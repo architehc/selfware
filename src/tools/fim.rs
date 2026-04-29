@@ -1,4 +1,7 @@
-use super::file::{resolve_safety_config, validate_tool_path};
+use super::file::{
+    clear_file_snapshot, is_file_stale, preserve_line_endings, read_file_with_encoding,
+    resolve_safety_config, validate_tool_path,
+};
 use super::Tool;
 use crate::api::ApiClient;
 use crate::config::SafetyConfig;
@@ -6,8 +9,18 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::Value;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::fs;
+
+/// Detect line ending style for FIM edit.
+fn detect_line_ending_fim(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
 
 /// Maximum allowed length for a FIM instruction (in characters).
 const FIM_INSTRUCTION_MAX_LEN: usize = 500;
@@ -146,7 +159,16 @@ impl Tool for FileFimEdit {
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(path, &safety)?;
 
-        let content = fs::read_to_string(path).await?;
+        // Stale-guard: reject if file changed since last read
+        if let Some(true) = is_file_stale(path) {
+            return Err(anyhow!(
+                "File {} changed on disk since you last read it. Re-read the file and try again.",
+                path
+            ));
+        }
+
+        let (content, _) = read_file_with_encoding(Path::new(path)).await?;
+        let line_ending = detect_line_ending_fim(&content);
         let lines: Vec<&str> = content.lines().collect();
 
         if start_line == 0
@@ -237,7 +259,9 @@ impl Tool for FileFimEdit {
             tracing::debug!("Could not create FIM backup: {}", e);
         }
 
-        fs::write(path, &new_content).await?;
+        let final_content = preserve_line_endings(&new_content, line_ending);
+        fs::write(path, &final_content).await?;
+        clear_file_snapshot(path);
 
         Ok(serde_json::json!({
             "status": "success",

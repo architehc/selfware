@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::catalog::{quant_catalog, QuantSpec};
-use super::dataset::{coerce_string_list, load_instances, Instance};
+use super::dataset::{load_instances, Instance};
 use super::harness::{capture_patch, clone_instance, run_selfware, LlamaServer, LlamaServerOpts};
+use crate::config::PromptProfile;
 
 /// Caller-supplied configuration for `run_swebench_pro`.
 ///
@@ -35,8 +36,9 @@ pub struct SwebenchProOpts {
     pub selfware_bin: PathBuf,
     pub skip_existing: bool,
     pub llama_opts: LlamaServerOpts,
-    pub prompt_mode: String, // "diagnostic" or "official"
-    pub official_eval: bool, // run Docker eval after patches
+    pub prompt_mode: String,    // "diagnostic" or "official"
+    pub prompt_profile: String, // "default" or "swebench_pro"
+    pub official_eval: bool,    // run Docker eval after patches
 }
 
 fn is_false(b: &bool) -> bool {
@@ -141,6 +143,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
             "trials": opts.trials,
             "selfware_bin": opts.selfware_bin,
             "prompt_mode": opts.prompt_mode,
+            "prompt_profile": opts.prompt_profile,
             "llama_server_binary": opts.llama_opts.binary,
             "llama_server_argv": llama_server_argv,
         }))?,
@@ -414,7 +417,11 @@ fn run_one(
         return Ok(result);
     }
 
-    let prompt = build_prompt(inst, &opts.prompt_mode);
+    let profile = match opts.prompt_profile.as_str() {
+        "swebench_pro" => PromptProfile::SwebenchPro,
+        _ => PromptProfile::Default,
+    };
+    let prompt = profile.task_prompt(inst, &opts.prompt_mode);
     std::fs::write(trial_dir.join("prompt.txt"), &prompt)?;
     std::fs::write(
         trial_dir.join("instance.json"),
@@ -448,6 +455,13 @@ fn run_one(
     });
     std::fs::write(&pred_path, &patch)?;
 
+    // Use structured output when available, fall back to `capture_patch`.
+    let (patch_lines, patch_bytes) = outcome
+        .parsed_result
+        .as_ref()
+        .map(|r| (r.patch_lines, r.patch_bytes))
+        .unwrap_or_else(|| (patch.lines().count(), patch.len()));
+
     let empty_diff = patch.trim().is_empty();
     let test_only_patch = !empty_diff && is_test_only_patch(&patch);
     let has_source_edit = !empty_diff && !test_only_patch;
@@ -459,8 +473,8 @@ fn run_one(
         exit_code: outcome.exit_code,
         timed_out: outcome.timed_out,
         wall_secs: outcome.wall_secs,
-        patch_lines: patch.lines().count(),
-        patch_bytes: patch.len(),
+        patch_lines,
+        patch_bytes,
         pred_path: pred_path.clone(),
         error: String::new(),
         empty_diff,
@@ -510,41 +524,6 @@ fn is_test_only_patch(patch: &str) -> bool {
         }
     }
     has_any_file
-}
-
-/// Build the "fix this issue" prompt.
-///
-/// * `diagnostic` mode — includes fail-to-pass tests and selected test files
-///   (matches the original run.py behaviour).
-/// * `official` mode — excludes test information so the agent must infer the
-///   bug from the problem statement alone, matching the official SWE-bench Pro
-///   scoring rules.
-pub fn build_prompt(inst: &Instance, prompt_mode: &str) -> String {
-    let problem = inst
-        .problem_statement
-        .trim()
-        .trim_matches('"')
-        .replace("\\n", "\n");
-
-    if prompt_mode == "official" {
-        format!(
-            "[mode: official]\n\nYou are working on a real codebase in the current directory. Resolve this issue:\n\n{problem}\n\nSteps:\n1. Read the codebase to understand the expected behavior.\n2. Make the smallest code change that resolves the issue.\n3. Do NOT modify the test files themselves.\n4. Run tests if possible to verify your fix.\n5. When done, summarize what you changed."
-        )
-    } else {
-        let tests = coerce_string_list(&inst.selected_test_files_to_run);
-        let fail = coerce_string_list(&inst.fail_to_pass);
-
-        let fail_str = fail
-            .iter()
-            .map(|t| format!("  - {}", t))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let test_str = tests.join(", ");
-
-        format!(
-            "[mode: diagnostic]\n\nYou are working on a real codebase in the current directory. Resolve this issue:\n\n{problem}\n\nThe fix needs to make these tests pass:\n{fail_str}\n\nRelevant test files: {test_str}\n\nSteps:\n1. Read the failing test files to understand the expected behavior.\n2. Read the implementation files mentioned in the tests.\n3. Make the smallest code change that resolves the issue.\n4. Do NOT modify the test files themselves.\n5. Run the failing tests if possible to verify your fix.\n6. When done, summarize what you changed."
-        )
-    }
 }
 
 #[derive(Serialize)]
@@ -789,28 +768,64 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_includes_problem_and_tests() {
-        let p = build_prompt(&dummy_instance(), "diagnostic");
-        assert!(p.contains("fix bug"));
-        assert!(p.contains("tests/test_a.py::test_x"));
-        assert!(p.contains("Relevant test files: tests/test_a.py"));
-        assert!(p.contains("Do NOT modify the test files themselves."));
-    }
-
-    #[test]
-    fn build_prompt_diagnostic_includes_tests() {
-        let p = build_prompt(&dummy_instance(), "diagnostic");
+    fn prompt_profile_diagnostic_includes_tests() {
+        let p = PromptProfile::SwebenchPro.task_prompt(&dummy_instance(), "diagnostic");
         assert!(p.contains("[mode: diagnostic]"));
         assert!(p.contains("tests/test_a.py::test_x"));
-        assert!(p.contains("Relevant test files: tests/test_a.py"));
+        assert!(p.contains("RELEVANT TEST FILES: tests/test_a.py"));
     }
 
     #[test]
-    fn build_prompt_official_excludes_tests() {
-        let p = build_prompt(&dummy_instance(), "official");
+    fn prompt_profile_official_excludes_tests() {
+        let p = PromptProfile::SwebenchPro.task_prompt(&dummy_instance(), "official");
         assert!(p.contains("[mode: official]"));
         assert!(!p.contains("tests/test_a.py::test_x"));
-        assert!(!p.contains("Relevant test files:"));
+        assert!(!p.contains("RELEVANT TEST FILES:"));
+        assert!(!p.contains("FAIL-TO-PASS"));
+    }
+
+    #[test]
+    fn prompt_profile_contains_tool_contract() {
+        let inst = dummy_instance();
+        for mode in &["diagnostic", "official"] {
+            let p = PromptProfile::SwebenchPro.task_prompt(&inst, mode);
+            assert!(
+                p.contains("Valid tool call ONLY"),
+                "tool contract missing in {} mode",
+                mode
+            );
+            assert!(
+                p.contains("NO prose before tool XML"),
+                "no-prose rule missing in {} mode",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_profile_contains_no_test_edit_rule() {
+        let inst = dummy_instance();
+        for mode in &["diagnostic", "official"] {
+            let p = PromptProfile::SwebenchPro.task_prompt(&inst, mode);
+            assert!(
+                p.contains("Do NOT modify test files"),
+                "no-test-edit rule missing in {} mode",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_profile_contains_verification_requirement() {
+        let inst = dummy_instance();
+        for mode in &["diagnostic", "official"] {
+            let p = PromptProfile::SwebenchPro.task_prompt(&inst, mode);
+            assert!(
+                p.contains("confirm they pass before finishing"),
+                "verification requirement missing in {} mode",
+                mode
+            );
+        }
     }
 
     #[test]

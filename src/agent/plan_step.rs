@@ -219,6 +219,20 @@ impl Agent {
             }),
         );
 
+        // Accumulate token usage from this planning call.
+        if let Some(prompt) = plan_meta.prompt_tokens {
+            self.cumulative_token_usage.input += prompt as usize;
+        }
+        if let Some(completion) = plan_meta.completion_tokens {
+            self.cumulative_token_usage.output += completion as usize;
+        }
+        if let Some(total) = plan_meta.total_tokens {
+            self.cumulative_token_usage.total += total as usize;
+        } else {
+            self.cumulative_token_usage.total =
+                self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        }
+
         // Return whether there are tool calls to execute
         Ok(has_tool_calls)
     }

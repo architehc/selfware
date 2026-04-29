@@ -471,6 +471,12 @@ pub struct Agent {
     prefill_400_count: usize,
     /// Whether the prefill-incompatible circuit breaker is currently open.
     prefill_breaker_open: bool,
+    /// Cumulative token usage across all LLM calls in the current task.
+    cumulative_token_usage: crate::observability::dashboard::TokenUsage,
+    /// Failure mode from the most recent run (set by `finalize_failure_mode`).
+    last_run_failure_mode: Option<failure_mode::FailureMode>,
+    /// Wall-clock start time of the current task.
+    task_start_time: std::time::Instant,
 }
 
 impl Agent {
@@ -977,6 +983,9 @@ To call a tool, use this EXACT XML structure:
             permanently_blocked_tool_calls: Vec::new(),
             prefill_400_count: 0,
             prefill_breaker_open: false,
+            cumulative_token_usage: crate::observability::dashboard::TokenUsage::default(),
+            last_run_failure_mode: None,
+            task_start_time: Instant::now(),
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
@@ -1794,6 +1803,26 @@ To call a tool, use this EXACT XML structure:
             seen.insert(entry.as_str());
         }
         seen.len()
+    }
+
+    /// Cumulative token usage across all LLM calls in the current task.
+    pub fn cumulative_token_usage(&self) -> &crate::observability::dashboard::TokenUsage {
+        &self.cumulative_token_usage
+    }
+
+    /// Failure mode from the most recent run.
+    pub fn last_run_failure_mode(&self) -> Option<&failure_mode::FailureMode> {
+        self.last_run_failure_mode.as_ref()
+    }
+
+    /// Current loop iteration count (number of turns through the agent loop).
+    pub fn current_iteration(&self) -> usize {
+        self.loop_control.current_iteration()
+    }
+
+    /// The model name configured for this agent.
+    pub fn model(&self) -> &str {
+        &self.config.model
     }
 
     /// Count of HTTP 400 "Assistant response prefill incompatible" responses.

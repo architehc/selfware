@@ -21,6 +21,7 @@ pub mod debug;
 mod loader;
 pub mod model;
 pub mod model_profiles;
+pub mod prompt_profiles;
 pub mod provenance;
 pub mod resources;
 pub mod safety;
@@ -37,6 +38,9 @@ pub use model_profiles::{
     apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile, AppliedFields,
     ModelDefaultsProfile, UserExplicitFields,
 };
+pub use prompt_profiles::PromptProfile;
+#[cfg(feature = "bench-harness")]
+pub use prompt_profiles::SwebenchProInstance;
 pub use provenance::{ConfigSource, ConfigSources};
 pub use resources::*;
 pub use safety::*;

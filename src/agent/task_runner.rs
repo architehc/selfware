@@ -72,6 +72,9 @@ impl Agent {
         self.total_no_action_prompts = 0;
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
+        self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
+        self.task_start_time = std::time::Instant::now();
+        self.last_run_failure_mode = None;
         let task_description = task.to_string();
         let available_tool_names: Vec<String> = self
             .tools
@@ -547,6 +550,33 @@ impl Agent {
                 self.messages.push(Message::system(warning));
             }
             self.trim_message_history();
+
+            // Hard limits: token budget and wall-clock timeout
+            if let Some(max_budget) = self.config.agent.max_budget_tokens {
+                let total = self.cumulative_token_usage.total;
+                if total >= max_budget {
+                    let reason =
+                        format!("Token budget exhausted: {} >= {} tokens", total, max_budget);
+                    warn!("{}", reason);
+                    self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                    self.finalize_failure_mode(RunOutcome::Failed {
+                        reason: reason.clone(),
+                    });
+                    anyhow::bail!("{}", reason);
+                }
+            }
+            if let Some(max_secs) = self.config.agent.max_wall_secs {
+                let elapsed = self.task_start_time.elapsed().as_secs();
+                if elapsed >= max_secs {
+                    let reason = format!("Wall-clock timeout: {}s >= {}s", elapsed, max_secs);
+                    warn!("{}", reason);
+                    self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                    self.finalize_failure_mode(RunOutcome::Failed {
+                        reason: reason.clone(),
+                    });
+                    anyhow::bail!("{}", reason);
+                }
+            }
 
             if self.is_cancelled() {
                 cli_println!("{}", "\n⚡ Interrupted".bright_yellow());
@@ -1044,6 +1074,7 @@ impl Agent {
     /// checkpoint directory (best-effort; never fails the run).
     fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
         let mode = FailureMode::classify(self, outcome);
+        self.last_run_failure_mode = Some(mode.clone());
         // Emit a structured progress event so non-TUI consumers can see the
         // run's terminal state. Successful runs emit `TaskCompleted`; every
         // other classification emits `TaskFailed { reason }`.

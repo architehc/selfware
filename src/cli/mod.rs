@@ -3,6 +3,7 @@
 //! Software you own. Software that knows you. Software that lasts.
 
 pub(crate) mod args;
+pub(crate) mod headless;
 pub(crate) mod init_wizard;
 
 #[cfg(feature = "tui")]
@@ -400,6 +401,13 @@ pub async fn run() -> Result<()> {
         config.debug.apply_env_overrides();
     }
 
+    // ── Wire headless limit flags into config ──
+    if let Some(max_turns) = cli.max_turns {
+        config.agent.max_iterations = max_turns;
+    }
+    config.agent.max_budget_tokens = cli.max_budget_tokens;
+    config.agent.max_wall_secs = cli.max_wall_secs;
+
     // ── Validate config and exit if requested ──
     if cli.validate_config {
         match config.validate() {
@@ -554,7 +562,11 @@ pub async fn run() -> Result<()> {
             anyhow::bail!("Empty prompt provided");
         }
 
-        if !cli.quiet {
+        let is_json = cli.output_format == "json";
+        let is_stream_json = cli.output_format == "stream-json";
+        let is_structured = is_json || is_stream_json;
+
+        if !cli.quiet && !is_structured {
             println!("{}", render_header(&ctx));
             println!(
                 "\n{} {}\n",
@@ -564,22 +576,25 @@ pub async fn run() -> Result<()> {
         }
 
         let start = std::time::Instant::now();
-        // Headless / non-TUI mode: attach a StderrProgressEmitter so users
-        // can `tee` or `grep` structured progress events from long runs.
-        // Skipped under --quiet to keep CI scripts clean.
-        let attach_stderr_progress = !cli.quiet;
         let mut agent = Agent::new(config).await?;
-        if attach_stderr_progress {
+        if is_stream_json {
+            agent = agent
+                .with_progress_emitter(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+        } else if !cli.quiet {
             agent = agent.with_progress_emitter(std::sync::Arc::new(
                 crate::agent::progress::StderrProgressEmitter::new(),
             ));
         }
-        agent.run_task(&actual_prompt).await?;
+        let run_result = agent.run_task(&actual_prompt).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
 
-        if !cli.quiet {
+        if is_structured {
+            let result = build_session_result(&agent, &run_result, duration_ms);
+            headless::emit_result(&result);
+        } else if !cli.quiet {
             println!("{}", render_task_complete(start.elapsed()));
         }
-        return Ok(());
+        return run_result;
     }
 
     // Handle TUI dashboard mode
@@ -652,8 +667,63 @@ pub async fn run() -> Result<()> {
         &ctx,
         exec_mode,
         cli.resume_session,
+        &cli.output_format,
     )
     .await
+}
+
+fn build_session_result(
+    agent: &Agent,
+    run_result: &Result<()>,
+    duration_ms: u64,
+) -> headless::SessionResult {
+    let exit_status = if run_result.is_ok() { 0 } else { 1 };
+    let stop_reason = match run_result {
+        Ok(()) => agent
+            .last_run_failure_mode()
+            .map(|fm| fm.kind.tag().to_string())
+            .unwrap_or_else(|| "completed".to_string()),
+        Err(e) => format!("error: {}", e),
+    };
+    let num_turns = agent.current_iteration();
+    let patch = headless::capture_patch().unwrap_or_default();
+    let patch_bytes = patch.len();
+    let patch_lines = patch.lines().count();
+    let usage = agent.cumulative_token_usage().clone();
+    let model = agent.model().to_string();
+    let failure_mode = agent
+        .last_run_failure_mode()
+        .map(|fm| format!("{}: {}", fm.kind.tag(), fm.evidence));
+    let artifact_dir = std::env::var("SELFWARE_RESULT_DIR")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            agent.current_checkpoint.as_ref().map(|c| {
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".selfware")
+                    .join("checkpoints")
+                    .join(&c.task_id)
+            })
+        });
+
+    headless::SessionResult {
+        session_id: agent
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.task_id.clone())
+            .unwrap_or_default(),
+        exit_status,
+        stop_reason,
+        num_turns,
+        patch_bytes,
+        patch_lines,
+        usage,
+        model,
+        duration_ms,
+        failure_mode,
+        artifact_dir,
+    }
 }
 
 async fn handle_command(
@@ -663,6 +733,7 @@ async fn handle_command(
     ctx: &WorkshopContext,
     exec_mode: ExecutionMode,
     resume_session: Option<String>,
+    output_format: &str,
 ) -> Result<()> {
     match command {
         Commands::Chat { yolo } => {
@@ -716,18 +787,32 @@ async fn handle_command(
             if yolo {
                 config.execution_mode = ExecutionMode::Yolo;
             }
-            if !quiet {
+            let is_json = output_format == "json";
+            let is_stream_json = output_format == "stream-json";
+            let is_structured = is_json || is_stream_json;
+
+            if !quiet && !is_structured {
                 println!("{}", render_header(ctx));
                 println!("{}", render_task_start(&task));
             }
 
             let start = std::time::Instant::now();
             let mut agent = Agent::new(config).await?;
-            agent.run_task(&task).await?;
+            if is_stream_json {
+                agent = agent.with_progress_emitter(std::sync::Arc::new(
+                    headless::JsonlProgressEmitter::new(),
+                ));
+            }
+            let run_result = agent.run_task(&task).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
 
-            if !quiet {
+            if is_structured {
+                let result = build_session_result(&agent, &run_result, duration_ms);
+                headless::emit_result(&result);
+            } else if !quiet {
                 println!("{}", render_task_complete(start.elapsed()));
             }
+            run_result?;
         }
 
         Commands::Analyze { path } => {
@@ -3074,6 +3159,7 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         selfware_bin,
         skip_existing: args.skip_existing,
         prompt_mode: args.prompt_mode,
+        prompt_profile: args.prompt_profile,
         official_eval: args.official_eval,
         llama_opts,
     };

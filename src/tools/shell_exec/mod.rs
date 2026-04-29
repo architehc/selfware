@@ -1,5 +1,6 @@
 //! Shell execution tool - runs shell commands with timeout and safety checks.
 
+use crate::tools::file::{is_file_stale, write_atomic};
 use crate::tools::Tool;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -10,6 +11,114 @@ use std::path::Path;
 use std::time::Duration;
 
 pub mod prompt;
+
+/// Attempt to parse a straightforward `sed -i 's/old/new/g' file` substitution.
+/// Returns `(file, old_str, new_str, global)` if the pattern is simple enough
+/// to intercept, or `None` for complex cases that should run raw.
+fn try_parse_sed_substitution(command: &str) -> Option<(String, String, String, bool)> {
+    let trimmed = command.trim();
+
+    // Must start with sed and contain -i or --in-place
+    if !trimmed.starts_with("sed") {
+        return None;
+    }
+    if !trimmed.contains("-i") && !trimmed.contains("--in-place") {
+        return None;
+    }
+
+    // Find the quoted substitution expression: look for 's... or "s...
+    let (quote_start, quote_char) = trimmed
+        .char_indices()
+        .find(|(_, c)| *c == '\'' || *c == '"')
+        .and_then(|(i, c)| trimmed.get(i + 1..)?.starts_with('s').then_some((i, c)))?;
+
+    let after_quote = &trimmed[quote_start + 1..];
+    let sub_end = after_quote.find(quote_char)?;
+    let sub_expr = &after_quote[..sub_end]; // e.g. "s/old/new/g"
+
+    if sub_expr.len() < 5 {
+        return None;
+    }
+
+    let delimiter = sub_expr.chars().nth(1)?;
+    let rest = &sub_expr[2..];
+    let parts: Vec<&str> = rest.split(delimiter).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let old_str = parts[0].to_string();
+    let new_str = parts[1].to_string();
+    let flags = if parts.len() > 2 { parts[2] } else { "" };
+    let global = flags.contains('g') || flags.contains('G');
+
+    // Only intercept simple literal patterns (no regex metacharacters)
+    if old_str.contains([
+        '.', '*', '+', '?', '^', '$', '[', ']', '(', ')', '{', '}', '|', '\\',
+    ]) {
+        return None;
+    }
+
+    // Extract filename: text after the closing quote, trimmed
+    let after_sub = &after_quote[sub_end + 1..].trim();
+    if after_sub.is_empty() {
+        return None;
+    }
+    let file_tokens: Vec<&str> = after_sub.split_whitespace().collect();
+    if file_tokens.len() != 1 {
+        return None; // Multiple files or extra flags — too complex
+    }
+    let file = file_tokens[0].to_string();
+    if file.starts_with('-') {
+        return None;
+    }
+
+    Some((file, old_str, new_str, global))
+}
+
+/// Apply a sed-like literal substitution with stale-guard protection.
+async fn apply_sed_substitution(
+    file: &str,
+    old_str: &str,
+    new_str: &str,
+    global: bool,
+) -> anyhow::Result<Value> {
+    // Stale-guard
+    if let Some(true) = is_file_stale(file) {
+        anyhow::bail!(
+            "File {} changed on disk since you last read it. Re-read the file and try again.",
+            file
+        );
+    }
+
+    let content = tokio::fs::read_to_string(file).await?;
+    let new_content = if global {
+        content.replace(old_str, new_str)
+    } else {
+        content.replacen(old_str, new_str, 1)
+    };
+
+    if new_content == content {
+        anyhow::bail!(
+            "sed substitution had no effect — old_str not found in {}",
+            file
+        );
+    }
+
+    write_atomic(Path::new(file), &new_content).await?;
+
+    Ok(serde_json::json!({
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "",
+        "stdout_pagination": {"offset":0,"limit":10000,"total_chars":0,"has_more":false},
+        "stderr_pagination": {"offset":0,"limit":10000,"total_chars":0,"has_more":false},
+        "duration_ms": 0,
+        "timed_out": false,
+        "intercepted": true,
+        "tool": "file_edit"
+    }))
+}
 
 /// Returns the platform-appropriate shell and flag for command execution.
 ///
@@ -125,6 +234,12 @@ impl Tool for ShellExec {
                     name
                 );
             }
+        }
+
+        // Intercept simple sed -i substitutions and route through file tools
+        // for stale-guard protection
+        if let Some((file, old_str, new_str, global)) = try_parse_sed_substitution(&args.command) {
+            return apply_sed_substitution(&file, &old_str, &new_str, global).await;
         }
 
         let (shell, flag) = default_shell();
@@ -322,5 +437,64 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("exceeds maximum length"));
+    }
+
+    // --- sed -i interception tests ---
+
+    #[test]
+    fn test_parse_sed_substitution_simple() {
+        let result = try_parse_sed_substitution("sed -i 's/old/new/g' file.txt");
+        assert!(result.is_some());
+        let (file, old, new, global) = result.unwrap();
+        assert_eq!(file, "file.txt");
+        assert_eq!(old, "old");
+        assert_eq!(new, "new");
+        assert!(global);
+    }
+
+    #[test]
+    fn test_parse_sed_substitution_no_global() {
+        let result = try_parse_sed_substitution("sed -i 's/old/new/' file.txt");
+        assert!(result.is_some());
+        let (_, _, _, global) = result.unwrap();
+        assert!(!global);
+    }
+
+    #[test]
+    fn test_parse_sed_substitution_falls_back_for_complex() {
+        // Regex metacharacters in pattern
+        assert!(try_parse_sed_substitution("sed -i 's/foo.bar/baz/g' file.txt").is_none());
+        // Multiple files
+        assert!(try_parse_sed_substitution("sed -i 's/a/b/g' f1 f2").is_none());
+        // Not sed
+        assert!(try_parse_sed_substitution("echo hello").is_none());
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn test_shell_exec_intercepts_sed() {
+        let tool = ShellExec;
+        let temp_dir =
+            std::env::temp_dir().join(format!("selfware-sed-test-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("test.txt");
+        tokio::fs::write(&file_path, "hello world\nfoo bar\n")
+            .await
+            .unwrap();
+
+        let args = serde_json::json!({
+            "command": format!("sed -i 's/foo/FOO/g' {}", file_path.display()),
+            "timeout_secs": 5
+        });
+
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["intercepted"], true);
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert!(content.contains("FOO bar"));
+        assert!(!content.contains("foo bar"));
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
 }

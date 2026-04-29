@@ -46,6 +46,7 @@ pub mod lsp_tools;
 pub mod net_policy;
 pub mod package;
 pub mod page_controller;
+pub mod patch_apply;
 pub mod process;
 pub mod prompt;
 pub mod pty_shell;
@@ -65,7 +66,7 @@ use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
 };
-use file::{DirectoryTree, FileDelete, FileEdit, FileWrite};
+use file::{DirectoryTree, FileDelete, FileEdit, FileMultiEdit, FileWrite};
 use file_read::FileRead;
 use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
 use git_worktree::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
@@ -77,6 +78,7 @@ use knowledge::{
 };
 use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
 use page_controller::PageControlTool;
+use patch_apply::PatchApply;
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
 use pty_shell::PtyShellTool;
 use radarcam::{
@@ -299,6 +301,7 @@ pub const CRITICAL_TOOLS: &[&str] = &[
     "file_read",
     "file_write",
     "file_edit",
+    "file_multi_edit",
     "file_delete",
     "directory_tree",
     // Shell execution - essential for running commands
@@ -338,12 +341,14 @@ impl ToolRegistry {
             registry.register_critical(FileRead::with_safety_config(cfg.clone()));
             registry.register_critical(FileWrite::with_safety_config(cfg.clone()));
             registry.register_critical(FileEdit::with_safety_config(cfg.clone()));
+            registry.register_critical(FileMultiEdit::with_safety_config(cfg.clone()));
             registry.register_critical(FileDelete::with_safety_config(cfg.clone()));
             registry.register_critical(DirectoryTree::with_safety_config(cfg.clone()));
         } else {
             registry.register_critical(FileRead::new());
             registry.register_critical(FileWrite::new());
             registry.register_critical(FileEdit::new());
+            registry.register_critical(FileMultiEdit::new());
             registry.register_critical(FileDelete::new());
             registry.register_critical(DirectoryTree::new());
         }
@@ -489,6 +494,9 @@ impl ToolRegistry {
         registry.register_deferred(codemap::CodeMapTool);
         registry.register_deferred(codemap::ContextBudgetTool);
         registry.register_deferred(codemap::ContextActionTool);
+
+        // Deferred: Patch apply tool
+        registry.register_deferred(PatchApply);
 
         registry
     }
@@ -889,8 +897,15 @@ mod tests {
         assert!(registry.get("file_read").is_some());
         assert!(registry.get("file_write").is_some());
         assert!(registry.get("file_edit").is_some());
+        assert!(registry.get("file_multi_edit").is_some());
         assert!(registry.get("file_delete").is_some());
         assert!(registry.get("directory_tree").is_some());
+    }
+
+    #[test]
+    fn test_patch_apply_tool_registered() {
+        let registry = ToolRegistry::new();
+        assert!(registry.get("patch_apply").is_some());
     }
 
     #[test]

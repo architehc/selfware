@@ -69,6 +69,20 @@ pub struct AgentConfig {
     /// that output (e.g. to avoid disk noise on a read-only workdir).
     #[serde(default)]
     pub disable_turn_artifacts: bool,
+
+    /// Prompt profile used for benchmark / evaluation runs.
+    #[serde(default = "default_prompt_profile")]
+    pub prompt_profile: String,
+
+    /// Hard limit: stop when total prompt+completion tokens exceed this.
+    /// CLI-only; not persisted in config files.
+    #[serde(skip)]
+    pub max_budget_tokens: Option<usize>,
+
+    /// Hard limit: stop after this many wall-clock seconds.
+    /// CLI-only; not persisted in config files.
+    #[serde(skip)]
+    pub max_wall_secs: Option<u64>,
 }
 
 impl Default for AgentConfig {
@@ -88,6 +102,9 @@ impl Default for AgentConfig {
             context_thinking_ratio: default_context_thinking_ratio(),
             compression_detail: default_compression_detail(),
             disable_turn_artifacts: false,
+            prompt_profile: default_prompt_profile(),
+            max_budget_tokens: None,
+            max_wall_secs: None,
         }
     }
 }
@@ -118,4 +135,7 @@ pub fn default_context_thinking_ratio() -> f32 {
 }
 pub fn default_compression_detail() -> String {
     "signatures".to_string()
+}
+pub fn default_prompt_profile() -> String {
+    "default".to_string()
 }

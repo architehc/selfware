@@ -6,9 +6,11 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use tempfile::NamedTempFile;
 
 /// Global safety configuration set at startup from the user-loaded config.
@@ -39,6 +41,107 @@ const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
 /// Maximum file size for writes (10 MB) to prevent accidentally writing huge files.
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
 
+// ---------------------------------------------------------------------------
+// File snapshot tracking for stale-guard protection
+// ---------------------------------------------------------------------------
+
+/// Snapshot of a file at the time it was last read by `file_read`.
+#[derive(Debug, Clone)]
+struct FileSnapshot {
+    content_hash: u64,
+    last_modified: u64,
+}
+
+static FILE_SNAPSHOTS: OnceLock<Mutex<HashMap<String, FileSnapshot>>> = OnceLock::new();
+
+fn get_snapshots() -> &'static Mutex<HashMap<String, FileSnapshot>> {
+    FILE_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Record a snapshot of a file after reading it.
+pub(crate) fn record_file_snapshot(path: &str, content: &str) {
+    let last_modified = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    let content_hash = hasher.finish();
+
+    if let Ok(mut guard) = get_snapshots().lock() {
+        guard.insert(
+            path.to_string(),
+            FileSnapshot {
+                content_hash,
+                last_modified,
+            },
+        );
+    }
+}
+
+/// Remove a file snapshot (e.g. after deletion).
+pub(crate) fn clear_file_snapshot(path: &str) {
+    if let Ok(mut guard) = get_snapshots().lock() {
+        guard.remove(path);
+    }
+}
+
+/// Check whether a file on disk has changed since the last recorded snapshot.
+/// Returns `Some(true)` if stale, `Some(false)` if unchanged, `None` if no snapshot exists.
+pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
+    let guard = get_snapshots().lock().ok()?;
+    let snapshot = guard.get(path)?;
+
+    let metadata = std::fs::metadata(path).ok()?;
+    let current_mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())?;
+
+    if snapshot.last_modified != current_mtime {
+        return Some(true);
+    }
+
+    // Secondary hash check for same-mtime modifications
+    let current_bytes = std::fs::read(path).ok()?;
+    let current_text = String::from_utf8_lossy(&current_bytes);
+    let mut hasher = DefaultHasher::new();
+    current_text.hash(&mut hasher);
+    let current_hash = hasher.finish();
+
+    Some(snapshot.content_hash != current_hash)
+}
+
+/// Read a file as raw bytes and convert to String, handling non-UTF8 gracefully.
+pub(crate) async fn read_file_with_encoding(path: &Path) -> Result<(String, Vec<u8>)> {
+    let bytes = tokio::fs::read(path).await?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    Ok((text, bytes))
+}
+
+/// Detect the line ending style of existing content.
+fn detect_line_ending(text: &str) -> &'static str {
+    if text.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    }
+}
+
+/// Normalize content to use the given line ending style.
+pub(crate) fn preserve_line_endings(content: &str, line_ending: &str) -> String {
+    let normalized = content.replace("\r\n", "\n");
+    if line_ending == "\r\n" {
+        normalized.replace('\n', "\r\n")
+    } else {
+        normalized
+    }
+}
+
 /// Read file contents. Supports optional per-instance safety configuration
 /// for multi-agent scenarios via [`FileRead::with_safety_config`].
 #[derive(Default)]
@@ -68,6 +171,14 @@ pub struct FileEdit {
 /// for multi-agent scenarios via [`FileDelete::with_safety_config`].
 #[derive(Default)]
 pub struct FileDelete {
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+/// Apply multiple surgical edits atomically. Supports optional per-instance
+/// safety configuration via [`FileMultiEdit::with_safety_config`].
+#[derive(Default)]
+pub struct FileMultiEdit {
     /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
     pub safety_config: Option<SafetyConfig>,
 }
@@ -126,6 +237,19 @@ impl FileEdit {
 }
 
 impl FileDelete {
+    pub fn new() -> Self {
+        Self {
+            safety_config: None,
+        }
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl FileMultiEdit {
     pub fn new() -> Self {
         Self {
             safety_config: None,
@@ -204,9 +328,10 @@ impl Tool for FileRead {
             }
         }
 
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .with_context(|| format!("Failed to read file: {}", args.path))?;
+        let (content, _bytes) = read_file_with_encoding(&path).await?;
+
+        // Record snapshot for stale-guard detection
+        record_file_snapshot(&args.path, &content);
 
         let total_lines = content.lines().count();
         let (start, end) = args.line_range.unwrap_or((1, total_lines));
@@ -276,16 +401,35 @@ impl Tool for FileWrite {
             .into());
         }
 
+        // Stale-guard: reject if file changed since last read
+        if path.exists() {
+            if let Some(true) = is_file_stale(&args.path) {
+                return Err(ToolError::FileStale {
+                    path: args.path.clone(),
+                }
+                .into());
+            }
+        }
+
+        // Detect existing line endings and preserve them
+        let content_to_write = if path.exists() {
+            let (existing, _) = read_file_with_encoding(&path).await?;
+            let line_ending = detect_line_ending(&existing);
+            preserve_line_endings(&args.content, line_ending)
+        } else {
+            args.content.clone()
+        };
+
         // Detect no-op writes (content identical to existing file)
         if path.exists() {
             if let Ok(existing) = tokio::fs::read_to_string(&path).await {
-                if existing == args.content {
+                if existing == content_to_write {
                     return Err(ToolError::EditNoOp.into());
                 }
             }
         }
 
-        validate_rust_source_if_needed(&path, &args.content)?;
+        validate_rust_source_if_needed(&path, &content_to_write)?;
 
         // Create backup if exists
         if args.backup && path.exists() {
@@ -293,11 +437,12 @@ impl Tool for FileWrite {
             tokio::fs::copy(&path, &backup_path).await?;
         }
 
-        write_atomic(&path, &args.content).await?;
+        write_atomic(&path, &content_to_write).await?;
+        clear_file_snapshot(&args.path);
 
         Ok(serde_json::json!({
             "success": true,
-            "bytes_written": args.content.len(),
+            "bytes_written": content_to_write.len(),
             "path": args.path
         }))
     }
@@ -340,7 +485,17 @@ impl Tool for FileEdit {
         let args: Args = serde_json::from_value(args)?;
         let safety = resolve_safety_config(self.safety_config.as_ref());
         validate_tool_path(&args.path, &safety)?;
-        let content = tokio::fs::read_to_string(&args.path).await?;
+
+        // Stale-guard: reject if file changed since last read
+        if let Some(true) = is_file_stale(&args.path) {
+            return Err(ToolError::FileStale {
+                path: args.path.clone(),
+            }
+            .into());
+        }
+
+        let (content, _) = read_file_with_encoding(Path::new(&args.path)).await?;
+        let line_ending = detect_line_ending(&content);
 
         // Check for exactly one match
         let matches = content.matches(&args.old_str).count();
@@ -355,8 +510,10 @@ impl Tool for FileEdit {
         }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
+        let new_content = preserve_line_endings(&new_content, line_ending);
         validate_rust_source_if_needed(Path::new(&args.path), &new_content)?;
         write_atomic(Path::new(&args.path), &new_content).await?;
+        clear_file_snapshot(&args.path);
 
         Ok(serde_json::json!({
             "success": true,
@@ -417,9 +574,19 @@ impl Tool for FileDelete {
             .into());
         }
 
+        // Stale-guard: reject if file changed since last read
+        if let Some(true) = is_file_stale(&args.path) {
+            return Err(ToolError::FileStale {
+                path: args.path.clone(),
+            }
+            .into());
+        }
+
         tokio::fs::remove_file(&path)
             .await
             .with_context(|| format!("Failed to delete file: {}", args.path))?;
+
+        clear_file_snapshot(&args.path);
 
         Ok(serde_json::json!({
             "deleted": true,
@@ -429,6 +596,200 @@ impl Tool for FileDelete {
 
     fn metadata(&self) -> crate::safety::ToolMetadata {
         crate::safety::ToolMetadata::file_destructive()
+    }
+}
+
+#[async_trait]
+impl Tool for FileMultiEdit {
+    fn name(&self) -> &str {
+        "file_multi_edit"
+    }
+
+    fn description(&self) -> &str {
+        "Apply multiple surgical edits atomically. If any edit fails validation, NONE are applied."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "description": "Ordered list of edits to apply",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "old_str": {"type": "string", "description": "Exact string to find (must be unique)"},
+                            "new_str": {"type": "string", "description": "Replacement string"}
+                        },
+                        "required": ["path", "old_str", "new_str"]
+                    }
+                }
+            },
+            "required": ["edits"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct EditItem {
+            path: String,
+            old_str: String,
+            new_str: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Args {
+            edits: Vec<EditItem>,
+        }
+
+        let args: Args = serde_json::from_value(args)?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+
+        if args.edits.is_empty() {
+            return Err(ToolError::InvalidToolCall {
+                name: "file_multi_edit".to_string(),
+                message: "No edits provided".to_string(),
+            }
+            .into());
+        }
+
+        // Validate paths and stale-guard first
+        for edit in &args.edits {
+            validate_tool_path(&edit.path, &safety)?;
+            if let Some(true) = is_file_stale(&edit.path) {
+                return Err(ToolError::FileStale {
+                    path: edit.path.clone(),
+                }
+                .into());
+            }
+        }
+
+        // Group edits by file path
+        let mut edits_by_file: HashMap<String, Vec<(usize, &EditItem)>> = HashMap::new();
+        for (idx, edit) in args.edits.iter().enumerate() {
+            edits_by_file
+                .entry(edit.path.clone())
+                .or_default()
+                .push((idx, edit));
+        }
+
+        // Phase 1: read all files and validate edits (find line ranges, check overlaps, unique matches)
+        let mut file_contents: HashMap<String, String> = HashMap::new();
+        let mut file_line_endings: HashMap<String, &'static str> = HashMap::new();
+
+        for (path, edits) in &edits_by_file {
+            let (content, _) = read_file_with_encoding(Path::new(path)).await?;
+            file_line_endings.insert(path.clone(), detect_line_ending(&content));
+
+            // Validate each edit: exactly one match
+            for (idx, edit) in edits {
+                let matches = content.matches(&edit.old_str).count();
+                if matches == 0 {
+                    return Err(ToolError::Execution {
+                        name: "file_multi_edit".to_string(),
+                        message: format!("Edit {}: old_str not found in {}", idx, edit.path),
+                    }
+                    .into());
+                }
+                if matches > 1 {
+                    return Err(ToolError::Execution {
+                        name: "file_multi_edit".to_string(),
+                        message: format!(
+                            "Edit {}: old_str matches {} times in {} (expected exactly 1)",
+                            idx, matches, edit.path
+                        ),
+                    }
+                    .into());
+                }
+                if edit.old_str == edit.new_str {
+                    return Err(ToolError::Execution {
+                        name: "file_multi_edit".to_string(),
+                        message: format!(
+                            "Edit {}: old_str and new_str are identical in {} — no-op edit",
+                            idx, edit.path
+                        ),
+                    }
+                    .into());
+                }
+            }
+
+            // Check for overlapping edits in the same file
+            if edits.len() > 1 {
+                let mut ranges = Vec::new();
+                for (_idx, edit) in edits {
+                    let byte_pos =
+                        content
+                            .find(&edit.old_str)
+                            .ok_or_else(|| ToolError::Execution {
+                                name: "file_multi_edit".to_string(),
+                                message: format!("old_str not found in {}", edit.path),
+                            })?;
+                    let before = &content[..byte_pos];
+                    let start_line = before.lines().count() + 1;
+                    let end_line = start_line + edit.old_str.lines().count().saturating_sub(1);
+                    ranges.push((start_line, end_line, edit));
+                }
+
+                for i in 0..ranges.len() {
+                    for j in (i + 1)..ranges.len() {
+                        let (s1, e1, edit1) = &ranges[i];
+                        let (s2, e2, _edit2) = &ranges[j];
+                        if s1 <= e2 && s2 <= e1 {
+                            return Err(ToolError::Execution {
+                                name: "file_multi_edit".to_string(),
+                                message: format!(
+                                    "Edits overlap in {}: lines {}-{} and {}-{}",
+                                    edit1.path, s1, e1, s2, e2
+                                ),
+                            }
+                            .into());
+                        }
+                    }
+                }
+            }
+
+            file_contents.insert(path.clone(), content);
+        }
+
+        // Phase 2: apply all edits atomically (from end to start per file to avoid shifts)
+        for (path, edits) in &edits_by_file {
+            let content = file_contents.get_mut(path).unwrap();
+            let line_ending = file_line_endings.get(path).copied().unwrap_or("\n");
+
+            // Build (byte_pos, old_len, new_str) for each edit
+            let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+            for (_idx, edit) in edits {
+                let pos = content.find(&edit.old_str).unwrap();
+                replacements.push((pos, edit.old_str.len(), edit.new_str.clone()));
+            }
+
+            // Sort by position descending so earlier replacements don't shift later ones
+            replacements.sort_by_key(|r| r.0);
+            replacements.reverse();
+
+            for (pos, len, new_str) in replacements {
+                content.replace_range(pos..pos + len, &new_str);
+            }
+
+            let final_content = preserve_line_endings(content, line_ending);
+            validate_rust_source_if_needed(Path::new(path), &final_content)?;
+            write_atomic(Path::new(path), &final_content).await?;
+            clear_file_snapshot(path);
+        }
+
+        let files_changed: Vec<String> = edits_by_file.keys().cloned().collect();
+        Ok(serde_json::json!({
+            "success": true,
+            "edits_applied": args.edits.len(),
+            "files_changed": files_changed.len(),
+            "files": files_changed
+        }))
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::file_write()
     }
 }
 
@@ -620,7 +981,7 @@ fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
 }
 
 /// Write content to a file atomically using a temporary file and rename.
-async fn write_atomic(path: &Path, content: &str) -> Result<()> {
+pub(crate) async fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid file path (no parent)"))?;
@@ -1399,5 +1760,199 @@ mod tests {
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(result.is_err());
+    }
+
+    // --- FileMultiEdit tests ---
+
+    #[test]
+    fn test_file_multi_edit_name() {
+        let tool = FileMultiEdit::new();
+        assert_eq!(tool.name(), "file_multi_edit");
+    }
+
+    #[tokio::test]
+    async fn test_file_multi_edit_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("multi.txt");
+        fs::write(&file_path, "alpha\nbeta\ngamma\n").unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "edits": [
+                {"path": file_path.to_str().unwrap(), "old_str": "alpha", "new_str": "ALPHA"},
+                {"path": file_path.to_str().unwrap(), "old_str": "gamma", "new_str": "GAMMA"}
+            ]
+        });
+
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["success"], true);
+        assert_eq!(result["edits_applied"], 2);
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("ALPHA"));
+        assert!(content.contains("beta"));
+        assert!(content.contains("GAMMA"));
+        assert!(!content.contains("alpha"));
+        assert!(!content.contains("gamma"));
+    }
+
+    #[tokio::test]
+    async fn test_file_multi_edit_atomic_rollback() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("atomic.txt");
+        fs::write(&file_path, "one\ntwo\nthree\n").unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "edits": [
+                {"path": file_path.to_str().unwrap(), "old_str": "one", "new_str": "ONE"},
+                {"path": file_path.to_str().unwrap(), "old_str": "MISSING", "new_str": "NEVER"}
+            ]
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+
+        // File should remain unchanged because the batch is atomic
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(content.contains("one"));
+        assert!(!content.contains("ONE"));
+    }
+
+    #[tokio::test]
+    async fn test_file_multi_edit_overlap_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("overlap.txt");
+        fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "edits": [
+                {"path": file_path.to_str().unwrap(), "old_str": "line1\nline2", "new_str": "A"},
+                {"path": file_path.to_str().unwrap(), "old_str": "line2\nline3", "new_str": "B"}
+            ]
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("overlap"));
+    }
+
+    // --- Stale-guard tests ---
+
+    #[tokio::test]
+    async fn test_file_edit_stale_guard_rejects() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("stale.txt");
+        fs::write(&file_path, "original content").unwrap();
+
+        // Simulate a read to record snapshot
+        let read_tool = FileRead::with_safety_config(permissive_safety_config());
+        let read_args = serde_json::json!({"path": file_path.to_str().unwrap()});
+        read_tool.execute(read_args).await.unwrap();
+
+        // Modify file externally
+        fs::write(&file_path, "externally modified").unwrap();
+
+        // Edit should be rejected as stale
+        let edit_tool = FileEdit::with_safety_config(permissive_safety_config());
+        let edit_args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "original content",
+            "new_str": "replaced"
+        });
+        let result = edit_tool.execute(edit_args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("changed on disk"));
+    }
+
+    #[tokio::test]
+    async fn test_file_write_stale_guard_rejects() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("stale_write.txt");
+        fs::write(&file_path, "original").unwrap();
+
+        let read_tool = FileRead::with_safety_config(permissive_safety_config());
+        read_tool
+            .execute(serde_json::json!({"path": file_path.to_str().unwrap()}))
+            .await
+            .unwrap();
+
+        fs::write(&file_path, "modified externally").unwrap();
+
+        let write_tool = FileWrite::with_safety_config(permissive_safety_config());
+        let result = write_tool
+            .execute(serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "content": "new content"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("changed on disk"));
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_stale_guard_rejects() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("stale_delete.txt");
+        fs::write(&file_path, "original").unwrap();
+
+        let read_tool = FileRead::with_safety_config(permissive_safety_config());
+        read_tool
+            .execute(serde_json::json!({"path": file_path.to_str().unwrap()}))
+            .await
+            .unwrap();
+
+        fs::write(&file_path, "modified externally").unwrap();
+
+        let delete_tool = FileDelete::with_safety_config(permissive_safety_config());
+        let result = delete_tool
+            .execute(serde_json::json!({"path": file_path.to_str().unwrap()}))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("changed on disk"));
+    }
+
+    // --- Line ending preservation tests ---
+
+    #[tokio::test]
+    async fn test_file_write_preserves_crlf() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("crlf.txt");
+        fs::write(&file_path, b"line1\r\nline2\r\n").unwrap();
+
+        let tool = FileWrite::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "content": "new1\nnew2\n"
+        });
+
+        tool.execute(args).await.unwrap();
+        let bytes = fs::read(&file_path).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("\r\n"));
+        assert!(!text.contains("\n\n") && !text.contains("\r\r"));
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_preserves_crlf() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("crlf_edit.txt");
+        fs::write(&file_path, b"alpha\r\nbeta\r\n").unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "alpha",
+            "new_str": "ALPHA"
+        });
+
+        tool.execute(args).await.unwrap();
+        let bytes = fs::read(&file_path).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("ALPHA\r\n"));
+        assert!(text.contains("beta\r\n"));
     }
 }

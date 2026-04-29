@@ -438,6 +438,22 @@ impl Agent {
             name: None,
         });
 
+        // Accumulate token usage from this assistant step.
+        if let Some(ref meta) = chat_metadata {
+            if let Some(prompt) = meta.prompt_tokens {
+                self.cumulative_token_usage.input += prompt as usize;
+            }
+            if let Some(completion) = meta.completion_tokens {
+                self.cumulative_token_usage.output += completion as usize;
+            }
+            if let Some(total) = meta.total_tokens {
+                self.cumulative_token_usage.total += total as usize;
+            } else {
+                self.cumulative_token_usage.total =
+                    self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+            }
+        }
+
         let response = AssistantStepResponse {
             content_chars: content.len(),
             reasoning_chars: reasoning.as_ref().map(|r| r.len()).unwrap_or(0),

@@ -222,8 +222,27 @@ fn probe_endpoint(port: u16) -> bool {
         .unwrap_or(false)
 }
 
-/// Run `selfware -p PROMPT -C WORKDIR --yolo --no-tui --quiet` with a wall-clock
-/// timeout.  Mirrors `run_selfware()` in run.py.
+/// Parse the final JSON object from stdout text.
+///
+/// The agent may emit intermediate progress lines (in stream-json mode) or
+/// diagnostic text; we scan from the last non-empty line backward until we
+/// find a line that parses as `SessionResult`.
+fn parse_session_result_from_stdout(text: &str) -> Option<crate::cli::headless::SessionResult> {
+    for line in text
+        .lines()
+        .rev()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+    {
+        if let Ok(result) = serde_json::from_str::<crate::cli::headless::SessionResult>(line) {
+            return Some(result);
+        }
+    }
+    None
+}
+
+/// Run `selfware -p PROMPT -C WORKDIR --yolo --no-tui --quiet --output-format json`
+/// with a wall-clock timeout.  Mirrors `run_selfware()` in run.py.
 ///
 /// `result_dir` is exported as `SELFWARE_RESULT_DIR` so the agent's
 /// `failure_mode.json` lands next to this trial's `result.json` instead of
@@ -240,7 +259,6 @@ pub fn run_selfware(
 ) -> Result<RunOutcome> {
     let log = std::fs::File::create(log_path)
         .with_context(|| format!("opening agent log {}", log_path.display()))?;
-    let log_err = log.try_clone()?;
 
     let started = Instant::now();
     let mut cmd = Command::new(selfware_bin);
@@ -251,37 +269,62 @@ pub fn run_selfware(
         .arg("--yolo")
         .arg("--no-tui")
         .arg("--quiet")
+        .arg("--output-format")
+        .arg("json")
         .env("SELFWARE_ENDPOINT", endpoint)
         .env("SELFWARE_MODEL", alias)
         .env("SELFWARE_RESULT_DIR", result_dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(log));
 
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning {}", selfware_bin.display()))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf);
+        buf
+    });
 
     // Poll-with-timeout. `Child::wait` has no native timeout; we bound it.
     let deadline = started + timeout;
     loop {
         match child.try_wait()? {
             Some(status) => {
+                let stdout_text = stdout_handle.join().unwrap_or_default();
                 let exit_code = status.code().unwrap_or(-1);
+
+                // Try to parse structured output from stdout.
+                if let Some(result) = parse_session_result_from_stdout(&stdout_text) {
+                    return Ok(RunOutcome {
+                        exit_code: result.exit_status,
+                        timed_out: false,
+                        wall_secs: result.duration_ms as f64 / 1000.0,
+                        parsed_result: Some(result),
+                    });
+                }
+
+                // Fall back to current behavior if JSON parse fails.
                 return Ok(RunOutcome {
                     exit_code,
                     timed_out: false,
                     wall_secs: started.elapsed().as_secs_f64(),
+                    parsed_result: None,
                 });
             }
             None => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = stdout_handle.join();
                     return Ok(RunOutcome {
                         exit_code: -1,
                         timed_out: true,
                         wall_secs: started.elapsed().as_secs_f64(),
+                        parsed_result: None,
                     });
                 }
                 std::thread::sleep(Duration::from_millis(500));
@@ -295,6 +338,9 @@ pub struct RunOutcome {
     pub exit_code: i32,
     pub timed_out: bool,
     pub wall_secs: f64,
+    /// Parsed `SessionResult` when `--output-format json` was used and parsing
+    /// succeeded.  `None` when the agent ran in text mode or JSON parsing failed.
+    pub parsed_result: Option<crate::cli::headless::SessionResult>,
 }
 
 /// Capture `git diff` from `workdir`, including newly added files and excluding

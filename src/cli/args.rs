@@ -104,6 +104,22 @@ pub(crate) struct Cli {
         default_missing_value = "",
     )]
     pub(crate) debug: Option<String>,
+
+    /// Output format for headless mode: text, json, or stream-json
+    #[arg(long, default_value = "text")]
+    pub(crate) output_format: String,
+
+    /// Maximum number of agent loop iterations (hard limit)
+    #[arg(long)]
+    pub(crate) max_turns: Option<usize>,
+
+    /// Maximum total prompt+completion tokens before stopping
+    #[arg(long)]
+    pub(crate) max_budget_tokens: Option<usize>,
+
+    /// Maximum wall-clock seconds before stopping
+    #[arg(long)]
+    pub(crate) max_wall_secs: Option<u64>,
 }
 
 /// Color theme for terminal output
@@ -590,6 +606,10 @@ pub(crate) struct SwebenchProArgs {
     /// `official` excludes them for valid scoring.
     #[arg(long, default_value = "diagnostic")]
     pub prompt_mode: String,
+
+    /// Prompt profile: `default` (legacy) or `swebench_pro` (Qwen3.6-optimized).
+    #[arg(long, default_value = "swebench_pro")]
+    pub prompt_profile: String,
 
     /// Run official SWE-bench Pro Docker eval after generating patches.
     #[arg(long)]

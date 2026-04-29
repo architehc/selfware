@@ -184,6 +184,9 @@ pub enum ToolError {
 
     #[error("Test fixture not found or not in allowed directory: {path}")]
     TestFixtureNotFound { path: String },
+
+    #[error("File {path} changed on disk since you last read it. Re-read the file and try again.")]
+    FileStale { path: String },
 }
 
 #[derive(Error, Debug)]

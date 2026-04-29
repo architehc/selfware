@@ -87,6 +87,9 @@ fn build_custom_config() -> Config {
             compression_detail: "signatures".to_string(),
             require_visual_verification: false,
             disable_turn_artifacts: false,
+            prompt_profile: "default".to_string(),
+            max_budget_tokens: None,
+            max_wall_secs: None,
         },
 
         // Resource limits
