@@ -43,6 +43,7 @@ impl Agent {
 
         let turn_start = std::time::Instant::now();
         let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
+        let mut text_fallback_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
         self.log_turn_start_event("assistant_step", use_last_message, self.messages.len());
 
         if use_last_message {
@@ -262,7 +263,12 @@ impl Agent {
                                     "Native FC returned empty tool_calls; parsed {} from content (sglang fallback)",
                                     parsed_calls.len()
                                 );
-                                native_tool_calls = Some(parsed_calls);
+                                // Preserve native/message-history invariants:
+                                // text-fallback calls are dispatched from text,
+                                // but must NOT be stored as assistant.tool_calls
+                                // because their results are emitted as XML/user
+                                // messages rather than role=tool messages.
+                                text_fallback_tool_calls = Some(parsed_calls);
                             }
                         }
                     }
@@ -460,7 +466,7 @@ impl Agent {
             content,
             reasoning_content: reasoning,
             native_tool_calls,
-            text_fallback_tool_calls: None,
+            text_fallback_tool_calls,
             metadata: chat_metadata,
         };
         self.log_turn_end_event(

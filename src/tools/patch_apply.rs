@@ -16,7 +16,8 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
         if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
             files += 1;
             // Extract path after "+++ b/" or "+++ "
-            let path = line.strip_prefix("+++ b/")
+            let path = line
+                .strip_prefix("+++ b/")
                 .or_else(|| line.strip_prefix("+++ "))
                 .unwrap_or("");
             if !path.is_empty() {
@@ -86,7 +87,10 @@ impl Tool for PatchApply {
                 anyhow::bail!("patch_apply rejects absolute paths: {}", path);
             }
             if path.contains("..") {
-                anyhow::bail!("patch_apply rejects paths with parent-directory escapes: {}", path);
+                anyhow::bail!(
+                    "patch_apply rejects paths with parent-directory escapes: {}",
+                    path
+                );
             }
             crate::tools::file::validate_tool_path(path, &safety)
                 .map_err(|e| anyhow!("patch_apply path validation failed for '{}': {}", path, e))?;

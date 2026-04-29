@@ -36,12 +36,8 @@ fn estimate_model_mb(spec: &QuantSpec) -> u64 {
 
 fn estimate_kv_mb(spec: &QuantSpec) -> u64 {
     let kv_bytes = kv_bytes_per_element(&spec.kv_cache_type);
-    let total_bytes = spec.ctx as u64
-        * spec.max_parallel as u64
-        * LAYER_COUNT
-        * HEAD_DIM
-        * 2
-        * kv_bytes;
+    let total_bytes =
+        spec.ctx as u64 * spec.max_parallel as u64 * LAYER_COUNT * HEAD_DIM * 2 * kv_bytes;
     total_bytes / 1024 / 1024
 }
 
@@ -169,21 +165,35 @@ mod tests {
     #[test]
     fn memory_estimation_q4_k_m() {
         let policies = policies_2x4090();
-        let spec = policies.iter().find(|s| s.label == "Qwen3.6-27B-Q4_K_M").unwrap();
+        let spec = policies
+            .iter()
+            .find(|s| s.label == "Qwen3.6-27B-Q4_K_M")
+            .unwrap();
         let (model_mb, kv_mb) = estimate_memory_mb(spec);
         // 27B params @ 4 bits = ~13.5 GB = ~13_824 MB
-        assert!(model_mb > 12_000 && model_mb < 16_000, "model_mb = {}", model_mb);
-        // ctx=131072, parallel=4, layers=64, head_dim=128, 2, 1 byte = ~4 GB = ~4_096 MB
-        assert!(kv_mb > 3_000 && kv_mb < 5_000, "kv_mb = {}", kv_mb);
+        assert!(
+            model_mb > 12_000 && model_mb < 16_000,
+            "model_mb = {}",
+            model_mb
+        );
+        // ctx=131072, parallel=4, layers=64, head_dim=128, 2, 1 byte = ~8 GB = 8_192 MiB
+        assert!(kv_mb > 7_000 && kv_mb < 9_000, "kv_mb = {}", kv_mb);
     }
 
     #[test]
     fn memory_estimation_fp8() {
         let policies = policies_2x4090();
-        let spec = policies.iter().find(|s| s.label == "Qwen3.6-27B-FP8").unwrap();
+        let spec = policies
+            .iter()
+            .find(|s| s.label == "Qwen3.6-27B-FP8")
+            .unwrap();
         let (model_mb, kv_mb) = estimate_memory_mb(spec);
         // 27B params @ 8 bits = ~27 GB = ~27_648 MB
-        assert!(model_mb > 25_000 && model_mb < 30_000, "model_mb = {}", model_mb);
+        assert!(
+            model_mb > 25_000 && model_mb < 30_000,
+            "model_mb = {}",
+            model_mb
+        );
         // ctx=65536, parallel=1, layers=64, head_dim=128, 2, 2 bytes = ~2 GB = ~2_048 MB
         assert!(kv_mb > 1_000 && kv_mb < 3_000, "kv_mb = {}", kv_mb);
     }

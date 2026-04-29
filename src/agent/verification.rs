@@ -321,6 +321,145 @@ impl Agent {
         false
     }
 
+    fn diff_paths_for_completion_gate(&self) -> Option<Vec<String>> {
+        let root = super::current_project_root();
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "--"])
+            .current_dir(root)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Some(
+            stdout
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+        )
+    }
+
+    fn gate_path_is_test(path: &str) -> bool {
+        let lower = path.trim_matches('"').to_ascii_lowercase();
+        let parts: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
+        if parts
+            .iter()
+            .any(|part| matches!(*part, "test" | "tests" | "__tests__" | "spec" | "specs"))
+        {
+            return true;
+        }
+
+        let basename = parts.last().copied().unwrap_or(lower.as_str());
+        let stem = basename
+            .rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(basename);
+        stem == "test"
+            || stem == "spec"
+            || stem.starts_with("test_")
+            || stem.starts_with("test-")
+            || stem.ends_with("_test")
+            || stem.ends_with("-test")
+            || stem.ends_with("_spec")
+            || stem.ends_with("-spec")
+            || basename.contains(".test.")
+            || basename.contains(".spec.")
+    }
+
+    fn gate_path_is_source(path: &str) -> bool {
+        let lower = path.trim_matches('"').to_ascii_lowercase();
+        let Some(ext) = std::path::Path::new(&lower)
+            .extension()
+            .and_then(|e| e.to_str())
+        else {
+            return false;
+        };
+        matches!(
+            ext,
+            "py" | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "java"
+                | "cs"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "cxx"
+                | "h"
+                | "hh"
+                | "hpp"
+                | "sql"
+                | "go"
+                | "swift"
+                | "rs"
+        )
+    }
+
+    fn mutation_completion_gate(&self) -> Option<String> {
+        if !super::tool_dispatch::task_requires_mutation(self.learning_context()) {
+            return None;
+        }
+
+        if let Some(paths) = self.diff_paths_for_completion_gate() {
+            if paths.is_empty() {
+                return Some(
+                    "EmptyDiff: this task requires a code change, but `git diff` is empty. \
+                     Edit the relevant source file before completing."
+                        .to_string(),
+                );
+            }
+
+            let has_source_edit = paths
+                .iter()
+                .any(|path| Self::gate_path_is_source(path) && !Self::gate_path_is_test(path));
+            let all_test_files = paths.iter().all(|path| Self::gate_path_is_test(path));
+
+            if all_test_files {
+                return Some(format!(
+                    "TestOnlyPatch: the current diff only modifies test files ({:?}). \
+                     SWE-style repair tasks require a source-code fix. Edit the implementation file before completing.",
+                    paths
+                ));
+            }
+
+            if !has_source_edit {
+                return Some(format!(
+                    "NoSourceEdit: the current diff does not include a supported source file ({:?}). \
+                     Edit source code in Python, JavaScript, TypeScript, Java, C#, C/C++, SQL, Go, Swift, or Rust before completing.",
+                    paths
+                ));
+            }
+        } else if self.mutating_tool_call_count() == 0 {
+            return Some(
+                "EmptyDiff: this task requires a code change, but no mutating tool has succeeded. \
+                 Edit a source file before completing."
+                    .to_string(),
+            );
+        }
+
+        if self.mutation_sequence > 0
+            && self.last_successful_verification_mutation_sequence < self.mutation_sequence
+        {
+            if let Some(summary) = &self.last_failed_verification_summary {
+                return Some(format!(
+                    "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
+                     Fix the issue and run verification again before completing."
+                ));
+            }
+            return Some(
+                "StaleVerification: verification has not passed after the most recent source edit. \
+                 Run the project's relevant verification command after your last change before completing."
+                    .to_string(),
+            );
+        }
+
+        None
+    }
+
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) fn check_completion_gate(&self) -> Option<String> {
@@ -407,6 +546,10 @@ impl Agent {
             return Some(msg);
         }
 
+        if let Some(msg) = self.mutation_completion_gate() {
+            return Some(msg);
+        }
+
         // Reject completion when the task requires code changes but no source files
         // were written at all. This catches the "context insufficient" early-quit
         // pattern where the model gives a text-only answer without doing any work.
@@ -446,7 +589,10 @@ impl Agent {
         }
 
         if self.config.agent.require_verification_before_completion {
-            // Skip cargo verification entirely for non-Rust tasks
+            // For non-mutation/non-Rust tasks, skip the legacy cargo-only
+            // gate. Mutation-required tasks are handled by
+            // mutation_completion_gate(), which is language-aware and requires
+            // verification after the latest edit.
             if self.should_skip_cargo_verification() {
                 debug!("Completion gate: bypassing cargo verification for non-Rust task");
                 return None;
@@ -607,6 +753,8 @@ impl Agent {
         {
             Ok(report) => {
                 if report.overall_passed {
+                    self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+                    self.last_failed_verification_summary = None;
                     spinner.stop_success("Verification passed");
                     self.cognitive_state.episodic_memory.what_worked(
                         tool_name,
@@ -617,6 +765,16 @@ impl Agent {
                     }
                     None
                 } else {
+                    let summary = report
+                        .checks
+                        .iter()
+                        .find(|check| !check.passed)
+                        .map(|check| {
+                            let output: String = check.output.chars().take(300).collect();
+                            format!("{} failed: {}", check.check_type.as_str(), output)
+                        })
+                        .unwrap_or_else(|| "verification failed".to_string());
+                    self.last_failed_verification_summary = Some(summary);
                     spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
                         tool_name,
@@ -632,6 +790,8 @@ impl Agent {
             Err(e) => {
                 spinner.stop_error("Verification failed to run");
                 warn!("Verification failed to run: {}", e);
+                self.last_failed_verification_summary =
+                    Some(format!("verification could not run: {}", e));
                 None
             }
         }

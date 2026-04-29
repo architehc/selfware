@@ -4,6 +4,23 @@ use serde::{Deserialize, Serialize};
 
 use super::types::default_true;
 
+/// Policy for mutation-required tasks that keep issuing read-only tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadLoopPolicy {
+    /// Preserve the historical behavior: block read-only tools and nudge.
+    Nudge,
+    /// Require the next action to mutate state, then abort if the model keeps
+    /// trying read-only actions. This is the default for SWE-style tasks.
+    ForceMutation,
+}
+
+impl Default for ReadLoopPolicy {
+    fn default() -> Self {
+        Self::ForceMutation
+    }
+}
+
 /// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -38,6 +55,9 @@ pub struct AgentConfig {
     /// computer control, web fetch, etc.) were used during the task.
     #[serde(default = "default_true")]
     pub require_verification_before_completion: bool,
+    /// Behavior when a mutation-required task loops on read-only tools.
+    #[serde(default)]
+    pub read_loop_policy: ReadLoopPolicy,
     /// When true, visual verification failures with confidence > 0.6 act as hard
     /// gates — the tool result is marked as needing retry and the assertion is
     /// logged to the checkpoint.  When false (default), failures are advisory only.
@@ -96,6 +116,7 @@ impl Default for AgentConfig {
             streaming: true,
             min_completion_steps: default_min_completion_steps(),
             require_verification_before_completion: true,
+            read_loop_policy: ReadLoopPolicy::default(),
             require_visual_verification: false,
             context_content_ratio: default_context_content_ratio(),
             context_compression_ratio: default_context_compression_ratio(),

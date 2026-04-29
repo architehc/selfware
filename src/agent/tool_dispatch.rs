@@ -70,6 +70,23 @@ fn summarize_and_spill(
     )
 }
 
+fn tool_result_value_indicates_success(result: &Value) -> bool {
+    if result.get("success").and_then(|v| v.as_bool()) == Some(false) {
+        return false;
+    }
+    if result.get("passed").and_then(|v| v.as_bool()) == Some(false) {
+        return false;
+    }
+    if result
+        .get("exit_code")
+        .and_then(|v| v.as_i64())
+        .is_some_and(|code| code != 0)
+    {
+        return false;
+    }
+    true
+}
+
 fn summarize_directory_tree(raw: &str) -> String {
     let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
     let root = v.get("root").and_then(|v| v.as_str()).unwrap_or(".");
@@ -636,6 +653,67 @@ pub(super) fn shell_command_is_observational(command: &str) -> bool {
     })
 }
 
+pub(super) fn shell_command_is_verification(command: &str) -> bool {
+    let normalized = command.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let verification_prefixes = [
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "pytest",
+        "python -m pytest",
+        "python3 -m pytest",
+        "python -m unittest",
+        "python3 -m unittest",
+        "python -m py_compile",
+        "python3 -m py_compile",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "npx tsc",
+        "tsc ",
+        "go test",
+        "go build",
+        "javac",
+        "mvn test",
+        "mvn verify",
+        "gradle test",
+        "./gradlew test",
+        "dotnet build",
+        "dotnet test",
+        "cmake --build",
+        "make test",
+        "ctest",
+        "swift build",
+        "swift test",
+        "sqlfluff lint",
+    ];
+
+    verification_prefixes.iter().any(|prefix| {
+        normalized == *prefix
+            || normalized.starts_with(&format!("{} ", prefix))
+            || normalized.starts_with(&format!("{} --", prefix))
+    })
+}
+
+pub(super) fn tool_call_is_verification(name: &str, args_str: &str) -> bool {
+    match name {
+        "cargo_check" | "cargo_test" | "cargo_clippy" => true,
+        "shell_exec" => serde_json::from_str::<Value>(args_str)
+            .ok()
+            .and_then(|args| {
+                args.get("command")
+                    .and_then(|value| value.as_str())
+                    .map(shell_command_is_verification)
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 pub(super) fn tool_call_is_observational(name: &str, args_str: &str) -> bool {
     match name {
         "file_read"
@@ -803,7 +881,7 @@ impl Agent {
     fn maybe_block_progressless_batch(
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
-    ) -> Option<Vec<super::execution::CollectedToolCall>> {
+    ) -> Result<Option<Vec<super::execution::CollectedToolCall>>> {
         // Use relaxed threshold when agent has already written source files.
         // Verification loops (cargo check → cargo test → read output) are expected
         // after writing and should not be blocked aggressively.
@@ -819,7 +897,7 @@ impl Agent {
                 .iter()
                 .all(|(name, args_str, _)| tool_call_is_observational(name, args_str))
         {
-            return Some(tool_calls);
+            return Ok(Some(tool_calls));
         }
 
         let error_msg = format!(
@@ -833,6 +911,7 @@ impl Agent {
             kind: "progress_guard".to_string(),
             count: self.progress_guard_fire_count(),
         });
+        let guard_count = self.progress_guard_fire_count();
 
         for (name, args_str, tool_call_id) in tool_calls {
             let start_time = std::time::Instant::now();
@@ -849,17 +928,30 @@ impl Agent {
             );
         }
 
-        self.messages.push(Message::user(
-            "<selfware_system_directive>\n\
-             Read-only and verification tools are blocked until you make a real change.\n\
-             Your NEXT response must do one of these:\n\
-             - use `file_edit`, `file_write`, or `file_delete`\n\
-             - use `shell_exec` with a mutating command\n\
-             - if you already know the exact code change, output the replacement code as text and include the target path; Selfware will write it automatically\n\
-             Do NOT call more file reads, directory listings, grep searches, cargo test, or cargo check right now.\n\
-             </selfware_system_directive>"
-                .to_string(),
-        ));
+        if self.config.agent.read_loop_policy == crate::config::ReadLoopPolicy::ForceMutation {
+            if guard_count >= 2 && self.mutating_tool_call_count() == 0 {
+                anyhow::bail!(
+                    "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
+                    guard_count,
+                    self.consecutive_read_only_steps
+                );
+            }
+
+            self.messages
+                .push(Message::user(self.force_mutation_directive()));
+        } else {
+            self.messages.push(Message::user(
+                "<selfware_system_directive>\n\
+                 Read-only and verification tools are blocked until you make a real change.\n\
+                 Your NEXT response must do one of these:\n\
+                 - use `file_edit`, `file_write`, or `file_delete`\n\
+                 - use `shell_exec` with a mutating command\n\
+                 - if you already know the exact code change, output the replacement code as text and include the target path; Selfware will write it automatically\n\
+                 Do NOT call more file reads, directory listings, grep searches, cargo test, or cargo check right now.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
 
         if self.consecutive_read_only_steps >= escalation_threshold
             && self.pending_synthesis.is_none()
@@ -871,7 +963,32 @@ impl Agent {
             self.pending_synthesis = Some(self.learning_context().to_string());
         }
 
-        None
+        Ok(None)
+    }
+
+    fn force_mutation_directive(&self) -> String {
+        let target = self
+            .last_read_file
+            .as_deref()
+            .unwrap_or("PATH_YOU_ALREADY_READ");
+        let target_json =
+            serde_json::to_string(target).unwrap_or_else(|_| "\"PATH_YOU_ALREADY_READ\"".into());
+        format!(
+            "<selfware_system_directive>\n\
+             READ-LOOP FORCE-MUTATION MODE is active.\n\
+             Your previous read-only or verification tool calls were suppressed. \
+             The next accepted action must mutate code or project state.\n\n\
+             Use this exact tool shape on the most relevant existing file you already inspected:\n\
+             <tool>\n\
+             <name>file_edit</name>\n\
+             <arguments>{{\"path\":{target_json},\"old_str\":\"EXACT ORIGINAL TEXT FROM THE FILE\",\"new_str\":\"REPLACEMENT TEXT\"}}</arguments>\n\
+             </tool>\n\n\
+             Rules:\n\
+             - Do NOT call file_read, directory_tree, glob_find, grep_search, git_diff, cargo_check, cargo_test, pytest, npm test, or go test first.\n\
+             - Do NOT create src/lib.rs unless this repository already has Cargo.toml and src/lib.rs is the real target.\n\
+             - If you cannot identify a safe edit from the file context already present, stop with READ_LOOP_NO_EDIT instead of guessing.\n\
+             </selfware_system_directive>"
+        )
     }
 
     pub(super) fn push_task_state_note(&mut self, note: String) {
@@ -1323,7 +1440,7 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
-        let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls) else {
+        let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls)? else {
             return Ok(());
         };
 
@@ -1592,22 +1709,25 @@ impl Agent {
                     let start = std::time::Instant::now();
                     let execution = tokio::time::timeout(
                         std::time::Duration::from_secs(timeout_secs),
-                        tool.execute(tool_args.clone()),
+                        crate::observability::telemetry::track_tool_execution(&tool_name, || {
+                            tool.execute(tool_args.clone())
+                        }),
                     )
                     .await;
                     let elapsed = start.elapsed().as_millis() as u64;
                     match execution {
                         Ok(Ok(result)) => {
+                            let tool_success = tool_result_value_indicates_success(&result);
                             let result_str =
                                 serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
                             let summary = crate::output::semantic_summary(
                                 &tool_name,
                                 &tool_args,
                                 Some(&result_str),
-                                true,
+                                tool_success,
                                 elapsed,
                             );
-                            (idx, (true, result_str, summary))
+                            (idx, (tool_success, result_str, summary))
                         }
                         Ok(Err(e)) => {
                             let summary = crate::output::semantic_summary(
@@ -1697,6 +1817,41 @@ impl Agent {
             }
 
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success);
+
+            let is_mutating_shell = vt.name == "shell_exec"
+                && vt
+                    .args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|cmd| !shell_command_is_observational(cmd))
+                    .unwrap_or(false);
+            if success
+                && (matches!(
+                    vt.name.as_str(),
+                    "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
+                ) || is_mutating_shell)
+            {
+                self.note_mutating_tool_call();
+                if matches!(
+                    vt.name.as_str(),
+                    "file_edit" | "file_write" | "file_fim_edit"
+                ) {
+                    self.has_written_any_file = true;
+                    self.terminal_guard_hits = 0;
+                }
+            }
+
+            if success
+                && tool_call_is_verification(&vt.name, &vt.args_str)
+                && self.mutation_sequence > 0
+            {
+                self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+                self.last_failed_verification_summary = None;
+            } else if !success && tool_call_is_verification(&vt.name, &vt.args_str) {
+                let preview: String = result_str.chars().take(300).collect();
+                self.last_failed_verification_summary =
+                    Some(format!("{} failed: {}", vt.name, preview));
+            }
 
             // Track file operations for context management
             if success {
@@ -2632,28 +2787,36 @@ impl Agent {
             Ok(Ok(result)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let result_str = serde_json::to_string(&result)?;
-                let summary =
-                    crate::output::semantic_summary(name, args, Some(&result_str), true, elapsed);
-                self.log_tool_call(name, args_str, &result_str, true, start_time, true);
+                let tool_success = tool_result_value_indicates_success(&result);
+                let summary = crate::output::semantic_summary(
+                    name,
+                    args,
+                    Some(&result_str),
+                    tool_success,
+                    elapsed,
+                );
+                self.log_tool_call(name, args_str, &result_str, tool_success, start_time, true);
 
                 // Store successful cacheable results in ToolCache
-                if is_cacheable {
+                if is_cacheable && tool_success {
                     self.cache_manager
                         .tool_cache
                         .set(name, args, result.clone());
                 }
 
                 // Cache tool results in LocalFirstCoordinator
-                let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
-                self.cache_manager.local_first.cache_response(
-                    &cache_key,
-                    result_str.clone(),
-                    result_str.len(),
-                );
+                if tool_success {
+                    let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
+                    self.cache_manager.local_first.cache_response(
+                        &cache_key,
+                        result_str.clone(),
+                        result_str.len(),
+                    );
+                }
 
                 // Display color-coded diff for file mutations
                 if let Some((ref path, ref old_content)) = pre_edit_content {
-                    if matches!(name, "file_edit" | "file_write") {
+                    if tool_success && matches!(name, "file_edit" | "file_write") {
                         self.has_written_any_file = true;
                         self.terminal_guard_hits = 0;
                         if let Ok(new_content) = std::fs::read_to_string(path) {
@@ -2679,19 +2842,42 @@ impl Agent {
                     "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
                 ) || is_mutating_shell
                 {
-                    self.note_mutating_tool_call();
+                    if tool_success {
+                        self.note_mutating_tool_call();
+                    }
+                }
+
+                if tool_success
+                    && tool_call_is_verification(name, args_str)
+                    && self.mutation_sequence > 0
+                {
+                    self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+                    self.last_failed_verification_summary = None;
+                } else if !tool_success && tool_call_is_verification(name, args_str) {
+                    self.last_failed_verification_summary = Some({
+                        let preview: String = result_str.chars().take(300).collect();
+                        format!("{} failed: {}", name, preview)
+                    });
                 }
 
                 // Record successful tool usage for learning
                 self.self_improvement.record_tool(
                     name,
                     self.learning_context(),
-                    Outcome::Success,
+                    if tool_success {
+                        Outcome::Success
+                    } else {
+                        Outcome::Failure
+                    },
                     elapsed,
-                    None,
+                    (!tool_success).then(|| result_str.clone()),
                 );
 
-                let verification_result = self.maybe_verify_file_change(name, args).await;
+                let verification_result = if tool_success {
+                    self.maybe_verify_file_change(name, args).await
+                } else {
+                    None
+                };
                 let visual_verification_result = self.maybe_verify_visual_change(name, args).await;
                 let enhanced_result = self.maybe_enhance_tool_result(name, &result_str);
                 let mut final_result = enhanced_result;
@@ -2750,7 +2936,7 @@ impl Agent {
                         ),
                     }.into());
                 }
-                Ok((true, final_result, summary))
+                Ok((tool_success, final_result, summary))
             }
             Ok(Err(e)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;

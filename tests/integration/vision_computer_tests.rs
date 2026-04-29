@@ -376,10 +376,17 @@ async fn test_control_then_analyze_chain() {
 /// Test SWE-bench evaluator + report generation chain.
 #[tokio::test]
 async fn test_swebench_evaluator_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dataset = tmp.path().join("tasks.jsonl");
+    std::fs::write(
+        &dataset,
+        r#"{"repo":"example/repo","instance_id":"test-001","problem_statement":"Fix bug","base_commit":"abc123","target_files":["auth/login.py"]}"#,
+    )
+    .unwrap();
     let evaluator = SWEBenchEvaluator::new(PathBuf::from("/tmp/swebench_test"));
 
     // Load tasks
-    let tasks = evaluator.load_tasks("public").unwrap();
+    let tasks = evaluator.load_tasks(dataset.to_str().unwrap()).unwrap();
     assert!(!tasks.is_empty());
     let task = &tasks[0];
 
@@ -818,8 +825,15 @@ async fn test_live_swebench_prompt_construction() {
     }
 
     // Load tasks
+    let tmp = tempfile::tempdir().unwrap();
+    let dataset = tmp.path().join("tasks.jsonl");
+    std::fs::write(
+        &dataset,
+        r#"{"repo":"example/repo","instance_id":"test-001","problem_statement":"Fix bug","base_commit":"abc123","target_files":["auth/login.py"]}"#,
+    )
+    .unwrap();
     let evaluator = SWEBenchEvaluator::new(PathBuf::from("/tmp/swebench_live_test"));
-    let tasks = evaluator.load_tasks("public").unwrap();
+    let tasks = evaluator.load_tasks(dataset.to_str().unwrap()).unwrap();
     let task = &tasks[0];
 
     // Build the prompt as the real pipeline would

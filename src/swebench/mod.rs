@@ -1,15 +1,14 @@
-//! SWE-bench Pro Integration (STUB - RETURNS MOCK DATA)
+//! Legacy SWE-bench demo API.
 //!
-//! ⚠️ WARNING: This module returns MOCK/FABRICATED data for all operations.
-//! - `load_tasks` returns hardcoded example tasks
-//! - `evaluate_task` returns fake success results
-//! - Test functions are all no-ops
-//!   DO NOT USE FOR REAL EVALUATION - FOR DEVELOPMENT/DEMO ONLY.
+//! This module is kept for source compatibility with older experiments. It no
+//! longer fabricates tasks or resolution results. Real benchmark execution and
+//! official Docker scoring live under `bench_harness::swebench_pro` and the CLI
+//! command `selfware bench swebench-pro --official-eval`.
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// SWE-bench Pro task
@@ -76,6 +75,83 @@ pub struct SWEBenchEvaluator {
     pub token_budget: usize,
 }
 
+fn string_field(value: &serde_json::Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn string_list_field(value: &serde_json::Value, key: &str) -> Vec<String> {
+    match value.get(key) {
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+            .collect(),
+        Some(serde_json::Value::String(s)) => {
+            serde_json::from_str::<Vec<String>>(s).unwrap_or_else(|_| vec![s.clone()])
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn target_files_from_patch(patch: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for line in patch.lines() {
+        let path = line
+            .strip_prefix("diff --git ")
+            .and_then(|line| line.find(" b/").map(|idx| &line[idx + 3..]))
+            .or_else(|| line.strip_prefix("+++ b/"));
+        if let Some(path) = path {
+            let path = path.trim().to_string();
+            if !path.is_empty() && path != "/dev/null" && !files.contains(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+fn parse_task_value(value: &serde_json::Value) -> Result<SWEBenchTask> {
+    let instance_id = string_field(value, "instance_id");
+    let repo = string_field(value, "repo");
+    let problem_statement = string_field(value, "problem_statement");
+    let base_commit = string_field(value, "base_commit");
+    if instance_id.is_empty()
+        || repo.is_empty()
+        || problem_statement.is_empty()
+        || base_commit.is_empty()
+    {
+        bail!(
+            "dataset row is missing one of required fields: instance_id, repo, problem_statement, base_commit"
+        );
+    }
+
+    let mut target_files = string_list_field(value, "target_files");
+    if target_files.is_empty() {
+        target_files = value
+            .get("patch")
+            .and_then(|v| v.as_str())
+            .map(target_files_from_patch)
+            .unwrap_or_default();
+    }
+
+    Ok(SWEBenchTask {
+        repo,
+        instance_id,
+        problem_statement,
+        base_commit,
+        solution_commit: value
+            .get("solution_commit")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned),
+        test_files: string_list_field(value, "selected_test_files_to_run"),
+        target_files,
+        difficulty: TaskDifficulty::Medium,
+    })
+}
+
 impl SWEBenchEvaluator {
     /// Create new evaluator
     pub fn new(work_dir: PathBuf) -> Self {
@@ -87,88 +163,53 @@ impl SWEBenchEvaluator {
         }
     }
 
-    /// Load tasks from SWE-bench Pro dataset (STUB - RETURNS MOCK DATA)
+    /// Load tasks from a local JSON/JSONL dataset file.
     ///
-    /// ⚠️ WARNING: This returns HARDCODED mock tasks, not real SWE-bench data.
-    /// TODO: Implement actual loading from JSON dataset file
+    /// Named datasets like `"public"` used to return a hardcoded fake task.
+    /// That behavior is intentionally disabled so no caller can accidentally
+    /// report fabricated SWE-bench success.
     pub fn load_tasks(&self, dataset: &str) -> Result<Vec<SWEBenchTask>> {
-        warn!("STUB: load_tasks returning MOCK data for: {}", dataset);
+        let path = Path::new(dataset);
+        if !path.exists() {
+            bail!(
+                "legacy swebench::load_tasks no longer provides mock datasets. \
+                 Pass a JSON/JSONL dataset path, or use `selfware bench swebench-pro`."
+            );
+        }
 
-        // STUB: Returns hardcoded example instead of loading from file
-        let tasks = vec![SWEBenchTask {
-            repo: "example/repo".to_string(),
-            instance_id: "test-001".to_string(),
-            problem_statement: "STUB: Fix the authentication bug in login.py".to_string(),
-            base_commit: "STUB-abc123".to_string(),
-            solution_commit: Some("STUB-def456".to_string()),
-            test_files: vec!["tests/test_auth.py".to_string()],
-            target_files: vec!["auth/login.py".to_string()],
-            difficulty: TaskDifficulty::Medium,
-        }];
-
-        warn!("STUB: load_tasks returned {} MOCK tasks", tasks.len());
-        Ok(tasks)
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("reading SWE-bench dataset {}", path.display()))?;
+        if dataset.ends_with(".jsonl") {
+            content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| {
+                    let value: serde_json::Value = serde_json::from_str(line)
+                        .with_context(|| "parsing SWE-bench JSONL row")?;
+                    parse_task_value(&value)
+                })
+                .collect()
+        } else {
+            let value: serde_json::Value = serde_json::from_str(&content)
+                .with_context(|| format!("parsing SWE-bench dataset {}", path.display()))?;
+            match value {
+                serde_json::Value::Array(items) => items.iter().map(parse_task_value).collect(),
+                other => parse_task_value(&other).map(|task| vec![task]),
+            }
+        }
     }
 
-    /// Run selfware on a single task (STUB - RETURNS MOCK RESULTS)
-    ///
-    /// ⚠️ WARNING: This does NOT actually run the agent or evaluate the task.
-    /// It returns FABRICATED success results.
-    /// TODO: Implement actual agent execution and test validation
+    /// Disabled legacy evaluation entrypoint.
     pub async fn evaluate_task(
         &self,
         task: &SWEBenchTask,
         _agent: &crate::agent::Agent,
     ) -> Result<TestResult> {
-        warn!(
-            "STUB: evaluate_task returning MOCK results for: {}",
+        bail!(
+            "legacy swebench::evaluate_task is disabled for `{}` because it previously returned fabricated success. \
+             Use `selfware bench swebench-pro --official-eval` for real evaluation.",
             task.instance_id
-        );
-        let start = std::time::Instant::now();
-
-        let mut trajectory = Vec::new();
-
-        // STUB: Mock trajectory steps
-        trajectory.push(TrajectoryStep {
-            step: 1,
-            action: "STUB: setup_environment".to_string(),
-            observation: format!(
-                "STUB: Would clone {} at commit {}",
-                task.repo, task.base_commit
-            ),
-            timestamp: chrono::Local::now().to_rfc3339(),
-        });
-
-        trajectory.push(TrajectoryStep {
-            step: 2,
-            action: "STUB: reproduce_bug".to_string(),
-            observation: "STUB: Would run test to confirm bug".to_string(),
-            timestamp: chrono::Local::now().to_rfc3339(),
-        });
-
-        trajectory.push(TrajectoryStep {
-            step: 3,
-            action: "STUB: agent_solve".to_string(),
-            observation: "STUB: Would run agent (NOT ACTUALLY RUNNING)".to_string(),
-            timestamp: chrono::Local::now().to_rfc3339(),
-        });
-
-        // STUB: NOT calling agent.execute()
-        let duration = start.elapsed().as_secs_f64();
-
-        warn!("STUB: evaluate_task returning FABRICATED success result");
-        Ok(TestResult {
-            instance_id: task.instance_id.clone(),
-            success: true,  // FABRICATED
-            resolved: true, // FABRICATED
-            duration_secs: duration,
-            iterations: 5,       // FABRICATED
-            tokens_used: 15000,  // FABRICATED
-            patch_applied: true, // FABRICATED
-            tests_passed: true,  // FABRICATED
-            error: None,
-            trajectory,
-        })
+        )
     }
 
     /// Run full evaluation on task set
@@ -177,31 +218,10 @@ impl SWEBenchEvaluator {
         tasks: &[SWEBenchTask],
         agent: &crate::agent::Agent,
     ) -> Result<EvaluationReport> {
-        info!("Running full evaluation on {} tasks", tasks.len());
-
-        let mut results = Vec::new();
-        let mut total_resolved = 0;
-
-        for (i, task) in tasks.iter().enumerate() {
-            info!("Task {}/{}: {}", i + 1, tasks.len(), task.instance_id);
-
-            let result = self.evaluate_task(task, agent).await?;
-            if result.resolved {
-                total_resolved += 1;
-            }
-            results.push(result);
-        }
-
-        let total_tasks = tasks.len();
-        let resolution_rate = total_resolved as f64 / total_tasks as f64;
-
-        Ok(EvaluationReport {
-            total_tasks,
-            resolved: total_resolved,
-            resolution_rate,
-            results,
-            timestamp: chrono::Local::now().to_rfc3339(),
-        })
+        let _ = (tasks, agent);
+        bail!(
+            "legacy swebench::evaluate_all is disabled. Use `selfware bench swebench-pro --official-eval`."
+        )
     }
 
     /// Generate evaluation report
@@ -483,12 +503,27 @@ mod tests {
 
     #[test]
     fn test_load_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = dir.path().join("tasks.jsonl");
+        std::fs::write(
+            &dataset,
+            r#"{"repo":"example/repo","instance_id":"test-001","problem_statement":"Fix bug","base_commit":"abc123","selected_test_files_to_run":["tests/test_auth.py"],"patch":"diff --git a/auth/login.py b/auth/login.py\n--- a/auth/login.py\n+++ b/auth/login.py\n"}"#,
+        )
+        .unwrap();
         let evaluator = SWEBenchEvaluator::new(PathBuf::from("/tmp/test"));
-        let tasks = evaluator.load_tasks("public").unwrap();
+        let tasks = evaluator.load_tasks(dataset.to_str().unwrap()).unwrap();
         assert!(!tasks.is_empty());
         assert_eq!(tasks[0].repo, "example/repo");
         assert_eq!(tasks[0].instance_id, "test-001");
+        assert_eq!(tasks[0].target_files, vec!["auth/login.py"]);
         assert_eq!(tasks[0].difficulty, TaskDifficulty::Medium);
+    }
+
+    #[test]
+    fn test_named_mock_dataset_is_disabled() {
+        let evaluator = SWEBenchEvaluator::new(PathBuf::from("/tmp/test"));
+        let err = evaluator.load_tasks("public").unwrap_err().to_string();
+        assert!(err.contains("no longer provides mock datasets"));
     }
 
     // ── EvaluationReport ─────────────────────────────────────────────

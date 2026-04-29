@@ -87,6 +87,7 @@ fn build_custom_config() -> Config {
             compression_detail: "signatures".to_string(),
             require_visual_verification: false,
             disable_turn_artifacts: false,
+            read_loop_policy: selfware::config::ReadLoopPolicy::ForceMutation,
             prompt_profile: "default".to_string(),
             max_budget_tokens: None,
             max_wall_secs: None,

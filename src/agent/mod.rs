@@ -118,10 +118,16 @@ pub(crate) const MAX_PENDING_MESSAGES: usize = 100;
 /// Detected project type for adapting verification instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectType {
-    Rust,
-    Node,
     Python,
+    JavaScript,
+    TypeScript,
+    Java,
+    CSharp,
+    Cpp,
+    Sql,
     Go,
+    Swift,
+    Rust,
     Generic,
 }
 
@@ -144,10 +150,17 @@ pub(super) fn current_project_root() -> std::path::PathBuf {
         &[
             "Cargo.toml",
             "package.json",
+            "tsconfig.json",
             "pyproject.toml",
             "setup.py",
             "requirements.txt",
             "go.mod",
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "*.csproj",
+            "*.sln",
+            "Package.swift",
         ],
     )
     .unwrap_or(cwd)
@@ -181,44 +194,109 @@ fn read_bounded_file(path: &std::path::Path, max_chars: usize) -> Option<String>
 /// Detect the project type from marker files in the working directory or its ancestors.
 fn detect_project_type() -> ProjectType {
     let root = current_project_root();
-    if root.join("Cargo.toml").exists() {
-        ProjectType::Rust
-    } else if root.join("package.json").exists() {
-        ProjectType::Node
-    } else if root.join("pyproject.toml").exists()
+    if root.join("pyproject.toml").exists()
         || root.join("setup.py").exists()
         || root.join("requirements.txt").exists()
     {
         ProjectType::Python
+    } else if root.join("tsconfig.json").exists() {
+        ProjectType::TypeScript
+    } else if root.join("package.json").exists() {
+        ProjectType::JavaScript
+    } else if root.join("pom.xml").exists()
+        || root.join("build.gradle").exists()
+        || root.join("build.gradle.kts").exists()
+    {
+        ProjectType::Java
+    } else if has_file_with_extension(&root, "csproj") || has_file_with_extension(&root, "sln") {
+        ProjectType::CSharp
+    } else if has_file_with_extension(&root, "cpp")
+        || has_file_with_extension(&root, "cc")
+        || has_file_with_extension(&root, "cxx")
+        || has_file_with_extension(&root, "c")
+        || root.join("CMakeLists.txt").exists()
+    {
+        ProjectType::Cpp
+    } else if has_file_with_extension(&root, "sql") {
+        ProjectType::Sql
     } else if root.join("go.mod").exists() {
         ProjectType::Go
+    } else if root.join("Package.swift").exists() || has_file_with_extension(&root, "swift") {
+        ProjectType::Swift
+    } else if root.join("Cargo.toml").exists() {
+        ProjectType::Rust
     } else {
         ProjectType::Generic
     }
 }
 
+fn has_file_with_extension(root: &std::path::Path, ext: &str) -> bool {
+    std::fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        })
+}
+
 /// Return (verify_step, test_step, completion_rule) for the detected project type.
 fn verification_instructions(pt: ProjectType) -> (&'static str, &'static str, &'static str) {
     match pt {
-        ProjectType::Rust => (
-            "3. VERIFY: Run cargo_check IMMEDIATELY after every file change",
-            "5. TEST: Run cargo_test when implementation is complete",
-            "- NEVER declare complete without a successful cargo_check",
-        ),
-        ProjectType::Node => (
-            "3. VERIFY: Check for syntax errors after changes. Run npm test or the project's test script if available",
-            "5. TEST: Run the project's test command when implementation is complete",
-            "- Verify your changes work before declaring complete",
-        ),
         ProjectType::Python => (
             "3. VERIFY: Check for syntax errors after changes. Run pytest or the project's test command if available",
             "5. TEST: Run pytest or the project's test command when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::JavaScript => (
+            "3. VERIFY: Check JavaScript syntax after changes and run npm/pnpm/yarn tests if available",
+            "5. TEST: Run the project's JavaScript test command when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::TypeScript => (
+            "3. VERIFY: Run TypeScript type-checking after changes and run the project's tests if available",
+            "5. TEST: Run the project's TypeScript test command when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::Java => (
+            "3. VERIFY: Run javac/maven/gradle checks after changes",
+            "5. TEST: Run mvn test or gradle test when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::CSharp => (
+            "3. VERIFY: Run dotnet build after changes",
+            "5. TEST: Run dotnet test when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::Cpp => (
+            "3. VERIFY: Run compiler or build-system checks after changes",
+            "5. TEST: Run the project's C/C++ test command when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::Sql => (
+            "3. VERIFY: Run SQL parser/linter or database-specific validation after changes",
+            "5. TEST: Run the project's database tests when implementation is complete",
             "- Verify your changes work before declaring complete",
         ),
         ProjectType::Go => (
             "3. VERIFY: Run go build after every file change",
             "5. TEST: Run go test when implementation is complete",
             "- NEVER declare complete without a successful go build",
+        ),
+        ProjectType::Swift => (
+            "3. VERIFY: Run swift build after changes",
+            "5. TEST: Run swift test when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::Rust => (
+            "3. VERIFY: Run cargo_check IMMEDIATELY after every file change",
+            "5. TEST: Run cargo_test when implementation is complete",
+            "- NEVER declare complete without a successful cargo_check",
         ),
         ProjectType::Generic => (
             "3. VERIFY: Test your changes using appropriate tools for the project type",
@@ -455,6 +533,12 @@ pub struct Agent {
     /// Set to true once any file_write or file_edit has been successfully executed
     /// (including synthetic/auto-writes). Used by progress guard to relax thresholds.
     has_written_any_file: bool,
+    /// Monotonic sequence incremented after every successful state-changing tool.
+    mutation_sequence: usize,
+    /// Mutation sequence number covered by the most recent successful verification.
+    last_successful_verification_mutation_sequence: usize,
+    /// Most recent failed verification summary, used by the completion gate.
+    last_failed_verification_summary: Option<String>,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
     /// Lifetime count of successful mutating tool calls (file_write/file_edit/file_delete/etc.)
@@ -978,6 +1062,9 @@ To call a tool, use this EXACT XML structure:
             terminal_guard_hits: 0,
             last_read_file: None,
             has_written_any_file: false,
+            mutation_sequence: 0,
+            last_successful_verification_mutation_sequence: 0,
+            last_failed_verification_summary: None,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
             total_tool_call_count: 0,
@@ -1865,6 +1952,9 @@ To call a tool, use this EXACT XML structure:
         self.mutating_tool_call_count = 0;
         self.total_tool_call_count = 0;
         self.progress_guard_fire_count = 0;
+        self.mutation_sequence = 0;
+        self.last_successful_verification_mutation_sequence = 0;
+        self.last_failed_verification_summary = None;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;
@@ -1875,6 +1965,8 @@ To call a tool, use this EXACT XML structure:
     /// completes successfully.
     pub(super) fn note_mutating_tool_call(&mut self) {
         self.mutating_tool_call_count += 1;
+        self.mutation_sequence += 1;
+        self.last_failed_verification_summary = None;
     }
 
     /// Increment the total tool-call counter. Should be called for every

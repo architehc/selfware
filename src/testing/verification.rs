@@ -79,11 +79,16 @@ pub enum ErrorSeverity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepoLanguage {
-    Rust,
     Python,
     JavaScript,
     TypeScript,
+    Java,
+    CSharp,
+    Cpp,
+    Sql,
     Go,
+    Swift,
+    Rust,
     Unknown,
 }
 
@@ -91,11 +96,16 @@ impl RepoLanguage {
     /// File extensions associated with this language.
     pub fn extensions(&self) -> &'static [&'static str] {
         match self {
-            Self::Rust => &[".rs"],
             Self::Python => &[".py"],
             Self::JavaScript => &[".js", ".jsx"],
             Self::TypeScript => &[".ts", ".tsx"],
+            Self::Java => &[".java"],
+            Self::CSharp => &[".cs"],
+            Self::Cpp => &[".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp"],
+            Self::Sql => &[".sql"],
             Self::Go => &[".go"],
+            Self::Swift => &[".swift"],
+            Self::Rust => &[".rs"],
             Self::Unknown => &[],
         }
     }
@@ -103,11 +113,16 @@ impl RepoLanguage {
     /// Convert from a file extension.
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext {
-            ".rs" => Some(Self::Rust),
             ".py" => Some(Self::Python),
             ".js" | ".jsx" => Some(Self::JavaScript),
             ".ts" | ".tsx" => Some(Self::TypeScript),
+            ".java" => Some(Self::Java),
+            ".cs" => Some(Self::CSharp),
+            ".c" | ".cc" | ".cpp" | ".cxx" | ".h" | ".hh" | ".hpp" => Some(Self::Cpp),
+            ".sql" => Some(Self::Sql),
             ".go" => Some(Self::Go),
+            ".swift" => Some(Self::Swift),
+            ".rs" => Some(Self::Rust),
             _ => None,
         }
     }
@@ -115,10 +130,13 @@ impl RepoLanguage {
     /// Convert from a manifest file name.
     pub fn from_manifest(name: &str) -> Option<Self> {
         match name {
-            "Cargo.toml" => Some(Self::Rust),
             "setup.py" | "pyproject.toml" | "requirements.txt" => Some(Self::Python),
             "package.json" => Some(Self::JavaScript), // may be upgraded to TypeScript
+            "tsconfig.json" => Some(Self::TypeScript),
+            "pom.xml" | "build.gradle" | "build.gradle.kts" => Some(Self::Java),
+            "Package.swift" => Some(Self::Swift),
             "go.mod" => Some(Self::Go),
+            "Cargo.toml" => Some(Self::Rust),
             _ => None,
         }
     }
@@ -127,11 +145,16 @@ impl RepoLanguage {
 impl std::fmt::Display for RepoLanguage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Rust => write!(f, "rust"),
             Self::Python => write!(f, "python"),
             Self::JavaScript => write!(f, "javascript"),
             Self::TypeScript => write!(f, "typescript"),
+            Self::Java => write!(f, "java"),
+            Self::CSharp => write!(f, "csharp"),
+            Self::Cpp => write!(f, "cpp"),
+            Self::Sql => write!(f, "sql"),
             Self::Go => write!(f, "go"),
+            Self::Swift => write!(f, "swift"),
+            Self::Rust => write!(f, "rust"),
             Self::Unknown => write!(f, "unknown"),
         }
     }
@@ -926,7 +949,12 @@ impl VerificationGate {
                 "python" => RepoLanguage::Python,
                 "javascript" | "js" => RepoLanguage::JavaScript,
                 "typescript" | "ts" => RepoLanguage::TypeScript,
+                "java" => RepoLanguage::Java,
+                "csharp" | "c#" => RepoLanguage::CSharp,
+                "cpp" | "c++" | "c" => RepoLanguage::Cpp,
+                "sql" => RepoLanguage::Sql,
                 "go" | "golang" => RepoLanguage::Go,
+                "swift" => RepoLanguage::Swift,
                 _ => RepoLanguage::Unknown,
             };
             if lang != RepoLanguage::Unknown {
@@ -939,6 +967,11 @@ impl VerificationGate {
         let manifests = [
             ("Cargo.toml", RepoLanguage::Rust),
             ("go.mod", RepoLanguage::Go),
+            ("Package.swift", RepoLanguage::Swift),
+            ("pom.xml", RepoLanguage::Java),
+            ("build.gradle", RepoLanguage::Java),
+            ("build.gradle.kts", RepoLanguage::Java),
+            ("tsconfig.json", RepoLanguage::TypeScript),
             ("package.json", RepoLanguage::JavaScript),
             ("setup.py", RepoLanguage::Python),
             ("pyproject.toml", RepoLanguage::Python),
@@ -1019,12 +1052,125 @@ impl VerificationGate {
                 }
                 ("npx", a)
             }
+            RepoLanguage::Java => {
+                let mut a = vec![
+                    "-Xlint:none".to_string(),
+                    "-d".to_string(),
+                    "/tmp".to_string(),
+                ];
+                for p in &full_paths {
+                    a.push(p.to_string_lossy().to_string());
+                }
+                ("javac", a)
+            }
+            RepoLanguage::CSharp => {
+                if self.project_root.join("global.json").exists()
+                    || self
+                        .project_root
+                        .read_dir()
+                        .ok()
+                        .into_iter()
+                        .flatten()
+                        .flatten()
+                        .any(|e| {
+                            e.path()
+                                .extension()
+                                .and_then(|x| x.to_str())
+                                .is_some_and(|x| matches!(x, "sln" | "csproj"))
+                        })
+                {
+                    ("dotnet", vec!["build".to_string(), "--nologo".to_string()])
+                } else {
+                    let mut a = vec![
+                        "-target:library".to_string(),
+                        "-out:/tmp/selfware-csharp-check.dll".to_string(),
+                    ];
+                    for p in &full_paths {
+                        a.push(p.to_string_lossy().to_string());
+                    }
+                    ("csc", a)
+                }
+            }
+            RepoLanguage::Cpp => {
+                if self.project_root.join("CMakeLists.txt").exists() {
+                    ("cmake", vec!["--build".to_string(), ".".to_string()])
+                } else if let Some(p) = full_paths.first() {
+                    let compiler = if p
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| matches!(e, "c"))
+                    {
+                        "cc"
+                    } else {
+                        "c++"
+                    };
+                    (
+                        compiler,
+                        vec!["-fsyntax-only".to_string(), p.to_string_lossy().to_string()],
+                    )
+                } else {
+                    return Ok(CheckResult {
+                        check_type: CheckType::TypeCheck,
+                        passed: true,
+                        duration_ms: 0,
+                        output: "No C/C++ files to check".to_string(),
+                        errors: vec![],
+                        warnings: vec![],
+                        suggestions: vec![],
+                    });
+                }
+            }
+            RepoLanguage::Sql => {
+                if self.command_exists("sqlfluff").await {
+                    let mut a = vec![
+                        "lint".to_string(),
+                        "--dialect".to_string(),
+                        "ansi".to_string(),
+                    ];
+                    for p in &full_paths {
+                        a.push(p.to_string_lossy().to_string());
+                    }
+                    ("sqlfluff", a)
+                } else {
+                    return Ok(CheckResult {
+                        check_type: CheckType::TypeCheck,
+                        passed: true,
+                        duration_ms: 0,
+                        output: "sqlfluff not installed; SQL syntax check skipped".to_string(),
+                        errors: vec![],
+                        warnings: vec![
+                            "SQL syntax check skipped: sqlfluff not installed".to_string()
+                        ],
+                        suggestions: vec![],
+                    });
+                }
+            }
             RepoLanguage::Go => {
                 let mut a = vec!["-l".to_string()];
                 for p in &full_paths {
                     a.push(p.to_string_lossy().to_string());
                 }
                 ("gofmt", a)
+            }
+            RepoLanguage::Swift => {
+                if self.project_root.join("Package.swift").exists() {
+                    ("swift", vec!["build".to_string()])
+                } else if let Some(p) = full_paths.first() {
+                    (
+                        "swiftc",
+                        vec!["-parse".to_string(), p.to_string_lossy().to_string()],
+                    )
+                } else {
+                    return Ok(CheckResult {
+                        check_type: CheckType::TypeCheck,
+                        passed: true,
+                        duration_ms: 0,
+                        output: "No Swift files to check".to_string(),
+                        errors: vec![],
+                        warnings: vec![],
+                        suggestions: vec![],
+                    });
+                }
             }
             RepoLanguage::Rust => {
                 let mut a = vec!["--check".to_string()];
@@ -1045,6 +1191,35 @@ impl VerificationGate {
                 });
             }
         };
+
+        if !matches!(program, "sh") && !self.command_exists(program).await {
+            return Ok(CheckResult {
+                check_type: CheckType::TypeCheck,
+                passed: false,
+                duration_ms: 0,
+                output: format!(
+                    "{} syntax check could not run: `{}` not found",
+                    lang, program
+                ),
+                errors: vec![VerificationError {
+                    file: files.first().cloned().unwrap_or_default(),
+                    line: None,
+                    column: None,
+                    message: format!("{} verifier `{}` not found", lang, program),
+                    code: Some("VERIFIER_NOT_FOUND".to_string()),
+                    severity: ErrorSeverity::Error,
+                    suggestion: Some(format!(
+                        "Install `{}` or run a project-specific verifier",
+                        program
+                    )),
+                }],
+                warnings: vec![],
+                suggestions: vec![format!(
+                    "Run a project-specific {} verification command manually",
+                    lang
+                )],
+            });
+        }
 
         let output = Command::new(program)
             .args(&args)
@@ -1127,10 +1302,44 @@ impl VerificationGate {
                 let pm = self.detect_package_manager();
                 Some((pm.to_string(), vec!["test".to_string()]))
             }
+            RepoLanguage::Java => {
+                if self.project_root.join("pom.xml").exists() {
+                    Some(("mvn".to_string(), vec!["test".to_string()]))
+                } else if self.project_root.join("build.gradle").exists()
+                    || self.project_root.join("build.gradle.kts").exists()
+                {
+                    Some(("gradle".to_string(), vec!["test".to_string()]))
+                } else {
+                    None
+                }
+            }
+            RepoLanguage::CSharp => Some(("dotnet".to_string(), vec!["test".to_string()])),
+            RepoLanguage::Cpp => {
+                if self.project_root.join("CMakeLists.txt").exists() {
+                    Some(("ctest".to_string(), vec!["--output-on-failure".to_string()]))
+                } else {
+                    Some(("make".to_string(), vec!["test".to_string()]))
+                }
+            }
+            RepoLanguage::Sql => {
+                if self.command_exists("sqlfluff").await {
+                    Some((
+                        "sqlfluff".to_string(),
+                        vec![
+                            "lint".to_string(),
+                            "--dialect".to_string(),
+                            "ansi".to_string(),
+                        ],
+                    ))
+                } else {
+                    None
+                }
+            }
             RepoLanguage::Go => Some((
                 "go".to_string(),
                 vec!["test".to_string(), "-v".to_string(), "./...".to_string()],
             )),
+            RepoLanguage::Swift => Some(("swift".to_string(), vec!["test".to_string()])),
             RepoLanguage::Unknown => None,
         }
     }
@@ -3334,6 +3543,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify_change_uses_cache_on_unchanged_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), "pub fn answer() -> i32 { 42 }\n").unwrap();
+
         let config = VerificationConfig {
             check_on_edit: false,
             test_on_edit: false,
@@ -3341,7 +3555,7 @@ mod tests {
             format_on_edit: false,
             ..Default::default()
         };
-        let mut gate = VerificationGate::new(".", config);
+        let mut gate = VerificationGate::new(temp.path(), config);
 
         // First verification with a file
         let report1 = gate

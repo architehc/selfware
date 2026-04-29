@@ -239,7 +239,11 @@ mod tests {
     fn catalog_entries_have_distinct_aliases() {
         let mut seen = std::collections::HashSet::new();
         for spec in quant_catalog().values() {
-            assert!(seen.insert(spec.alias.clone()), "duplicate alias: {}", spec.alias);
+            assert!(
+                seen.insert(spec.alias.clone()),
+                "duplicate alias: {}",
+                spec.alias
+            );
         }
     }
 

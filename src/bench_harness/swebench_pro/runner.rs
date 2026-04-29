@@ -1071,7 +1071,7 @@ fn run_one_candidate(
 
     let empty_diff = patch.trim().is_empty();
     let test_only_patch = !empty_diff && is_test_only_patch(&patch);
-    let has_source_edit = !empty_diff && !test_only_patch;
+    let has_source_edit = !empty_diff && has_source_edit_in_patch(&patch);
     let has_test_edit = !empty_diff && has_test_edit_in_patch(&patch);
     let syntax_check_passed = cheap_syntax_check(&patch);
 
@@ -1365,6 +1365,50 @@ fn has_test_edit_in_patch(patch: &str) -> bool {
     for line in patch.lines() {
         if let Some(path) = diff_path_from_line(line) {
             if is_test_path(path) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_source_path(path: &str) -> bool {
+    let lower = path.trim_matches('"').to_ascii_lowercase();
+    if is_test_path(&lower) {
+        return false;
+    }
+    let Some(ext) = std::path::Path::new(&lower)
+        .extension()
+        .and_then(|e| e.to_str())
+    else {
+        return false;
+    };
+    matches!(
+        ext,
+        "py" | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "java"
+            | "cs"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "h"
+            | "hh"
+            | "hpp"
+            | "sql"
+            | "go"
+            | "swift"
+            | "rs"
+    )
+}
+
+fn has_source_edit_in_patch(patch: &str) -> bool {
+    for line in patch.lines() {
+        if let Some(path) = diff_path_from_line(line) {
+            if is_source_path(path) {
                 return true;
             }
         }

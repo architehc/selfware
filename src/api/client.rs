@@ -729,7 +729,6 @@ pub(crate) fn rand_jitter() -> f64 {
     StandardUniform.sample(&mut rand::rng())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
