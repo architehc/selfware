@@ -928,15 +928,15 @@ impl Agent {
             );
         }
 
-        if self.config.agent.read_loop_policy == crate::config::ReadLoopPolicy::ForceMutation {
-            if guard_count >= 2 && self.mutating_tool_call_count() == 0 {
-                anyhow::bail!(
-                    "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
-                    guard_count,
-                    self.consecutive_read_only_steps
-                );
-            }
+        if guard_count >= 2 && self.mutating_tool_call_count() == 0 {
+            anyhow::bail!(
+                "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
+                guard_count,
+                self.consecutive_read_only_steps
+            );
+        }
 
+        if self.config.agent.read_loop_policy == crate::config::ReadLoopPolicy::ForceMutation {
             self.messages
                 .push(Message::user(self.force_mutation_directive()));
         } else {
@@ -3530,7 +3530,8 @@ mod tests {
         assert!(last
             .content
             .text()
-            .contains("output the replacement code as text"));
+            .contains("READ-LOOP FORCE-MUTATION MODE"));
+        assert!(last.content.text().contains("<name>file_edit</name>"));
         assert_eq!(
             agent.pending_synthesis.as_deref(),
             Some("Fix the failing tests, make code changes, and keep going until everything is green.")
@@ -3539,6 +3540,17 @@ mod tests {
             .recent_failed_tool_attempts
             .back()
             .is_some_and(|attempt| attempt.failure_kind == "progress_guard"));
+
+        agent.consecutive_read_only_steps = 9;
+        let err = agent
+            .execute_tool_batch(vec![(
+                "shell_exec".to_string(),
+                r#"{"command":"git status"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("READ_LOOP_NO_EDIT"));
 
         server.stop().await;
     }
