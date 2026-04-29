@@ -1874,7 +1874,9 @@ diff --git a/tests/test_a.py b/tests/test_a.py
 
     #[test]
     fn cheap_syntax_check_rejects_merge_conflict() {
-        assert!(!cheap_syntax_check("<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n"));
+        assert!(!cheap_syntax_check(
+            "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n"
+        ));
     }
 
     #[test]
@@ -2005,7 +2007,10 @@ diff --git a/tests/test_a.py b/tests/test_a.py
                 .unwrap();
 
         // pass@1 should be false because no official eval data
-        assert_eq!(agg["pass_at_1_rate"], 0.0, "pass@1 should be 0 without official eval");
+        assert_eq!(
+            agg["pass_at_1_rate"], 0.0,
+            "pass@1 should be 0 without official eval"
+        );
         // pass@k_oracle should be true because at least one candidate has
         // source edit + no test edit + syntax ok (the selected best and candidate 1)
         assert_eq!(
