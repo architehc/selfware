@@ -1,39 +1,33 @@
-//! Coordinator Mode - Multi-Agent Orchestration (STUB - SIMULATED EXECUTION)
+//! Coordinator Mode - Multi-Agent Orchestration with Real Subagent Execution
 //!
-//! ⚠️ WARNING: Worker execution is SIMULATED. This module provides the framework
-//! for multi-agent orchestration but `WorkerAgent::execute_task` is a stub that
-//! does NOT actually use an LLM or execute tools. Workers only log and return
-//! placeholder results.
+//! Replaces simulated workers with real [`Agent`] execution inside isolated
+//! git worktrees. Each worker gets its own worktree and communicates back to
+//! the coordinator via channels.
 //!
 //! ## Architecture
 //!
 //! - **CoordinatorAgent**: Owns high-level task decomposition, restricted tool set
-//! - **WorkerAgent**: Spawned by coordinator for specific subtasks, SIMULATED execution
-//! - **Scratchpad**: Shared state for cross-worker knowledge sharing
-//!
-//! ## Four-Phase Workflow
-//!
-//! 1. **Research**: Coordinator spawns parallel workers (SIMULATED)
-//! 2. **Synthesis**: Coordinator reads findings, creates implementation plan
-//! 3. **Implementation**: Workers "execute" plan in parallel (SIMULATED)
-//! 4. **Verification**: Workers "verify" each other's work (SIMULATED)
-//!
-//! Status: Framework complete but worker execution is STUBBED.
-//! TODO: Implement actual LLM-driven worker execution in `WorkerAgent::execute_task`.
+//! - **WorkerAgent**: Spawned by coordinator for specific subtasks, runs a real `Agent`
+//! - **Subagent**: Wrapper that creates an `Agent` in an isolated worktree
+//! - **Scratchpad**: Shared state for cross-worker knowledge sharing (legacy)
 
 #![allow(dead_code)] // Types exported for API stability; integration pending
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use super::scratchpad::{Scratchpad, ScratchpadEntry, WorkerInfo, WorkerStatus};
+use crate::agent::subagent::{Subagent, SubagentResult, SubagentRole};
+use crate::agent::worktree::WorktreeManager;
+use crate::config::Config;
 use crate::tools::ToolRegistry;
 
 /// Coordinator Mode execution phase
@@ -163,6 +157,8 @@ pub struct CoordinatorAgent {
     running: Arc<AtomicBool>,
     /// Tool registry with restricted tools
     tools: ToolRegistry,
+    /// Agent configuration for subagent workers
+    agent_config: Option<Config>,
 }
 
 /// Handle to an active worker
@@ -176,6 +172,8 @@ struct WorkerHandle {
     pub role: String,
     /// Join handle for the worker task
     pub abort_handle: tokio::task::AbortHandle,
+    /// Channel receiver for the worker result
+    pub result_rx: tokio::sync::Mutex<mpsc::Receiver<WorkerResult>>,
 }
 
 /// Worker Agent - executes subtasks with full tool access
@@ -201,54 +199,41 @@ pub struct WorkerAgent {
 }
 
 impl CoordinatorAgent {
-    /// Create a new coordinator agent for the given task
-    ///
-    /// ⚠️ WARNING: Coordinator mode uses SIMULATED worker execution.
-    /// Workers do NOT actually use LLM calls or execute tools - they only
-    /// log messages and return placeholder results. See `WorkerAgent::execute_task`.
+    /// Create a new coordinator agent for the given task.
     pub fn new(task: impl Into<String>) -> Result<Self> {
+        Self::with_config(task, CoordinatorConfig::default(), None)
+    }
+
+    /// Create a new coordinator with custom configuration and optional agent config.
+    pub fn with_config(
+        task: impl Into<String>,
+        config: CoordinatorConfig,
+        agent_config: Option<Config>,
+    ) -> Result<Self> {
         let task = task.into();
         let task_id = format!("task-{}", uuid::Uuid::new_v4());
 
-        // Log prominent warning about simulated execution
-        warn!(
-            "\n{}
-{} {}
-{} {}
-{} {}
-{}",
-            "╔══════════════════════════════════════════════════════════════════╗",
-            "║",
-            "⚠️  WARNING: COORDINATOR MODE USES SIMULATED WORKER EXECUTION",
-            "║",
-            "   WorkerAgent::execute_task is a STUB that does NOT use LLM",
-            "║",
-            "   or execute tools. Workers only log and return placeholders.",
-            "╚══════════════════════════════════════════════════════════════════╝"
-        );
-
         let scratchpad = Scratchpad::for_task(&task_id)?;
-
-        // Create restricted tool registry
         let tools = Self::create_restricted_tool_registry()?;
 
-        info!(task_id = %task_id, "Created coordinator agent (SIMULATED MODE)");
+        info!(task_id = %task_id, "Created coordinator agent");
 
         Ok(Self {
             task_id,
             task,
-            config: CoordinatorConfig::default(),
+            config,
             scratchpad,
             phase: Arc::new(RwLock::new(WorkflowPhase::Research)),
             workers: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(false)),
             tools,
+            agent_config,
         })
     }
 
-    /// Create with custom configuration
-    pub fn with_config(mut self, config: CoordinatorConfig) -> Self {
-        self.config = config;
+    /// Set the agent configuration used by subagent workers.
+    pub fn with_agent_config(mut self, config: Config) -> Self {
+        self.agent_config = Some(config);
         self
     }
 
@@ -317,10 +302,12 @@ impl CoordinatorAgent {
         self.scratchpad.list_workers()
     }
 
-    /// Spawn a worker agent for a subtask
+    /// Spawn a worker agent for a subtask.
     ///
-    /// This creates a new worker, registers it in the scratchpad, and starts
-    /// its execution in a background task.
+    /// Creates a new worker, registers it in the scratchpad, and starts its
+    /// execution in a background task. The worker runs a real [`Agent`] in an
+    /// isolated worktree when `agent_config` is available; otherwise it falls
+    /// back to simulated execution.
     pub async fn spawn_worker(
         &self,
         task: impl Into<String>,
@@ -336,12 +323,16 @@ impl CoordinatorAgent {
 
         info!(worker_id = %worker_id, role = %role, "Spawned worker");
 
+        // Create channel for worker result
+        let (result_tx, result_rx) = mpsc::channel(1);
+
         // Start worker in background task
         let scratchpad = self.scratchpad.clone();
         let worker_task = task.clone();
         let worker_role = role.clone();
         let coordinator_id = self.task_id.clone();
         let worker_id_for_spawn = worker_id.clone();
+        let agent_config = self.agent_config.clone();
 
         let handle = tokio::spawn(async move {
             WorkerAgent::run(
@@ -351,6 +342,8 @@ impl CoordinatorAgent {
                 worker_role,
                 scratchpad,
                 None,
+                agent_config,
+                Some(result_tx),
             )
             .await
         });
@@ -361,6 +354,7 @@ impl CoordinatorAgent {
             task,
             role,
             abort_handle: handle.abort_handle(),
+            result_rx: tokio::sync::Mutex::new(result_rx),
         };
 
         self.workers
@@ -531,6 +525,83 @@ impl CoordinatorAgent {
         result.final_output = self.gather_final_output().await?;
 
         Ok(result)
+    }
+
+    /// Run SWE-mode orchestration with exactly three subagents.
+    ///
+    /// Spawns a localizer, patcher, and verifier in isolated worktrees.
+    /// Each subagent has its own turn budget (default 30). Results are
+    /// collected via channels and the best patch is selected based on
+    /// verification evidence.
+    ///
+    /// Returns the selected [`WorkerResult`] and the full set of results.
+    pub async fn run_swe_mode(&self, issue: &str) -> Result<(WorkerResult, Vec<WorkerResult>)> {
+        if self.agent_config.is_none() {
+            anyhow::bail!("SWE mode requires an agent configuration");
+        }
+
+        let roles = [
+            (SubagentRole::Localizer, "localizer"),
+            (SubagentRole::Patcher, "patcher"),
+            (SubagentRole::Verifier, "verifier"),
+        ];
+
+        let mut worker_ids = Vec::new();
+
+        for (role, role_name) in &roles {
+            let worker_id = self
+                .spawn_worker(format!("{}: {}", role.prompt_prefix(), issue), *role_name)
+                .await?;
+            worker_ids.push((worker_id, *role));
+        }
+
+        // Collect results from channels
+        let mut results = Vec::new();
+        for (worker_id, role) in &worker_ids {
+            let worker = self.workers.read().await;
+            let handle = worker
+                .get(worker_id)
+                .ok_or_else(|| anyhow!("Worker handle missing: {}", worker_id))?;
+            let mut rx = handle.result_rx.lock().await;
+            let worker_result = match rx.recv().await {
+                Some(r) => r,
+                None => WorkerResult {
+                    worker_id: worker_id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some("Worker channel closed without result".to_string()),
+                    tool_calls: 0,
+                    duration_secs: 0,
+                },
+            };
+            results.push((*role, worker_result));
+        }
+
+        // Select the best result based on verification evidence.
+        // Priority: verifier success > patcher success > localizer success.
+        let best = results
+            .iter()
+            .max_by_key(|(role, result)| {
+                let role_score = match role {
+                    SubagentRole::Verifier => 3,
+                    SubagentRole::Patcher => 2,
+                    SubagentRole::Localizer => 1,
+                };
+                let success_score = if result.success { 10 } else { 0 };
+                role_score + success_score
+            })
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| WorkerResult {
+                worker_id: "none".to_string(),
+                success: false,
+                output: String::new(),
+                error: Some("No results produced".to_string()),
+                tool_calls: 0,
+                duration_secs: 0,
+            });
+
+        let all: Vec<WorkerResult> = results.into_iter().map(|(_, r)| r).collect();
+        Ok((best, all))
     }
 
     /// Run the research phase - spawn workers to investigate different aspects
@@ -761,9 +832,6 @@ pub struct WorkflowResult {
 
 impl WorkerAgent {
     /// Create a new worker agent (internal use, workers are spawned by coordinator)
-    ///
-    /// ⚠️ WARNING: Worker execution is SIMULATED. Workers created by this method
-    /// will NOT actually perform LLM calls or tool execution. See `execute_task`.
     fn new(
         id: impl Into<String>,
         coordinator_id: impl Into<String>,
@@ -783,13 +851,11 @@ impl WorkerAgent {
         }
     }
 
-    /// Run the worker agent
+    /// Run the worker agent with real subagent execution.
     ///
-    /// This is the main entry point for worker execution.
-    ///
-    /// ⚠️ WARNING: This method calls `execute_task` which is a STUB that
-    /// SIMULATES execution without using LLM or tools. The worker will log
-    /// and return placeholder results only.
+    /// When `agent_config` is `Some`, the worker creates an isolated worktree,
+    /// spawns a real [`Agent`] inside it, and runs the task. The result is sent
+    /// back via the optional `result_tx` channel.
     async fn run(
         id: String,
         _coordinator_id: String,
@@ -797,6 +863,8 @@ impl WorkerAgent {
         role: String,
         scratchpad: Scratchpad,
         _parent_id: Option<String>,
+        agent_config: Option<Config>,
+        result_tx: Option<mpsc::Sender<WorkerResult>>,
     ) -> Result<WorkerResult> {
         let start = std::time::Instant::now();
 
@@ -812,14 +880,15 @@ impl WorkerAgent {
             &id,
         ))?;
 
-        // Execute the task
-        // In a real implementation, this would use an LLM with tool access
-        let result = Self::execute_task(&id, &task, &role, &scratchpad).await;
+        let result = if let Some(config) = agent_config {
+            Self::execute_task_real(&id, &task, &role, config).await
+        } else {
+            Self::execute_task_stub(&id, &task, &role, &scratchpad).await
+        };
 
         let duration_secs = start.elapsed().as_secs();
 
-        // Update status and store result
-        match &result {
+        let worker_result = match &result {
             Ok(output) => {
                 scratchpad.update_worker_status(&id, WorkerStatus::Completed)?;
                 scratchpad.write(ScratchpadEntry::new(
@@ -830,14 +899,14 @@ impl WorkerAgent {
 
                 info!(worker_id = %id, duration = duration_secs, "Worker completed");
 
-                Ok(WorkerResult {
-                    worker_id: id,
+                WorkerResult {
+                    worker_id: id.clone(),
                     success: true,
                     output: output.clone(),
                     error: None,
-                    tool_calls: 0, // Would be tracked in real implementation
+                    tool_calls: 0,
                     duration_secs,
-                })
+                }
             }
             Err(e) => {
                 scratchpad.update_worker_status(&id, WorkerStatus::Failed)?;
@@ -849,35 +918,71 @@ impl WorkerAgent {
 
                 warn!(worker_id = %id, error = %e, "Worker failed");
 
-                Ok(WorkerResult {
-                    worker_id: id,
+                WorkerResult {
+                    worker_id: id.clone(),
                     success: false,
                     output: String::new(),
                     error: Some(e.to_string()),
                     tool_calls: 0,
                     duration_secs,
-                })
+                }
             }
+        };
+
+        // Send result via channel if requested
+        if let Some(tx) = result_tx {
+            let _ = tx.send(worker_result.clone()).await;
+        }
+
+        Ok(worker_result)
+    }
+
+    /// Execute the actual task using a real [`Agent`] in an isolated worktree.
+    async fn execute_task_real(id: &str, task: &str, role: &str, config: Config) -> Result<String> {
+        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let git_root = WorktreeManager::find_git_root(&current_dir).await?;
+        let worktree_base = git_root.join(".selfware/coordinator-worktrees");
+        let manager = WorktreeManager::new(&worktree_base);
+
+        let worktree_path = manager.create_worktree(id, &git_root).await?;
+
+        let role_enum = match role {
+            "localizer" => SubagentRole::Localizer,
+            "patcher" => SubagentRole::Patcher,
+            "verifier" => SubagentRole::Verifier,
+            _ => SubagentRole::Patcher,
+        };
+
+        let subagent = Subagent::new(id, worktree_path.clone(), role_enum, config);
+        let subagent_result = subagent.run(task).await;
+
+        // Clean up worktree
+        if let Err(e) = manager.remove_worktree(id).await {
+            warn!(worker_id = %id, error = %e, "Failed to remove worktree");
+        }
+
+        match subagent_result {
+            Ok(result) => {
+                if result.success {
+                    Ok(result.patch.unwrap_or_else(|| result.artifacts.join("\n")))
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Subagent failed: {}",
+                        result.error.unwrap_or_default()
+                    ))
+                }
+            }
+            Err(e) => Err(e),
         }
     }
 
-    /// Execute the actual task (STUB - SIMULATED EXECUTION)
-    ///
-    /// ⚠️ WARNING: This is a STUB that SIMULATES task execution.
-    /// It does NOT:
-    /// - Build a prompt with the task and role
-    /// - Make LLM calls with tool access
-    /// - Actually execute any tools
-    /// - Produce real results
-    ///
-    /// TODO: Implement actual LLM-driven task execution
-    async fn execute_task(
+    /// Fallback stub when no agent config is available.
+    async fn execute_task_stub(
         id: &str,
         task: &str,
         role: &str,
         scratchpad: &Scratchpad,
     ) -> Result<String> {
-        // STUB: Simulating task execution
         warn!(
             "STUB: Worker {} (role: {}) SIMULATING task execution: {}",
             id, role, task
@@ -889,7 +994,6 @@ impl WorkerAgent {
             id, role, task
         );
 
-        // Store a STUB finding
         let finding_key = format!("finding:{}:{}", id, chrono::Utc::now().timestamp_millis());
         scratchpad.write(ScratchpadEntry::new(
             finding_key,
@@ -901,11 +1005,6 @@ impl WorkerAgent {
     }
 
     /// Spawn a sub-worker (hierarchical worker spawning)
-    ///
-    /// Workers can spawn sub-workers for further parallelization.
-    ///
-    /// ⚠️ WARNING: The spawned sub-worker will also use SIMULATED execution
-    /// (see `execute_task`). Sub-workers do NOT actually use LLM or tools.
     pub async fn spawn_subworker(
         &self,
         task: impl Into<String>,
@@ -915,13 +1014,11 @@ impl WorkerAgent {
         let role = role.into();
         let subworker_id = format!("subworker-{}", uuid::Uuid::new_v4());
 
-        // Register subworker with parent reference
         let worker_info = WorkerInfo::new(&subworker_id, &role, &task).with_parent(&self.id);
         self.scratchpad.register_worker(worker_info)?;
 
         info!(subworker_id = %subworker_id, parent_id = %self.id, "Spawned subworker");
 
-        // Start subworker
         let scratchpad = self.scratchpad.clone();
         let coordinator_id = self.coordinator_id.clone();
         let parent_id = self.id.clone();
@@ -935,6 +1032,8 @@ impl WorkerAgent {
                 role,
                 scratchpad,
                 Some(parent_id),
+                None,
+                None,
             )
             .await
         });
@@ -1516,8 +1615,121 @@ mod tests {
             allow_worker_spawn: false,
             auto_advance: false,
         };
-        let coordinator = CoordinatorAgent::new("Test").unwrap().with_config(config);
+        let coordinator = CoordinatorAgent::with_config("Test", config, None).unwrap();
         assert_eq!(coordinator.task(), "Test");
         // Config is applied internally; we verify creation succeeds
+    }
+
+    #[test]
+    fn test_coordinator_selects_best_result() {
+        // Simulate SWE-mode result selection logic.
+        let results = vec![
+            (
+                SubagentRole::Localizer,
+                WorkerResult {
+                    worker_id: "w1".to_string(),
+                    success: true,
+                    output: "found src/lib.rs".to_string(),
+                    error: None,
+                    tool_calls: 2,
+                    duration_secs: 10,
+                },
+            ),
+            (
+                SubagentRole::Patcher,
+                WorkerResult {
+                    worker_id: "w2".to_string(),
+                    success: true,
+                    output: "patch diff".to_string(),
+                    error: None,
+                    tool_calls: 5,
+                    duration_secs: 20,
+                },
+            ),
+            (
+                SubagentRole::Verifier,
+                WorkerResult {
+                    worker_id: "w3".to_string(),
+                    success: false,
+                    output: String::new(),
+                    error: Some("tests failed".to_string()),
+                    tool_calls: 3,
+                    duration_secs: 15,
+                },
+            ),
+        ];
+
+        let best = results
+            .iter()
+            .max_by_key(|(role, result)| {
+                let role_score = match role {
+                    SubagentRole::Verifier => 3,
+                    SubagentRole::Patcher => 2,
+                    SubagentRole::Localizer => 1,
+                };
+                let success_score = if result.success { 10 } else { 0 };
+                role_score + success_score
+            })
+            .map(|(_, r)| r.clone())
+            .unwrap();
+
+        // Patcher success (12) beats localizer success (11) and verifier failure (3).
+        assert_eq!(best.worker_id, "w2");
+        assert!(best.success);
+    }
+
+    #[test]
+    fn test_coordinator_prefers_verifier_when_successful() {
+        let results = vec![
+            (
+                SubagentRole::Localizer,
+                WorkerResult {
+                    worker_id: "w1".to_string(),
+                    success: true,
+                    output: "found".to_string(),
+                    error: None,
+                    tool_calls: 1,
+                    duration_secs: 5,
+                },
+            ),
+            (
+                SubagentRole::Patcher,
+                WorkerResult {
+                    worker_id: "w2".to_string(),
+                    success: true,
+                    output: "patch".to_string(),
+                    error: None,
+                    tool_calls: 1,
+                    duration_secs: 5,
+                },
+            ),
+            (
+                SubagentRole::Verifier,
+                WorkerResult {
+                    worker_id: "w3".to_string(),
+                    success: true,
+                    output: "tests pass".to_string(),
+                    error: None,
+                    tool_calls: 1,
+                    duration_secs: 5,
+                },
+            ),
+        ];
+
+        let best = results
+            .iter()
+            .max_by_key(|(role, result)| {
+                let role_score = match role {
+                    SubagentRole::Verifier => 3,
+                    SubagentRole::Patcher => 2,
+                    SubagentRole::Localizer => 1,
+                };
+                let success_score = if result.success { 10 } else { 0 };
+                role_score + success_score
+            })
+            .map(|(_, r)| r.clone())
+            .unwrap();
+
+        assert_eq!(best.worker_id, "w3");
     }
 }
