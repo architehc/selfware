@@ -17,6 +17,11 @@ use super::harness::{capture_patch, clone_instance, run_selfware, LlamaServer, L
 use super::manifest::{SwebenchProOptsSnapshot, SweepManifest, TrialManifest, TrialState};
 use super::trace::{RunTrace, TraceEvent};
 use crate::config::PromptProfile;
+use crate::memory::swebench::{
+    build_memory_prompt_block, index_repo, load_repo_index, save_repo_index, MemoryKey,
+    SwebenchInstanceMemory,
+};
+use crate::memory::swebench_store::SwebenchMemoryStore;
 
 /// Caller-supplied configuration for `run_swebench_pro`.
 ///
@@ -827,6 +832,28 @@ fn run_one(
         return Ok(result);
     }
 
+    // ── Memory store & repo index ──
+    let memory_dir = opts.output.join(".selfware").join("memory");
+    let store = SwebenchMemoryStore::load(&memory_dir).ok();
+
+    // Cheap repo index on first use.
+    let index = if let Some(ref idx) = load_repo_index(&inst.repo, &inst.base_commit, &memory_dir) {
+        Some(idx.clone())
+    } else {
+        match index_repo(&inst.repo, &inst.base_commit, &workdir) {
+            Ok(idx) => {
+                if let Err(e) = save_repo_index(&idx, &memory_dir) {
+                    eprintln!("    failed to save repo index: {}", e);
+                }
+                Some(idx)
+            }
+            Err(e) => {
+                eprintln!("    repo indexing failed: {}", e);
+                None
+            }
+        }
+    };
+
     let profile = match opts.prompt_profile.as_str() {
         "swebench_pro" => PromptProfile::SwebenchPro,
         _ => PromptProfile::Default,
@@ -834,12 +861,14 @@ fn run_one(
     let mut prompt = profile.task_prompt(inst, &opts.prompt_mode);
 
     // In diagnostic mode, run localize_issue and inject top candidates.
+    let mut candidate_files: Vec<String> = Vec::new();
     if opts.prompt_mode == "diagnostic" {
         match crate::tools::localize_issue::localize_issue_sync(
             &inst.problem_statement,
             workdir.to_str().unwrap_or("."),
         ) {
             Ok(candidates) if !candidates.is_empty() => {
+                candidate_files = candidates.iter().map(|c| c.file.clone()).collect();
                 let top: Vec<String> = candidates
                     .iter()
                     .take(3)
@@ -863,6 +892,39 @@ fn run_one(
                 eprintln!("    localize_issue failed: {}", e);
             }
         }
+    }
+
+    // ── Memory injection (leakage-controlled) ──
+    let official_mode = opts.prompt_mode == "official";
+    let instance_key = MemoryKey::new(
+        &inst.repo,
+        &inst.base_commit,
+        &inst.instance_id,
+        spec.label,
+        trial,
+    );
+    let instance_memory = store.as_ref().and_then(|s| s.get_instance(&instance_key));
+    let repo_lessons = store
+        .as_ref()
+        .map(|s| s.get_repo_lessons(&inst.repo))
+        .unwrap_or_default();
+
+    // Seed candidates from index test files when localize_issue didn't run.
+    if candidate_files.is_empty() {
+        if let Some(ref idx) = index {
+            candidate_files = idx.test_files.clone();
+        }
+    }
+
+    if let Some(block) = build_memory_prompt_block(
+        instance_memory.as_ref(),
+        &repo_lessons,
+        official_mode,
+        trial,
+        &candidate_files,
+    ) {
+        // Inject the memory block before the issue description.
+        prompt = block + &prompt;
     }
 
     std::fs::write(trial_dir.join("prompt.txt"), &prompt)?;
@@ -937,6 +999,15 @@ fn run_one(
     }
     if let Err(e) = run_trace.write_jsonl(&trace_path) {
         eprintln!("    failed to write trace.jsonl: {}", e);
+    }
+
+    // ── Persist instance memory for retries ──
+    if let Some(ref store) = store {
+        let mut mem = instance_memory.unwrap_or_else(|| SwebenchInstanceMemory::new(&instance_key));
+        mem.indexed_at = index.as_ref().map(|i| i.indexed_at);
+        if let Err(e) = store.save_instance(&mem) {
+            eprintln!("    failed to save instance memory: {}", e);
+        }
     }
 
     let result = PerRunResult {
