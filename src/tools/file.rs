@@ -2,7 +2,7 @@ use super::Tool;
 use crate::config::SafetyConfig;
 use crate::errors::ToolError;
 use crate::safety::path_validator::PathValidator;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -507,6 +507,12 @@ impl Tool for FileEdit {
         }
         if args.old_str == args.new_str {
             return Err(ToolError::EditNoOp.into());
+        }
+        if args.new_str.contains(&args.old_str) && content.contains(&args.new_str) {
+            bail!(
+                "file_edit duplicate insertion rejected: the requested replacement block is already present in {}. Re-read the file and make a different targeted edit.",
+                args.path
+            );
         }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
@@ -1478,6 +1484,28 @@ mod tests {
         assert!(
             err_msg.contains("no-op"),
             "Expected no-op error, got: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_duplicate_insertion_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("duplicate.txt");
+        fs::write(&file_path, "alpha\nbeta\ninserted\n").unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "alpha\n",
+            "new_str": "alpha\nbeta\ninserted\n"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("duplicate insertion rejected"),
+            "Expected duplicate insertion error, got: {err_msg}"
         );
     }
 
