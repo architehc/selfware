@@ -197,6 +197,7 @@ fn chrome_staging_output_path(requested_output: &Path) -> Result<PathBuf> {
 async fn prepare_chrome_output_path(output_path: &str) -> Result<(PathBuf, Option<PathBuf>)> {
     let requested_output = PathBuf::from(output_path);
     if !should_stage_chrome_output(&requested_output) {
+        ensure_output_parent(&requested_output).await?;
         return Ok((requested_output, None));
     }
 
@@ -208,6 +209,21 @@ async fn prepare_chrome_output_path(output_path: &str) -> Result<(PathBuf, Optio
     }
 
     Ok((staged_output.clone(), Some(staged_output)))
+}
+
+fn validate_browser_output_path(output_path: &str, tool_name: &str) -> Result<()> {
+    let safety = crate::tools::file::resolve_safety_config(None);
+    crate::tools::file::validate_tool_path(output_path, &safety)
+        .with_context(|| format!("{tool_name} output_path validation failed"))
+}
+
+async fn ensure_output_parent(output_path: &Path) -> Result<()> {
+    if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create browser output dir {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 async fn finalize_chrome_output_path(
@@ -575,7 +591,7 @@ impl Tool for BrowserScreenshot {
                 },
                 "output_path": {
                     "type": "string",
-                    "description": "Path to save screenshot (default: /tmp/screenshot.png)"
+                    "description": "Path to save screenshot (default: .selfware/browser-output/screenshot.png)"
                 },
                 "width": {
                     "type": "integer",
@@ -608,7 +624,8 @@ impl Tool for BrowserScreenshot {
         let output_path = args
             .get("output_path")
             .and_then(|v| v.as_str())
-            .unwrap_or("/tmp/screenshot.png");
+            .unwrap_or(".selfware/browser-output/screenshot.png");
+        validate_browser_output_path(output_path, self.name())?;
         let (chrome_output_path, staged_output_path) =
             prepare_chrome_output_path(output_path).await?;
 
@@ -676,6 +693,7 @@ impl Tool for BrowserScreenshot {
             BrowserType::Playwright => {
                 let safe_url = escape_js_string(&pinned_target.url);
                 let safe_output_path = escape_js_string(output_path);
+                ensure_output_parent(Path::new(output_path)).await?;
                 let full_page = args
                     .get("full_page")
                     .and_then(|v| v.as_bool())
@@ -776,7 +794,7 @@ impl Tool for BrowserPdf {
                 },
                 "output_path": {
                     "type": "string",
-                    "description": "Path to save PDF (default: /tmp/page.pdf)"
+                    "description": "Path to save PDF (default: .selfware/browser-output/page.pdf)"
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -797,7 +815,8 @@ impl Tool for BrowserPdf {
         let output_path = args
             .get("output_path")
             .and_then(|v| v.as_str())
-            .unwrap_or("/tmp/page.pdf");
+            .unwrap_or(".selfware/browser-output/page.pdf");
+        validate_browser_output_path(output_path, self.name())?;
         let (chrome_output_path, staged_output_path) =
             prepare_chrome_output_path(output_path).await?;
 
@@ -860,6 +879,7 @@ impl Tool for BrowserPdf {
             BrowserType::Playwright => {
                 let safe_url = escape_js_string(&pinned_target.url);
                 let safe_output_path = escape_js_string(output_path);
+                ensure_output_parent(Path::new(output_path)).await?;
                 let launch_args = if pinned_target.host_is_ip {
                     "[]".to_string()
                 } else {
@@ -1600,9 +1620,20 @@ mod tests {
     fn test_browser_screenshot_schema_complete() {
         let tool = BrowserScreenshot;
         let schema = tool.schema();
+        assert!(schema["properties"]["output_path"]["description"]
+            .as_str()
+            .unwrap()
+            .contains(".selfware/browser-output/screenshot.png"));
         assert!(schema["properties"].get("height").is_some());
         assert!(schema["properties"].get("full_page").is_some());
         assert!(schema["properties"].get("timeout_secs").is_some());
+    }
+
+    #[test]
+    fn test_validate_browser_output_path_rejects_unsafe_absolute_path() {
+        let err = validate_browser_output_path("/etc/selfware-shot.png", "browser_screenshot")
+            .expect_err("absolute output outside allowed paths must be rejected");
+        assert!(err.to_string().contains("output_path validation failed"));
     }
 
     #[test]

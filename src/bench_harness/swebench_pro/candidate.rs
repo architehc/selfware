@@ -91,19 +91,23 @@ impl CandidatePool {
     /// proxy metrics (source edit, no test edits, syntax ok) and is therefore
     /// an **upper bound**.
     pub fn pass_at_k_oracle(&self) -> bool {
-        let any_official = self.candidates.iter().any(|c| {
-            c.official_eval
-                .as_ref()
-                .map(|e| e.resolved)
-                .unwrap_or(false)
-        });
-        if any_official {
-            return true;
+        if self.has_any_official_eval() {
+            return self.candidates.iter().any(|c| {
+                c.official_eval
+                    .as_ref()
+                    .map(|e| e.resolved)
+                    .unwrap_or(false)
+            });
         }
         // Proxy-based upper bound when official eval is not available.
         self.candidates
             .iter()
             .any(|c| c.has_source_edit && !c.has_test_edit && c.syntax_check_passed)
+    }
+
+    /// Returns `true` when at least one candidate has official-eval data.
+    pub fn has_any_official_eval(&self) -> bool {
+        self.candidates.iter().any(|c| c.official_eval.is_some())
     }
 
     /// Returns `true` when every candidate in the pool has official-eval
@@ -221,6 +225,16 @@ mod tests {
             make_candidate(1, 10, false, true, true, None),
             make_candidate(1, 5, false, false, false, None),
         ]);
+        assert!(!pool.pass_at_k_oracle());
+    }
+
+    #[test]
+    fn pass_at_k_oracle_does_not_fallback_to_proxy_when_official_all_fail() {
+        let pool = CandidatePool::new(vec![
+            make_candidate(1, 10, true, false, true, Some(false)),
+            make_candidate(1, 5, true, false, true, None),
+        ]);
+        assert!(pool.has_any_official_eval());
         assert!(!pool.pass_at_k_oracle());
     }
 

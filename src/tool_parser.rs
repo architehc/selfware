@@ -54,6 +54,7 @@ static XML_TOOL_ALT_REGEX: OnceLock<Regex> = OnceLock::new();
 static XML_TOOL_ALT2_REGEX: OnceLock<Regex> = OnceLock::new();
 static XML_TOOL_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static XML_TOOL_FUNCTION_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
+static XML_TOOL_MISSING_ARGS_CLOSE_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
 static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -108,6 +109,16 @@ fn xml_tool_function_tag_regex() -> &'static Regex {
     XML_TOOL_FUNCTION_TAG_REGEX.get_or_init(|| {
         Regex::new(r"(?s)<tool>\s*<function>([^<]+)</function>\s*<arguments>([\s\S]*?)</arguments>\s*</tool>")
             .expect("Invalid XML tool function tag regex")
+    })
+}
+
+/// Malformed XML seen from Qwen: `</arguments>` is omitted and the model emits
+/// `</tool></tool>`. Recover the JSON payload between `<arguments>` and the
+/// first closing `</tool>`.
+fn xml_tool_missing_args_close_regex() -> &'static Regex {
+    XML_TOOL_MISSING_ARGS_CLOSE_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)<tool>\s*<name>([^<]+)</name>\s*<arguments>([\s\S]*?)</tool>\s*</tool>")
+            .expect("Invalid XML missing args close regex")
     })
 }
 
@@ -381,6 +392,29 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
     if results.is_empty() {
         let func_tag_regex = xml_tool_function_tag_regex();
         results = func_tag_regex
+            .captures_iter(content)
+            .map(|cap| {
+                let raw = cap[0].to_string();
+                let name = cap[1].trim().to_string();
+                let args_str = cap[2].trim();
+
+                let result = parse_xml_arguments(args_str).map(|arguments| ParsedToolCall {
+                    tool_name: name,
+                    arguments,
+                    raw_text: raw.clone(),
+                    parse_method: ParseMethod::Xml,
+                });
+
+                (result, raw)
+            })
+            .collect();
+    }
+
+    // If still no matches, recover Qwen's missing </arguments> variant:
+    // <tool><name>x</name><arguments>{...}</tool></tool>
+    if results.is_empty() {
+        let malformed_regex = xml_tool_missing_args_close_regex();
+        results = malformed_regex
             .captures_iter(content)
             .map(|cap| {
                 let raw = cap[0].to_string();
@@ -1676,6 +1710,25 @@ I'll check the output next."#;
         );
         assert_eq!(result.tool_calls[0].tool_name, "file_read");
         assert_eq!(result.tool_calls[0].arguments["path"], "./src/main.rs");
+    }
+
+    #[test]
+    fn test_missing_arguments_close_recovered() {
+        // Qwen3.6 sometimes closes the tool while forgetting </arguments>.
+        let content = r#"<tool>
+<name>glob_find</name>
+<arguments>{"pattern":"**/guiprocess.py"}
+</tool>
+</tool>"#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "glob_find");
+        assert_eq!(
+            result.tool_calls[0].arguments["pattern"],
+            "**/guiprocess.py"
+        );
     }
 
     #[test]

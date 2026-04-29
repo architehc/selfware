@@ -477,6 +477,7 @@ fn bench_swebench_pro_defaults() {
                 assert!(args.quants.contains("Q4_K_P"));
                 assert!(!args.resume);
                 assert!(!args.force_rerun);
+                assert_eq!(args.prompt_mode, "official");
             }
             other => panic!("expected SwebenchPro, got {:?}", other),
         },

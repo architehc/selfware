@@ -63,12 +63,20 @@ pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
         Ok(Err(e)) => {
             let msg = format!("Hook '{}' failed to run: {}", command, e);
             warn!("{}", msg);
-            HookAction::Error { message: msg }
+            if ctx.event == super::HookEvent::PreToolUse {
+                HookAction::Skip { reason: msg }
+            } else {
+                HookAction::Error { message: msg }
+            }
         }
         Err(_) => {
             let msg = format!("Hook '{}' timed out after {}s", command, hook.timeout_secs);
             warn!("{}", msg);
-            HookAction::Error { message: msg }
+            if ctx.event == super::HookEvent::PreToolUse {
+                HookAction::Skip { reason: msg }
+            } else {
+                HookAction::Error { message: msg }
+            }
         }
     }
 }
@@ -109,18 +117,25 @@ fn expand_placeholders(command: &str, ctx: &HookContext) -> String {
     let mut result = command.to_string();
 
     if let Some(ref path) = ctx.affected_path {
-        result = result.replace("{path}", path);
+        result = result.replace("{path}", &shell_quote(path));
     } else {
-        result = result.replace("{path}", "");
+        result = result.replace("{path}", "''");
     }
 
     if let Some(ref tool) = ctx.tool_name {
-        result = result.replace("{tool}", tool);
+        result = result.replace("{tool}", &shell_quote(tool));
     } else {
-        result = result.replace("{tool}", "");
+        result = result.replace("{tool}", "''");
     }
 
     result
+}
+
+fn shell_quote(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+    format!("'{}'", value.replace('\'', r#"'\''"#))
 }
 
 #[cfg(test)]
@@ -133,10 +148,10 @@ mod tests {
         let ctx = HookContext::post_tool("file_write", r#"{"path": "src/main.rs"}"#, true, "ok");
 
         let cmd = expand_placeholders("cargo fmt -- {path}", &ctx);
-        assert_eq!(cmd, "cargo fmt -- src/main.rs");
+        assert_eq!(cmd, "cargo fmt -- 'src/main.rs'");
 
         let cmd = expand_placeholders("echo {tool} modified {path}", &ctx);
-        assert_eq!(cmd, "echo file_write modified src/main.rs");
+        assert_eq!(cmd, "echo 'file_write' modified 'src/main.rs'");
     }
 
     #[test]
@@ -144,6 +159,19 @@ mod tests {
         let ctx = HookContext::stop();
         let cmd = expand_placeholders("cargo test", &ctx);
         assert_eq!(cmd, "cargo test");
+    }
+
+    #[test]
+    fn test_expand_placeholders_shell_quotes_injection_chars() {
+        let ctx = HookContext::post_tool(
+            "file_write",
+            r#"{"path": "src/main.rs; touch /tmp/pwned"}"#,
+            true,
+            "ok",
+        );
+
+        let cmd = expand_placeholders("cargo fmt -- {path}", &ctx);
+        assert_eq!(cmd, "cargo fmt -- 'src/main.rs; touch /tmp/pwned'");
     }
 
     #[tokio::test]

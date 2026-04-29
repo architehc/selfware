@@ -301,6 +301,13 @@ pub fn run_selfware(
     log_path: &Path,
     result_dir: &Path,
 ) -> Result<RunOutcome> {
+    std::fs::create_dir_all(result_dir)
+        .with_context(|| format!("creating result dir {}", result_dir.display()))?;
+    let result_dir = if result_dir.is_absolute() {
+        result_dir.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(result_dir)
+    };
     let log = std::fs::File::create(log_path)
         .with_context(|| format!("opening agent log {}", log_path.display()))?;
 
@@ -317,7 +324,7 @@ pub fn run_selfware(
         .arg("json")
         .env("SELFWARE_ENDPOINT", endpoint)
         .env("SELFWARE_MODEL", alias)
-        .env("SELFWARE_RESULT_DIR", result_dir)
+        .env("SELFWARE_RESULT_DIR", &result_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(log));
@@ -394,6 +401,10 @@ pub struct RunOutcome {
 /// the same patch as `scripts/swebench_pro/run.py`:
 ///   `.selfware/`, `.claude/`, `__pycache__/`, `selfware.toml`, `*.bak`,
 ///   `**/*.bak`.
+///
+/// Also excludes selfware harness artifacts defensively. The harness normally
+/// writes these outside the cloned repo, but stale relative paths must never
+/// become submitted model patches.
 pub fn capture_patch(workdir: &Path) -> Result<String> {
     let _ = Command::new("git")
         .args(["-C"])
@@ -417,6 +428,11 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
             ":(exclude)__pycache__/**",
             ":(exclude)**/__pycache__/**",
             ":(exclude)selfware.toml",
+            ":(exclude)reports/swebench_pro/**",
+            ":(exclude)trace.jsonl",
+            ":(exclude)**/trace.jsonl",
+            ":(exclude)failure_mode.json",
+            ":(exclude)**/failure_mode.json",
             ":(exclude)*.bak",
             ":(exclude)**/*.bak",
         ])
@@ -521,8 +537,8 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use crate::bench_harness::swebench_pro::catalog::{BackendProfile, ThinkingPolicy};
     use super::*;
+    use crate::bench_harness::swebench_pro::catalog::{BackendProfile, ThinkingPolicy};
 
     fn dummy_spec() -> QuantSpec {
         QuantSpec {
@@ -647,5 +663,55 @@ mod tests {
         // Use a port that is almost certainly closed.
         let result = detect_backend(59999);
         assert!(result.is_err() || result.unwrap() == "unknown");
+    }
+
+    #[test]
+    fn capture_patch_excludes_harness_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .arg("init")
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args(["config", "user.email", "test@example.com"])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args(["config", "user.name", "Test"])
+            .status()
+            .unwrap();
+
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/app.py"), "print('old')\n").unwrap();
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args(["commit", "-m", "initial"])
+            .status()
+            .unwrap();
+
+        std::fs::write(repo.join("src/app.py"), "print('new')\n").unwrap();
+        std::fs::create_dir_all(repo.join("reports/swebench_pro/run")).unwrap();
+        std::fs::write(repo.join("reports/swebench_pro/run/trace.jsonl"), "{}\n").unwrap();
+        std::fs::write(repo.join("failure_mode.json"), "{}\n").unwrap();
+
+        let patch = capture_patch(repo).unwrap();
+
+        assert!(patch.contains("src/app.py"));
+        assert!(!patch.contains("reports/swebench_pro"));
+        assert!(!patch.contains("failure_mode.json"));
     }
 }

@@ -255,6 +255,30 @@ fn estimate_tokens(msg: &Message) -> usize {
     content_tokens + reasoning_tokens + tool_call_tokens + 4 // overhead
 }
 
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}...[truncated]", truncated)
+    } else {
+        s.to_string()
+    }
+}
+
+fn truncate_chars_with_total(s: &str, max_chars: usize) -> String {
+    let total_chars = s.chars().count();
+    if total_chars <= max_chars {
+        return s.to_string();
+    }
+
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!(
+        "{}\n...[{} chars truncated by micro_compact]",
+        truncated,
+        total_chars.saturating_sub(max_chars)
+    )
+}
+
 /// MicroCompact: Fast local compression with no API call
 ///
 /// - Strips old tool outputs from conversation
@@ -345,12 +369,8 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
         // For tool messages older than last 2, truncate content
         if msg.role == "tool" && !is_recent {
             if let MessageContent::Text(text) = &msg.content {
-                if text.len() > 500 {
-                    let truncated = format!(
-                        "{}\n...[{} chars truncated by micro_compact]",
-                        &text[..500.min(text.len())],
-                        text.len() - 500
-                    );
+                if text.chars().count() > 500 {
+                    let truncated = truncate_chars_with_total(text, 500);
                     cleaned.content = MessageContent::Text(truncated);
                 }
             }
@@ -427,11 +447,7 @@ pub async fn auto_compact(
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                let content = if m.content.text().len() > 800 {
-                    format!("{}...[truncated]", &m.content.text()[..800])
-                } else {
-                    m.content.text().to_string()
-                };
+                let content = truncate_chars(m.content.text(), 800);
                 format!("[{}] {}: {}", i, m.role, content)
             })
             .collect::<Vec<_>>()
@@ -530,11 +546,7 @@ pub async fn full_compact(
         Message::user(format!("{}\n\nConversation:\n{}",
             summary_prompt,
             messages.iter().enumerate().map(|(i, m)| {
-                let content = if m.content.text().len() > 600 {
-                    format!("{}...[truncated]", &m.content.text()[..600])
-                } else {
-                    m.content.text().to_string()
-                };
+                let content = truncate_chars(m.content.text(), 600);
                 format!("[{}] {}: {}", i, m.role, content)
             }).collect::<Vec<_>>().join("\n")
         )),
@@ -575,11 +587,12 @@ pub async fn full_compact(
         for path in recent_files {
             // Try to read file content (best effort)
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                let truncated = if content.len() > 20_000 {
+                let total_chars = content.chars().count();
+                let truncated = if total_chars > 20_000 {
                     format!(
                         "{}\n...[truncated, {} total chars]",
-                        &content[..20_000],
-                        content.len()
+                        content.chars().take(20_000).collect::<String>(),
+                        total_chars
                     )
                 } else {
                     content

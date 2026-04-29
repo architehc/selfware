@@ -147,6 +147,24 @@ pub(super) fn build_image_result_summary(result: &str) -> String {
 }
 
 impl Agent {
+    fn note_mutation_no_tool_stall(&mut self, context: &str) -> Result<()> {
+        if !(self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0) {
+            return Ok(());
+        }
+
+        const MAX_MUTATION_NO_TOOL_STALLS: usize = 6;
+        self.consecutive_no_action_prompts += 1;
+        self.total_no_action_prompts += 1;
+        if self.consecutive_no_action_prompts >= MAX_MUTATION_NO_TOOL_STALLS {
+            bail!(
+                "NONTERM_PROSE_NO_TOOL: mutation-required task produced {} consecutive no-tool turns with 0 mutating tools ({})",
+                self.consecutive_no_action_prompts,
+                context
+            );
+        }
+        Ok(())
+    }
+
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
     /// instead of making a new API call (used after planning phase)
@@ -363,6 +381,7 @@ impl Agent {
 
         // Detect malformed tool calls and inject correction before treating as completion
         if self.detect_and_correct_malformed_tools(&content, &tool_calls) {
+            self.note_mutation_no_tool_stall("malformed tool XML")?;
             return Ok(false);
         }
 
@@ -380,6 +399,12 @@ impl Agent {
                 // If the only fallback is directory_tree (nothing new to load),
                 // the model is stuck and should just answer with what it has.
                 if tool_name == super::FALLBACK_TOOL_NAME {
+                    if self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0
+                    {
+                        bail!(
+                            "NONTERM_PROSE_NO_TOOL: mutation-required task produced repeated prose-only turns with 0 mutating tools"
+                        );
+                    }
                     info!("No useful fallback available — prompting model to finalize");
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
@@ -549,12 +574,14 @@ impl Agent {
                 } else {
                     // Can't extract a clear path — ask the model to use tools
                     info!("Rejected text response containing code — nudging to use tools");
+                    self.note_mutation_no_tool_stall("code-like text without extractable path")?;
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
                          You wrote code in your text response instead of using tools. \
-                         DO NOT output code as text. Use file_write to write it to a file:\n\n\
+                         DO NOT output code as text. Use file_edit on the existing target file you already read. \
+                         Do NOT create src/lib.rs unless the repository already is a Rust crate.\n\n\
                          <tool>\n<name>file_write</name>\n\
-                         <arguments>{\"path\": \"src/lib.rs\", \"content\": \"YOUR CODE HERE\"}</arguments>\n\
+                         <arguments>{\"path\": \"PATH_YOU_ALREADY_READ\", \"content\": \"FULL UPDATED FILE CONTENT\"}</arguments>\n\
                          </tool>\n\
                          </selfware_system_directive>"
                             .to_string(),
@@ -657,6 +684,14 @@ impl Agent {
 
         // Detect repetition loops before executing
         if let Some(loop_msg) = self.detect_repetition(&tool_calls) {
+            if self.current_task_requires_mutation()
+                && self.mutating_tool_call_count() > 0
+                && is_observational_shell_batch(&tool_calls)
+            {
+                bail!(
+                    "VERIFICATION_LOOP_AFTER_EDIT: repeated observational shell commands after a successful mutation; stopping so the captured patch can be evaluated"
+                );
+            }
             info!("Repetition loop detected, injecting correction");
             self.messages
                 .push(crate::api::types::Message::user(loop_msg));
@@ -681,7 +716,14 @@ impl Agent {
         // When the model keeps emitting identical tool calls that are all
         // suppressed (retry suppressed / no-op), it is stuck in tool-calling
         // mode and cannot produce a final text response on its own.
-        if self.consecutive_suppressions >= 10 {
+        if self.current_task_requires_mutation()
+            && self.mutating_tool_call_count() > 0
+            && self.consecutive_suppressions >= 3
+        {
+            bail!(
+                "EDIT_FAILURE_LOOP_AFTER_EDIT: repeated stale edit retries after a successful mutation; stopping so the captured patch can be evaluated"
+            );
+        } else if self.consecutive_suppressions >= 10 {
             // After many suppressed calls, nudge the model to try a different approach.
             // Do NOT abort or force completion — the task may still need work.
             // Also clear the failed-tool cache so the agent gets fresh chances.
@@ -894,8 +936,10 @@ impl Agent {
                 "<selfware_system_directive>\n\
                  You have spent {} consecutive steps reading without writing. \
                  You have {} steps before forced synthesis. Write code NOW:\n\n\
-                 <tool>\n<name>file_write</name>\n\
-                 <arguments>{{\"path\": \"src/lib.rs\", \"content\": \"YOUR FULL CODE\"}}</arguments>\n\
+                 Use file_edit or file_write on an existing file you already read. \
+                 Do NOT create src/lib.rs unless this repository already has Cargo.toml.\n\n\
+                 <tool>\n<name>file_edit</name>\n\
+                 <arguments>{{\"path\": \"PATH_YOU_ALREADY_READ\", \"old_str\": \"EXACT OLD TEXT\", \"new_str\": \"EXACT NEW TEXT\"}}</arguments>\n\
                  </tool>\n\
                  </selfware_system_directive>",
                 self.consecutive_read_only_steps,
@@ -925,18 +969,19 @@ pub(super) fn extract_code_and_path(content: &str) -> Option<(String, String)> {
         )
         .expect("Invalid path regex")
     });
-    let path = path_re
-        .captures(&stripped)
-        .map(|c| c[1].to_string())
-        .unwrap_or_else(|| {
-            // Default: if code looks like a library module, use src/lib.rs
-            // If it has fn main(), use src/main.rs
-            if stripped.contains("fn main(") {
+    let explicit_path = path_re.captures(&stripped).map(|c| c[1].to_string());
+    let path = explicit_path.or_else(|| {
+        if std::path::Path::new("Cargo.toml").exists() {
+            // Rust-only fallback for SAB-style scratch projects.
+            Some(if stripped.contains("fn main(") {
                 "src/main.rs".to_string()
             } else {
                 "src/lib.rs".to_string()
-            }
-        });
+            })
+        } else {
+            None
+        }
+    })?;
 
     // Extract code: prefer fenced code blocks, fall back to raw code
     let code = if stripped.contains("```") {
@@ -1077,6 +1122,24 @@ pub(super) fn contains_unwritten_code(content: &str) -> bool {
     }
 
     false
+}
+
+fn is_observational_shell_batch(tool_calls: &[CollectedToolCall]) -> bool {
+    !tool_calls.is_empty()
+        && tool_calls.iter().all(|(name, args_str, _)| {
+            if name != "shell_exec" {
+                return false;
+            }
+            let command = serde_json::from_str::<serde_json::Value>(args_str)
+                .ok()
+                .and_then(|v| {
+                    v.get("command")
+                        .and_then(|c| c.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_default();
+            super::tool_dispatch::shell_command_is_observational(&command)
+        })
 }
 
 #[cfg(test)]
@@ -3532,6 +3595,109 @@ mod tests {
         assert!(last_user_msg.content.text().contains("step"));
 
         server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_mutation_task_rejects_long_prose_without_tools_before_completion_gate() {
+        let long_prose = format!(
+            "I analyzed the bug and will now explain the intended fix.\n{}",
+            "This is still only prose, not a tool call. ".repeat(40)
+        );
+        let server = MockLlmServer::builder()
+            .with_response(&long_prose)
+            .build()
+            .await;
+
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Fix the qutebrowser bug".to_string();
+
+        let result = agent.execute_step_internal(false).await;
+
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+        assert_eq!(agent.consecutive_no_action_prompts, 1);
+        let last_user_msg = agent
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .unwrap();
+        assert!(
+            last_user_msg.content.text().contains("did not call a tool"),
+            "expected no-action recovery prompt, got: {}",
+            last_user_msg.content.text()
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn mutation_no_tool_stall_bails_after_repeated_malformed_turns() {
+        let config = test_config("http://127.0.0.1:1/v1".to_string());
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Fix the bug in this repository".to_string();
+
+        for _ in 0..5 {
+            agent
+                .note_mutation_no_tool_stall("malformed tool XML")
+                .unwrap();
+        }
+        let err = agent
+            .note_mutation_no_tool_stall("malformed tool XML")
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("NONTERM_PROSE_NO_TOOL"));
+    }
+
+    #[test]
+    fn observational_shell_batch_detects_read_only_commands() {
+        let calls = vec![(
+            "shell_exec".to_string(),
+            serde_json::json!({"command": "grep -n all_processes qutebrowser/misc/guiprocess.py"})
+                .to_string(),
+            None,
+        )];
+        assert!(is_observational_shell_batch(&calls));
+
+        let mutating = vec![(
+            "shell_exec".to_string(),
+            serde_json::json!({"command": "sed -i 's/old/new/' qutebrowser/misc/guiprocess.py"})
+                .to_string(),
+            None,
+        )];
+        assert!(!is_observational_shell_batch(&mutating));
+    }
+
+    #[test]
+    fn extract_code_and_path_rust_fallback_requires_cargo_toml() {
+        let saved = std::env::current_dir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        let content = r#"```rust
+pub fn answer() -> i32 {
+    42
+}
+
+pub fn other() -> i32 {
+    answer()
+}
+```"#;
+
+        assert!(extract_code_and_path(content).is_none());
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
+
+        let (path, _) = extract_code_and_path(content).unwrap();
+        assert_eq!(path, "src/lib.rs");
+        std::env::set_current_dir(saved).unwrap();
     }
 
     #[tokio::test]

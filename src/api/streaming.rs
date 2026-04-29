@@ -60,6 +60,7 @@ impl StreamingResponse {
             };
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
+            let mut pending_utf8 = Vec::new();
             let mut accumulator = ToolCallAccumulator::new();
             let chunk_timeout = self.chunk_timeout;
 
@@ -87,7 +88,7 @@ impl StreamingResponse {
                 };
                 match chunk_result {
                     Ok(bytes) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        append_utf8_chunk(&mut buffer, &mut pending_utf8, &bytes);
 
                         // Process complete SSE events
                         while let Some(pos) = buffer.find("\n\n") {
@@ -123,6 +124,10 @@ impl StreamingResponse {
                         return;
                     }
                 }
+            }
+
+            if !pending_utf8.is_empty() {
+                buffer.push_str(&String::from_utf8_lossy(&pending_utf8));
             }
 
             // Flush trailing buffer (data without final \n\n)
@@ -231,6 +236,38 @@ impl StreamingResponse {
     }
 }
 
+fn append_utf8_chunk(buffer: &mut String, pending: &mut Vec<u8>, bytes: &[u8]) {
+    pending.extend_from_slice(bytes);
+
+    loop {
+        match std::str::from_utf8(pending) {
+            Ok(valid) => {
+                buffer.push_str(valid);
+                pending.clear();
+                return;
+            }
+            Err(err) => {
+                let valid_up_to = err.valid_up_to();
+                if valid_up_to > 0 {
+                    let valid = std::str::from_utf8(&pending[..valid_up_to])
+                        .expect("valid_up_to prefix must be valid utf-8");
+                    buffer.push_str(valid);
+                    pending.drain(..valid_up_to);
+                    continue;
+                }
+
+                if let Some(error_len) = err.error_len() {
+                    buffer.push('\u{FFFD}');
+                    pending.drain(..error_len);
+                    continue;
+                }
+
+                return;
+            }
+        }
+    }
+}
+
 /// A chunk received from an SSE streaming response.
 #[derive(Debug, Clone)]
 pub enum StreamChunk {
@@ -319,6 +356,27 @@ impl ToolCallAccumulator {
                 },
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_utf8_chunk;
+
+    #[test]
+    fn append_utf8_chunk_preserves_split_multibyte_codepoint() {
+        let mut buffer = String::new();
+        let mut pending = Vec::new();
+        let text = "data: hello 🦀\n\n";
+        let bytes = text.as_bytes();
+        let split = text.find('🦀').unwrap() + 1;
+
+        append_utf8_chunk(&mut buffer, &mut pending, &bytes[..split]);
+        assert!(!pending.is_empty());
+
+        append_utf8_chunk(&mut buffer, &mut pending, &bytes[split..]);
+        assert_eq!(buffer, text);
+        assert!(pending.is_empty());
     }
 }
 

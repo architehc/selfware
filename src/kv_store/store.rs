@@ -1,4 +1,5 @@
 use crate::kv_store::entry::Entry;
+use crate::kv_store::serialization::StoreSerializer;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -53,13 +54,7 @@ impl KvStore {
         if path.as_ref().exists() {
             match Self::load(path.as_ref()) {
                 Ok(store) => Ok(store),
-                Err(_) => {
-                    // If loading fails, create a new store
-                    Ok(Self {
-                        data: HashMap::new(),
-                        path: Some(path_str),
-                    })
-                }
+                Err(e) => Err(e),
             }
         } else {
             // Create new store and save it
@@ -172,18 +167,19 @@ impl KvStore {
     /// Save the store to disk
     pub fn save(&self) -> Result<()> {
         if let Some(ref path) = self.path {
-            // Create a serializable representation
-            let serializable_data: HashMap<String, String> = self
-                .data
-                .iter()
-                .map(|(k, v)| (k.clone(), v.value.clone()))
-                .collect();
-
-            match serde_json::to_string_pretty(&serializable_data) {
+            match <HashMap<String, Entry> as StoreSerializer>::serialize_to_json(&self.data) {
                 Ok(json) => {
-                    if let Err(e) = fs::write(path, &json) {
+                    let tmp_path = format!("{}.tmp", path);
+                    if let Err(e) = fs::write(&tmp_path, &json) {
                         return Err(KvStoreError::StorageError(format!(
                             "Failed to write to {}: {}",
+                            tmp_path, e
+                        )));
+                    }
+                    if let Err(e) = fs::rename(&tmp_path, path) {
+                        let _ = fs::remove_file(&tmp_path);
+                        return Err(KvStoreError::StorageError(format!(
+                            "Failed to replace {}: {}",
                             path, e
                         )));
                     }
@@ -204,23 +200,39 @@ impl KvStore {
     /// Load the store from disk
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         match fs::read_to_string(path.as_ref()) {
-            Ok(json) => match serde_json::from_str::<HashMap<String, String>>(&json) {
-                Ok(data) => {
-                    let store_data: HashMap<String, Entry> = data
-                        .into_iter()
-                        .map(|(k, v)| (k.clone(), Entry::new(k.clone(), v)))
-                        .collect();
+            Ok(json) => {
+                match <HashMap<String, Entry> as StoreSerializer>::deserialize_from_json(&json) {
+                    Ok(store_data) => {
+                        return Ok(Self {
+                            data: store_data,
+                            path: Some(path.as_ref().to_string_lossy().to_string()),
+                        });
+                    }
+                    Err(structured_error) => {
+                        // Backward compatibility for legacy stores that persisted
+                        // as `{ "key": "value" }` and had no tags/metadata.
+                        match serde_json::from_str::<HashMap<String, String>>(&json) {
+                            Ok(data) => {
+                                let store_data: HashMap<String, Entry> = data
+                                    .into_iter()
+                                    .map(|(k, v)| (k.clone(), Entry::new(k.clone(), v)))
+                                    .collect();
 
-                    Ok(Self {
-                        data: store_data,
-                        path: Some(path.as_ref().to_string_lossy().to_string()),
-                    })
+                                return Ok(Self {
+                                    data: store_data,
+                                    path: Some(path.as_ref().to_string_lossy().to_string()),
+                                });
+                            }
+                            Err(legacy_error) => {
+                                return Err(KvStoreError::SerializationError(format!(
+                                    "Failed to deserialize store as structured entries ({}) or legacy map ({})",
+                                    structured_error, legacy_error
+                                )));
+                            }
+                        }
+                    }
                 }
-                Err(e) => Err(KvStoreError::SerializationError(format!(
-                    "Failed to deserialize store: {}",
-                    e
-                ))),
-            },
+            }
             Err(e) => Err(KvStoreError::StorageError(format!(
                 "Failed to read from {}: {}",
                 path.as_ref().display(),
@@ -349,6 +361,37 @@ mod tests {
         let store2 = KvStore::with_path(&path).unwrap();
         assert_eq!(store2.get("key1").unwrap(), "value1");
         assert_eq!(store2.get("key2").unwrap(), "value2");
+    }
+
+    #[test]
+    fn test_persistence_preserves_tags_and_metadata() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.json");
+
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), "test".to_string());
+        let entry = Entry::new("key1", "value1")
+            .with_tags(vec!["important".to_string()])
+            .with_metadata(metadata);
+
+        let mut store = KvStore::with_path(&path).unwrap();
+        store.upsert_entry("key1", entry).unwrap();
+
+        let store2 = KvStore::with_path(&path).unwrap();
+        let loaded = store2.get_entry("key1").unwrap();
+        assert_eq!(loaded.value, "value1");
+        assert!(loaded.has_tag("important"));
+        assert_eq!(loaded.get_metadata("source"), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn test_corrupt_store_is_not_reset_or_overwritten() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("store.json");
+        fs::write(&path, "{not valid json").unwrap();
+
+        assert!(KvStore::with_path(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{not valid json");
     }
 
     #[test]

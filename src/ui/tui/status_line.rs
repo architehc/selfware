@@ -10,6 +10,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::TuiPalette;
 
@@ -202,9 +203,9 @@ impl StatusLine {
         let right_text: String = right.iter().map(|s| s.content.clone()).collect();
         let center_text: String = center.iter().map(|s| s.content.clone()).collect();
 
-        let left_width = left_text.chars().count() as u16;
-        let right_width = right_text.chars().count() as u16;
-        let center_width = center_text.chars().count() as u16;
+        let left_width = UnicodeWidthStr::width(left_text.as_str()) as u16;
+        let right_width = UnicodeWidthStr::width(right_text.as_str()) as u16;
+        let center_width = UnicodeWidthStr::width(center_text.as_str()) as u16;
 
         let available = area.width.saturating_sub(left_width + right_width);
         let padding = available.saturating_sub(center_width) / 2;

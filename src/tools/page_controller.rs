@@ -653,6 +653,13 @@ impl Tool for PageControlTool {
             }
         }
 
+        if matches!(action, "screenshot" | "pdf") {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                validate_page_output_path(path, self.name())?;
+                ensure_page_output_parent(std::path::Path::new(path)).await?;
+            }
+        }
+
         // Build the command object to send to the bridge.
         // We forward the entire args object; the bridge picks the fields it needs.
         let mut command = args.clone();
@@ -681,6 +688,21 @@ impl Tool for PageControlTool {
             }
         }
     }
+}
+
+fn validate_page_output_path(output_path: &str, tool_name: &str) -> Result<()> {
+    let safety = crate::tools::file::resolve_safety_config(None);
+    crate::tools::file::validate_tool_path(output_path, &safety)
+        .with_context(|| format!("{tool_name} output path validation failed"))
+}
+
+async fn ensure_page_output_parent(output_path: &std::path::Path) -> Result<()> {
+    if let Some(parent) = output_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create page output dir {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -740,6 +762,13 @@ mod tests {
         assert!(action_enum.contains(&json!("evaluate")));
         assert!(action_enum.contains(&json!("new_tab")));
         assert!(action_enum.contains(&json!("shutdown")));
+    }
+
+    #[test]
+    fn test_page_control_rejects_unsafe_output_path() {
+        let err = validate_page_output_path("/etc/selfware-page.png", "page_control")
+            .expect_err("absolute output outside allowed paths must be rejected");
+        assert!(err.to_string().contains("output path validation failed"));
     }
 
     #[test]

@@ -1779,16 +1779,39 @@ pub(crate) fn wrap_chat_message<'a>(
 ) -> ratatui::widgets::ListItem<'a> {
     use ratatui::text::{Line, Span, Text};
     use ratatui::widgets::ListItem;
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    fn split_at_display_width(s: &str, max_width: usize) -> (&str, &str) {
+        if max_width == 0 {
+            return ("", s);
+        }
+
+        let mut width = 0usize;
+        let mut end = 0usize;
+        for (idx, ch) in s.char_indices() {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width + ch_width > max_width {
+                if end == 0 {
+                    end = idx + ch.len_utf8();
+                }
+                break;
+            }
+            width += ch_width;
+            end = idx + ch.len_utf8();
+        }
+
+        (&s[..end], &s[end..])
+    }
 
     // Guard against extremely narrow panes
     if width == 0 {
         return ListItem::new(Text::from(Vec::<Line>::new()));
     }
 
-    let prefix_char_len = prefix_str.chars().count();
-    let first_avail = width.saturating_sub(prefix_char_len);
+    let prefix_width = UnicodeWidthStr::width(prefix_str);
+    let first_avail = width.saturating_sub(prefix_width);
 
-    if content.chars().count() <= first_avail {
+    if UnicodeWidthStr::width(content) <= first_avail {
         // Entire message fits on a single line
         let full = format!("{}{}", prefix_str, content);
         return ListItem::new(Line::from(Span::styled(full, style)));
@@ -1797,24 +1820,23 @@ pub(crate) fn wrap_chat_message<'a>(
     let mut lines: Vec<Line> = Vec::new();
 
     // First line: prefix + as many characters as fit
-    let first_part: String = content.chars().take(first_avail).collect();
+    let (first_part, rest) = split_at_display_width(content, first_avail);
     lines.push(Line::from(Span::styled(
         format!("{}{}", prefix_str, first_part),
         style,
     )));
 
     // Continuation lines with indent matching the prefix width
-    let indent: String = " ".repeat(prefix_char_len);
-    let cont_width = width.saturating_sub(prefix_char_len).max(1);
-    let mut remaining: String = content.chars().skip(first_avail).collect();
+    let indent: String = " ".repeat(prefix_width);
+    let cont_width = width.saturating_sub(prefix_width).max(1);
+    let mut remaining = rest;
     while !remaining.is_empty() {
-        let chunk: String = remaining.chars().take(cont_width).collect();
-        let chunk_char_len = chunk.chars().count();
+        let (chunk, rest) = split_at_display_width(remaining, cont_width);
         lines.push(Line::from(Span::styled(
             format!("{}{}", indent, chunk),
             style,
         )));
-        remaining = remaining.chars().skip(chunk_char_len).collect();
+        remaining = rest;
     }
 
     ListItem::new(Text::from(lines))

@@ -3,7 +3,10 @@
 //! A thread-safe bounded queue that supports multiple producers and consumers
 //! with backpressure when the queue is full.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 
@@ -13,6 +16,7 @@ pub struct BoundedQueue<T> {
     sender: mpsc::Sender<T>,
     receiver: Arc<Mutex<mpsc::Receiver<T>>>,
     capacity: usize,
+    closed: Arc<AtomicBool>,
 }
 
 impl<T: Send + 'static> BoundedQueue<T> {
@@ -23,17 +27,24 @@ impl<T: Send + 'static> BoundedQueue<T> {
             sender,
             receiver: Arc::new(Mutex::new(receiver)),
             capacity,
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
     /// Send an item to the queue
     /// Returns an error if the queue is closed
     pub async fn send(&self, item: T) -> Result<(), mpsc::error::SendError<T>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(mpsc::error::SendError(item));
+        }
         self.sender.send(item).await
     }
 
     /// Try to send an item without blocking
     pub fn try_send(&self, item: T) -> Result<(), mpsc::error::TrySendError<T>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(mpsc::error::TrySendError::Closed(item));
+        }
         self.sender.try_send(item)
     }
 
@@ -46,7 +57,7 @@ impl<T: Send + 'static> BoundedQueue<T> {
 
     /// Try to receive an item without blocking
     pub fn try_receive(&self) -> Option<T> {
-        let receiver = self.receiver.blocking_lock();
+        let mut receiver = self.receiver.try_lock().ok()?;
         receiver.try_recv().ok()
     }
 
@@ -57,7 +68,9 @@ impl<T: Send + 'static> BoundedQueue<T> {
 
     /// Get the approximate number of items in the queue
     pub fn len(&self) -> usize {
-        self.sender.capacity().unwrap_or(0)
+        self.sender
+            .max_capacity()
+            .saturating_sub(self.sender.capacity())
     }
 
     /// Check if the queue is empty
@@ -67,7 +80,9 @@ impl<T: Send + 'static> BoundedQueue<T> {
 
     /// Close the queue, preventing new items from being sent
     pub async fn close(&self) {
-        self.sender.close();
+        self.closed.store(true, Ordering::Release);
+        let mut receiver = self.receiver.lock().await;
+        receiver.close();
     }
 
     /// Get a clone of the sender for creating additional producers
@@ -84,10 +99,11 @@ mod tests {
     #[tokio::test]
     async fn test_bounded_queue_basic() {
         let queue: BoundedQueue<i32> = BoundedQueue::new(10);
-        
+
         queue.send(1).await.unwrap();
         queue.send(2).await.unwrap();
-        
+        queue.close().await;
+
         assert_eq!(queue.receive().await, Some(1));
         assert_eq!(queue.receive().await, Some(2));
         assert_eq!(queue.receive().await, None);
@@ -96,10 +112,10 @@ mod tests {
     #[tokio::test]
     async fn test_bounded_queue_capacity() {
         let queue: BoundedQueue<i32> = BoundedQueue::new(2);
-        
+
         queue.send(1).await.unwrap();
         queue.send(2).await.unwrap();
-        
+
         // Third send should fail as queue is full
         let result = timeout(Duration::from_millis(100), queue.send(3)).await;
         assert!(result.is_err());
@@ -108,22 +124,49 @@ mod tests {
     #[tokio::test]
     async fn test_bounded_queue_try_send() {
         let queue: BoundedQueue<i32> = BoundedQueue::new(1);
-        
+
         assert!(queue.try_send(1).is_ok());
         assert!(queue.try_send(2).is_err());
-        
+
         queue.try_receive();
         assert!(queue.try_send(2).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_bounded_queue_len_counts_items_not_remaining_capacity() {
+        let queue: BoundedQueue<i32> = BoundedQueue::new(2);
+
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+
+        queue.send(1).await.unwrap();
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+
+        queue.send(2).await.unwrap();
+        assert_eq!(queue.len(), 2);
+        assert!(!queue.is_empty());
+
+        assert_eq!(queue.try_receive(), Some(1));
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_try_receive_does_not_blocking_lock_inside_runtime() {
+        let queue: BoundedQueue<i32> = BoundedQueue::new(1);
+        queue.send(7).await.unwrap();
+
+        assert_eq!(queue.try_receive(), Some(7));
     }
 
     #[tokio::test]
     async fn test_bounded_queue_close() {
         let queue: BoundedQueue<i32> = BoundedQueue::new(10);
         let queue2 = queue.clone();
-        
+
         queue.close().await;
-        
+
         let result = timeout(Duration::from_millis(100), queue2.send(1)).await;
-        assert!(result.is_err());
+        assert!(matches!(result, Ok(Err(_))));
     }
 }

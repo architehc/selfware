@@ -621,6 +621,17 @@ Try ONE of these strategies:\
         let effective_content = strip_think_blocks(content);
         let effective_len = effective_content.len();
 
+        // SWE/coding tasks that require mutation must not burn dozens of turns
+        // on long prose. If no mutating tool has succeeded yet, require a
+        // concrete action unless the response contains extractable code that
+        // the execution layer can auto-write immediately after this check.
+        if self.current_task_requires_mutation()
+            && self.mutating_tool_call_count() == 0
+            && !super::execution::contains_unwritten_code(&effective_content)
+        {
+            return true;
+        }
+
         // If the model produced substantial non-think content, treat as real output.
         // Use a relative threshold: if think blocks dominate (>80% of total output),
         // the "real" content is likely just leaked intent.

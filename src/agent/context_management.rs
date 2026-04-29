@@ -8,6 +8,14 @@ impl Agent {
     // =========================================================================
 
     fn is_critical_context_message(message: &Message) -> bool {
+        if message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty())
+        {
+            return true;
+        }
+
         if message.role == "tool" {
             return true;
         }
@@ -26,6 +34,82 @@ impl Agent {
                 || text.contains("RETRY SUPPRESSED")
                 || text.contains("TOOL INPUT RECOVERY")
                 || text.contains("Repeated unchanged reread blocked"))
+    }
+
+    fn has_kept_tool_result_for_call(
+        messages: &[Message],
+        keep: &[bool],
+        assistant_idx: usize,
+        tool_call_id: &str,
+    ) -> bool {
+        messages
+            .iter()
+            .enumerate()
+            .skip(assistant_idx + 1)
+            .any(|(idx, message)| {
+                keep[idx]
+                    && message.role == "tool"
+                    && message.tool_call_id.as_deref() == Some(tool_call_id)
+            })
+    }
+
+    fn has_kept_prior_assistant_call(
+        messages: &[Message],
+        keep: &[bool],
+        tool_idx: usize,
+        tool_call_id: &str,
+    ) -> bool {
+        messages
+            .iter()
+            .enumerate()
+            .take(tool_idx)
+            .rev()
+            .any(|(idx, message)| {
+                keep[idx]
+                    && message
+                        .tool_calls
+                        .as_ref()
+                        .is_some_and(|calls| calls.iter().any(|call| call.id == tool_call_id))
+            })
+    }
+
+    fn enforce_tool_call_pair_invariants(messages: &[Message], keep: &mut [bool]) {
+        let original_keep = keep.to_vec();
+
+        for (idx, message) in messages.iter().enumerate() {
+            if !original_keep[idx] {
+                continue;
+            }
+
+            let Some(calls) = &message.tool_calls else {
+                continue;
+            };
+            if calls.is_empty() {
+                continue;
+            }
+
+            let has_all_results = calls.iter().all(|call| {
+                Self::has_kept_tool_result_for_call(messages, &original_keep, idx, &call.id)
+            });
+            if !has_all_results {
+                keep[idx] = false;
+            }
+        }
+
+        for (idx, message) in messages.iter().enumerate() {
+            if !keep[idx] || message.role != "tool" {
+                continue;
+            }
+
+            let Some(tool_call_id) = message.tool_call_id.as_deref() else {
+                keep[idx] = false;
+                continue;
+            };
+
+            if !Self::has_kept_prior_assistant_call(messages, keep, idx, tool_call_id) {
+                keep[idx] = false;
+            }
+        }
     }
 
     /// Trim the message history so total estimated tokens stay within
@@ -78,6 +162,8 @@ impl Agent {
                 remaining -= tokens;
             }
         }
+
+        Self::enforce_tool_call_pair_invariants(&self.messages, &mut keep);
 
         // Retain only the messages we decided to keep (single O(N) pass).
         let mut idx = 0;
@@ -520,6 +606,7 @@ impl Agent {
         let keep_recent = 4;
         if self.messages.len() > keep_recent + 1 {
             let system_msg = self.messages.first().cloned();
+            let messages_before = self.messages.len();
             let recent: Vec<_> = self
                 .messages
                 .iter()
@@ -530,6 +617,9 @@ impl Agent {
                 .into_iter()
                 .rev()
                 .collect();
+            let compressed_count = messages_before
+                .saturating_sub(recent.len())
+                .saturating_sub(usize::from(system_msg.is_some()));
 
             self.messages.clear();
             if let Some(sys) = system_msg {
@@ -537,8 +627,7 @@ impl Agent {
             }
             self.messages.push(crate::api::types::Message::user(format!(
                 "[STRUCTURED SUMMARY — {} earlier messages compressed]\n{}",
-                self.messages.len(),
-                summary
+                compressed_count, summary
             )));
             self.messages
                 .push(crate::api::types::Message::user("[RECENT CONTEXT]:"));
@@ -646,6 +735,19 @@ mod tests {
         Agent::new(config)
             .await
             .expect("failed to create test agent")
+    }
+
+    fn assistant_tool_call(id: &str, name: &str) -> Message {
+        let mut message = Message::assistant("");
+        message.tool_calls = Some(vec![crate::api::types::ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        }]);
+        message
     }
 
     // =====================================================================
@@ -1345,6 +1447,9 @@ mod tests {
         agent
             .messages
             .push(Message::user(format!("older filler {}", filler)));
+        agent
+            .messages
+            .push(assistant_tool_call("call_1", "file_read"));
         agent.messages.push(Message::tool(
             r#"{"content":"critical tool result"}"#,
             "call_1",
@@ -1362,18 +1467,45 @@ mod tests {
             .filter(|m| m.role == "system")
             .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
             .sum();
-        let tool_tokens =
-            crate::token_count::estimate_tokens_with_overhead(agent.messages[2].content.text(), 4);
-        agent.max_context_tokens = system_tokens + tool_tokens + 50;
+        let assistant_tokens = crate::agent::context::estimate_message_tokens(&agent.messages[2]);
+        let tool_tokens = crate::agent::context::estimate_message_tokens(&agent.messages[3]);
+        agent.max_context_tokens = system_tokens + assistant_tokens + tool_tokens + 50;
 
         agent.trim_message_history();
 
+        assert!(agent.messages.iter().any(|message| message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.iter().any(|call| call.id == "call_1"))));
         assert!(agent.messages.iter().any(|message| message.role == "tool"
             && message.content.text().contains("critical tool result")));
         assert!(!agent
             .messages
             .iter()
             .any(|message| message.content.text().contains("older filler")));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_trim_message_history_drops_orphaned_native_tool_result() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let mut agent = make_test_agent(&server).await;
+
+        agent.max_context_tokens = 20;
+        agent.messages.push(Message::user("x".repeat(400)));
+        agent.messages.push(Message::tool(
+            r#"{"content":"orphaned tool result"}"#,
+            "call_orphan",
+        ));
+
+        agent.trim_message_history();
+
+        assert!(
+            !agent.messages.iter().any(|message| message.role == "tool"
+                && message.tool_call_id.as_deref() == Some("call_orphan")),
+            "trimmed history must not keep tool results without matching assistant tool_calls"
+        );
 
         server.stop().await;
     }

@@ -633,9 +633,9 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long)]
     pub force_rerun: bool,
 
-    /// Prompt mode: `diagnostic` includes fail-to-pass tests (default);
-    /// `official` excludes them for valid scoring.
-    #[arg(long, default_value = "diagnostic")]
+    /// Prompt mode: `official` excludes oracle test fields for valid scoring;
+    /// `diagnostic` includes fail-to-pass tests for local debugging.
+    #[arg(long, default_value = "official")]
     pub prompt_mode: String,
 
     /// Prompt profile: `default` (legacy) or `swebench_pro` (Qwen3.6-optimized).

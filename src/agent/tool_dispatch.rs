@@ -1220,10 +1220,6 @@ impl Agent {
                         path, edit_fail_count
                     );
 
-                    // Clear ALL file_edit failures for this path to prevent further suppression
-                    self.recent_failed_tool_attempts
-                        .retain(|a| a.tool_name != "file_edit");
-
                     // Force-read the file so the model sees current content
                     let read_result = if std::path::Path::new(path).exists() {
                         match std::fs::read_to_string(path) {
@@ -1266,7 +1262,7 @@ impl Agent {
                         start_time,
                         false,
                     );
-                    self.consecutive_suppressions = 0; // reset — we gave the model new info
+                    self.consecutive_suppressions += 1;
                     return true;
                 }
             }
@@ -2610,7 +2606,9 @@ impl Agent {
 
         let execution = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
-            tool.execute(args.clone()),
+            crate::observability::telemetry::track_tool_execution(name, || {
+                tool.execute(args.clone())
+            }),
         )
         .await;
 

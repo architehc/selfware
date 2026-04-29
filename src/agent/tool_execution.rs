@@ -55,12 +55,13 @@ impl Agent {
         let args_hash = hash_tool_args(args_str);
         let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
 
-        self.recent_failed_tool_attempts.push_back(FailedToolAttempt {
-            tool_name: tool_name.to_string(),
-            args_hash,
-            failure_kind,
-            error_preview,
-        });
+        self.recent_failed_tool_attempts
+            .push_back(FailedToolAttempt {
+                tool_name: tool_name.to_string(),
+                args_hash,
+                failure_kind,
+                error_preview,
+            });
 
         // Maintain fixed-size window
         while self.recent_failed_tool_attempts.len() > FAILED_TOOL_ATTEMPT_WINDOW_SIZE {
@@ -84,7 +85,10 @@ impl Agent {
         let call_id = tool_call_id.unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
 
         let fake_call = if use_native_fc {
-            format!(r#"{{"id":"{}","function{{"name":"{}","arguments":{}}}}"#, call_id, name, args_str)
+            format!(
+                r#"{{"id":"{}","type":"function","function":{{"name":"{}","arguments":{}}}}}"#,
+                call_id, name, args_str
+            )
         } else {
             format!(r#"{{"name":"{}","arguments":{}}}"#, name, args_str)
         };
@@ -181,7 +185,16 @@ impl Agent {
         start_time: std::time::Instant,
     ) -> Result<()> {
         let tool = self.tools.get(name).ok_or_else(|| {
-            anyhow::anyhow!("Tool not found: {}. Available tools: {}", name, self.tools.list().iter().map(|t| t.name()).collect::<Vec<_>>().join(", "))
+            anyhow::anyhow!(
+                "Tool not found: {}. Available tools: {}",
+                name,
+                self.tools
+                    .list()
+                    .iter()
+                    .map(|t| t.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         })?;
 
         // Hook: before_tool
@@ -279,7 +292,11 @@ impl Agent {
         self.self_improvement.record_tool(
             name,
             self.learning_context(),
-            if success { Outcome::Success } else { Outcome::Failure },
+            if success {
+                Outcome::Success
+            } else {
+                Outcome::Failure
+            },
             duration_ms,
             if !success { Some(result_str) } else { None },
         );

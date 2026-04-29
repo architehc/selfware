@@ -16,6 +16,7 @@ use ratatui::{
 };
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 
 /// Application state for swarm UI
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,7 +454,7 @@ impl SwarmApp {
 /// Render pause indicator overlay
 fn render_pause_indicator(frame: &mut Frame, area: Rect) {
     let text = " ⏸ PAUSED ";
-    let width = text.len() as u16 + 4;
+    let width = UnicodeWidthStr::width(text) as u16 + 4;
     let height = 3;
     let x = (area.width - width) / 2;
     let y = (area.height - height) / 2;

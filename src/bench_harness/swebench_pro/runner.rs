@@ -113,15 +113,21 @@ fn trial_state_from_result(result: &PerRunResult) -> (TrialState, Option<String>
         } else {
             (TrialState::AgentFailed, Some(result.error.clone()))
         }
-    } else if result.exit_code != 0 || result.timed_out {
-        (TrialState::AgentFailed, None)
-    } else {
+    } else if result.patch_bytes > 0 {
+        // A nonzero agent exit can still leave an evaluable patch. Treat it as
+        // captured so resume/eval do not rerun and double-count the trial.
         (TrialState::PatchCaptured, None)
+    } else if result.exit_code == 0 && !result.timed_out {
+        (TrialState::PatchCaptured, None)
+    } else {
+        (TrialState::AgentFailed, None)
     }
 }
 
 /// Reconstruct a `PerRunResult` from disk for a trial that is being skipped
-/// during resume. Falls back to a synthetic record if `result.json` is missing.
+/// during resume. Missing `result.json` is treated as an unknown failed run:
+/// a stale `.pred` proves only that a patch file exists, not that the agent
+/// completed successfully.
 fn reconstruct_result_from_disk(
     opts: &SwebenchProOpts,
     spec: &QuantSpec,
@@ -149,17 +155,29 @@ fn reconstruct_result_from_disk(
         (0, 0)
     };
 
+    let error = if pred_path.exists() {
+        format!(
+            "resume skipped stale patch without result.json: {}",
+            result_path.display()
+        )
+    } else {
+        format!(
+            "resume skipped trial without result.json: {}",
+            result_path.display()
+        )
+    };
+
     Ok(PerRunResult {
         instance_id: inst.instance_id.clone(),
         quant: spec.label.clone(),
         trial,
-        exit_code: 0,
+        exit_code: 1,
         timed_out: false,
         wall_secs: 0.0,
         patch_lines: lines,
         patch_bytes: bytes,
         pred_path,
-        error: String::new(),
+        error,
         empty_diff: lines == 0 && bytes == 0,
         test_only_patch: false,
         has_source_edit: false,
@@ -433,10 +451,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
     // Per-quant outer loop matches Python — boot once, drive every instance × trial,
     // tear down before next quant.
     for quant in &valid_quants {
-        let spec = catalog
-            .get(quant)
-            .expect("validated above")
-            .clone();
+        let spec = catalog.get(quant).expect("validated above").clone();
 
         eprintln!("{}", "=".repeat(70));
         eprintln!("QUANT: {}", quant);
@@ -846,6 +861,12 @@ fn run_one_candidate(
             "  → {} (trial {} candidate {}): SKIP (pred exists)",
             inst.instance_id, trial, candidate
         );
+        let result_path = candidate_dir.join("result.json");
+        if result_path.exists() {
+            let bytes = std::fs::read(&result_path)?;
+            let result: PerRunResult = serde_json::from_slice(&bytes)?;
+            return Ok(result);
+        }
         let bytes = std::fs::metadata(&pred_path)
             .map(|m| m.len() as usize)
             .unwrap_or(0);
@@ -856,13 +877,16 @@ fn run_one_candidate(
             instance_id: inst.instance_id.clone(),
             quant: spec.label.clone(),
             trial,
-            exit_code: 0,
+            exit_code: 1,
             timed_out: false,
             wall_secs: 0.0,
             patch_lines: lines,
             patch_bytes: bytes,
             pred_path,
-            error: String::new(),
+            error: format!(
+                "skip-existing found .pred without result.json: {}",
+                result_path.display()
+            ),
             empty_diff: lines == 0 && bytes == 0,
             test_only_patch: false,
             has_source_edit: false,
@@ -1149,6 +1173,12 @@ fn run_one(
             "  → {} (trial {}): SKIP (pred exists)",
             inst.instance_id, trial
         );
+        let result_path = trial_dir.join("result.json");
+        if result_path.exists() {
+            let bytes = std::fs::read(&result_path)?;
+            let result: PerRunResult = serde_json::from_slice(&bytes)?;
+            return Ok((result, vec![]));
+        }
         let bytes = std::fs::metadata(&trial_pred)
             .map(|m| m.len() as usize)
             .unwrap_or(0);
@@ -1159,13 +1189,16 @@ fn run_one(
             instance_id: inst.instance_id.clone(),
             quant: spec.label.clone(),
             trial,
-            exit_code: 0,
+            exit_code: 1,
             timed_out: false,
             wall_secs: 0.0,
             patch_lines: lines,
             patch_bytes: bytes,
             pred_path: trial_pred,
-            error: String::new(),
+            error: format!(
+                "skip-existing found .pred without result.json: {}",
+                result_path.display()
+            ),
             empty_diff: lines == 0 && bytes == 0,
             test_only_patch: false,
             has_source_edit: false,
@@ -1246,7 +1279,7 @@ fn run_one(
         patch_lines: best.patch_lines,
         patch_bytes: best.patch_bytes,
         pred_path: trial_pred.clone(),
-        error: String::new(),
+        error: best.error.clone(),
         empty_diff: best.empty_diff,
         test_only_patch: best.test_only_patch,
         has_source_edit: best.has_source_edit,
@@ -1271,26 +1304,54 @@ fn run_one(
     Ok((synthetic, candidate_results))
 }
 
+fn diff_path_from_line(line: &str) -> Option<&str> {
+    if line.starts_with("diff --git ") {
+        return line.find(" b/").map(|b_start| &line[b_start + 3..]);
+    }
+    if let Some(path) = line.strip_prefix("+++ b/") {
+        return Some(path);
+    }
+    if let Some(path) = line.strip_prefix("--- a/") {
+        return Some(path);
+    }
+    None
+}
+
+fn is_test_path(path: &str) -> bool {
+    let lower = path.trim_matches('"').to_ascii_lowercase();
+    let mut parts = lower.split('/').filter(|part| !part.is_empty());
+    if parts
+        .clone()
+        .any(|part| matches!(part, "test" | "tests" | "__tests__" | "spec" | "specs"))
+    {
+        return true;
+    }
+
+    let basename = parts.next_back().unwrap_or(lower.as_str());
+    let stem = basename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(basename);
+    stem == "test"
+        || stem == "spec"
+        || stem.starts_with("test_")
+        || stem.starts_with("test-")
+        || stem.starts_with("spec_")
+        || stem.starts_with("spec-")
+        || stem.ends_with("_test")
+        || stem.ends_with("-test")
+        || stem.ends_with("_spec")
+        || stem.ends_with("-spec")
+        || basename.contains(".test.")
+        || basename.contains(".spec.")
+}
+
 /// Parse a git diff and determine whether every modified file is a test file.
-/// A file counts as a test file when its path or basename contains "test".
 fn is_test_only_patch(patch: &str) -> bool {
     let mut has_any_file = false;
     for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            // Extract the b/ path after "diff --git a/... b/..."
-            if let Some(b_start) = line.find(" b/") {
-                let path = &line[b_start + 3..];
-                let basename = path.rsplit('/').next().unwrap_or(path);
-                if !path.contains("test") && !basename.contains("test") {
-                    return false;
-                }
-                has_any_file = true;
-            }
-        } else if line.starts_with("+++ b/") || line.starts_with("--- a/") {
-            // Fallback for unified diff headers without diff --git
-            let path = &line[6..];
-            let basename = path.rsplit('/').next().unwrap_or(path);
-            if !path.contains("test") && !basename.contains("test") {
+        if let Some(path) = diff_path_from_line(line) {
+            if !is_test_path(path) {
                 return false;
             }
             has_any_file = true;
@@ -1302,18 +1363,8 @@ fn is_test_only_patch(patch: &str) -> bool {
 /// Parse a git diff and determine whether *any* modified file is a test file.
 fn has_test_edit_in_patch(patch: &str) -> bool {
     for line in patch.lines() {
-        if line.starts_with("diff --git ") {
-            if let Some(b_start) = line.find(" b/") {
-                let path = &line[b_start + 3..];
-                let basename = path.rsplit('/').next().unwrap_or(path);
-                if path.contains("test") || basename.contains("test") {
-                    return true;
-                }
-            }
-        } else if line.starts_with("+++ b/") || line.starts_with("--- a/") {
-            let path = &line[6..];
-            let basename = path.rsplit('/').next().unwrap_or(path);
-            if path.contains("test") || basename.contains("test") {
+        if let Some(path) = diff_path_from_line(line) {
+            if is_test_path(path) {
                 return true;
             }
         }
@@ -1335,7 +1386,7 @@ struct AggregateEntry {
     quant: String,
     instance_id: String,
     trials: u32,
-    /// Proxy metric: runs that exited cleanly, didn't time out, and produced a non-empty patch.
+    /// Diagnostic metric: runs that reached the agent and produced a non-empty patch.
     attempted_patch: u32,
     attempted_patch_rate: f64,
     empty_patch_rate: f64,
@@ -1414,14 +1465,16 @@ fn write_aggregate(
     let mut pass_at_1_count = 0usize;
     let mut pass_at_k_oracle_count = 0usize;
     let mut pass_at_k_oracle_is_proxy = false;
+    let evaluated_runs = official_eval.map(|_| best_runs_by_quant_instance(runs));
 
     for ((quant, instance_id), group_runs) in groups {
+        let key = (quant.clone(), instance_id.clone());
         // Separate selected results (candidate_num == 0) from raw candidates.
         let selected: Vec<_> = group_runs.iter().filter(|r| r.candidate_num == 0).collect();
         let total = selected.len() as u32;
         let attempted_patch = selected
             .iter()
-            .filter(|r| r.exit_code == 0 && !r.timed_out && r.patch_bytes > 0)
+            .filter(|r| r.error.is_empty() && r.patch_bytes > 0)
             .count() as u32;
         let empty_patch = selected.iter().filter(|r| r.empty_diff).count() as u32;
         let test_only = selected.iter().filter(|r| r.test_only_patch).count() as u32;
@@ -1464,20 +1517,27 @@ fn write_aggregate(
         let median_patch_lines = median_f64(&lines);
 
         let official = official_eval
-            .and_then(|m| m.by_pair.get(&(quant.clone(), instance_id.clone())))
+            .and_then(|m| m.by_pair.get(&key))
             .cloned()
             .unwrap_or_default();
+        let evaluated_run = evaluated_runs.as_ref().and_then(|m| m.get(&key).copied());
 
         // Build CandidatePool from *all* runs (selected + candidates) for this pair.
         let candidates: Vec<Candidate> = group_runs
             .iter()
             .map(|r| {
                 let patch = std::fs::read_to_string(&r.pred_path).unwrap_or_default();
-                let oe = official_eval
-                    .and_then(|m| m.by_pair.get(&(quant.clone(), instance_id.clone())))
-                    .map(|s| OfficialEvalResult {
-                        resolved: s.resolved,
-                    });
+                let oe = match (official_eval, evaluated_run) {
+                    (Some(_), Some(evaluated))
+                        if evaluated.trial == r.trial
+                            && evaluated.candidate_num == r.candidate_num =>
+                    {
+                        Some(OfficialEvalResult {
+                            resolved: official.resolved,
+                        })
+                    }
+                    _ => None,
+                };
                 Candidate {
                     trial: r.trial,
                     patch,
@@ -1494,7 +1554,7 @@ fn write_aggregate(
         let pool = CandidatePool::new(candidates);
         let pass_at_1 = pool.pass_at_1();
         let pass_at_k_oracle = pool.pass_at_k_oracle();
-        if pass_at_k_oracle && !pool.all_have_official_eval() {
+        if pass_at_k_oracle && !pool.has_any_official_eval() {
             pass_at_k_oracle_is_proxy = true;
         }
         if pass_at_1 {
@@ -1531,7 +1591,7 @@ fn write_aggregate(
     let attempted_patch_total = runs
         .iter()
         .filter(|r| r.candidate_num == 0)
-        .filter(|r| r.exit_code == 0 && !r.timed_out && r.patch_bytes > 0)
+        .filter(|r| r.error.is_empty() && r.patch_bytes > 0)
         .count();
     let selected_count = runs.iter().filter(|r| r.candidate_num == 0).count();
     let attempted_patch_rate = if selected_count == 0 {
@@ -1587,8 +1647,8 @@ fn median_f64(sorted: &[f64]) -> f64 {
 fn best_runs_by_quant_instance(runs: &[PerRunResult]) -> BTreeMap<(String, String), &PerRunResult> {
     let mut best: BTreeMap<(String, String), &PerRunResult> = BTreeMap::new();
     for r in runs {
-        if r.candidate_num > 0 {
-            continue; // candidates are not promoted to patches.json
+        if r.candidate_num > 0 || !r.error.is_empty() || r.patch_bytes == 0 {
+            continue; // candidates/infra failures/empty patches are not promoted to patches.json
         }
         let key = (r.quant.clone(), r.instance_id.clone());
         match best.get(&key) {
@@ -1682,15 +1742,33 @@ fn run_official_eval(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<Of
         );
     }
 
+    let eval_script = opts
+        .official_eval_script
+        .canonicalize()
+        .with_context(|| format!("resolving {}", opts.official_eval_script.display()))?;
+    let raw_sample_path = opts
+        .official_eval_raw_sample_path
+        .canonicalize()
+        .with_context(|| format!("resolving {}", opts.official_eval_raw_sample_path.display()))?;
+    let scripts_dir = opts
+        .official_eval_scripts_dir
+        .canonicalize()
+        .with_context(|| format!("resolving {}", opts.official_eval_scripts_dir.display()))?;
+    let output_root = absolute_path(&opts.output)?;
+
     let best = best_runs_by_quant_instance(runs);
     let mut by_quant: BTreeMap<String, Vec<&PerRunResult>> = BTreeMap::new();
     for ((quant, _instance_id), run) in best {
         by_quant.entry(quant).or_default().push(run);
     }
 
-    let eval_root = opts.output.join("eval");
+    let eval_root = output_root.join("eval");
     std::fs::create_dir_all(&eval_root)
         .with_context(|| format!("creating {}", eval_root.display()))?;
+    let normalized_raw_sample_path = prepare_official_eval_sample(
+        &raw_sample_path,
+        &eval_root.join("raw_sample.normalized.jsonl"),
+    )?;
 
     let mut statuses = OfficialEvalMap::default();
     let mut summaries = Vec::new();
@@ -1713,17 +1791,23 @@ fn run_official_eval(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<Of
             });
         }
         std::fs::write(&patch_path, serde_json::to_vec_pretty(&preds)?)?;
+        let patch_path = patch_path
+            .canonicalize()
+            .with_context(|| format!("resolving {}", patch_path.display()))?;
+        let eval_dir = eval_dir
+            .canonicalize()
+            .with_context(|| format!("resolving {}", eval_dir.display()))?;
 
         let mut cmd = std::process::Command::new("python3");
-        cmd.arg(&opts.official_eval_script)
+        cmd.arg(&eval_script)
             .arg("--raw_sample_path")
-            .arg(&opts.official_eval_raw_sample_path)
+            .arg(&normalized_raw_sample_path)
             .arg("--patch_path")
             .arg(&patch_path)
             .arg("--output_dir")
             .arg(&eval_dir)
             .arg("--scripts_dir")
-            .arg(&opts.official_eval_scripts_dir)
+            .arg(&scripts_dir)
             .arg("--dockerhub_username")
             .arg(&opts.official_eval_dockerhub_username)
             .arg("--num_workers")
@@ -1737,13 +1821,13 @@ fn run_official_eval(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<Of
         if opts.official_eval_block_network {
             cmd.arg("--block_network");
         }
-        if let Some(parent) = opts.official_eval_script.parent() {
+        if let Some(parent) = eval_script.parent() {
             cmd.current_dir(parent);
         }
 
         let output = cmd
             .output()
-            .with_context(|| format!("spawning {}", opts.official_eval_script.display()))?;
+            .with_context(|| format!("spawning {}", eval_script.display()))?;
         let exit_code = output.status.code();
         let eval_error = if output.status.success() {
             String::new()
@@ -1753,11 +1837,13 @@ fn run_official_eval(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<Of
         std::fs::write(
             eval_dir.join("eval_invocation.json"),
             serde_json::to_vec_pretty(&json!({
-                "script": opts.official_eval_script,
-                "raw_sample_path": opts.official_eval_raw_sample_path,
-                "patch_path": patch_path,
-                "output_dir": eval_dir,
-                "scripts_dir": opts.official_eval_scripts_dir,
+                "script": &opts.official_eval_script,
+                "resolved_script": &eval_script,
+                "raw_sample_path": &normalized_raw_sample_path,
+                "original_raw_sample_path": &raw_sample_path,
+                "patch_path": &patch_path,
+                "output_dir": &eval_dir,
+                "scripts_dir": &scripts_dir,
                 "dockerhub_username": opts.official_eval_dockerhub_username,
                 "num_workers": opts.official_eval_num_workers.max(1),
                 "use_local_docker": opts.official_eval_use_local_docker,
@@ -1839,6 +1925,80 @@ fn safe_path_component(s: &str) -> String {
         .collect()
 }
 
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn prepare_official_eval_sample(input: &Path, output: &Path) -> Result<PathBuf> {
+    if input.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return Ok(input.to_path_buf());
+    }
+
+    let data = std::fs::read_to_string(input)
+        .with_context(|| format!("reading raw sample {}", input.display()))?;
+    let mut normalized = String::new();
+    for (line_idx, line) in data.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut row: serde_json::Value = serde_json::from_str(line).with_context(|| {
+            format!(
+                "parsing raw sample {} line {}",
+                input.display(),
+                line_idx + 1
+            )
+        })?;
+        if let Some(obj) = row.as_object_mut() {
+            normalize_eval_test_list(obj, "fail_to_pass", "FAIL_TO_PASS");
+            normalize_eval_test_list(obj, "pass_to_pass", "PASS_TO_PASS");
+        }
+        normalized.push_str(&serde_json::to_string(&row)?);
+        normalized.push('\n');
+    }
+
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(output, normalized)
+        .with_context(|| format!("writing normalized raw sample {}", output.display()))?;
+    output
+        .canonicalize()
+        .with_context(|| format!("resolving {}", output.display()))
+}
+
+fn normalize_eval_test_list(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    lower_key: &str,
+    upper_key: &str,
+) {
+    let value = obj
+        .get(lower_key)
+        .cloned()
+        .or_else(|| obj.get(upper_key).cloned())
+        .unwrap_or(serde_json::Value::Null);
+    obj.insert(
+        lower_key.to_string(),
+        serde_json::Value::String(eval_list_literal(&value)),
+    );
+}
+
+fn eval_list_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) if s.trim().is_empty() => "[]".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(_) => {
+            serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string())
+        }
+        serde_json::Value::Null => "[]".to_string(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "[]".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1853,6 +2013,56 @@ mod tests {
             selected_test_files_to_run: serde_json::json!(["tests/test_a.py"]),
             repo_language: Some("python".into()),
             extra: Default::default(),
+        }
+    }
+
+    fn dummy_quant(label: &str) -> QuantSpec {
+        use super::super::catalog::{BackendProfile, ThinkingPolicy};
+
+        QuantSpec {
+            label: label.into(),
+            gguf: "test.gguf".into(),
+            alias: "test-alias".into(),
+            mmproj: "mmproj.gguf".into(),
+            name: "Test".into(),
+            ctx: 65_536,
+            max_parallel: 1,
+            kv_cache_type: "q8_0".into(),
+            tensor_split: None,
+            temperature: 0.7,
+            thinking_policy: ThinkingPolicy::Enable,
+            backend: BackendProfile::LlamaCpp,
+        }
+    }
+
+    fn dummy_opts(output: PathBuf) -> SwebenchProOpts {
+        SwebenchProOpts {
+            quants: vec!["q1".into()],
+            instance_ids: vec![],
+            instances: 1,
+            scenario_timeout: Duration::from_secs(1),
+            ctx: 65_536,
+            parallel: 1,
+            concurrency: 1,
+            trials: 1,
+            candidates: 1,
+            output,
+            selfware_bin: PathBuf::from("selfware"),
+            skip_existing: false,
+            llama_opts: LlamaServerOpts::default(),
+            prompt_mode: "official".into(),
+            prompt_profile: "swebench_pro".into(),
+            official_eval: false,
+            official_eval_script: PathBuf::from("eval.py"),
+            official_eval_raw_sample_path: PathBuf::from("sample.jsonl"),
+            official_eval_scripts_dir: PathBuf::from("scripts"),
+            official_eval_dockerhub_username: "local".into(),
+            official_eval_num_workers: 1,
+            official_eval_use_local_docker: true,
+            official_eval_redo: false,
+            official_eval_block_network: false,
+            resume: false,
+            force_rerun: false,
         }
     }
 
@@ -1939,6 +2149,75 @@ mod tests {
 +new
 "#;
         assert!(!is_test_only_patch(patch));
+    }
+
+    #[test]
+    fn test_path_detection_does_not_match_substrings() {
+        let patch = r#"diff --git a/src/contest.py b/src/contest.py
+--- a/src/contest.py
++++ b/src/contest.py
+@@ -1 +1 @@
+-old
++new
+"#;
+        assert!(!is_test_only_patch(patch));
+        assert!(!has_test_edit_in_patch(patch));
+    }
+
+    #[test]
+    fn test_path_detection_matches_common_test_names() {
+        assert!(is_test_path("tests/test_user.py"));
+        assert!(is_test_path("src/foo/user_test.rs"));
+        assert!(is_test_path("web/Button.test.tsx"));
+        assert!(is_test_path("pkg/__tests__/button.js"));
+        assert!(!is_test_path("src/contest.py"));
+        assert!(!is_test_path("src/latest.rs"));
+    }
+
+    #[test]
+    fn prepare_official_eval_sample_normalizes_uppercase_test_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("sample.jsonl");
+        let output = dir.path().join("out").join("sample.normalized.jsonl");
+        std::fs::write(
+            &input,
+            r#"{"instance_id":"i1","FAIL_TO_PASS":["tests/test_a.py::test_x"],"PASS_TO_PASS":"[\"tests/test_b.py::test_y\"]"}"#,
+        )
+        .unwrap();
+
+        let normalized_path = prepare_official_eval_sample(&input, &output).unwrap();
+        let row: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(normalized_path).unwrap()).unwrap();
+
+        assert_eq!(row["fail_to_pass"], r#"["tests/test_a.py::test_x"]"#);
+        assert_eq!(row["pass_to_pass"], r#"["tests/test_b.py::test_y"]"#);
+    }
+
+    #[test]
+    fn nonzero_agent_exit_with_patch_is_patch_captured() {
+        let result = PerRunResult {
+            instance_id: "i1".into(),
+            quant: "q1".into(),
+            trial: 1,
+            exit_code: 1,
+            timed_out: false,
+            wall_secs: 1.0,
+            patch_lines: 3,
+            patch_bytes: 42,
+            pred_path: PathBuf::from("i1.pred"),
+            error: String::new(),
+            empty_diff: false,
+            test_only_patch: false,
+            has_source_edit: true,
+            has_test_edit: false,
+            syntax_check_passed: true,
+            candidate_num: 0,
+        };
+
+        let (state, error) = trial_state_from_result(&result);
+
+        assert_eq!(state, TrialState::PatchCaptured);
+        assert!(error.is_none());
     }
 
     #[test]
@@ -2187,5 +2466,94 @@ diff --git a/tests/test_a.py b/tests/test_a.py
         assert_eq!(entry["pass_at_k_oracle"], true);
         // attempted_patch_rate should be based on selected results only
         assert_eq!(entry["attempted_patch_rate"], 1.0);
+    }
+
+    #[test]
+    fn write_aggregate_does_not_proxy_pass_at_k_when_official_eval_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("selected.pred"), "selected\n").unwrap();
+        std::fs::write(dir.path().join("candidate.pred"), "candidate\n").unwrap();
+
+        let runs = vec![
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 2,
+                patch_bytes: 10,
+                pred_path: dir.path().join("selected.pred"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
+                candidate_num: 0,
+            },
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 1,
+                patch_bytes: 5,
+                pred_path: dir.path().join("candidate.pred"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
+                candidate_num: 1,
+            },
+        ];
+
+        let mut by_pair = BTreeMap::new();
+        by_pair.insert(
+            ("q1".to_string(), "i1".to_string()),
+            OfficialEvalStatus {
+                eval_completed: true,
+                patch_applied: true,
+                f2p_p2p_passed: false,
+                resolved: false,
+                eval_error: String::new(),
+            },
+        );
+
+        write_aggregate(dir.path(), &runs, Some(&OfficialEvalMap { by_pair })).unwrap();
+
+        let agg: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("aggregate.json")).unwrap())
+                .unwrap();
+
+        assert_eq!(agg["pass_at_k_oracle_rate"], 0.0);
+        assert_eq!(agg["pass_at_k_oracle_is_proxy"], false);
+        assert_eq!(agg["entries"][0]["pass_at_k_oracle"], false);
+    }
+
+    #[test]
+    fn reconstruct_missing_result_json_is_failed_even_when_pred_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = dummy_opts(dir.path().to_path_buf());
+        let spec = dummy_quant("q1");
+        let inst = dummy_instance();
+        let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, 1);
+        std::fs::create_dir_all(&trial_dir).unwrap();
+        std::fs::write(
+            trial_dir.join(format!("{}.pred", inst.instance_id)),
+            "patch\n",
+        )
+        .unwrap();
+
+        let result = reconstruct_result_from_disk(&opts, &spec, &inst, 1).unwrap();
+
+        assert_ne!(result.exit_code, 0);
+        assert!(result.error.contains("without result.json"));
+        assert_eq!(result.patch_bytes, 6);
     }
 }
