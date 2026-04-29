@@ -53,8 +53,16 @@ impl CandidatePool {
     pub fn select_best(&self) -> Option<&Candidate> {
         self.candidates.iter().max_by(|a, b| {
             // 1. Official eval resolved=true
-            let a_official = a.official_eval.as_ref().map(|e| e.resolved).unwrap_or(false);
-            let b_official = b.official_eval.as_ref().map(|e| e.resolved).unwrap_or(false);
+            let a_official = a
+                .official_eval
+                .as_ref()
+                .map(|e| e.resolved)
+                .unwrap_or(false);
+            let b_official = b
+                .official_eval
+                .as_ref()
+                .map(|e| e.resolved)
+                .unwrap_or(false);
             a_official
                 .cmp(&b_official)
                 // 2. Non-empty source diff + no test edits
@@ -84,22 +92,24 @@ impl CandidatePool {
     /// an **upper bound**.
     pub fn pass_at_k_oracle(&self) -> bool {
         let any_official = self.candidates.iter().any(|c| {
-            c.official_eval.as_ref().map(|e| e.resolved).unwrap_or(false)
+            c.official_eval
+                .as_ref()
+                .map(|e| e.resolved)
+                .unwrap_or(false)
         });
         if any_official {
             return true;
         }
         // Proxy-based upper bound when official eval is not available.
-        self.candidates.iter().any(|c| {
-            c.has_source_edit && !c.has_test_edit && c.syntax_check_passed
-        })
+        self.candidates
+            .iter()
+            .any(|c| c.has_source_edit && !c.has_test_edit && c.syntax_check_passed)
     }
 
     /// Returns `true` when every candidate in the pool has official-eval
     /// data.  Used by reporting to label `pass@k_oracle` accurately.
     pub fn all_have_official_eval(&self) -> bool {
-        !self.candidates.is_empty()
-            && self.candidates.iter().all(|c| c.official_eval.is_some())
+        !self.candidates.is_empty() && self.candidates.iter().all(|c| c.official_eval.is_some())
     }
 }
 
@@ -182,9 +192,7 @@ mod tests {
 
     #[test]
     fn pass_at_1_false_when_no_official_eval() {
-        let pool = CandidatePool::new(vec![
-            make_candidate(1, 10, true, false, true, None),
-        ]);
+        let pool = CandidatePool::new(vec![make_candidate(1, 10, true, false, true, None)]);
         assert!(!pool.pass_at_1());
     }
 
