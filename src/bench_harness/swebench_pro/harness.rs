@@ -310,6 +310,9 @@ pub fn run_selfware(
     };
     let log = std::fs::File::create(log_path)
         .with_context(|| format!("opening agent log {}", log_path.display()))?;
+    let bench_config_path = result_dir.join("selfware_bench.toml");
+    write_bench_selfware_config(&bench_config_path, endpoint, alias)
+        .with_context(|| format!("writing {}", bench_config_path.display()))?;
 
     let started = Instant::now();
     let mut cmd = Command::new(selfware_bin);
@@ -322,6 +325,7 @@ pub fn run_selfware(
         .arg("--quiet")
         .arg("--output-format")
         .arg("json")
+        .env("SELFWARE_CONFIG", &bench_config_path)
         .env("SELFWARE_ENDPOINT", endpoint)
         .env("SELFWARE_MODEL", alias)
         .env("SELFWARE_RESULT_DIR", &result_dir)
@@ -382,6 +386,28 @@ pub fn run_selfware(
             }
         }
     }
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn write_bench_selfware_config(path: &Path, endpoint: &str, alias: &str) -> Result<()> {
+    let content = format!(
+        "endpoint = {}\n\
+         model = {}\n\
+         temperature = 0.7\n\
+         max_tokens = 32768\n\n\
+         [agent]\n\
+         native_function_calling = true\n\
+         streaming = true\n\
+         read_loop_policy = \"force_mutation\"\n\
+         disable_turn_artifacts = false\n",
+        toml_string(endpoint),
+        toml_string(alias)
+    );
+    std::fs::write(path, content)?;
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -644,6 +670,17 @@ mod tests {
             .position(|a| a == "--mmproj")
             .expect("--mmproj flag missing");
         assert_eq!(args.get(pos + 1).map(|s| s.as_str()), Some("/tmp/mm.gguf"));
+    }
+
+    #[test]
+    fn bench_selfware_config_forces_native_fc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selfware_bench.toml");
+        write_bench_selfware_config(&path, "http://127.0.0.1:8000/v1", "qwen3.6-27b-q4kp").unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("model = \"qwen3.6-27b-q4kp\""));
+        assert!(content.contains("native_function_calling = true"));
+        assert!(content.contains("read_loop_policy = \"force_mutation\""));
     }
 
     #[test]
