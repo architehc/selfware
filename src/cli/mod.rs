@@ -3200,6 +3200,7 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         parallel: args.parallel,
         concurrency: args.concurrency,
         trials: args.trials,
+        candidates: args.candidates,
         output,
         selfware_bin,
         skip_existing: args.skip_existing,

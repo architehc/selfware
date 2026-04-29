@@ -607,6 +607,12 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long, default_value_t = 1)]
     pub trials: u32,
 
+    /// Number of candidate patches to generate per (quant, instance, trial).
+    /// Each candidate gets its own subdirectory.  The best candidate is
+    /// selected honestly and promoted to the trial-level patch.
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=4))]
+    pub candidates: u32,
+
     /// Output directory (default: reports/swebench_pro/<timestamp>)
     #[arg(long)]
     pub output: Option<String>,

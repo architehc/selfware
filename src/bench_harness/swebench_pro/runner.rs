@@ -39,6 +39,7 @@ pub struct SwebenchProOpts {
     /// effect is that we surface it in `plan.json` for traceability.
     pub concurrency: u32,
     pub trials: u32,
+    pub candidates: u32,
     pub output: PathBuf,
     pub selfware_bin: PathBuf,
     pub skip_existing: bool,
@@ -64,6 +65,10 @@ fn is_false(b: &bool) -> bool {
     !b
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 fn opts_to_snapshot(opts: &SwebenchProOpts) -> SwebenchProOptsSnapshot {
     SwebenchProOptsSnapshot {
         quants: opts.quants.clone(),
@@ -74,6 +79,7 @@ fn opts_to_snapshot(opts: &SwebenchProOpts) -> SwebenchProOptsSnapshot {
         parallel: opts.parallel,
         concurrency: opts.concurrency,
         trials: opts.trials,
+        candidates: opts.candidates,
         prompt_mode: opts.prompt_mode.clone(),
         prompt_profile: opts.prompt_profile.clone(),
         official_eval: opts.official_eval,
@@ -157,6 +163,9 @@ fn reconstruct_result_from_disk(
         empty_diff: lines == 0 && bytes == 0,
         test_only_patch: false,
         has_source_edit: false,
+        has_test_edit: false,
+        syntax_check_passed: false,
+        candidate_num: 0,
     })
 }
 
@@ -181,6 +190,12 @@ struct PerRunResult {
     test_only_patch: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     has_source_edit: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    has_test_edit: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    syntax_check_passed: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    candidate_num: u32,
 }
 
 /// Create a fresh manifest pre-populated with every trial in `Planned` state.
@@ -591,68 +606,62 @@ fn run_trial(
     manifest_path: &Path,
 ) -> Vec<PerRunResult> {
     if concurrency <= 1 {
-        return instances
-            .iter()
-            .filter_map(|inst| {
-                // Check manifest state before running.
-                {
-                    let m = manifest.lock().unwrap();
-                    if let Some(t) = m.find_trial(&spec.label, &inst.instance_id, trial) {
-                        if should_skip_trial(opts, Some(t)) {
-                            eprintln!(
-                                "  → {} (trial {}): SKIP (manifest: {:?})",
-                                inst.instance_id, trial, t.state
-                            );
-                            return match reconstruct_result_from_disk(opts, spec, inst, trial) {
-                                Ok(res) => Some(res),
-                                Err(e) => {
-                                    eprintln!(
-                                        "    {} trial {}: failed to reconstruct skipped result: {}",
-                                        inst.instance_id, trial, e
-                                    );
-                                    None
-                                }
-                            };
-                        }
-                    }
-                }
-
-                match run_one(opts, spec, inst, trial) {
-                    Ok(res) => {
-                        let (state, error) = trial_state_from_result(&res);
-                        {
-                            let mut m = manifest.lock().unwrap();
-                            update_manifest_entry(
-                                &mut m,
-                                &spec.label,
-                                &inst.instance_id,
-                                trial,
-                                state,
-                                error,
-                                Some(res.pred_path.clone()),
-                                Some(
-                                    trial_dir_for(
-                                        &opts.output,
-                                        &spec.label,
-                                        &inst.instance_id,
-                                        trial,
-                                    )
-                                    .join("result.json"),
-                                ),
-                            );
-                            if let Err(we) = m.write_atomic(manifest_path) {
-                                eprintln!("    failed to write manifest: {}", we);
+        let mut out = Vec::new();
+        for inst in instances {
+            // Check manifest state before running.
+            {
+                let m = manifest.lock().unwrap();
+                if let Some(t) = m.find_trial(&spec.label, &inst.instance_id, trial) {
+                    if should_skip_trial(opts, Some(t)) {
+                        eprintln!(
+                            "  → {} (trial {}): SKIP (manifest: {:?})",
+                            inst.instance_id, trial, t.state
+                        );
+                        match reconstruct_result_from_disk(opts, spec, inst, trial) {
+                            Ok(res) => out.push(res),
+                            Err(e) => {
+                                eprintln!(
+                                    "    {} trial {}: failed to reconstruct skipped result: {}",
+                                    inst.instance_id, trial, e
+                                );
                             }
                         }
-                        Some(res)
-                    }
-                    Err(e) => {
-                        eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e);
-                        None
+                        continue;
                     }
                 }
-            })
-            .collect();
+            }
+
+            match run_one(opts, spec, inst, trial) {
+                Ok((selected, mut candidates)) => {
+                    let (state, error) = trial_state_from_result(&selected);
+                    {
+                        let mut m = manifest.lock().unwrap();
+                        update_manifest_entry(
+                            &mut m,
+                            spec.label,
+                            &inst.instance_id,
+                            trial,
+                            state,
+                            error,
+                            Some(selected.pred_path.clone()),
+                            Some(
+                                trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial)
+                                    .join("result.json"),
+                            ),
+                        );
+                        if let Err(we) = m.write_atomic(manifest_path) {
+                            eprintln!("    failed to write manifest: {}", we);
+                        }
+                    }
+                    out.push(selected);
+                    out.append(&mut candidates);
+                }
+                Err(e) => {
+                    eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e);
+                }
+            }
+        }
+        return out;
     }
 
     // Real parallelism: a tiny work-stealing pool of OS threads.  Each thread
@@ -709,8 +718,8 @@ fn run_trial(
                 }
 
                 match run_one(&opts_c, &spec_c, inst, trial) {
-                    Ok(res) => {
-                        let (state, error) = trial_state_from_result(&res);
+                    Ok((selected, mut candidates)) => {
+                        let (state, error) = trial_state_from_result(&selected);
                         {
                             let mut m = manifest_c.lock().unwrap();
                             update_manifest_entry(
@@ -720,7 +729,7 @@ fn run_trial(
                                 trial,
                                 state,
                                 error,
-                                Some(res.pred_path.clone()),
+                                Some(selected.pred_path.clone()),
                                 Some(
                                     trial_dir_for(
                                         &output_c,
@@ -735,7 +744,9 @@ fn run_trial(
                                 eprintln!("    failed to write manifest: {}", we);
                             }
                         }
-                        results.lock().unwrap().push(res);
+                        let mut r = results.lock().unwrap();
+                        r.push(selected);
+                        r.append(&mut candidates);
                     }
                     Err(e) => eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e),
                 }
@@ -795,6 +806,9 @@ fn record_boot_failure(
         empty_diff: true,
         test_only_patch: false,
         has_source_edit: false,
+        has_test_edit: false,
+        syntax_check_passed: false,
+        candidate_num: 0,
     };
     std::fs::write(
         trial_dir.join("result.json"),
@@ -803,30 +817,35 @@ fn record_boot_failure(
     Ok(result)
 }
 
-fn run_one(
+/// Run a single candidate in `candidate_dir`.  When `candidate == 0` this is
+/// the legacy single-candidate path and `candidate_dir` is the trial dir.
+fn run_one_candidate(
     opts: &SwebenchProOpts,
     spec: &QuantSpec,
     inst: &Instance,
     trial: u32,
+    candidate: u32,
+    candidate_dir: &Path,
 ) -> Result<PerRunResult> {
-    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
-    std::fs::create_dir_all(&trial_dir)
-        .with_context(|| format!("creating {}", trial_dir.display()))?;
-    let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
+    std::fs::create_dir_all(candidate_dir)
+        .with_context(|| format!("creating {}", candidate_dir.display()))?;
+    let pred_path = candidate_dir.join(format!("{}.pred", inst.instance_id));
 
-    let mut run_trace = RunTrace::new(
-        format!("{}-{}-{}", spec.label, inst.instance_id, trial),
-        inst.instance_id.clone(),
-        spec.label.clone(),
-        trial,
-    );
+    let run_id = if candidate > 0 {
+        format!(
+            "{}-{}-{}-c{}",
+            spec.label, inst.instance_id, trial, candidate
+        )
+    } else {
+        format!("{}-{}-{}", spec.label, inst.instance_id, trial)
+    };
+    let mut run_trace = RunTrace::new(run_id, inst.instance_id.clone(), spec.label.into(), trial);
 
     if opts.skip_existing && pred_path.exists() {
         eprintln!(
-            "  → {} (trial {}): SKIP (pred exists)",
-            inst.instance_id, trial
+            "  → {} (trial {} candidate {}): SKIP (pred exists)",
+            inst.instance_id, trial, candidate
         );
-        // Reconstruct minimal record from the existing pred so aggregation works.
         let bytes = std::fs::metadata(&pred_path)
             .map(|m| m.len() as usize)
             .unwrap_or(0);
@@ -847,18 +866,25 @@ fn run_one(
             empty_diff: lines == 0 && bytes == 0,
             test_only_patch: false,
             has_source_edit: false,
+            has_test_edit: false,
+            syntax_check_passed: false,
+            candidate_num: candidate,
         });
     }
 
-    eprintln!("  → {} (trial {})", inst.instance_id, trial);
+    if candidate > 0 {
+        eprintln!(
+            "  → {} (trial {} candidate {})",
+            inst.instance_id, trial, candidate
+        );
+    } else {
+        eprintln!("  → {} (trial {})", inst.instance_id, trial);
+    }
 
-    let workdir = trial_dir.join("repo");
+    let workdir = candidate_dir.join("repo");
     if let Err(e) = clone_instance(&inst.repo, &inst.base_commit, &workdir) {
         eprintln!("    clone failed: {}", e);
-        // Persist the failure as a real result.json (exit_code=-2) so the
-        // aggregate denominator counts it as attempted-and-failed instead of
-        // silently dropping the trial.
-        let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
+        let pred_path = candidate_dir.join(format!("{}.pred", inst.instance_id));
         if !pred_path.exists() {
             std::fs::write(&pred_path, "")?;
         }
@@ -876,9 +902,12 @@ fn run_one(
             empty_diff: true,
             test_only_patch: false,
             has_source_edit: false,
+            has_test_edit: false,
+            syntax_check_passed: false,
+            candidate_num: candidate,
         };
         std::fs::write(
-            trial_dir.join("result.json"),
+            candidate_dir.join("result.json"),
             serde_json::to_vec_pretty(&result)?,
         )?;
         return Ok(result);
@@ -979,15 +1008,13 @@ fn run_one(
         prompt = block + &prompt;
     }
 
-    std::fs::write(trial_dir.join("prompt.txt"), &prompt)?;
+    std::fs::write(candidate_dir.join("prompt.txt"), &prompt)?;
     std::fs::write(
-        trial_dir.join("instance.json"),
+        candidate_dir.join("instance.json"),
         serde_json::to_vec_pretty(inst)?,
     )?;
 
-    let log_path = trial_dir.join("agent.log");
-    // Use the configured llama-server port so `--port 8001` actually points
-    // selfware sub-runs at the right endpoint instead of the hard-coded 8000.
+    let log_path = candidate_dir.join("agent.log");
     let endpoint = format!("http://127.0.0.1:{}/v1", opts.llama_opts.port);
     let outcome = run_selfware(
         &opts.selfware_bin,
@@ -997,7 +1024,7 @@ fn run_one(
         &endpoint,
         opts.scenario_timeout,
         &log_path,
-        &trial_dir,
+        candidate_dir,
     )?;
     eprintln!(
         "    agent exit={} after {:.1}s{}",
@@ -1012,7 +1039,6 @@ fn run_one(
     });
     std::fs::write(&pred_path, &patch)?;
 
-    // Use structured output when available, fall back to `capture_patch`.
     let (patch_lines, patch_bytes) = outcome
         .parsed_result
         .as_ref()
@@ -1022,9 +1048,10 @@ fn run_one(
     let empty_diff = patch.trim().is_empty();
     let test_only_patch = !empty_diff && is_test_only_patch(&patch);
     let has_source_edit = !empty_diff && !test_only_patch;
+    let has_test_edit = !empty_diff && has_test_edit_in_patch(&patch);
+    let syntax_check_passed = cheap_syntax_check(&patch);
 
-    // Load trace events written by the subprocess and enrich them.
-    let trace_path = trial_dir.join("trace.jsonl");
+    let trace_path = candidate_dir.join("trace.jsonl");
     if trace_path.exists() {
         if let Ok(loaded) = RunTrace::read_jsonl(&trace_path) {
             run_trace.events = loaded.events;
@@ -1034,7 +1061,7 @@ fn run_one(
         patch_lines,
         patch_bytes,
     });
-    if let Ok(fm_content) = std::fs::read_to_string(trial_dir.join("failure_mode.json")) {
+    if let Ok(fm_content) = std::fs::read_to_string(candidate_dir.join("failure_mode.json")) {
         if let Ok(fm) = serde_json::from_str::<serde_json::Value>(&fm_content) {
             if let Some(kind) = fm.get("kind").and_then(|v| v.as_str()) {
                 let evidence = fm
@@ -1076,9 +1103,12 @@ fn run_one(
         empty_diff,
         test_only_patch,
         has_source_edit,
+        has_test_edit,
+        syntax_check_passed,
+        candidate_num: candidate,
     };
     std::fs::write(
-        trial_dir.join("result.json"),
+        candidate_dir.join("result.json"),
         serde_json::to_vec_pretty(&result)?,
     )?;
     eprintln!(
@@ -1092,6 +1122,153 @@ fn run_one(
     );
 
     Ok(result)
+}
+
+/// Run one or more candidates for a single (quant, instance, trial).
+/// Returns `(selected_best, vec_of_all_candidate_results)`.
+fn run_one(
+    opts: &SwebenchProOpts,
+    spec: &QuantSpec,
+    inst: &Instance,
+    trial: u32,
+) -> Result<(PerRunResult, Vec<PerRunResult>)> {
+    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
+    std::fs::create_dir_all(&trial_dir)
+        .with_context(|| format!("creating {}", trial_dir.display()))?;
+    let trial_pred = trial_dir.join(format!("{}.pred", inst.instance_id));
+
+    // Legacy path: single candidate directly in trial_dir.
+    if opts.candidates <= 1 {
+        let res = run_one_candidate(opts, spec, inst, trial, 0, &trial_dir)?;
+        return Ok((res, vec![]));
+    }
+
+    // Multi-candidate path.
+    if opts.skip_existing && trial_pred.exists() {
+        eprintln!(
+            "  → {} (trial {}): SKIP (pred exists)",
+            inst.instance_id, trial
+        );
+        let bytes = std::fs::metadata(&trial_pred)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let lines = std::fs::read_to_string(&trial_pred)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        let synthetic = PerRunResult {
+            instance_id: inst.instance_id.clone(),
+            quant: spec.label.into(),
+            trial,
+            exit_code: 0,
+            timed_out: false,
+            wall_secs: 0.0,
+            patch_lines: lines,
+            patch_bytes: bytes,
+            pred_path: trial_pred,
+            error: String::new(),
+            empty_diff: lines == 0 && bytes == 0,
+            test_only_patch: false,
+            has_source_edit: false,
+            has_test_edit: false,
+            syntax_check_passed: false,
+            candidate_num: 0,
+        };
+        return Ok((synthetic, vec![]));
+    }
+
+    let mut candidate_results = Vec::new();
+    for c in 1..=opts.candidates {
+        let c_dir = trial_dir.join(format!("candidate_{}", c));
+        match run_one_candidate(opts, spec, inst, trial, c, &c_dir) {
+            Ok(res) => candidate_results.push(res),
+            Err(e) => {
+                eprintln!(
+                    "    {} trial {} candidate {}: error: {}",
+                    inst.instance_id, trial, c, e
+                );
+            }
+        }
+    }
+
+    if candidate_results.is_empty() {
+        // All candidates failed — synthesise a failure result for the trial.
+        if !trial_pred.exists() {
+            std::fs::write(&trial_pred, "")?;
+        }
+        let synthetic = PerRunResult {
+            instance_id: inst.instance_id.clone(),
+            quant: spec.label.into(),
+            trial,
+            exit_code: -2,
+            timed_out: false,
+            wall_secs: 0.0,
+            patch_lines: 0,
+            patch_bytes: 0,
+            pred_path: trial_pred.clone(),
+            error: "all candidates failed".into(),
+            empty_diff: true,
+            test_only_patch: false,
+            has_source_edit: false,
+            has_test_edit: false,
+            syntax_check_passed: false,
+            candidate_num: 0,
+        };
+        std::fs::write(
+            trial_dir.join("result.json"),
+            serde_json::to_vec_pretty(&synthetic)?,
+        )?;
+        return Ok((synthetic, candidate_results));
+    }
+
+    // Honest selection: pick the best candidate using proxy metrics.
+    let best = candidate_results
+        .iter()
+        .max_by(|a, b| {
+            let a_good = a.has_source_edit && !a.has_test_edit;
+            let b_good = b.has_source_edit && !b.has_test_edit;
+            a_good
+                .cmp(&b_good)
+                .then_with(|| b.patch_lines.cmp(&a.patch_lines))
+                .then_with(|| a.syntax_check_passed.cmp(&b.syntax_check_passed))
+        })
+        .unwrap();
+
+    // Promote best candidate patch to trial-level pred.
+    std::fs::copy(&best.pred_path, &trial_pred)?;
+
+    let synthetic = PerRunResult {
+        instance_id: inst.instance_id.clone(),
+        quant: spec.label.into(),
+        trial,
+        exit_code: best.exit_code,
+        timed_out: best.timed_out,
+        wall_secs: best.wall_secs,
+        patch_lines: best.patch_lines,
+        patch_bytes: best.patch_bytes,
+        pred_path: trial_pred.clone(),
+        error: String::new(),
+        empty_diff: best.empty_diff,
+        test_only_patch: best.test_only_patch,
+        has_source_edit: best.has_source_edit,
+        has_test_edit: best.has_test_edit,
+        syntax_check_passed: best.syntax_check_passed,
+        candidate_num: 0,
+    };
+    std::fs::write(
+        trial_dir.join("result.json"),
+        serde_json::to_vec_pretty(&synthetic)?,
+    )?;
+    eprintln!(
+        "    selected candidate {} → {} ({} lines)",
+        best.candidate_num,
+        trial_pred
+            .file_name()
+            .map(|s| s.to_string_lossy())
+            .unwrap_or_default(),
+        best.patch_lines,
+    );
+
+    Ok((synthetic, candidate_results))
 }
 
 /// Parse a git diff and determine whether every modified file is a test file.
@@ -1122,6 +1299,37 @@ fn is_test_only_patch(patch: &str) -> bool {
     has_any_file
 }
 
+/// Parse a git diff and determine whether *any* modified file is a test file.
+fn has_test_edit_in_patch(patch: &str) -> bool {
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            if let Some(b_start) = line.find(" b/") {
+                let path = &line[b_start + 3..];
+                let basename = path.rsplit('/').next().unwrap_or(path);
+                if path.contains("test") || basename.contains("test") {
+                    return true;
+                }
+            }
+        } else if line.starts_with("+++ b/") || line.starts_with("--- a/") {
+            let path = &line[6..];
+            let basename = path.rsplit('/').next().unwrap_or(path);
+            if path.contains("test") || basename.contains("test") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Cheap syntax check: non-empty and no merge-conflict markers.
+fn cheap_syntax_check(patch: &str) -> bool {
+    let trimmed = patch.trim();
+    !trimmed.is_empty()
+        && !trimmed.contains("<<<<<<<")
+        && !trimmed.contains("=======")
+        && !trimmed.contains(">>>>>>>")
+}
+
 #[derive(Serialize)]
 struct AggregateEntry {
     quant: String,
@@ -1145,6 +1353,11 @@ struct AggregateEntry {
     f2p_p2p_passed: bool,
     resolved: bool,
     official_resolution_rate: f64,
+    /// `pass@1` — did the honestly-selected best candidate resolve?
+    pass_at_1: bool,
+    /// `pass@k` oracle — did any candidate resolve?  Labelled as upper bound
+    /// in the report-level metadata.
+    pass_at_k_oracle: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     eval_error: String,
 }
@@ -1156,6 +1369,14 @@ struct AggregateReport {
     attempted_patch_rate: f64,
     official_eval_completed: bool,
     official_resolution_rate: f64,
+    /// `pass@1` — single best candidate per instance (honest selection).
+    pass_at_1_rate: f64,
+    /// `pass@k` oracle — best of k candidates.  **Upper bound**: may be
+    /// proxy-based when official eval was not run on all candidates.
+    pass_at_k_oracle_rate: f64,
+    /// When `true`, `pass_at_k_oracle_rate` is based on proxy metrics
+    /// because not every candidate received an official Docker evaluation.
+    pass_at_k_oracle_is_proxy: bool,
     entries: Vec<AggregateEntry>,
 }
 
@@ -1178,6 +1399,8 @@ fn write_aggregate(
     runs: &[PerRunResult],
     official_eval: Option<&OfficialEvalMap>,
 ) -> Result<()> {
+    use super::candidate::{Candidate, CandidatePool, OfficialEvalResult};
+
     // Group by (quant, instance_id).
     let mut groups: BTreeMap<(String, String), Vec<&PerRunResult>> = BTreeMap::new();
     for r in runs {
@@ -1188,15 +1411,21 @@ fn write_aggregate(
     }
 
     let mut entries = Vec::new();
-    for ((quant, instance_id), trials) in groups {
-        let total = trials.len() as u32;
-        let attempted_patch = trials
+    let mut pass_at_1_count = 0usize;
+    let mut pass_at_k_oracle_count = 0usize;
+    let mut pass_at_k_oracle_is_proxy = false;
+
+    for ((quant, instance_id), group_runs) in groups {
+        // Separate selected results (candidate_num == 0) from raw candidates.
+        let selected: Vec<_> = group_runs.iter().filter(|r| r.candidate_num == 0).collect();
+        let total = selected.len() as u32;
+        let attempted_patch = selected
             .iter()
             .filter(|r| r.exit_code == 0 && !r.timed_out && r.patch_bytes > 0)
             .count() as u32;
-        let empty_patch = trials.iter().filter(|r| r.empty_diff).count() as u32;
-        let test_only = trials.iter().filter(|r| r.test_only_patch).count() as u32;
-        let source_edit = trials.iter().filter(|r| r.has_source_edit).count() as u32;
+        let empty_patch = selected.iter().filter(|r| r.empty_diff).count() as u32;
+        let test_only = selected.iter().filter(|r| r.test_only_patch).count() as u32;
+        let source_edit = selected.iter().filter(|r| r.has_source_edit).count() as u32;
 
         let attempted_patch_rate = if total == 0 {
             0.0
@@ -1219,18 +1448,18 @@ fn write_aggregate(
             source_edit as f64 / total as f64
         };
 
-        let mut walls: Vec<f64> = trials.iter().map(|r| r.wall_secs).collect();
+        let mut walls: Vec<f64> = selected.iter().map(|r| r.wall_secs).collect();
         walls.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median_wall = median_f64(&walls);
         let best_wall = walls.first().copied().unwrap_or(0.0);
 
-        let best_trial = trials
+        let best_trial = selected
             .iter()
             .max_by_key(|r| r.patch_lines)
             .map(|r| r.trial)
             .unwrap_or(0);
 
-        let mut lines: Vec<f64> = trials.iter().map(|r| r.patch_lines as f64).collect();
+        let mut lines: Vec<f64> = selected.iter().map(|r| r.patch_lines as f64).collect();
         lines.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median_patch_lines = median_f64(&lines);
 
@@ -1238,6 +1467,42 @@ fn write_aggregate(
             .and_then(|m| m.by_pair.get(&(quant.clone(), instance_id.clone())))
             .cloned()
             .unwrap_or_default();
+
+        // Build CandidatePool from *all* runs (selected + candidates) for this pair.
+        let candidates: Vec<Candidate> = group_runs
+            .iter()
+            .map(|r| {
+                let patch = std::fs::read_to_string(&r.pred_path).unwrap_or_default();
+                let oe = official_eval
+                    .and_then(|m| m.by_pair.get(&(quant.clone(), instance_id.clone())))
+                    .map(|s| OfficialEvalResult {
+                        resolved: s.resolved,
+                    });
+                Candidate {
+                    trial: r.trial,
+                    patch,
+                    patch_bytes: r.patch_bytes,
+                    patch_lines: r.patch_lines,
+                    has_source_edit: r.has_source_edit,
+                    has_test_edit: r.has_test_edit,
+                    syntax_check_passed: r.syntax_check_passed,
+                    test_results: None,
+                    official_eval: oe,
+                }
+            })
+            .collect();
+        let pool = CandidatePool::new(candidates);
+        let pass_at_1 = pool.pass_at_1();
+        let pass_at_k_oracle = pool.pass_at_k_oracle();
+        if pass_at_k_oracle && !pool.all_have_official_eval() {
+            pass_at_k_oracle_is_proxy = true;
+        }
+        if pass_at_1 {
+            pass_at_1_count += 1;
+        }
+        if pass_at_k_oracle {
+            pass_at_k_oracle_count += 1;
+        }
 
         entries.push(AggregateEntry {
             quant,
@@ -1257,18 +1522,22 @@ fn write_aggregate(
             f2p_p2p_passed: official.f2p_p2p_passed,
             resolved: official.resolved,
             official_resolution_rate: if official.resolved { 1.0 } else { 0.0 },
+            pass_at_1,
+            pass_at_k_oracle,
             eval_error: official.eval_error,
         });
     }
 
     let attempted_patch_total = runs
         .iter()
+        .filter(|r| r.candidate_num == 0)
         .filter(|r| r.exit_code == 0 && !r.timed_out && r.patch_bytes > 0)
         .count();
-    let attempted_patch_rate = if runs.is_empty() {
+    let selected_count = runs.iter().filter(|r| r.candidate_num == 0).count();
+    let attempted_patch_rate = if selected_count == 0 {
         0.0
     } else {
-        attempted_patch_total as f64 / runs.len() as f64
+        attempted_patch_total as f64 / selected_count as f64
     };
 
     let official_eval_completed = official_eval
@@ -1284,12 +1553,16 @@ fn write_aggregate(
         })
         .unwrap_or(0.0);
 
+    let n_instances = entries.len().max(1);
     let report = AggregateReport {
         generated_at: Utc::now().to_rfc3339(),
         total_runs: runs.len(),
         attempted_patch_rate,
         official_eval_completed,
         official_resolution_rate,
+        pass_at_1_rate: pass_at_1_count as f64 / n_instances as f64,
+        pass_at_k_oracle_rate: pass_at_k_oracle_count as f64 / n_instances as f64,
+        pass_at_k_oracle_is_proxy,
         entries,
     };
     std::fs::write(
@@ -1314,6 +1587,9 @@ fn median_f64(sorted: &[f64]) -> f64 {
 fn best_runs_by_quant_instance(runs: &[PerRunResult]) -> BTreeMap<(String, String), &PerRunResult> {
     let mut best: BTreeMap<(String, String), &PerRunResult> = BTreeMap::new();
     for r in runs {
+        if r.candidate_num > 0 {
+            continue; // candidates are not promoted to patches.json
+        }
         let key = (r.quant.clone(), r.instance_id.clone());
         match best.get(&key) {
             Some(existing) if existing.patch_lines >= r.patch_lines => {}
@@ -1705,5 +1981,211 @@ mod tests {
         let requested = 0;
         let effective = requested.min(spec.max_parallel).max(1);
         assert_eq!(effective, 1);
+    }
+
+    #[test]
+    fn has_test_edit_detects_test_file() {
+        let patch = r#"diff --git a/tests/test_a.py b/tests/test_a.py
+--- a/tests/test_a.py
++++ b/tests/test_a.py
+@@ -1 +1 @@
+-old
++new
+"#;
+        assert!(has_test_edit_in_patch(patch));
+    }
+
+    #[test]
+    fn has_test_edit_detects_no_test_file() {
+        let patch = r#"diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -1 +1 @@
+-old
++new
+"#;
+        assert!(!has_test_edit_in_patch(patch));
+    }
+
+    #[test]
+    fn has_test_edit_mixed_source_and_test() {
+        let patch = r#"diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -1 +1 @@
+-old
++new
+
+diff --git a/tests/test_a.py b/tests/test_a.py
+--- a/tests/test_a.py
++++ b/tests/test_a.py
+@@ -1 +1 @@
+-old
++new
+"#;
+        assert!(has_test_edit_in_patch(patch));
+    }
+
+    #[test]
+    fn cheap_syntax_check_accepts_clean_patch() {
+        assert!(cheap_syntax_check("diff --git a/foo.py b/foo.py\n+bar\n"));
+    }
+
+    #[test]
+    fn cheap_syntax_check_rejects_merge_conflict() {
+        assert!(!cheap_syntax_check(
+            "<<<<<<< HEAD\nfoo\n=======\nbar\n>>>>>>> branch\n"
+        ));
+    }
+
+    #[test]
+    fn cheap_syntax_check_rejects_empty() {
+        assert!(!cheap_syntax_check(""));
+        assert!(!cheap_syntax_check("   \n  \n"));
+    }
+
+    #[test]
+    fn best_runs_skips_candidates() {
+        let runs = vec![
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 10,
+                patch_bytes: 100,
+                pred_path: PathBuf::from("/tmp/a"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
+                candidate_num: 0,
+            },
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 50,
+                patch_bytes: 500,
+                pred_path: PathBuf::from("/tmp/b"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
+                candidate_num: 2,
+            },
+        ];
+        let best = best_runs_by_quant_instance(&runs);
+        assert_eq!(best.len(), 1);
+        let chosen = best.values().next().unwrap();
+        assert_eq!(chosen.patch_lines, 10); // candidate skipped
+    }
+
+    #[test]
+    fn write_aggregate_pass_at_1_vs_pass_at_k() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write dummy pred files
+        std::fs::write(dir.path().join("i1_t1.pred"), "patch1\n").unwrap();
+        std::fs::write(dir.path().join("i1_c1.pred"), "patch2\n").unwrap();
+        std::fs::write(dir.path().join("i1_c2.pred"), "patch3\n").unwrap();
+
+        let runs = vec![
+            // Selected best for instance i1, trial 1
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 2,
+                patch_bytes: 10,
+                pred_path: dir.path().join("i1_t1.pred"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
+                candidate_num: 0,
+            },
+            // Candidate 1: smaller diff, no test edits, syntax ok
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 1,
+                patch_bytes: 5,
+                pred_path: dir.path().join("i1_c1.pred"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
+                candidate_num: 1,
+            },
+            // Candidate 2: has test edit
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 1,
+                patch_bytes: 5,
+                pred_path: dir.path().join("i1_c2.pred"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: true,
+                syntax_check_passed: true,
+                candidate_num: 2,
+            },
+        ];
+
+        write_aggregate(dir.path(), &runs, None).unwrap();
+
+        let agg: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("aggregate.json")).unwrap())
+                .unwrap();
+
+        // pass@1 should be false because no official eval data
+        assert_eq!(
+            agg["pass_at_1_rate"], 0.0,
+            "pass@1 should be 0 without official eval"
+        );
+        // pass@k_oracle should be true because at least one candidate has
+        // source edit + no test edit + syntax ok (the selected best and candidate 1)
+        assert_eq!(
+            agg["pass_at_k_oracle_rate"], 1.0,
+            "pass@k oracle should be 1 via proxy upper bound"
+        );
+        assert_eq!(
+            agg["pass_at_k_oracle_is_proxy"], true,
+            "should be marked proxy-based"
+        );
+
+        // Entry-level checks
+        let entry = &agg["entries"][0];
+        assert_eq!(entry["pass_at_1"], false);
+        assert_eq!(entry["pass_at_k_oracle"], true);
+        // attempted_patch_rate should be based on selected results only
+        assert_eq!(entry["attempted_patch_rate"], 1.0);
     }
 }
