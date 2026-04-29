@@ -7,6 +7,7 @@
 //! Adds `--trials N` for repeated runs and writes an aggregate `aggregate.json`
 //! plus a ready-to-eval `patches.json` collation.
 
+pub mod candidate;
 pub mod catalog;
 pub mod dataset;
 pub mod harness;
@@ -14,6 +15,7 @@ pub mod manifest;
 pub mod runner;
 pub mod trace;
 
+pub use candidate::{Candidate, CandidatePool, OfficialEvalResult, TestResults};
 pub use catalog::{quant_catalog, QuantSpec};
 pub use dataset::{load_instances, Instance};
 pub use harness::{LlamaServer, LlamaServerOpts};
