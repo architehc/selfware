@@ -120,6 +120,10 @@ impl Tool for ScreenCapture {
 
         // Either save to file or return base64
         if let Some(path) = output_path {
+            // Validate output path through safety layer
+            let safety = crate::tools::file::resolve_safety_config(None);
+            crate::tools::file::validate_tool_path(path, &safety)
+                .map_err(|e| anyhow::anyhow!("screen_capture output_path validation failed: {}", e))?;
             tokio::task::block_in_place(|| {
                 std::fs::write(path, &png_bytes)
                     .with_context(|| format!("Failed to write screenshot to {}", path))

@@ -5,15 +5,23 @@ use serde_json::Value;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-/// Parse a unified diff and return approximate stats.
-fn parse_diff_stats(diff: &str) -> (usize, usize, usize) {
+/// Parse a unified diff and return approximate stats and target paths.
+fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
     let mut files = 0;
     let mut insertions = 0;
     let mut deletions = 0;
+    let mut targets = Vec::new();
 
     for line in diff.lines() {
         if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
             files += 1;
+            // Extract path after "+++ b/" or "+++ "
+            let path = line.strip_prefix("+++ b/")
+                .or_else(|| line.strip_prefix("+++ "))
+                .unwrap_or("");
+            if !path.is_empty() {
+                targets.push(path.to_string());
+            }
         } else if line.starts_with('+') && !line.starts_with("+++") && !line.starts_with("@@") {
             insertions += 1;
         } else if line.starts_with('-') && !line.starts_with("---") && !line.starts_with("@@") {
@@ -21,7 +29,7 @@ fn parse_diff_stats(diff: &str) -> (usize, usize, usize) {
         }
     }
 
-    (files, insertions, deletions)
+    (files, insertions, deletions, targets)
 }
 
 /// Apply a unified diff using `git apply` with validation and optional 3-way fallback.
@@ -68,7 +76,21 @@ impl Tool for PatchApply {
             return Err(anyhow!("diff is empty"));
         }
 
-        let (files, insertions, deletions) = parse_diff_stats(diff);
+        let (files, insertions, deletions, targets) = parse_diff_stats(diff);
+
+        // Validate all target paths through the safety validator
+        let safety = crate::tools::file::resolve_safety_config(None);
+        for path in &targets {
+            // Reject absolute paths and parent-directory escapes
+            if path.starts_with('/') {
+                anyhow::bail!("patch_apply rejects absolute paths: {}", path);
+            }
+            if path.contains("..") {
+                anyhow::bail!("patch_apply rejects paths with parent-directory escapes: {}", path);
+            }
+            crate::tools::file::validate_tool_path(path, &safety)
+                .map_err(|e| anyhow!("patch_apply path validation failed for '{}': {}", path, e))?;
+        }
 
         // Write diff to a temporary file
         let mut temp = NamedTempFile::new()?;
@@ -137,10 +159,11 @@ mod tests {
 +line2_modified
  line3
 "#;
-        let (files, insertions, deletions) = parse_diff_stats(diff);
+        let (files, insertions, deletions, targets) = parse_diff_stats(diff);
         assert_eq!(files, 1);
         assert_eq!(insertions, 1);
         assert_eq!(deletions, 1);
+        assert_eq!(targets, vec!["file.txt"]);
     }
 
     #[test]
@@ -158,10 +181,11 @@ mod tests {
 +new
 +added
 "#;
-        let (files, insertions, deletions) = parse_diff_stats(diff);
+        let (files, insertions, deletions, targets) = parse_diff_stats(diff);
         assert_eq!(files, 2);
         assert_eq!(insertions, 3);
         assert_eq!(deletions, 2);
+        assert_eq!(targets, vec!["one.txt", "two.txt"]);
     }
 
     #[test]

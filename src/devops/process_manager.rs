@@ -970,6 +970,17 @@ async fn spawn_child_process(
         cmd.current_dir(cwd);
     }
 
+    // Clear inherited environment to prevent secret leakage, then set a minimal base
+    cmd.env_clear();
+    if let Ok(path) = std::env::var("PATH") {
+        cmd.env("PATH", path);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        cmd.env("HOME", home);
+    }
+    if let Ok(lang) = std::env::var("LANG") {
+        cmd.env("LANG", lang);
+    }
     for (key, value) in &config.env {
         cmd.env(key, value);
     }

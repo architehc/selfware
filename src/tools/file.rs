@@ -931,7 +931,7 @@ fn default_three() -> usize {
 /// Call this at the tool level, then pass the result to `validate_tool_path`.
 /// This keeps the global state lookup at the tool boundary rather than
 /// buried inside the validation function.
-pub(super) fn resolve_safety_config(instance_config: Option<&SafetyConfig>) -> SafetyConfig {
+pub(crate) fn resolve_safety_config(instance_config: Option<&SafetyConfig>) -> SafetyConfig {
     if let Some(cfg) = instance_config {
         return cfg.clone();
     }
@@ -945,7 +945,7 @@ pub(super) fn resolve_safety_config(instance_config: Option<&SafetyConfig>) -> S
 ///
 /// Takes a resolved `&SafetyConfig` — callers should use
 /// `resolve_safety_config()` to pick the right config before calling this.
-pub(super) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()> {
+pub(crate) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()> {
     #[cfg(test)]
     {
         if std::env::var("SELFWARE_TEST_MODE").is_ok() {
