@@ -9,7 +9,6 @@
 
 pub mod analytics;
 pub mod carbon_tracker;
-pub mod dashboard;
 pub mod telemetry;
 pub mod test_dashboard;
 

@@ -6,18 +6,16 @@ use super::types::{
 };
 use super::*;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 /// Mutex to serialize tests that mutate SELFWARE_* environment variables.
 /// `env::set_var` / `env::remove_var` are process-global, so parallel tests
 /// that rely on specific env values will race without serialization.
 /// All tests that call `clear_selfware_env_vars()` or `set_var(SELFWARE_*)`
 /// should acquire this lock first via `lock_env()`.
-static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
-}
+// NOTE: ENV_MUTEX and clear_selfware_env_vars have moved to
+// `crate::config::test_helpers` so that `cli::tests` can share the same lock.
+// This module now re-exports the helpers for backward compatibility within
+// config tests.
 
 #[test]
 fn test_config_default() {
@@ -1180,28 +1178,10 @@ fn test_keyring_service_constant() {
     assert_eq!(KEYRING_SERVICE, "selfware-api-key");
 }
 
-/// Helper to clear all SELFWARE_* env vars that Config::load reads,
-/// while holding the ENV_MUTEX to prevent parallel tests from racing
-/// on environment variable mutations. Returns the guard so the lock
-/// is held for the duration of the calling test.
-fn clear_selfware_env_vars() -> std::sync::MutexGuard<'static, ()> {
-    let guard = lock_env();
-    for var in &[
-        "SELFWARE_CONFIG",
-        "SELFWARE_ENDPOINT",
-        "SELFWARE_MODEL",
-        "SELFWARE_API_KEY",
-        "SELFWARE_MAX_TOKENS",
-        "SELFWARE_TEMPERATURE",
-        "SELFWARE_TIMEOUT",
-        "SELFWARE_THEME",
-        "SELFWARE_LOG_LEVEL",
-        "SELFWARE_MODE",
-        "SELFWARE_STRICT_PERMISSIONS",
-    ] {
-        std::env::remove_var(var);
-    }
-    guard
+/// Re-export of [`crate::config::test_helpers::clear_env`] for backward
+/// compatibility within this module.
+fn clear_selfware_env_vars() -> crate::config::test_helpers::EnvGuard {
+    crate::config::test_helpers::clear_env()
 }
 
 // ---- RedactedString comprehensive tests ----

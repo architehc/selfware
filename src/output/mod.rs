@@ -891,9 +891,14 @@ pub(crate) fn verification_report(report: &str, passed: bool) {
     }
 }
 
-/// Print debug output (only in verbose mode or with SELFWARE_DEBUG)
-pub(crate) fn debug_output(label: &str, content: &str) {
-    if is_verbose() || std::env::var("SELFWARE_DEBUG").is_ok() {
+/// Print debug output for per-turn LLM responses.
+///
+/// Gated on the unified [`crate::config::DebugConfig`] `turns` channel so the
+/// `--debug=turns` CLI flag (and the legacy `SELFWARE_DEBUG` /
+/// `SELFWARE_DEBUG_TURNS` env vars) actually disable this output when not set.
+/// Verbose mode (`-v`) is preserved as a friendly opt-in for interactive use.
+pub(crate) fn debug_output(debug: &crate::config::DebugConfig, label: &str, content: &str) {
+    if is_verbose() || debug.should_log_turns() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!("{}", format!("=== DEBUG: {} ===", label).bright_magenta());
         println!("{}", content);

@@ -13,6 +13,13 @@ use crate::supervision::circuit_breaker::{
 };
 use crate::tokens::{estimate_messages_tokens, estimate_tool_definitions_tokens};
 
+/// Helper: token estimate for an optional tool list, returning 0 when `None`.
+fn estimate_tool_definitions_tokens_opt(tools: Option<&Vec<ToolDefinition>>) -> usize {
+    tools
+        .map(|t| estimate_tool_definitions_tokens(t))
+        .unwrap_or(0)
+}
+
 use super::streaming::StreamingResponse;
 use super::types::*;
 use super::{
@@ -89,6 +96,11 @@ pub struct ApiClient {
     pub(crate) base_url: String,
     pub(crate) retry_config: RetryConfig,
     circuit_breaker: Arc<CircuitBreaker>,
+    /// Progress emitter for `LlmRequestSent` / `LlmResponseReceived` events.
+    /// Defaults to a no-op; the agent installs a real emitter via
+    /// [`Self::with_progress_emitter`] so the same observability pipe used by
+    /// step / tool events also covers the LLM round trip.
+    progress_emitter: Arc<dyn crate::agent::progress::ProgressEmitter>,
 }
 
 impl ApiClient {
@@ -116,12 +128,24 @@ impl ApiClient {
             config: config.clone(),
             retry_config: RetryConfig::from_settings(&config.retry),
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
+            progress_emitter: Arc::new(crate::agent::progress::NoopProgressEmitter),
         })
     }
 
     pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
         self.retry_config = retry_config;
         self
+    }
+
+    /// Install a [`ProgressEmitter`](crate::agent::progress::ProgressEmitter)
+    /// for `LlmRequestSent` / `LlmResponseReceived` events.  The agent calls
+    /// this so HTTP round-trips show up in the same structured stream as
+    /// step / tool / guard events.
+    pub fn with_progress_emitter(
+        &mut self,
+        emitter: Arc<dyn crate::agent::progress::ProgressEmitter>,
+    ) {
+        self.progress_emitter = emitter;
     }
 
     pub async fn completion(
@@ -202,8 +226,18 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<(ChatResponse, ChatMetadata)> {
+        // Compute the prompt-token estimate before `messages` is moved into
+        // `build_chat_body` so the progress event reports the actual outgoing
+        // size (messages + tool definitions).
+        let estimated_tokens = estimate_messages_tokens(&messages)
+            + estimate_tool_definitions_tokens_opt(tools.as_ref());
         let body = self.build_chat_body(messages, tools, thinking, false)?;
         maybe_log_request_body(&self.config.debug, &body, "chat");
+
+        self.progress_emitter
+            .emit(crate::agent::progress::ProgressEvent::LlmRequestSent {
+                tokens: estimated_tokens,
+            });
 
         let started = std::time::Instant::now();
         let resp = self.send_with_retry(&body).await?;
@@ -211,12 +245,19 @@ impl ApiClient {
 
         let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.clone());
 
+        self.progress_emitter
+            .emit(crate::agent::progress::ProgressEvent::LlmResponseReceived {
+                finish_reason: finish_reason.clone().unwrap_or_else(|| "unknown".into()),
+                completion_tokens: resp.usage.completion_tokens as u32,
+            });
+
         let meta = ChatMetadata {
             request_body: body,
             elapsed_ms,
             finish_reason,
             prompt_tokens: Some(resp.usage.prompt_tokens as u32),
             completion_tokens: Some(resp.usage.completion_tokens as u32),
+            total_tokens: Some(resp.usage.total_tokens as u32),
         };
         Ok((resp, meta))
     }
@@ -314,8 +355,15 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<(StreamingResponse, ChatMetadata)> {
+        let estimated_tokens = estimate_messages_tokens(&messages)
+            + estimate_tool_definitions_tokens_opt(tools.as_ref());
         let body = self.build_chat_body(messages, tools, thinking, true)?;
         maybe_log_request_body(&self.config.debug, &body, "chat_stream");
+
+        self.progress_emitter
+            .emit(crate::agent::progress::ProgressEvent::LlmRequestSent {
+                tokens: estimated_tokens,
+            });
 
         let started = std::time::Instant::now();
         let body_for_meta = body.clone();
@@ -340,6 +388,7 @@ impl ApiClient {
             finish_reason: None,
             prompt_tokens: None,
             completion_tokens: None,
+            total_tokens: None,
         };
         Ok((stream, meta))
     }

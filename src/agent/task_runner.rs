@@ -1024,11 +1024,13 @@ impl Agent {
             }
         }
 
-        // Classify the outcome for instrumentation
-        let outcome_label = self.classify_outcome_label();
+        // Classify the outcome for instrumentation. Use the canonical
+        // `FailureMode::classify` so the partial-exit log line matches the
+        // structured artifact and CLI banner emitted just below.
+        let fm = FailureMode::classify(self, RunOutcome::Partial);
         let detail = format!(
             "Execution stopped: {} (step {})",
-            outcome_label,
+            fm.kind.tag(),
             self.loop_control.current_step()
         );
         self.record_task_outcome(task_description, Outcome::Partial, Some(&detail));
@@ -1086,72 +1088,6 @@ impl Agent {
             .map(|c| c.task_id.clone())?;
         let home = dirs::home_dir()?;
         Some(home.join(".selfware").join("checkpoints").join(task_id))
-    }
-
-    /// Classify the run outcome into a specific failure mode label.
-    /// These labels make it easy to grep logs and identify systemic issues.
-    fn classify_outcome_label(&self) -> &'static str {
-        let step = self.loop_control.current_step();
-        let has_writes = self
-            .current_checkpoint
-            .as_ref()
-            .map(|cp| {
-                cp.tool_calls.iter().any(|tc| {
-                    matches!(tc.tool_name.as_str(), "file_write" | "file_edit") && tc.success
-                })
-            })
-            .unwrap_or(false);
-        let has_verification = self
-            .current_checkpoint
-            .as_ref()
-            .map(|cp| {
-                cp.tool_calls.iter().any(|tc| {
-                    matches!(tc.tool_name.as_str(), "cargo_check" | "cargo_test") && tc.success
-                })
-            })
-            .unwrap_or(false);
-        let suppressed_count = self
-            .current_checkpoint
-            .as_ref()
-            .map(|cp| {
-                cp.tool_calls
-                    .iter()
-                    .filter(|tc| !tc.success && tc.tool_name == "file_edit")
-                    .count()
-            })
-            .unwrap_or(0);
-        let read_only_tools = self
-            .current_checkpoint
-            .as_ref()
-            .map(|cp| {
-                cp.tool_calls.iter().all(|tc| {
-                    matches!(
-                        tc.tool_name.as_str(),
-                        "file_read"
-                            | "directory_tree"
-                            | "grep_search"
-                            | "glob_find"
-                            | "context_bulk_read"
-                    )
-                })
-            })
-            .unwrap_or(true);
-
-        if !has_writes && read_only_tools && step > 10 {
-            "read_loop"
-        } else if !has_writes && step <= 5 {
-            "no_write"
-        } else if suppressed_count > 5 {
-            "edit_failure_loop"
-        } else if has_writes && !has_verification {
-            "verification_missing"
-        } else if has_writes && has_verification {
-            "green_incomplete"
-        } else if self.consecutive_suppressions > 10 {
-            "invalid_tool_loop"
-        } else {
-            "max_iterations"
-        }
     }
 }
 

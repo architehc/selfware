@@ -2,29 +2,10 @@ use tracing::{debug, info, warn};
 
 use super::*;
 use crate::api::tool_calling::{extract_tool_calls, extract_tool_calls_from_text};
-use crate::tool_parser::parse_tool_calls;
 
 pub(super) type CollectedToolCall = (String, String, Option<String>);
 
 impl Agent {
-    pub(super) fn message_has_tool_calls(
-        &self,
-        assistant_msg: &crate::api::types::Message,
-    ) -> bool {
-        if self.config.agent.native_function_calling
-            && assistant_msg
-                .tool_calls
-                .as_ref()
-                .is_some_and(|calls| !calls.is_empty())
-        {
-            return true;
-        }
-
-        !parse_tool_calls(assistant_msg.content.text())
-            .tool_calls
-            .is_empty()
-    }
-
     /// Collect tool calls from a model response into the agent's internal
     /// `(name, args, id)` triples.
     ///

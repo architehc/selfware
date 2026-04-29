@@ -125,7 +125,16 @@ def stop_llama_server():
     time.sleep(2)
 
 
-def boot_llama_server(quant: str, port: int = 8000, ctx: int = 262144, parallel: int = 2):
+def boot_llama_server(
+    quant: str,
+    port: int = 8000,
+    ctx: int = 262144,
+    parallel: int = 2,
+    cache_type_k: str = "q8_0",
+    cache_type_v: str = "q8_0",
+    chat_template_kwargs: str = '{"enable_thinking": false}',
+    use_mmproj: bool = True,
+):
     """Boot llama-server for the given quant. Returns its PID."""
     if quant not in QUANT_CATALOG:
         raise ValueError(f"unknown quant: {quant}")
@@ -143,15 +152,15 @@ def boot_llama_server(quant: str, port: int = 8000, ctx: int = 262144, parallel:
         "-c", str(ctx),
         "-ngl", "99",
         "--tensor-split", "24,24",
-        "-ctk", "q8_0", "-ctv", "q8_0",
+        "-ctk", cache_type_k, "-ctv", cache_type_v,
         "--parallel", str(parallel),
         "--cont-batching",
-        "--chat-template-kwargs", '{"enable_thinking": false}',
+        "--chat-template-kwargs", chat_template_kwargs,
         "--host", "0.0.0.0",
         "--port", str(port),
         "--alias", alias,
     ]
-    if mmproj.exists():
+    if use_mmproj and mmproj.exists():
         cmd += ["--mmproj", str(mmproj)]
 
     log_file = open(f"/tmp/llama-{alias}.log", "w")
@@ -350,6 +359,14 @@ def main():
     p.add_argument("--scenario-timeout", type=int, default=900, help="Per-instance agent timeout (seconds)")
     p.add_argument("--ctx", type=int, default=262144)
     p.add_argument("--parallel", type=int, default=2)
+    p.add_argument("--cache-type-k", type=str, default=os.environ.get("SWEBENCH_CACHE_TYPE_K", "q8_0"))
+    p.add_argument("--cache-type-v", type=str, default=os.environ.get("SWEBENCH_CACHE_TYPE_V", "q8_0"))
+    p.add_argument(
+        "--chat-template-kwargs",
+        type=str,
+        default=os.environ.get("SWEBENCH_CHAT_TEMPLATE_KWARGS", '{"enable_thinking": false}'),
+    )
+    p.add_argument("--no-mmproj", action="store_true", help="Do not pass a vision mmproj to llama-server")
     p.add_argument("--skip-existing", action="store_true", help="Skip (quant, instance) pairs whose .pred already exists")
     args = p.parse_args()
 
@@ -394,6 +411,10 @@ def main():
                 "scenario_timeout": args.scenario_timeout,
                 "ctx": args.ctx,
                 "parallel": args.parallel,
+                "cache_type_k": args.cache_type_k,
+                "cache_type_v": args.cache_type_v,
+                "chat_template_kwargs": args.chat_template_kwargs,
+                "use_mmproj": not args.no_mmproj,
             },
             f,
             indent=2,
@@ -408,7 +429,15 @@ def main():
 
         stop_llama_server()
         try:
-            boot_llama_server(quant, ctx=args.ctx, parallel=args.parallel)
+            boot_llama_server(
+                quant,
+                ctx=args.ctx,
+                parallel=args.parallel,
+                cache_type_k=args.cache_type_k,
+                cache_type_v=args.cache_type_v,
+                chat_template_kwargs=args.chat_template_kwargs,
+                use_mmproj=not args.no_mmproj,
+            )
         except Exception as e:
             log(f"  ❌ boot failed: {e} — skipping this quant")
             continue

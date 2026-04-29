@@ -240,6 +240,7 @@ impl Agent {
         let mut captured_finish_reason: Option<String> = None;
         let mut captured_prompt_tokens: Option<u32> = None;
         let mut captured_completion_tokens: Option<u32> = None;
+        let mut captured_total_tokens: Option<u32> = None;
 
         let mut rx = stream.into_channel().await;
         let mut content = String::new();
@@ -465,6 +466,7 @@ impl Agent {
 
                     captured_prompt_tokens = Some(u.prompt_tokens as u32);
                     captured_completion_tokens = Some(u.completion_tokens as u32);
+                    captured_total_tokens = Some(u.total_tokens as u32);
 
                     self.emit_event(AgentEvent::TokenUsage {
                         prompt_tokens: u.prompt_tokens as u64,
@@ -524,6 +526,17 @@ impl Agent {
             // No per-call summary — chat_streaming runs multiple times per task.
         }
 
+        // Mirror the non-streaming path: emit `LlmResponseReceived` once the
+        // SSE stream has produced its final usage / finish-reason chunks.  The
+        // request-side event was already emitted inside
+        // `chat_stream_with_meta`.
+        self.emit_progress(super::progress::ProgressEvent::LlmResponseReceived {
+            finish_reason: captured_finish_reason
+                .clone()
+                .unwrap_or_else(|| "stream_end".into()),
+            completion_tokens: captured_completion_tokens.unwrap_or(0),
+        });
+
         if let Some(slot) = meta_out {
             *slot = crate::api::types::ChatMetadata {
                 request_body: request_meta.request_body,
@@ -531,6 +544,7 @@ impl Agent {
                 finish_reason: captured_finish_reason,
                 prompt_tokens: captured_prompt_tokens,
                 completion_tokens: captured_completion_tokens,
+                total_tokens: captured_total_tokens,
             };
         }
 

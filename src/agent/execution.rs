@@ -240,7 +240,22 @@ impl Agent {
 
     /// Internal execution logic
     /// If `use_last_message` is true, process tool calls from the last assistant message
+    ///
+    /// Wraps [`Self::execute_step_internal_inner`] so a `StepCompleted` progress
+    /// event always fires after the step body returns — even on early returns
+    /// from guards or error paths.  The inner function's many `return Ok(...)`
+    /// branches still work; we just emit one trailing event when it unwinds.
     async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
+        let step_at_entry = self.loop_control.current_step().saturating_add(1);
+        let result = self.execute_step_internal_inner(use_last_message).await;
+        self.emit_progress(super::progress::ProgressEvent::StepCompleted {
+            step: step_at_entry,
+            mutating_tools_so_far: self.mutating_tool_call_count(),
+        });
+        result
+    }
+
+    async fn execute_step_internal_inner(&mut self, use_last_message: bool) -> Result<bool> {
         // Emit a structured progress event at the top of every loop iteration.
         // Step is 1-based; tool count is the registry's current size.
         self.emit_progress(super::progress::ProgressEvent::StepStarted {

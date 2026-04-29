@@ -2594,11 +2594,40 @@ impl Agent {
         };
 
         let timeout_secs = self.config.agent.step_timeout_secs.max(1);
+
+        // For tools that spawn an OS subprocess (shell_exec, pty_shell), emit
+        // structured progress events around the spawn so live observers
+        // (StderrProgressEmitter, future Prometheus exporter) can track
+        // subprocess lifecycles independently of the in-process tool wrapper.
+        let spawns_subprocess = is_bash;
+        let subprocess_start = std::time::Instant::now();
+        if spawns_subprocess {
+            self.emit_progress(super::progress::ProgressEvent::SubprocessStarted {
+                name: name.to_string(),
+            });
+        }
+
         let execution = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             tool.execute(args.clone()),
         )
         .await;
+
+        if spawns_subprocess {
+            // Best-effort exit code: tool wrappers (e.g. shell_exec) surface it
+            // in the JSON result; the agent layer can't read it back here, so we
+            // report success/failure as 0/-1 and the elapsed wall time.
+            let exit = match &execution {
+                Ok(Ok(_)) => 0,
+                Ok(Err(_)) => -1,
+                Err(_) => -2, // tokio timeout
+            };
+            self.emit_progress(super::progress::ProgressEvent::SubprocessCompleted {
+                name: name.to_string(),
+                exit,
+                elapsed_ms: subprocess_start.elapsed().as_millis() as u64,
+            });
+        }
 
         match execution {
             Ok(Ok(result)) => {

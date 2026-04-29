@@ -289,6 +289,61 @@ fn resolve_config_path(
     None
 }
 
+/// Decide whether auto-calibration should be skipped for the current CLI
+/// invocation.
+///
+/// Returns `true` (skip calibration) when:
+/// - The command is purely diagnostic (`config show`, `bench`, `doctor`, …).
+/// - The user explicitly pointed at a config file (`--config`) — they know
+///   what they want.
+/// - The loaded config already looks configured (non-default endpoint or model).
+///
+/// Returns `false` (run calibration) only for `autoconfig` / `unpack`, or when
+/// the install appears to be completely fresh (bare defaults, no CLI overrides).
+fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
+    // Commands that explicitly opt-in to calibration side-effects.
+    let is_opt_in = matches!(
+        cli.command,
+        Some(Commands::AutoConfig { .. } | Commands::Unpack { .. })
+    );
+    if is_opt_in {
+        return false;
+    }
+
+    // Diagnostic / read-only commands should never trigger port scans or
+    // backend auto-starts.
+    let is_diagnostic = matches!(
+        cli.command,
+        Some(
+            Commands::Config { .. }
+                | Commands::Bench { .. }
+                | Commands::Doctor
+                | Commands::LlmDoctor
+                | Commands::Test { .. }
+                | Commands::Status { .. }
+                | Commands::Validate { .. }
+        )
+    );
+    if is_diagnostic {
+        return true;
+    }
+
+    // User pointed at a specific config file → respect their choice.
+    if cli.config.is_some() {
+        return true;
+    }
+
+    // Config already looks configured (non-default endpoint or model).
+    let is_default_endpoint = config.endpoint == crate::config::default_endpoint();
+    let is_default_model = config.model == crate::config::default_model();
+    if !is_default_endpoint || !is_default_model {
+        return true;
+    }
+
+    // Fresh install with bare defaults → allow calibration to run.
+    false
+}
+
 pub async fn run() -> Result<()> {
     // Initialize telemetry
     init_tracing();
@@ -359,16 +414,16 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // ── Auto-calibration: make local LLM setup as automatic as possible ──
-    // If the config looks unconfigured (default endpoint/model), scan for local
-    // servers, auto-start backends if needed, and auto-generate configuration.
-    //
-    // Bug fix: `selfware config show` is meant to print the *effective*
-    // configuration as loaded from disk + env vars. Running calibration here
-    // would overwrite explicit user values (and inflate provenance), so we
-    // skip it for that subcommand.
-    let skip_calibration = matches!(cli.command, Some(Commands::Config { .. }));
-    if !skip_calibration {
+    // ── Auto-calibration: opt-in only ──
+    // Calibration scans local ports, may auto-start backends, pull models, and
+    // (re)write `selfware.toml`.  Those side effects are surprising for any
+    // command that already has a working configuration, an explicit endpoint,
+    // an explicit config path, or that is purely diagnostic (e.g. `bench`,
+    // `config show`).  We therefore skip calibration unless the user has
+    // *explicitly* opted in via `selfware autoconfig` / `selfware unpack`,
+    // OR the loaded config is still on the bare defaults and the user did not
+    // point at a specific config / endpoint via CLI or env.
+    if !should_skip_calibration(&cli, &config) {
         if let Err(e) = crate::config::unpack::auto_calibrate(&mut config).await {
             tracing::warn!("Auto-calibration failed: {}", e);
         }
@@ -768,7 +823,10 @@ async fn handle_command(
         }
 
         #[cfg(feature = "tui")]
-        Commands::CommandCenter { mode, refresh: _ } => {
+        Commands::CommandCenter {
+            mode: _,
+            refresh: _,
+        } => {
             if !quiet {
                 println!("{}", render_header(ctx));
                 println!(
@@ -778,12 +836,10 @@ async fn handle_command(
                 );
             }
 
-            let _update_mode = match mode.as_str() {
-                "stream" => crate::observability::dashboard::command_center::UpdateMode::Streaming,
-                _ => crate::observability::dashboard::command_center::UpdateMode::Polling,
-            };
-
-            crate::observability::dashboard::command_center::run_command_center().await?;
+            println!(
+                "Command Center is temporarily unavailable (observability dashboard removed)."
+            );
+            println!("Use `selfware dashboard` for the TUI overview instead.");
         }
 
         Commands::Resume { task_id } => {

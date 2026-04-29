@@ -690,6 +690,9 @@ pub struct ChatMetadata {
     pub prompt_tokens: Option<u32>,
     /// Completion tokens reported by the backend, if any.
     pub completion_tokens: Option<u32>,
+    /// Total tokens reported by the backend (prompt + completion + reasoning,
+    /// per backend convention). `None` when the backend doesn't report it.
+    pub total_tokens: Option<u32>,
 }
 
 /// A streaming chunk of a chat completion response.

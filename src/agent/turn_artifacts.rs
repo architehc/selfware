@@ -59,36 +59,87 @@ pub struct TurnArtifact {
     pub elapsed_ms: u64,
 }
 
-/// Strip API keys and Authorization headers from a request body. Mutates in place.
+/// Sentinel that replaces redacted secret values in artifact files.
+const REDACTED: &str = "<redacted>";
+
+/// Returns `true` if `key` looks like a credential field name.
 ///
-/// We try a few common locations: a top-level `api_key` field (some clients
-/// inject it into the body), an `authorization` header object inside the body,
-/// and `x-api-key`. The Authorization HTTP header itself never reaches the
-/// JSON body — that lives on the reqwest builder — so this is mostly a
-/// defence-in-depth pass against future code that *does* inline credentials.
-pub fn sanitize_request_body(body: &mut serde_json::Value) {
-    const SECRET_KEYS: &[&str] = &[
-        "api_key",
-        "apikey",
-        "authorization",
-        "x-api-key",
-        "bearer",
-        "token",
-    ];
-    if let Some(obj) = body.as_object_mut() {
-        for key in SECRET_KEYS {
-            if obj.contains_key(*key) {
-                obj.insert((*key).to_string(), serde_json::Value::String("***".into()));
-            }
+/// Matches (case-insensitive):
+/// - `authorization`
+/// - `bearer`
+/// - `secret`
+/// - `password`
+/// - any key containing `api_key`, `apikey`, or `api-key` as a substring
+///   (catches `api_key`, `apiKey`, `x-api-key`, `openai_api_key`, …)
+/// - keys whose normalized form ends in `token` (e.g. `token`, `access_token`,
+///   `auth-token`) but NOT `tool_call_id`, `completion_tokens`,
+///   `prompt_tokens`, `total_tokens`, `max_tokens`, etc.
+fn key_is_secret(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "authorization" | "bearer" | "secret" | "password"
+    ) {
+        return true;
+    }
+    // `api_key`, `apikey`, `api-key`, `x-api-key`, `openai_api_key`, …
+    if lower.contains("api_key") || lower.contains("apikey") || lower.contains("api-key") {
+        return true;
+    }
+    // Token suffix matching: normalize separators so `auth-token` and
+    // `auth_token` both match. We require an exact `token` suffix on a
+    // word boundary, so `*_token` / `*-token` / bare `token` match but
+    // `tokens`, `tokenizer`, `completion_tokens`, `prompt_tokens`,
+    // `total_tokens`, `max_tokens`, `tool_call_id` don't.
+    let norm = lower.replace('-', "_");
+    if norm == "token" {
+        return true;
+    }
+    if let Some(stripped) = norm.strip_suffix("_token") {
+        // Defensive: the stripped prefix must be non-empty.
+        if !stripped.is_empty() {
+            return true;
         }
-        // Common nested shapes: headers / auth.
-        if let Some(headers) = obj.get_mut("headers").and_then(|h| h.as_object_mut()) {
-            for (k, v) in headers.iter_mut() {
-                if SECRET_KEYS.iter().any(|s| k.eq_ignore_ascii_case(s)) {
-                    *v = serde_json::Value::String("***".into());
+    }
+    false
+}
+
+/// Strip API keys, Authorization headers, and bearer tokens from a request body.
+/// Mutates in place, walking the entire JSON tree to any depth.
+///
+/// Sanitization is defence-in-depth — the HTTP `Authorization` header never
+/// reaches the request body for our own client (it's set on the reqwest
+/// builder).  But OpenAI-compatible backends, custom `extra_body` shapes, and
+/// future wrappers can and do inline credentials in nested fields like
+/// `extra_body.api_key`, `headers.X-API-KEY`, `auth.bearer_token`.  Walking
+/// recursively keeps the persistent per-turn artifacts under
+/// `<workdir>/.selfware/turns/` from leaking those.
+///
+/// Matched keys are replaced with the literal string `"<redacted>"`.  Values
+/// that happen to be objects/arrays are still descended into first, so a
+/// nested credential under a non-secret-named key is still scrubbed.
+pub fn sanitize_request_body(body: &mut serde_json::Value) {
+    sanitize_value(body);
+}
+
+/// Recursive walker for [`sanitize_request_body`].
+fn sanitize_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if key_is_secret(k) {
+                    *v = serde_json::Value::String(REDACTED.to_string());
+                } else {
+                    sanitize_value(v);
                 }
             }
         }
+        serde_json::Value::Array(items) => {
+            for v in items.iter_mut() {
+                sanitize_value(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -160,27 +211,141 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_strips_top_level_api_key() {
+    fn sanitize_strips_top_level_api_key_and_authorization() {
         let mut body = serde_json::json!({
             "model": "selfware",
             "api_key": "sk-secret-123",
             "Authorization": "Bearer abc",
         });
         sanitize_request_body(&mut body);
-        assert_eq!(body["api_key"], serde_json::Value::String("***".into()));
-        // Case-insensitive over our key list — top-level Authorization is not
-        // in the body normally but if a wrapper inlined it we still scrub.
-        // (top-level scrubbing matches our exact-key list, lowercase.)
+        assert_eq!(body["api_key"], "<redacted>");
+        assert_eq!(body["Authorization"], "<redacted>");
+        // Non-secret keys preserved.
+        assert_eq!(body["model"], "selfware");
     }
 
     #[test]
-    fn sanitize_strips_nested_headers() {
+    fn sanitize_strips_nested_headers_with_mixed_case() {
         let mut body = serde_json::json!({
-            "headers": {"Authorization": "Bearer abc", "X-Api-Key": "sk"},
+            "headers": {
+                "Authorization": "Bearer abc",
+                "X-Api-Key": "sk",
+                "AUTHORIZATION": "Bearer XYZ",
+                "X-API-KEY": "sk-upper",
+                "Content-Type": "application/json",
+            },
         });
         sanitize_request_body(&mut body);
-        assert_eq!(body["headers"]["Authorization"], "***");
-        assert_eq!(body["headers"]["X-Api-Key"], "***");
+        assert_eq!(body["headers"]["Authorization"], "<redacted>");
+        assert_eq!(body["headers"]["X-Api-Key"], "<redacted>");
+        assert_eq!(body["headers"]["AUTHORIZATION"], "<redacted>");
+        assert_eq!(body["headers"]["X-API-KEY"], "<redacted>");
+        // Non-secret header preserved.
+        assert_eq!(body["headers"]["Content-Type"], "application/json");
+    }
+
+    #[test]
+    fn sanitize_walks_deeply_nested_extra_body() {
+        // Real-world shape: `extra_body.headers.api_key`, plus `extra_body.api_key`
+        // (some OpenAI-compatible backends accept this), plus `auth.bearer_token`.
+        let mut body = serde_json::json!({
+            "model": "selfware",
+            "extra_body": {
+                "api_key": "sk-extra-body-leak",
+                "headers": {
+                    "Authorization": "Bearer deep",
+                    "X-API-KEY": "sk-deep",
+                },
+                "auth": {
+                    "bearer_token": "tok-1",
+                    "access_token": "tok-2",
+                },
+            },
+        });
+        sanitize_request_body(&mut body);
+        assert_eq!(body["extra_body"]["api_key"], "<redacted>");
+        assert_eq!(body["extra_body"]["headers"]["Authorization"], "<redacted>");
+        assert_eq!(body["extra_body"]["headers"]["X-API-KEY"], "<redacted>");
+        assert_eq!(body["extra_body"]["auth"]["bearer_token"], "<redacted>");
+        assert_eq!(body["extra_body"]["auth"]["access_token"], "<redacted>");
+        // Sibling field preserved.
+        assert_eq!(body["model"], "selfware");
+    }
+
+    #[test]
+    fn sanitize_handles_arrays_and_prefix_variants() {
+        // Authorization headers buried inside a `tools[].config.headers` array
+        // and a top-level `secrets[]` array of credential objects.
+        let mut body = serde_json::json!({
+            "tools": [
+                {"name": "fetch", "config": {"headers": {"authorization": "Bearer leak1"}}},
+                {"name": "post",  "config": {"headers": {"X-Api-Key": "leak2"}}},
+            ],
+            "secrets": [
+                {"password": "p1", "api_key": "k1"},
+                {"refresh_token": "rt1"},
+            ],
+            "openai_api_key": "sk-inline",
+        });
+        sanitize_request_body(&mut body);
+        assert_eq!(
+            body["tools"][0]["config"]["headers"]["authorization"],
+            "<redacted>"
+        );
+        assert_eq!(
+            body["tools"][1]["config"]["headers"]["X-Api-Key"],
+            "<redacted>"
+        );
+        assert_eq!(body["secrets"][0]["password"], "<redacted>");
+        assert_eq!(body["secrets"][0]["api_key"], "<redacted>");
+        assert_eq!(body["secrets"][1]["refresh_token"], "<redacted>");
+        assert_eq!(body["openai_api_key"], "<redacted>");
+    }
+
+    #[test]
+    fn sanitize_preserves_token_count_fields() {
+        // The `token` matcher must not eat `completion_tokens`, `prompt_tokens`,
+        // `total_tokens`, `max_tokens`, or `tool_call_id`.  These are usage /
+        // identifier fields that we explicitly want preserved in artifacts.
+        let mut body = serde_json::json!({
+            "messages": [{
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "ok",
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+            },
+            "max_tokens": 4096,
+            "tokenizer": "cl100k",
+        });
+        sanitize_request_body(&mut body);
+        assert_eq!(body["messages"][0]["tool_call_id"], "call_123");
+        assert_eq!(body["usage"]["prompt_tokens"], 10);
+        assert_eq!(body["usage"]["completion_tokens"], 5);
+        assert_eq!(body["usage"]["total_tokens"], 15);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["tokenizer"], "cl100k");
+    }
+
+    #[test]
+    fn sanitize_redacts_token_suffix_keys() {
+        // `*_token` and bare `token` should be redacted.
+        let mut body = serde_json::json!({
+            "token": "raw",
+            "access_token": "at",
+            "refresh_token": "rt",
+            "id_token": "idt",
+            "auth-token": "ath",
+        });
+        sanitize_request_body(&mut body);
+        assert_eq!(body["token"], "<redacted>");
+        assert_eq!(body["access_token"], "<redacted>");
+        assert_eq!(body["refresh_token"], "<redacted>");
+        assert_eq!(body["id_token"], "<redacted>");
+        assert_eq!(body["auth-token"], "<redacted>");
     }
 
     #[test]

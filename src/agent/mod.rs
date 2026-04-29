@@ -794,11 +794,17 @@ To call a tool, use this EXACT XML structure:
                         match crate::mcp::discover_tools(&client).await {
                             Ok(mcp_tools) => {
                                 let count = mcp_tools.len();
+                                // Register MCP tools as CRITICAL so they appear in the
+                                // initial `tools: [...]` array sent to the LLM in native
+                                // function-calling mode, and pass the activation gate in
+                                // XML mode. When a user explicitly configures an MCP
+                                // server via `[[mcp.servers]]`, they want those tools
+                                // visible immediately — not hidden behind tool_search.
                                 for tool in mcp_tools {
-                                    tools.register(tool);
+                                    tools.register_critical(tool);
                                 }
                                 info!(
-                                    "Registered {} tool(s) from MCP server '{}'",
+                                    "Registered {} tool(s) from MCP server '{}' as critical",
                                     count, server_config.name
                                 );
                             }
@@ -1006,8 +1012,13 @@ To call a tool, use this EXACT XML structure:
 
     /// Swap in a custom [`progress::ProgressEmitter`].  Used by the headless
     /// non-TUI path to attach a [`progress::StderrProgressEmitter`].
+    ///
+    /// The emitter is also propagated into the inner [`ApiClient`] so HTTP
+    /// round-trip events (`LlmRequestSent` / `LlmResponseReceived`) land on
+    /// the same channel as step / tool / guard events.
     pub fn with_progress_emitter(mut self, emitter: Arc<dyn progress::ProgressEmitter>) -> Self {
-        self.progress_emitter = emitter;
+        self.progress_emitter = Arc::clone(&emitter);
+        self.client.with_progress_emitter(emitter);
         self
     }
 

@@ -37,7 +37,7 @@ pub struct SwebenchProOpts {
     pub llama_opts: LlamaServerOpts,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct PerRunResult {
     instance_id: String,
     quant: String,
@@ -48,6 +48,10 @@ struct PerRunResult {
     patch_lines: usize,
     patch_bytes: usize,
     pred_path: PathBuf,
+    /// When the run never reached the agent (e.g. clone or boot failed),
+    /// this string explains why.  Empty for successful or agent-failed runs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    error: String,
 }
 
 /// Run the SWE-bench Pro harness end-to-end.  Always returns `Ok(())` if the
@@ -133,18 +137,29 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         let server = match LlamaServer::boot(&spec, &opts.llama_opts) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("  ❌ boot failed: {} — skipping this quant", e);
+                eprintln!("  ❌ boot failed: {} — recording failures and skipping", e);
+                // Each (instance × trial) is "attempted" from the harness's
+                // point of view, even if the server never came up.  Write a
+                // result.json with exit_code=-2 so denominators are stable.
+                for trial in 1..=trials {
+                    for inst in &instances {
+                        match record_boot_failure(&opts, &spec, inst, trial, &e.to_string()) {
+                            Ok(res) => all_runs.push(res),
+                            Err(rec_err) => eprintln!(
+                                "    failed to record boot failure for {} trial {}: {}",
+                                inst.instance_id, trial, rec_err
+                            ),
+                        }
+                    }
+                }
                 continue;
             }
         };
 
+        let concurrency = opts.concurrency.max(1) as usize;
         for trial in 1..=trials {
-            for inst in &instances {
-                match run_one(&opts, &spec, inst, trial) {
-                    Ok(res) => all_runs.push(res),
-                    Err(e) => eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e),
-                }
-            }
+            let trial_results = run_trial(&opts, &spec, &instances, trial, concurrency);
+            all_runs.extend(trial_results);
         }
 
         // Drop server explicitly so subsequent quant boot has a clean GPU.
@@ -170,19 +185,130 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
     Ok(())
 }
 
+/// Drive every (instance) for one `trial`, optionally fanning out to
+/// `concurrency` worker threads against the same llama-server (which is
+/// configured via `--parallel` to accept N concurrent slots).
+///
+/// Sequential when `concurrency <= 1` to preserve existing log ordering.
+fn run_trial(
+    opts: &SwebenchProOpts,
+    spec: &QuantSpec,
+    instances: &[Instance],
+    trial: u32,
+    concurrency: usize,
+) -> Vec<PerRunResult> {
+    if concurrency <= 1 {
+        return instances
+            .iter()
+            .filter_map(|inst| match run_one(opts, spec, inst, trial) {
+                Ok(res) => Some(res),
+                Err(e) => {
+                    eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e);
+                    None
+                }
+            })
+            .collect();
+    }
+
+    // Real parallelism: a tiny work-stealing pool of OS threads.  Each thread
+    // dequeues an instance index from a Mutex<Vec<usize>>, runs `run_one`, and
+    // appends to a shared results vec.
+    use std::sync::{Arc, Mutex};
+
+    let queue: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new((0..instances.len()).rev().collect()));
+    let results: Arc<Mutex<Vec<PerRunResult>>> = Arc::new(Mutex::new(Vec::new()));
+    let opts_arc = Arc::new(opts.clone());
+    let spec_arc = Arc::new(spec.clone());
+    let instances_arc = Arc::new(instances.to_vec());
+
+    std::thread::scope(|scope| {
+        let n = concurrency.min(instances.len()).max(1);
+        let mut handles = Vec::with_capacity(n);
+        for _ in 0..n {
+            let queue = Arc::clone(&queue);
+            let results = Arc::clone(&results);
+            let opts_c = Arc::clone(&opts_arc);
+            let spec_c = Arc::clone(&spec_arc);
+            let instances_c = Arc::clone(&instances_arc);
+            handles.push(scope.spawn(move || loop {
+                let idx = {
+                    let mut q = queue.lock().unwrap();
+                    q.pop()
+                };
+                let Some(idx) = idx else { return };
+                let inst = &instances_c[idx];
+                match run_one(&opts_c, &spec_c, inst, trial) {
+                    Ok(res) => results.lock().unwrap().push(res),
+                    Err(e) => eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e),
+                }
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
+    });
+
+    let mut out = results.lock().unwrap().clone();
+    // Stable order: by (instance_id, trial) so logs/aggregate are deterministic.
+    out.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
+    out
+}
+
+/// Compute the per-(quant, instance, trial) directory under `output/trials/...`.
+fn trial_dir_for(output: &Path, spec_label: &str, instance_id: &str, trial: u32) -> PathBuf {
+    output
+        .join("trials")
+        .join(trial.to_string())
+        .join("runs")
+        .join(spec_label)
+        .join(instance_id)
+}
+
+/// Persist a synthetic result.json for an (instance, trial) we never got to
+/// run because the llama-server failed to boot.  exit_code=-2 marks
+/// "infrastructure failure"; the aggregate counter still includes it as
+/// attempted-and-failed.
+fn record_boot_failure(
+    opts: &SwebenchProOpts,
+    spec: &QuantSpec,
+    inst: &Instance,
+    trial: u32,
+    reason: &str,
+) -> Result<PerRunResult> {
+    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
+    std::fs::create_dir_all(&trial_dir)
+        .with_context(|| format!("creating {}", trial_dir.display()))?;
+    let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
+    // Touch an empty pred so downstream tooling expecting the file finds it.
+    if !pred_path.exists() {
+        std::fs::write(&pred_path, "")?;
+    }
+    let result = PerRunResult {
+        instance_id: inst.instance_id.clone(),
+        quant: spec.label.into(),
+        trial,
+        exit_code: -2,
+        timed_out: false,
+        wall_secs: 0.0,
+        patch_lines: 0,
+        patch_bytes: 0,
+        pred_path,
+        error: format!("boot failed: {}", reason),
+    };
+    std::fs::write(
+        trial_dir.join("result.json"),
+        serde_json::to_vec_pretty(&result)?,
+    )?;
+    Ok(result)
+}
+
 fn run_one(
     opts: &SwebenchProOpts,
     spec: &QuantSpec,
     inst: &Instance,
     trial: u32,
 ) -> Result<PerRunResult> {
-    let trial_dir = opts
-        .output
-        .join("trials")
-        .join(trial.to_string())
-        .join("runs")
-        .join(spec.label)
-        .join(&inst.instance_id);
+    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
     std::fs::create_dir_all(&trial_dir)
         .with_context(|| format!("creating {}", trial_dir.display()))?;
     let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
@@ -209,6 +335,7 @@ fn run_one(
             patch_lines: lines,
             patch_bytes: bytes,
             pred_path,
+            error: String::new(),
         });
     }
 
@@ -217,7 +344,30 @@ fn run_one(
     let workdir = trial_dir.join("repo");
     if let Err(e) = clone_instance(&inst.repo, &inst.base_commit, &workdir) {
         eprintln!("    clone failed: {}", e);
-        bail!("clone failed: {}", e);
+        // Persist the failure as a real result.json (exit_code=-2) so the
+        // aggregate denominator counts it as attempted-and-failed instead of
+        // silently dropping the trial.
+        let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
+        if !pred_path.exists() {
+            std::fs::write(&pred_path, "")?;
+        }
+        let result = PerRunResult {
+            instance_id: inst.instance_id.clone(),
+            quant: spec.label.into(),
+            trial,
+            exit_code: -2,
+            timed_out: false,
+            wall_secs: 0.0,
+            patch_lines: 0,
+            patch_bytes: 0,
+            pred_path,
+            error: format!("clone failed: {}", e),
+        };
+        std::fs::write(
+            trial_dir.join("result.json"),
+            serde_json::to_vec_pretty(&result)?,
+        )?;
+        return Ok(result);
     }
 
     let prompt = build_prompt(inst);
@@ -239,6 +389,7 @@ fn run_one(
         &endpoint,
         opts.scenario_timeout,
         &log_path,
+        &trial_dir,
     )?;
     eprintln!(
         "    agent exit={} after {:.1}s{}",
@@ -263,6 +414,7 @@ fn run_one(
         patch_lines: patch.lines().count(),
         patch_bytes: patch.len(),
         pred_path: pred_path.clone(),
+        error: String::new(),
     };
     std::fs::write(
         trial_dir.join("result.json"),

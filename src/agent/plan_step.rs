@@ -108,8 +108,10 @@ impl Agent {
             content
         );
 
-        // Verbose logging when SELFWARE_DEBUG is set or verbose mode
-        output::debug_output("Planning Response", content.text());
+        // Per-turn debug logging — gated on the unified `--debug=turns` channel
+        // (or the legacy SELFWARE_DEBUG / SELFWARE_DEBUG_TURNS env vars).
+        // Verbose mode also forces it on for interactive use.
+        output::debug_output(&self.config.debug, "Planning Response", content.text());
 
         if content.is_empty() {
             warn!("Model returned empty planning content!");
@@ -127,8 +129,12 @@ impl Agent {
         }
 
         // Check if the planning response contains tool calls
-        // For native function calling, check tool_calls field; otherwise parse from content
-        let has_tool_calls = self.message_has_tool_calls(&assistant_msg);
+        // Uses the unified extractor so native and text-fallback paths agree.
+        let has_tool_calls = !crate::api::tool_calling::extract_tool_calls(
+            &assistant_msg,
+            self.config.agent.native_function_calling,
+        )
+        .is_empty();
         let native_tool_calls = if let (true, Some(tool_calls)) = (
             self.config.agent.native_function_calling,
             assistant_msg.tool_calls.as_ref(),

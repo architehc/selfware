@@ -718,6 +718,7 @@ async fn test_live_tool_dispatch_uses_models_vision_profile() {
                 );
                 extra
             }),
+            native_function_calling: None,
         },
     );
 

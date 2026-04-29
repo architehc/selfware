@@ -186,6 +186,7 @@ fn cli_command_tree_has_no_duplicate_aliases() {
 
 #[test]
 fn resolve_config_path_no_flags_returns_none() {
+    let _guard = clear_config_env();
     // No --config, no -C → None (Config::load does normal search)
     let result = resolve_config_path(None, false, Some(Path::new("/home/user/project")));
     assert!(result.is_none());
@@ -193,6 +194,7 @@ fn resolve_config_path_no_flags_returns_none() {
 
 #[test]
 fn resolve_config_path_explicit_absolute_config() {
+    let _guard = clear_config_env();
     // --config /etc/selfware.toml → returned as-is regardless of cwd or -C
     let result = resolve_config_path(
         Some("/etc/selfware.toml"),
@@ -205,6 +207,7 @@ fn resolve_config_path_explicit_absolute_config() {
 #[test]
 #[cfg(not(windows))] // Uses Unix paths
 fn resolve_config_path_explicit_relative_config_uses_original_cwd() {
+    let _guard = clear_config_env();
     // --config my.toml with original cwd → absolutified against original cwd
     let result = resolve_config_path(
         Some("my.toml"),
@@ -217,6 +220,7 @@ fn resolve_config_path_explicit_relative_config_uses_original_cwd() {
 #[test]
 #[cfg(not(windows))] // Uses Unix paths
 fn resolve_config_path_explicit_relative_config_with_workdir_uses_original_cwd() {
+    let _guard = clear_config_env();
     // --config my.toml -C /other/dir → absolutified against ORIGINAL cwd, not /other/dir
     let result = resolve_config_path(Some("my.toml"), true, Some(Path::new("/home/user/project")));
     assert_eq!(result.as_deref(), Some("/home/user/project/my.toml"));
@@ -224,6 +228,7 @@ fn resolve_config_path_explicit_relative_config_with_workdir_uses_original_cwd()
 
 #[test]
 fn resolve_config_path_workdir_without_config_checks_original_cwd() {
+    let _guard = clear_config_env();
     // -C /other/dir (no --config) → checks for selfware.toml in original cwd
     let tmp = tempfile::tempdir().unwrap();
     let config_file = tmp.path().join("selfware.toml");
@@ -239,6 +244,7 @@ fn resolve_config_path_workdir_without_config_checks_original_cwd() {
 
 #[test]
 fn resolve_config_path_workdir_without_config_no_selfware_toml_returns_none() {
+    let _guard = clear_config_env();
     // -C /other/dir (no --config), no selfware.toml in original cwd → None
     let tmp = tempfile::tempdir().unwrap();
     // Don't create selfware.toml
@@ -252,6 +258,7 @@ fn resolve_config_path_workdir_without_config_no_selfware_toml_returns_none() {
 
 #[test]
 fn resolve_config_path_no_original_cwd_falls_back_gracefully() {
+    let _guard = clear_config_env();
     // Edge case: original_cwd is None (couldn't be determined)
     let result = resolve_config_path(Some("my.toml"), true, None);
     // Should still return the path, just not absolutified
@@ -267,30 +274,13 @@ fn resolve_config_path_no_original_cwd_falls_back_gracefully() {
 // from `resolve_config_path` whenever `SELFWARE_CONFIG` is set, letting
 // `Config::load` honour the env var.
 
-use std::sync::Mutex;
-static CLI_ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-fn lock_cli_env() -> std::sync::MutexGuard<'static, ()> {
-    CLI_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn clear_config_env() {
-    std::env::remove_var("SELFWARE_CONFIG");
-    std::env::remove_var("SELFWARE_ENDPOINT");
-    std::env::remove_var("SELFWARE_MODEL");
-    std::env::remove_var("SELFWARE_API_KEY");
-    std::env::remove_var("SELFWARE_MAX_TOKENS");
-    std::env::remove_var("SELFWARE_TEMPERATURE");
-    std::env::remove_var("SELFWARE_TIMEOUT");
-    std::env::remove_var("SELFWARE_THEME");
-    std::env::remove_var("SELFWARE_MODE");
-    std::env::remove_var("SELFWARE_STRICT_PERMISSIONS");
+fn clear_config_env() -> crate::config::test_helpers::EnvGuard {
+    crate::config::test_helpers::clear_env()
 }
 
 #[test]
 fn resolve_config_path_workdir_with_selfware_config_env_returns_none() {
-    let _guard = lock_cli_env();
-    clear_config_env();
+    let _guard = clear_config_env();
 
     let tmp = tempfile::tempdir().unwrap();
     let original_cfg = tmp.path().join("selfware.toml");
@@ -309,8 +299,7 @@ fn resolve_config_path_workdir_with_selfware_config_env_returns_none() {
 
 #[test]
 fn config_load_selfware_config_env_overrides_local_selfware_toml_with_workdir() {
-    let _guard = lock_cli_env();
-    clear_config_env();
+    let _guard = clear_config_env();
 
     let dir_a = tempfile::tempdir().unwrap();
     let cfg_a = dir_a.path().join("selfware.toml");
@@ -369,8 +358,7 @@ fn config_load_selfware_config_env_overrides_local_selfware_toml_with_workdir() 
 
 #[test]
 fn config_show_renders_provenance_lines() {
-    let _guard = lock_cli_env();
-    clear_config_env();
+    let _guard = clear_config_env();
 
     let tmp = tempfile::tempdir().unwrap();
     let cfg_path = tmp.path().join("selfware.toml");
