@@ -92,7 +92,12 @@ impl WorktreeManager {
         // Fallback: manual removal.
         tokio::fs::remove_dir_all(&worktree_path)
             .await
-            .with_context(|| format!("Failed to remove worktree directory: {}", worktree_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "Failed to remove worktree directory: {}",
+                    worktree_path.display()
+                )
+            })?;
 
         info!(worktree_id = %id, "Removed worktree manually");
         Ok(())
