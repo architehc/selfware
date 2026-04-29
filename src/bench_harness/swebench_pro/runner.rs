@@ -839,7 +839,7 @@ fn run_one_candidate(
     } else {
         format!("{}-{}-{}", spec.label, inst.instance_id, trial)
     };
-    let mut run_trace = RunTrace::new(run_id, inst.instance_id.clone(), spec.label.clone().into(), trial);
+    let mut run_trace = RunTrace::new(run_id, inst.instance_id.clone(), spec.label.clone(), trial);
 
     if opts.skip_existing && pred_path.exists() {
         eprintln!(
@@ -1157,7 +1157,7 @@ fn run_one(
             .unwrap_or(0);
         let synthetic = PerRunResult {
             instance_id: inst.instance_id.clone(),
-            quant: spec.label.clone().into(),
+            quant: spec.label.clone(),
             trial,
             exit_code: 0,
             timed_out: false,
@@ -1197,7 +1197,7 @@ fn run_one(
         }
         let synthetic = PerRunResult {
             instance_id: inst.instance_id.clone(),
-            quant: spec.label.clone().into(),
+            quant: spec.label.clone(),
             trial,
             exit_code: -2,
             timed_out: false,
@@ -1238,7 +1238,7 @@ fn run_one(
 
     let synthetic = PerRunResult {
         instance_id: inst.instance_id.clone(),
-        quant: spec.label.clone().into(),
+        quant: spec.label.clone(),
         trial,
         exit_code: best.exit_code,
         timed_out: best.timed_out,

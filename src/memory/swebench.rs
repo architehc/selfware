@@ -417,7 +417,7 @@ fn extract_name(line: &str, keyword: &str) -> Option<String> {
     let after = line.strip_prefix("async ").unwrap_or(line);
     let after = after.strip_prefix(keyword).unwrap_or(after);
     let end = after
-        .find(|c: char| c == '(' || c == ':' || c == '<' || c == ' ')
+        .find(['(', ':', '<', ' '])
         .unwrap_or(after.len());
     let name = after[..end].trim();
     if name.is_empty() {
@@ -471,7 +471,7 @@ fn extract_fn_name_multi_lang(line: &str) -> Option<String> {
     // Now look for "fn " if Rust.
     if let Some(after_fn) = rest.strip_prefix("fn ") {
         let end = after_fn
-            .find(|c: char| c == '(' || c == '<' || c == ' ')
+            .find(['(', '<', ' '])
             .unwrap_or(after_fn.len());
         let name = after_fn[..end].trim();
         return if name.is_empty() {
@@ -483,7 +483,7 @@ fn extract_fn_name_multi_lang(line: &str) -> Option<String> {
 
     // Generic fallback: first identifier before '('.
     if let Some(before_paren) = rest.split('(').next() {
-        let name = before_paren.trim().split_whitespace().last().unwrap_or("");
+        let name = before_paren.split_whitespace().last().unwrap_or("");
         if name.is_empty() || name == "if" || name == "for" || name == "while" {
             None
         } else {

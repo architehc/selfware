@@ -521,6 +521,7 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
+    use crate::bench_harness::swebench_pro::catalog::{BackendProfile, ThinkingPolicy};
     use super::*;
 
     fn dummy_spec() -> QuantSpec {

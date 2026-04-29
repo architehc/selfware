@@ -643,26 +643,6 @@ impl ApiClient {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detect_backend_returns_string_for_unresponsive() {
-        // A port that is almost certainly closed.
-        let result = detect_backend("http://127.0.0.1:59999/v1");
-        // Should either fail (network error) or return "unknown".
-        match result {
-            Ok(label) => assert!(
-                ["llama.cpp", "sglang", "vllm", "unknown"].contains(&label.as_str()),
-                "unexpected backend label: {}",
-                label
-            ),
-            Err(_) => {} // network error is acceptable
-        }
-    }
-}
-
 #[async_trait]
 impl LlmClient for ApiClient {
     async fn chat(
@@ -747,4 +727,25 @@ pub fn detect_backend(endpoint: &str) -> Result<String> {
 pub(crate) fn rand_jitter() -> f64 {
     use rand::distr::{Distribution, StandardUniform};
     StandardUniform.sample(&mut rand::rng())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_backend_returns_string_for_unresponsive() {
+        // A port that is almost certainly closed.
+        let result = detect_backend("http://127.0.0.1:59999/v1");
+        // Should either fail (network error) or return "unknown".
+        if let Ok(label) = result {
+            assert!(
+                ["llama.cpp", "sglang", "vllm", "unknown"].contains(&label.as_str()),
+                "unexpected backend label: {}",
+                label
+            );
+        }
+        // network error is acceptable
+    }
 }

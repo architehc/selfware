@@ -1623,7 +1623,7 @@ mod tests {
     #[test]
     fn test_coordinator_selects_best_result() {
         // Simulate SWE-mode result selection logic.
-        let results = vec![
+        let results = [
             (
                 SubagentRole::Localizer,
                 WorkerResult {
@@ -1680,7 +1680,7 @@ mod tests {
 
     #[test]
     fn test_coordinator_prefers_verifier_when_successful() {
-        let results = vec![
+        let results = [
             (
                 SubagentRole::Localizer,
                 WorkerResult {
