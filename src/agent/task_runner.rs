@@ -23,6 +23,13 @@ enum LoopMode {
     Resume,
 }
 
+fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
+    let msg = error.to_string();
+    msg.contains("READ_LOOP_NO_EDIT")
+        || msg.contains("EDIT_FAILURE_LOOP_AFTER_EDIT")
+        || msg.contains("VERIFICATION_LOOP_AFTER_EDIT")
+}
+
 impl Agent {
     fn set_loop_state(&mut self, state: AgentState) -> Result<()> {
         self.loop_control.transition_to(state).map_err(Into::into)
@@ -684,6 +691,17 @@ impl Agent {
                                 continue;
                             }
 
+                            if is_fatal_loop_error(&e) {
+                                record_state_transition("Planning", "Failed");
+                                if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                    checkpoint.log_error(0, e.to_string(), false);
+                                }
+                                self.set_loop_state(AgentState::Failed {
+                                    reason: e.to_string(),
+                                })?;
+                                continue;
+                            }
+
                             // No-action during planning is recoverable — reset and retry
                             if is_no_action_error(&e) {
                                 warn!("No-action during planning — resetting and retrying");
@@ -836,6 +854,17 @@ impl Agent {
 
                             // Confirmation errors (user denied) are truly fatal
                             if is_confirmation_error(&e) {
+                                record_state_transition("Executing", "Failed");
+                                if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                    checkpoint.log_error(step, e.to_string(), false);
+                                }
+                                self.set_loop_state(AgentState::Failed {
+                                    reason: e.to_string(),
+                                })?;
+                                continue;
+                            }
+
+                            if is_fatal_loop_error(&e) {
                                 record_state_transition("Executing", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(step, e.to_string(), false);
@@ -1155,6 +1184,22 @@ mod tests {
             execution_mode: ExecutionMode::Yolo,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn fatal_loop_errors_are_not_recoverable() {
+        assert!(is_fatal_loop_error(&anyhow::anyhow!(
+            "READ_LOOP_NO_EDIT: no mutation after guard"
+        )));
+        assert!(is_fatal_loop_error(&anyhow::anyhow!(
+            "EDIT_FAILURE_LOOP_AFTER_EDIT: repeated stale edits"
+        )));
+        assert!(is_fatal_loop_error(&anyhow::anyhow!(
+            "VERIFICATION_LOOP_AFTER_EDIT: repeated checks"
+        )));
+        assert!(!is_fatal_loop_error(&anyhow::anyhow!(
+            "temporary API failure"
+        )));
     }
 
     // =========================================================================
