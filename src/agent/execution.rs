@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use tracing::{debug, info};
 
 use super::*;
@@ -350,6 +350,7 @@ impl Agent {
                 self.execute_tool_batch(write_call).await?;
                 self.consecutive_read_only_steps = 0;
                 self.has_written_any_file = true;
+                self.terminal_guard_hits = 0;
                 self.messages.push(crate::api::types::Message::user(
                     "<selfware_system_directive>\n\
                      Code from your response was automatically written to a file. \
@@ -535,6 +536,7 @@ impl Agent {
                     )];
                     self.consecutive_read_only_steps = 0;
                     self.has_written_any_file = true;
+                    self.terminal_guard_hits = 0;
                     self.execute_tool_batch(synthetic_calls).await?;
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
@@ -731,6 +733,21 @@ impl Agent {
         let warning_threshold = if has_any_file_write { 15 } else { 4 };
 
         if self.consecutive_read_only_steps >= terminal_threshold {
+            self.terminal_guard_hits += 1;
+
+            // After two terminal-guard hits without ever writing, give up.
+            if self.terminal_guard_hits >= 2 && !has_any_file_write {
+                info!(
+                    "READ_LOOP_NO_EDIT: {} read-only steps, {} terminal-guard hits, 0 writes — aborting",
+                    self.consecutive_read_only_steps, self.terminal_guard_hits
+                );
+                bail!(
+                    "READ_LOOP_NO_EDIT: {} consecutive read-only steps without making an edit. \
+                     The model was nudged twice but never modified a file.",
+                    self.consecutive_read_only_steps
+                );
+            }
+
             if !has_any_file_write && self.pending_synthesis.is_some() {
                 // Second time hitting terminal guard without any writes.
                 // Check if src/lib.rs already has substantial content (template project).
@@ -777,7 +794,22 @@ impl Agent {
                         self.consecutive_read_only_steps, real_codebase_evidence
                     );
                     self.consecutive_read_only_steps = 0;
-                    self.messages.push(crate::api::types::Message::user(
+                    // If we know the last file the model read, inject a concrete
+                    // file_edit template instead of a generic nudge.
+                    let nudge = if let Some(ref path) = self.last_read_file {
+                        format!(
+                            "<selfware_system_directive>\n\
+                             You are working in an existing codebase that already has source files. \
+                             Do NOT create a new src/lib.rs scaffold.\n\
+                             You just read `{path}`. Based on your investigation, make a TARGETED edit to that file.\n\
+                             Use the file_edit tool with this exact format:\n\n\
+                             <tool>\n\
+                             {{\"tool_type\": \"file_edit\", \"path\": \"{path}\", \"old_string\": \"...the exact original lines...\", \"new_string\": \"...the replacement lines...\"}}\n\
+                             </tool>\n\n\
+                             Then run the project's actual test command to verify.\n\
+                             </selfware_system_directive>"
+                        )
+                    } else {
                         "<selfware_system_directive>\n\
                          You are working in an existing codebase that already has source files. \
                          Do NOT create a new src/lib.rs scaffold. Instead:\n\
@@ -788,8 +820,9 @@ impl Agent {
                          3. Run the project's actual test command (cargo test / go test / \
                             pytest / npm test, depending on the project) to verify.\n\
                          </selfware_system_directive>"
-                            .to_string(),
-                    ));
+                            .to_string()
+                    };
+                    self.messages.push(crate::api::types::Message::user(nudge));
                     return Ok(false);
                 }
 
@@ -821,6 +854,7 @@ impl Agent {
                 )];
                 self.consecutive_read_only_steps = 0;
                 self.has_written_any_file = true;
+                self.terminal_guard_hits = 0;
                 if let Err(e) = self.execute_tool_batch(calls).await {
                     warn!("Scaffold write failed: {}", e);
                 }

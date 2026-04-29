@@ -585,6 +585,15 @@ pub(crate) struct SwebenchProArgs {
     /// Skip (quant, instance, trial) triples whose .pred already exists
     #[arg(long)]
     pub skip_existing: bool,
+
+    /// Prompt mode: `diagnostic` includes fail-to-pass tests (default);
+    /// `official` excludes them for valid scoring.
+    #[arg(long, default_value = "diagnostic")]
+    pub prompt_mode: String,
+
+    /// Run official SWE-bench Pro Docker eval after generating patches.
+    #[arg(long)]
+    pub official_eval: bool,
 }
 
 #[derive(Subcommand, Clone, Debug)]

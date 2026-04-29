@@ -444,6 +444,12 @@ pub struct Agent {
     /// logic nudges or blocks more read-only batches until the agent edits code
     /// or otherwise changes project state.
     consecutive_read_only_steps: usize,
+    /// How many times the terminal progress guard fired without producing a write.
+    /// After 2 hits the run fails with READ_LOOP_NO_EDIT.
+    terminal_guard_hits: usize,
+    /// Most recently read file path (set by file_read).  Used to inject
+    /// concrete edit templates when the model is stuck in a read loop.
+    last_read_file: Option<String>,
     /// Set to true once any file_write or file_edit has been successfully executed
     /// (including synthetic/auto-writes). Used by progress guard to relax thresholds.
     has_written_any_file: bool,
@@ -961,6 +967,8 @@ To call a tool, use this EXACT XML structure:
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
             consecutive_read_only_steps: 0,
+            terminal_guard_hits: 0,
+            last_read_file: None,
             has_written_any_file: false,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,

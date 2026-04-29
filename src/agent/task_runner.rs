@@ -726,6 +726,7 @@ impl Agent {
                                             )];
                                         self.consecutive_read_only_steps = 0;
                                         self.has_written_any_file = true;
+                                        self.terminal_guard_hits = 0;
                                         if let Err(e) = self.execute_tool_batch(calls).await {
                                             warn!("Auto-write from synthesis failed: {}", e);
                                         }

@@ -1989,6 +1989,7 @@ impl Agent {
                 let path_str = path.to_string();
                 match name.as_str() {
                     "file_read" => {
+                        self.last_read_file = Some(path_str.clone());
                         if self.file_tracker.context_files.len() < 500
                             && !self.file_tracker.context_files.contains(&path_str)
                         {
@@ -2656,6 +2657,7 @@ impl Agent {
                 if let Some((ref path, ref old_content)) = pre_edit_content {
                     if matches!(name, "file_edit" | "file_write") {
                         self.has_written_any_file = true;
+                        self.terminal_guard_hits = 0;
                         if let Ok(new_content) = std::fs::read_to_string(path) {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }

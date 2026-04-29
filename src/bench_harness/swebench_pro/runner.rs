@@ -35,6 +35,12 @@ pub struct SwebenchProOpts {
     pub selfware_bin: PathBuf,
     pub skip_existing: bool,
     pub llama_opts: LlamaServerOpts,
+    pub prompt_mode: String, // "diagnostic" or "official"
+    pub official_eval: bool, // run Docker eval after patches
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -52,6 +58,12 @@ struct PerRunResult {
     /// this string explains why.  Empty for successful or agent-failed runs.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     error: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    empty_diff: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    test_only_patch: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    has_source_edit: bool,
 }
 
 /// Run the SWE-bench Pro harness end-to-end.  Always returns `Ok(())` if the
@@ -102,6 +114,20 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
     }
 
     let plan_path = opts.output.join("plan.json");
+    let llama_server_argv = {
+        let dummy_gguf = std::path::Path::new("/dev/null/dummy.gguf");
+        super::harness::build_llama_server_args(
+            &super::catalog::QuantSpec {
+                label: "plan-dummy",
+                gguf: "dummy.gguf",
+                alias: "plan-dummy",
+                mmproj: "dummy.mmproj.gguf",
+            },
+            &opts.llama_opts,
+            dummy_gguf,
+            None,
+        )
+    };
     std::fs::write(
         &plan_path,
         serde_json::to_vec_pretty(&json!({
@@ -114,6 +140,9 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
             "concurrency": opts.concurrency,
             "trials": opts.trials,
             "selfware_bin": opts.selfware_bin,
+            "prompt_mode": opts.prompt_mode,
+            "llama_server_binary": opts.llama_opts.binary,
+            "llama_server_argv": llama_server_argv,
         }))?,
     )?;
 
@@ -172,16 +201,22 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
     write_aggregate(&opts.output, &all_runs)?;
     write_patches_json(&opts, &all_runs)?;
 
+    if opts.official_eval {
+        run_official_eval(&opts)?;
+    }
+
     eprintln!(
         "DONE in {:.0}s. Output: {}",
         overall_started.elapsed().as_secs_f64(),
         opts.output.display()
     );
-    eprintln!("Next steps:");
-    eprintln!(
-        "  python /home/ivo/SWE-bench_Pro-os/swe_bench_pro_eval.py --predictions {} ...",
-        opts.output.join("patches.json").display()
-    );
+    if !opts.official_eval {
+        eprintln!("Next steps:");
+        eprintln!(
+            "  python /home/ivo/SWE-bench_Pro-os/swe_bench_pro_eval.py --predictions {} ...",
+            opts.output.join("patches.json").display()
+        );
+    }
     Ok(())
 }
 
@@ -294,6 +329,9 @@ fn record_boot_failure(
         patch_bytes: 0,
         pred_path,
         error: format!("boot failed: {}", reason),
+        empty_diff: true,
+        test_only_patch: false,
+        has_source_edit: false,
     };
     std::fs::write(
         trial_dir.join("result.json"),
@@ -336,6 +374,9 @@ fn run_one(
             patch_bytes: bytes,
             pred_path,
             error: String::new(),
+            empty_diff: lines == 0 && bytes == 0,
+            test_only_patch: false,
+            has_source_edit: false,
         });
     }
 
@@ -362,6 +403,9 @@ fn run_one(
             patch_bytes: 0,
             pred_path,
             error: format!("clone failed: {}", e),
+            empty_diff: true,
+            test_only_patch: false,
+            has_source_edit: false,
         };
         std::fs::write(
             trial_dir.join("result.json"),
@@ -370,7 +414,7 @@ fn run_one(
         return Ok(result);
     }
 
-    let prompt = build_prompt(inst);
+    let prompt = build_prompt(inst, &opts.prompt_mode);
     std::fs::write(trial_dir.join("prompt.txt"), &prompt)?;
     std::fs::write(
         trial_dir.join("instance.json"),
@@ -404,6 +448,10 @@ fn run_one(
     });
     std::fs::write(&pred_path, &patch)?;
 
+    let empty_diff = patch.trim().is_empty();
+    let test_only_patch = !empty_diff && is_test_only_patch(&patch);
+    let has_source_edit = !empty_diff && !test_only_patch;
+
     let result = PerRunResult {
         instance_id: inst.instance_id.clone(),
         quant: spec.label.into(),
@@ -415,6 +463,9 @@ fn run_one(
         patch_bytes: patch.len(),
         pred_path: pred_path.clone(),
         error: String::new(),
+        empty_diff,
+        test_only_patch,
+        has_source_edit,
     };
     std::fs::write(
         trial_dir.join("result.json"),
@@ -433,27 +484,67 @@ fn run_one(
     Ok(result)
 }
 
-/// Build the "fix this issue" prompt — string-for-string the same as run.py's
-/// `build_prompt`, so a Rust run produces an identical agent prompt.
-pub fn build_prompt(inst: &Instance) -> String {
+/// Parse a git diff and determine whether every modified file is a test file.
+/// A file counts as a test file when its path or basename contains "test".
+fn is_test_only_patch(patch: &str) -> bool {
+    let mut has_any_file = false;
+    for line in patch.lines() {
+        if line.starts_with("diff --git ") {
+            // Extract the b/ path after "diff --git a/... b/..."
+            if let Some(b_start) = line.find(" b/") {
+                let path = &line[b_start + 3..];
+                let basename = path.rsplit('/').next().unwrap_or(path);
+                if !path.contains("test") && !basename.contains("test") {
+                    return false;
+                }
+                has_any_file = true;
+            }
+        } else if line.starts_with("+++ b/") || line.starts_with("--- a/") {
+            // Fallback for unified diff headers without diff --git
+            let path = &line[6..];
+            let basename = path.rsplit('/').next().unwrap_or(path);
+            if !path.contains("test") && !basename.contains("test") {
+                return false;
+            }
+            has_any_file = true;
+        }
+    }
+    has_any_file
+}
+
+/// Build the "fix this issue" prompt.
+///
+/// * `diagnostic` mode — includes fail-to-pass tests and selected test files
+///   (matches the original run.py behaviour).
+/// * `official` mode — excludes test information so the agent must infer the
+///   bug from the problem statement alone, matching the official SWE-bench Pro
+///   scoring rules.
+pub fn build_prompt(inst: &Instance, prompt_mode: &str) -> String {
     let problem = inst
         .problem_statement
         .trim()
         .trim_matches('"')
         .replace("\\n", "\n");
-    let tests = coerce_string_list(&inst.selected_test_files_to_run);
-    let fail = coerce_string_list(&inst.fail_to_pass);
 
-    let fail_str = fail
-        .iter()
-        .map(|t| format!("  - {}", t))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let test_str = tests.join(", ");
+    if prompt_mode == "official" {
+        format!(
+            "[mode: official]\n\nYou are working on a real codebase in the current directory. Resolve this issue:\n\n{problem}\n\nSteps:\n1. Read the codebase to understand the expected behavior.\n2. Make the smallest code change that resolves the issue.\n3. Do NOT modify the test files themselves.\n4. Run tests if possible to verify your fix.\n5. When done, summarize what you changed."
+        )
+    } else {
+        let tests = coerce_string_list(&inst.selected_test_files_to_run);
+        let fail = coerce_string_list(&inst.fail_to_pass);
 
-    format!(
-        "You are working on a real codebase in the current directory. Resolve this issue:\n\n{problem}\n\nThe fix needs to make these tests pass:\n{fail_str}\n\nRelevant test files: {test_str}\n\nSteps:\n1. Read the failing test files to understand the expected behavior.\n2. Read the implementation files mentioned in the tests.\n3. Make the smallest code change that resolves the issue.\n4. Do NOT modify the test files themselves.\n5. Run the failing tests if possible to verify your fix.\n6. When done, summarize what you changed."
-    )
+        let fail_str = fail
+            .iter()
+            .map(|t| format!("  - {}", t))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let test_str = tests.join(", ");
+
+        format!(
+            "[mode: diagnostic]\n\nYou are working on a real codebase in the current directory. Resolve this issue:\n\n{problem}\n\nThe fix needs to make these tests pass:\n{fail_str}\n\nRelevant test files: {test_str}\n\nSteps:\n1. Read the failing test files to understand the expected behavior.\n2. Read the implementation files mentioned in the tests.\n3. Make the smallest code change that resolves the issue.\n4. Do NOT modify the test files themselves.\n5. Run the failing tests if possible to verify your fix.\n6. When done, summarize what you changed."
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -461,8 +552,12 @@ struct AggregateEntry {
     quant: String,
     instance_id: String,
     trials: u32,
-    successes: u32,
-    pass_rate: f64,
+    /// Proxy metric: runs that exited cleanly, didn't time out, and produced a non-empty patch.
+    attempted_patch: u32,
+    attempted_patch_rate: f64,
+    empty_patch_rate: f64,
+    test_only_patch_rate: f64,
+    source_edit_rate: f64,
     median_wall_secs: f64,
     best_wall_secs: f64,
     /// Trial number whose patch had the most lines (proxy for "biggest attempt").
@@ -490,14 +585,33 @@ fn write_aggregate(output: &Path, runs: &[PerRunResult]) -> Result<()> {
     let mut entries = Vec::new();
     for ((quant, instance_id), trials) in groups {
         let total = trials.len() as u32;
-        let successes = trials
+        let attempted_patch = trials
             .iter()
             .filter(|r| r.exit_code == 0 && !r.timed_out && r.patch_bytes > 0)
             .count() as u32;
-        let pass_rate = if total == 0 {
+        let empty_patch = trials.iter().filter(|r| r.empty_diff).count() as u32;
+        let test_only = trials.iter().filter(|r| r.test_only_patch).count() as u32;
+        let source_edit = trials.iter().filter(|r| r.has_source_edit).count() as u32;
+
+        let attempted_patch_rate = if total == 0 {
             0.0
         } else {
-            successes as f64 / total as f64
+            attempted_patch as f64 / total as f64
+        };
+        let empty_patch_rate = if total == 0 {
+            0.0
+        } else {
+            empty_patch as f64 / total as f64
+        };
+        let test_only_patch_rate = if total == 0 {
+            0.0
+        } else {
+            test_only as f64 / total as f64
+        };
+        let source_edit_rate = if total == 0 {
+            0.0
+        } else {
+            source_edit as f64 / total as f64
         };
 
         let mut walls: Vec<f64> = trials.iter().map(|r| r.wall_secs).collect();
@@ -519,8 +633,11 @@ fn write_aggregate(output: &Path, runs: &[PerRunResult]) -> Result<()> {
             quant,
             instance_id,
             trials: total,
-            successes,
-            pass_rate,
+            attempted_patch,
+            attempted_patch_rate,
+            empty_patch_rate,
+            test_only_patch_rate,
+            source_edit_rate,
             median_wall_secs: median_wall,
             best_wall_secs: best_wall,
             best_trial,
@@ -595,6 +712,65 @@ fn write_patches_json(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<(
     Ok(())
 }
 
+/// Run the official SWE-bench Pro Docker eval script against the generated
+/// `patches.json`.  If the script doesn't exist the run is skipped gracefully.
+fn run_official_eval(opts: &SwebenchProOpts) -> Result<()> {
+    let patches_json = opts.output.join("patches.json");
+    let eval_dir = opts.output.join("official_eval");
+    std::fs::create_dir_all(&eval_dir)
+        .with_context(|| format!("creating {}", eval_dir.display()))?;
+
+    let script = std::path::PathBuf::from("/home/ivo/SWE-bench_Pro-os/swe_bench_pro_eval.py");
+    if !script.exists() {
+        let skip = json!({
+            "skipped": true,
+            "reason": "eval script not found",
+            "script": script,
+        });
+        std::fs::write(
+            eval_dir.join("eval_output.json"),
+            serde_json::to_vec_pretty(&skip)?,
+        )?;
+        eprintln!("  ⚠ official eval skipped (script not found)");
+        return Ok(());
+    }
+
+    eprintln!("  → running official eval...");
+    let output = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("--predictions")
+        .arg(&patches_json)
+        .arg("--output")
+        .arg(&eval_dir)
+        .output()
+        .with_context(|| "spawning official eval script")?;
+
+    let eval_out = json!({
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+        "exit_code": output.status.code(),
+    });
+    std::fs::write(
+        eval_dir.join("eval_output.json"),
+        serde_json::to_vec_pretty(&eval_out)?,
+    )?;
+
+    if output.status.success() {
+        if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            std::fs::write(
+                eval_dir.join("eval_results.json"),
+                serde_json::to_vec_pretty(&parsed)?,
+            )?;
+        }
+    }
+
+    eprintln!(
+        "    official eval finished (exit={})",
+        output.status.code().unwrap_or(-1)
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,11 +790,51 @@ mod tests {
 
     #[test]
     fn build_prompt_includes_problem_and_tests() {
-        let p = build_prompt(&dummy_instance());
+        let p = build_prompt(&dummy_instance(), "diagnostic");
         assert!(p.contains("fix bug"));
         assert!(p.contains("tests/test_a.py::test_x"));
         assert!(p.contains("Relevant test files: tests/test_a.py"));
         assert!(p.contains("Do NOT modify the test files themselves."));
+    }
+
+    #[test]
+    fn build_prompt_diagnostic_includes_tests() {
+        let p = build_prompt(&dummy_instance(), "diagnostic");
+        assert!(p.contains("[mode: diagnostic]"));
+        assert!(p.contains("tests/test_a.py::test_x"));
+        assert!(p.contains("Relevant test files: tests/test_a.py"));
+    }
+
+    #[test]
+    fn build_prompt_official_excludes_tests() {
+        let p = build_prompt(&dummy_instance(), "official");
+        assert!(p.contains("[mode: official]"));
+        assert!(!p.contains("tests/test_a.py::test_x"));
+        assert!(!p.contains("Relevant test files:"));
+    }
+
+    #[test]
+    fn is_test_only_patch_detects_test_only() {
+        let patch = r#"diff --git a/tests/test_a.py b/tests/test_a.py
+--- a/tests/test_a.py
++++ b/tests/test_a.py
+@@ -1 +1 @@
+-old
++new
+"#;
+        assert!(is_test_only_patch(patch));
+    }
+
+    #[test]
+    fn is_test_only_patch_detects_source_edit() {
+        let patch = r#"diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -1 +1 @@
+-old
++new
+"#;
+        assert!(!is_test_only_patch(patch));
     }
 
     #[test]

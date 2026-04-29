@@ -3057,6 +3057,8 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
 
     let llama_opts = crate::bench_harness::swebench_pro::harness::LlamaServerOpts {
         port: args.port,
+        ctx: args.ctx,
+        parallel: args.parallel,
         ..Default::default()
     };
     let opts = SwebenchProOpts {
@@ -3071,6 +3073,8 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         output,
         selfware_bin,
         skip_existing: args.skip_existing,
+        prompt_mode: args.prompt_mode,
+        official_eval: args.official_eval,
         llama_opts,
     };
 
