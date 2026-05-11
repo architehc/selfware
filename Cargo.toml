@@ -49,13 +49,13 @@ exclude = [
 ]
 
 [dependencies]
-tokio = { version = "1.51", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal"] }
 anyhow = "1.0"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 git2 = "0.20"  # Updated for security fixes (CVE-2024-24575, CVE-2024-24577)
@@ -116,7 +116,7 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }  # For 
 redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] }  # Redis backend for workflow state
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }  # For visual stuck-loop detection
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
-tracing-appender = "0.2.4"
+tracing-appender = "0.2.5"
 opentelemetry = "0.21.0"
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14.0"
@@ -179,7 +179,7 @@ extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-ana
 tokio-test = "0.4"
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1.5"
-assert_cmd = "2.1.2"
+assert_cmd = "2.2.2"
 predicates = "3.1.4"
 
 [lib]
