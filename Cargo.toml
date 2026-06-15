@@ -118,7 +118,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
 tracing-appender = "0.2.4"
 opentelemetry = "0.21.0"
-opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
+opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14.0"
 tracing-opentelemetry = "0.22.0"
 metrics = "0.21.0"
