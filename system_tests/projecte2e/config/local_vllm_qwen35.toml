@@ -1,0 +1,21 @@
+# Sample selfware config for a local vLLM OpenAI-compatible endpoint.
+#
+# Start the server with:
+#   python -m vllm.entrypoints.openai.api_server \
+#       --model Qwen/Qwen3-5-Instruct \
+#       --dtype half \
+#       --max-model-len 8192
+#
+# Then run selfware pointing at this config:
+#   selfware --config system_tests/projecte2e/config/local_vllm_qwen35.toml
+
+endpoint = "https://api.openrouter.ai/v1"
+model = "openai/gpt-4o-mini"
+# Leave api_key unset here and rely on SELFWARE_API_KEY when using the remote endpoint.
+
+[local]
+endpoint = "http://localhost:8000/v1"
+model_name = "Qwen/Qwen3-5-Instruct"
+
+[safety]
+allowed_paths = ["./**"]

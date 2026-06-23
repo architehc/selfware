@@ -1,0 +1,43 @@
+# Auto-generated SWE-bench Pro tuned config from openrouter_models.toml
+# Do NOT edit by hand; rerun generate_sweap_configs.py
+# Do NOT put the real API key here; set SELFWARE_API_KEY in the environment.
+
+endpoint = "https://openrouter.ai/api/v1"
+model = "moonshotai/kimi-k2.7-code"
+max_tokens = 32768
+temperature = 0.1
+api_key = "$SELFWARE_API_KEY"
+
+[agent]
+max_iterations = 70
+step_timeout_secs = 240
+token_budget = 32768
+context_window = 256000
+native_function_calling = false
+streaming = true
+min_completion_steps = 2
+# Tests are run externally by the SWE-bench Pro evaluator; do not block on them.
+require_verification_before_completion = false
+# Force the agent to modify at least one source file before finishing.
+require_edit_before_completion = true
+
+[retry]
+max_retries = 8
+base_delay_ms = 2000
+max_delay_ms = 60000
+
+[verification]
+# Disable automatic post-edit verification; SWE-bench Pro tests run externally.
+disabled = true
+
+[safety]
+# Allow edits both relative to the repo CWD and via absolute /app paths.
+# SWE-bench Pro extracts the target repo at /app inside the container, and
+# the agent may refer to files using absolute paths.
+allowed_paths = ["./**", "/app/**"]
+
+[metadata]
+tier = "medium"
+tool_style = "xml"
+recommended = true
+notes = "Strong coding-specialized model with large context; higher cost but reliable."

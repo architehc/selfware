@@ -1,0 +1,33 @@
+# Auto-generated from config/openrouter_models.toml
+# Do NOT edit by hand; rerun generate_openrouter_configs.py
+# Do NOT put the real API key here; set SELFWARE_API_KEY in the environment.
+
+endpoint = "https://openrouter.ai/api/v1"
+model = "meta-llama/llama-3.3-70b-instruct:free"
+max_tokens = 16384
+temperature = 0.1
+api_key = "$SELFWARE_API_KEY"
+
+[agent]
+max_iterations = 40
+step_timeout_secs = 900
+token_budget = 32768
+context_window = 131072
+native_function_calling = false
+streaming = false
+min_completion_steps = 2
+require_verification_before_completion = true
+
+[retry]
+max_retries = 8
+base_delay_ms = 2000
+max_delay_ms = 60000
+
+[safety]
+allowed_paths = ["./**", "/app/**"]
+
+[metadata]
+tier = "medium"
+tool_style = "xml"
+recommended = false
+notes = "Free 70B Llama 3.3 from OpenRouter; untested in this harness."

@@ -1,0 +1,771 @@
+[coding_models."glm-5.2"]
+id = "z-ai/glm-5.2"
+max_tokens = 16384
+context_window = 32768
+max_output_tokens = 16384
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.3
+cost_output_per_1m = 0.6
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "General-purpose coding model; reliable on mixed-language tasks."
+
+[coding_models.gemma-4-12b]
+id = "google/gemma-4-12b-it"
+max_tokens = 8192
+context_window = 128000
+max_output_tokens = 8192
+context_length = 128000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.08
+cost_output_per_1m = 0.16
+recommended = false
+tier = "small"
+tool_style = "auto"
+notes = "Lightweight Gemma 4 variant; mark not recommended pending more data."
+
+[coding_models.gemma-4-26b-a4b]
+id = "google/gemma-4-26b-a4b-it"
+max_tokens = 8192
+context_window = 128000
+max_output_tokens = 8192
+context_length = 128000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.1
+cost_output_per_1m = 0.2
+recommended = true
+tier = "medium"
+tool_style = "auto"
+notes = "Strong mid-size Gemma 4 MoE; good price/performance for coding."
+
+[coding_models.gemma-4-26b-a4b-free]
+id = "google/gemma-4-26b-a4b-it:free"
+max_tokens = 8192
+context_window = 128000
+max_output_tokens = 8192
+context_length = 128000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "medium"
+tool_style = "auto"
+notes = "Free variant of Gemma 4 26B A4B; rate-limited but useful for experiments."
+
+[coding_models.gemma-4-31b]
+id = "google/gemma-4-31b-it"
+max_tokens = 8192
+context_window = 128000
+max_output_tokens = 8192
+context_length = 128000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.3
+recommended = false
+tier = "medium"
+tool_style = "auto"
+notes = "Dense Gemma 4 31B; mark not recommended pending more data."
+
+[coding_models.deepseek-v4-flash]
+id = "deepseek/deepseek-v4-flash"
+max_tokens = 8192
+context_window = 64000
+max_output_tokens = 8192
+context_length = 64000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.1
+cost_output_per_1m = 0.3
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Fast cheap coding model; generally follows XML tool prompts."
+
+[coding_models."qwen3.5-9b"]
+id = "qwen/qwen3.5-9b"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.08
+cost_output_per_1m = 0.15
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "Very cheap 9B model. Base (non-minimal) profile struggled on SWE-bench Pro; use qwen3.5-9b-minimal instead."
+
+[coding_models."qwen3.5-9b-minimal"]
+id = "qwen/qwen3.5-9b"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.08
+cost_output_per_1m = 0.15
+recommended = true
+tier = "small"
+tool_style = "xml"
+minimal = true
+notes = "Minimal/cheap tuning of Qwen3.5-9B. 2/5 success on the minimal 5-instance SWE-bench Pro set; best cheap small model after Mistral 3.2."
+
+[coding_models."qwen3.5-flash"]
+id = "qwen/qwen3.5-flash-02-23"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.1
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Fast Qwen3.5 variant; good value for short coding tasks."
+
+[coding_models."qwen3.5-flash-minimal"]
+id = "qwen/qwen3.5-flash-02-23"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.1
+recommended = false
+tier = "small"
+tool_style = "xml"
+minimal = true
+notes = "Minimal/cheap tuning of Qwen3.5-Flash. Early minimal runs showed missing_stderr failures; needs more investigation."
+
+[coding_models."qwen3.5-27b"]
+id = "qwen/qwen3.5-27b"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.12
+cost_output_per_1m = 0.25
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Mid-size Qwen3.5 with good coding performance for the price."
+
+[coding_models."qwen3.6-27b"]
+id = "qwen/qwen3.6-27b"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.3
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Updated Qwen3.6 27B; solid cheap coding choice."
+
+[coding_models."qwen3.6-27b-minimal"]
+id = "qwen/qwen3.6-27b"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.3
+recommended = false
+tier = "small"
+tool_style = "xml"
+minimal = true
+notes = "Minimal/cheap tuning of Qwen3.6-27B. Early minimal runs showed missing_stderr failures; needs more investigation."
+
+[coding_models."qwen3.6-35b-a3b"]
+id = "qwen/qwen3.6-35b-a3b"
+max_tokens = 8192
+context_window = 32768
+max_output_tokens = 8192
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.18
+cost_output_per_1m = 0.35
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Qwen3.6 35B A3B MoE; good coding reasoning for a low price."
+
+[coding_models.cohere-north-mini-code-free]
+id = "cohere/north-mini-code:free"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Free small coding model from Cohere; rate-limited."
+
+[coding_models."kimi-k2.7-code"]
+id = "moonshotai/kimi-k2.7-code"
+max_tokens = 16384
+context_window = 256000
+max_output_tokens = 16384
+context_length = 256000
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 2
+cost_input_per_1m = 0.5
+cost_output_per_1m = 1.0
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Strong coding-specialized model with large context; higher cost but reliable."
+
+[coding_models."seed-2.0-mini"]
+id = "bytedance-seed/seed-2.0-mini"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.1
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Tiny cheap model from ByteDance Seed; good for quick tasks."
+
+[coding_models.solar-pro-3]
+id = "upstage/solar-pro-3"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.1
+cost_output_per_1m = 0.2
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Compact coding model from Upstage."
+
+[coding_models."lfm-2.5-1.2b-thinking-free"]
+id = "liquid/lfm-2.5-1.2b-thinking:free"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 20
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Very small free model; useful for smoke tests only."
+
+[coding_models.amazon-nova-lite]
+id = "amazon/nova-lite-v1"
+max_tokens = 4096
+context_window = 128000
+max_output_tokens = 4096
+context_length = 128000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.06
+cost_output_per_1m = 0.12
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Cheap Amazon model with large context window."
+
+[coding_models.qwen3-next-80b-a3b]
+id = "qwen/qwen3-next-80b-a3b-instruct"
+max_tokens = 16384
+context_window = 131072
+max_output_tokens = 16384
+context_length = 131072
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 2
+cost_input_per_1m = 0.4
+cost_output_per_1m = 0.8
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Qwen3 Next 80B A3B; strong reasoning and coding, medium price."
+
+[coding_models.qwen3-next-80b-a3b-free]
+id = "qwen/qwen3-next-80b-a3b-instruct:free"
+max_tokens = 16384
+context_window = 131072
+max_output_tokens = 16384
+context_length = 131072
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Free tier of Qwen3 Next 80B A3B; rate-limited."
+
+[coding_models."gemini-2.5-pro"]
+id = "google/gemini-2.5-pro"
+max_tokens = 16384
+context_window = 1048576
+max_output_tokens = 16384
+context_length = 1048576
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 2
+cost_input_per_1m = 1.25
+cost_output_per_1m = 10.0
+recommended = true
+tier = "large"
+tool_style = "auto"
+notes = "Large high-quality model with 1M context; expensive output tokens but powerful for big-code tasks."
+
+[coding_models.qwen3-coder-30b-a3b-instruct]
+id = "qwen/qwen3-coder-30b-a3b-instruct"
+max_tokens = 8192
+context_window = 160000
+max_output_tokens = 8192
+context_length = 160000
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.07
+cost_output_per_1m = 0.27
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: 1/10 success (NodeBB + one Teleport). Mostly hits max_iterations_exceeded; not currently recommended."
+
+[coding_models.qwen3-coder-flash]
+id = "qwen/qwen3-coder-flash"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.195
+cost_output_per_1m = 0.975
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: still running / early results poor (max_iterations_exceeded and other failures)."
+
+[coding_models.qwen3-coder-free]
+id = "qwen/qwen3-coder:free"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Free tier of Qwen3 Coder; useful for low-cost experiments."
+
+[coding_models.qwen3-coder-next]
+id = "qwen/qwen3-coder-next"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.11
+cost_output_per_1m = 0.8
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: 0/3 on Teleport (max_iterations_exceeded). Mark not recommended pending more data."
+
+[coding_models."poolside-laguna-xs.2"]
+id = "poolside/laguna-xs.2"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.1
+cost_output_per_1m = 0.2
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: 0/3 (malformed XML / JSON parse errors, max_iterations_exceeded). Not recommended."
+
+[coding_models."poolside-laguna-xs.2-free"]
+id = "poolside/laguna-xs.2:free"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "Free tier of Poolside Laguna XS.2; inherits the paid variant parsing issues."
+
+[coding_models.mistral-small-24b-instruct-2501]
+id = "mistralai/mistral-small-24b-instruct-2501"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.08
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: 1/3 success on Teleport. Older Mistral Small; superseded by 3.2-24b-instruct."
+
+[coding_models."mistral-small-3.2-24b-instruct"]
+id = "mistralai/mistral-small-3.2-24b-instruct"
+max_tokens = 4096
+context_window = 128000
+max_output_tokens = 4096
+context_length = 128000
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.075
+cost_output_per_1m = 0.2
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: 3/3 success on Teleport smoke set. BEST cheap model; clearly recommended."
+
+[coding_models."ibm-granite-4.1-8b"]
+id = "ibm-granite/granite-4.1-8b"
+max_tokens = 4096
+context_window = 131072
+max_output_tokens = 4096
+context_length = 131072
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.1
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "SWE-bench Pro smoke result: 0/3 (no_edit_termination / prompt injection behavior). Not recommended."
+
+[coding_models.openai-gpt-oss-20b]
+id = "openai/gpt-oss-20b"
+max_tokens = 4096
+context_window = 131072
+max_output_tokens = 4096
+context_length = 131072
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.029
+cost_output_per_1m = 0.14
+recommended = false
+tier = "small"
+tool_style = "json"
+notes = "SWE-bench Pro smoke result: 0/3 (JSON parse errors). Not recommended in current harness."
+
+[coding_models.arcee-ai-trinity-mini]
+id = "arcee-ai/trinity-mini"
+max_tokens = 4096
+context_window = 131072
+max_output_tokens = 4096
+context_length = 131072
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.045
+cost_output_per_1m = 0.15
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "Small model; already marked not recommended. No positive SWE-bench Pro data yet."
+
+[coding_models.deepseek-v4-flash-minimal]
+id = "deepseek/deepseek-v4-flash"
+max_tokens = 8192
+context_window = 64000
+max_output_tokens = 8192
+context_length = 64000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.1
+cost_output_per_1m = 0.3
+recommended = false
+tier = "small"
+tool_style = "xml"
+minimal = true
+notes = "Minimal/cheap tuning of DeepSeek-V4-Flash. Early minimal runs showed missing_stderr failures; needs more investigation."
+
+[coding_models."llama-3.3-70b-instruct-free"]
+id = "meta-llama/llama-3.3-70b-instruct:free"
+max_tokens = 16384
+context_window = 131072
+max_output_tokens = 16384
+context_length = 131072
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = false
+tier = "medium"
+tool_style = "xml"
+notes = "Free 70B Llama 3.3 from OpenRouter; untested in this harness."
+
+[coding_models.llama-4-scout]
+id = "meta-llama/llama-4-scout"
+max_tokens = 16384
+context_window = 10000000
+max_output_tokens = 16384
+context_length = 10000000
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 2
+cost_input_per_1m = 0.09999999999999999
+cost_output_per_1m = 0.3
+recommended = false
+tier = "medium"
+tool_style = "xml"
+notes = "Cheap Llama 4 Scout with 10M context; untested in this harness."
+
+[coding_models."deepseek-chat-v3.1"]
+id = "deepseek/deepseek-chat-v3.1"
+max_tokens = 32768
+context_window = 163840
+max_output_tokens = 32768
+context_length = 163840
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 2
+cost_input_per_1m = 0.21
+cost_output_per_1m = 0.7899999999999999
+recommended = false
+tier = "medium"
+tool_style = "xml"
+notes = "Cheap general coding model; untested in this harness."
+
+[coding_models.qwen3-coder]
+id = "qwen/qwen3-coder"
+max_tokens = 65536
+context_window = 1048576
+max_output_tokens = 65536
+context_length = 1048576
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 2
+cost_input_per_1m = 0.22
+cost_output_per_1m = 1.7999999999999998
+recommended = false
+tier = "medium"
+tool_style = "xml"
+notes = "Large Qwen3 Coder (480B A35B); cheap for its size but untested in this harness."
+
+[coding_models.mistral-small-2603]
+id = "mistralai/mistral-small-2603"
+max_tokens = 4096
+context_window = 262144
+max_output_tokens = 4096
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.6
+recommended = false
+tier = "small"
+tool_style = "xml"
+notes = "Newer Mistral Small (March 2026); cheap, untested in this harness."
+
+[coding_models.gpt-5-mini]
+id = "openai/gpt-5-mini"
+max_tokens = 4096
+context_window = 400000
+max_output_tokens = 4096
+context_length = 400000
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.25
+cost_output_per_1m = 2.0
+recommended = false
+tier = "small"
+tool_style = "json"
+notes = "Cheap OpenAI GPT-5 Mini; untested in this harness."
+
+[coding_models.gemma-3-27b-it]
+id = "google/gemma-3-27b-it"
+max_tokens = 16384
+context_window = 131072
+max_output_tokens = 16384
+context_length = 131072
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.08
+cost_output_per_1m = 0.16
+recommended = false
+tier = "small"
+tool_style = "auto"
+notes = "Cheap Gemma 3 27B; untested in this harness."
+
+[vision_models.minimax-m3]
+id = "minimax/minimax-m3"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.3
+recommended = true
+tier = "small"
+tool_style = "xml"
+vision = true
+notes = "Vision-capable model from MiniMax."
+
+[vision_models.qwen3-vl-8b-instruct]
+id = "qwen/qwen3-vl-8b-instruct"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.1
+cost_output_per_1m = 0.2
+recommended = true
+tier = "small"
+tool_style = "xml"
+vision = true
+notes = "Small vision-language model from Qwen."
+
+[vision_models.qwen3-vl-30b-a3b-instruct]
+id = "qwen/qwen3-vl-30b-a3b-instruct"
+max_tokens = 4096
+context_window = 32768
+max_output_tokens = 4096
+context_length = 32768
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.2
+cost_output_per_1m = 0.4
+recommended = true
+tier = "small"
+tool_style = "xml"
+vision = true
+notes = "Mid-size vision-language model from Qwen."
