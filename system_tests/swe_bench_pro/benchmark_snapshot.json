@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-24T05:42:13.121371+00:00",
+  "generated_at": "2026-06-24T05:43:10.519653+00:00",
   "runs": [
     {
       "model": "mistral-large-3",
@@ -36,13 +36,13 @@
     {
       "model": "gemini-3.5-flash",
       "sample_size": 50,
-      "predictions": 23,
+      "predictions": 24,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.1621,
+      "estimated_cost_usd": 0.1692,
       "elapsed_hours": 0.2,
       "instances_per_hour": 250.0
     },
@@ -101,13 +101,52 @@
     {
       "model": "llama-4-scout",
       "sample_size": 10,
+      "predictions": 5,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": 0.0195,
+      "elapsed_hours": 0.01,
+      "instances_per_hour": 1000.0
+    },
+    {
+      "model": "xiaomi-mimo-v2.5",
+      "sample_size": 10,
       "predictions": 4,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0156,
+      "estimated_cost_usd": 0.0174,
+      "elapsed_hours": 0.01,
+      "instances_per_hour": 1000.0
+    },
+    {
+      "model": "gemma-3-12b",
+      "sample_size": 10,
+      "predictions": 3,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": 0.0058,
+      "elapsed_hours": 0.01,
+      "instances_per_hour": 1000.0
+    },
+    {
+      "model": "granite-4.1-8b",
+      "sample_size": 10,
+      "predictions": 3,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": 0.0047,
       "elapsed_hours": 0.01,
       "instances_per_hour": 1000.0
     },
@@ -121,45 +160,6 @@
       "fail_to_pass": null,
       "pass_to_pass": null,
       "estimated_cost_usd": 0.0221,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "xiaomi-mimo-v2.5",
-      "sample_size": 10,
-      "predictions": 3,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.013,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "gemma-3-12b",
-      "sample_size": 10,
-      "predictions": 2,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0039,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "granite-4.1-8b",
-      "sample_size": 10,
-      "predictions": 2,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0031,
       "elapsed_hours": 0.01,
       "instances_per_hour": 1000.0
     },
