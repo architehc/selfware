@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-24T05:41:41.842736+00:00",
+  "generated_at": "2026-06-24T05:42:13.121371+00:00",
   "runs": [
     {
       "model": "mistral-large-3",
@@ -101,13 +101,26 @@
     {
       "model": "llama-4-scout",
       "sample_size": 10,
+      "predictions": 4,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": 0.0156,
+      "elapsed_hours": 0.01,
+      "instances_per_hour": 1000.0
+    },
+    {
+      "model": "llama-4-maverick",
+      "sample_size": 10,
       "predictions": 3,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0117,
+      "estimated_cost_usd": 0.0221,
       "elapsed_hours": 0.01,
       "instances_per_hour": 1000.0
     },
@@ -138,7 +151,7 @@
       "instances_per_hour": 1000.0
     },
     {
-      "model": "llama-4-maverick",
+      "model": "granite-4.1-8b",
       "sample_size": 10,
       "predictions": 2,
       "completed": null,
@@ -146,7 +159,20 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0147,
+      "estimated_cost_usd": 0.0031,
+      "elapsed_hours": 0.01,
+      "instances_per_hour": 1000.0
+    },
+    {
+      "model": "ling-2.6-flash",
+      "sample_size": 10,
+      "predictions": 2,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": 0.0008,
       "elapsed_hours": 0.01,
       "instances_per_hour": 1000.0
     },
@@ -173,32 +199,6 @@
       "fail_to_pass": null,
       "pass_to_pass": null,
       "estimated_cost_usd": 0.0428,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "granite-4.1-8b",
-      "sample_size": 10,
-      "predictions": 1,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0016,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "ling-2.6-flash",
-      "sample_size": 10,
-      "predictions": 1,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0004,
       "elapsed_hours": 0.01,
       "instances_per_hour": 1000.0
     },
