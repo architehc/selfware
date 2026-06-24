@@ -770,6 +770,40 @@ tool_style = "xml"
 vision = true
 notes = "Mid-size vision-language model from Qwen."
 
+[coding_models."gemini-3.5-flash"]
+id = "google/gemini-3.5-flash"
+max_tokens = 16384
+context_window = 1048576
+max_output_tokens = 16384
+context_length = 1048576
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.6
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Fast cheap Google model; strong on the first 10-instance pilot."
+
+[coding_models."kimi-k2.6"]
+id = "moonshotai/kimi-k2.6"
+max_tokens = 16384
+context_window = 256000
+max_output_tokens = 16384
+context_length = 256000
+temperature = 0.1
+max_iterations = 35
+step_timeout_secs = 750
+parallelism = 2
+cost_input_per_1m = 0.3
+cost_output_per_1m = 0.8
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Strong coding model from Moonshot; good balance of speed and quality."
+
 [coding_models."xiaomi-mimo-v2.5"]
 id = "xiaomi/mimo-v2.5"
 max_tokens = 16384
