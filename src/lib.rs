@@ -144,6 +144,7 @@ pub use testing::visual_verification;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod profiles;
+#[cfg(feature = "legacy-swebench")]
 pub mod swebench;
 
 // ============================================================================

@@ -11,6 +11,7 @@
 
 use selfware::agent::Agent;
 use selfware::config::{AgentConfig, Config, ExecutionMode, ModelProfile, SafetyConfig};
+#[cfg(feature = "legacy-swebench")]
 use selfware::swebench::*;
 use selfware::tools::computer::{ComputerKeyboardTool, ComputerMouseTool, ComputerWindowTool};
 use selfware::tools::vision::{VisionAnalyze, VisionCompare};
@@ -374,6 +375,7 @@ async fn test_control_then_analyze_chain() {
 }
 
 /// Test SWE-bench evaluator + report generation chain.
+#[cfg(feature = "legacy-swebench")]
 #[tokio::test]
 async fn test_swebench_evaluator_chain() {
     let tmp = tempfile::tempdir().unwrap();
@@ -816,6 +818,7 @@ async fn test_live_visual_feedback_loop() {
 }
 
 /// Test SWE-bench task loading + prompt construction chain with live endpoint check.
+#[cfg(feature = "legacy-swebench")]
 #[tokio::test]
 async fn test_live_swebench_prompt_construction() {
     let endpoint = vision_endpoint();

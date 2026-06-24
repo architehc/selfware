@@ -1,9 +1,14 @@
-//! Legacy SWE-bench demo API.
+//! Deprecated legacy SWE-bench demo API.
 //!
-//! This module is kept for source compatibility with older experiments. It no
-//! longer fabricates tasks or resolution results. Real benchmark execution and
-//! official Docker scoring live under `bench_harness::swebench_pro` and the CLI
-//! command `selfware bench swebench-pro --official-eval`.
+//! **Do not use for official scoring.** This module is kept only for source
+//! compatibility with older experiments and is gated behind the
+//! `legacy-swebench` feature. It no longer executes tasks or produces
+//! resolution results.
+//!
+//! Real benchmark execution and official Docker scoring live in
+//! `system_tests/swe_bench_pro/` and behind the `bench-harness` feature in
+//! `src/bench_harness/swebench_pro/`. Use the CLI command
+//! `selfware bench swebench-pro` or the Python harness for production runs.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

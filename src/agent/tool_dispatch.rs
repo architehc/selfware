@@ -978,13 +978,27 @@ impl Agent {
              READ-LOOP FORCE-MUTATION MODE is active.\n\
              Your previous read-only or verification tool calls were suppressed. \
              The next accepted action must mutate code or project state.\n\n\
-             Use this exact tool shape on the most relevant existing file you already inspected:\n\
+             Choose ONE of these exact tool shapes on the most relevant existing file you already inspected:\n\n\
              <tool>\n\
              <name>file_edit</name>\n\
              <arguments>{{\"path\":{target_json},\"old_str\":\"EXACT ORIGINAL TEXT FROM THE FILE\",\"new_str\":\"REPLACEMENT TEXT\"}}</arguments>\n\
              </tool>\n\n\
+             <tool>\n\
+             <name>file_multi_edit</name>\n\
+             <arguments>{{\"path\":{target_json},\"edits\":[{{\"old_str\":\"...\",\"new_str\":\"...\"}}]}}</arguments>\n\
+             </tool>\n\n\
+             <tool>\n\
+             <name>file_write</name>\n\
+             <arguments>{{\"path\":{target_json},\"content\":\"FULL NEW FILE CONTENT\"}}</arguments>\n\
+             </tool>\n\n\
+             <tool>\n\
+             <name>patch_apply</name>\n\
+             <arguments>{{\"patch\":\"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new\\n\"}}</arguments>\n\
+             </tool>\n\n\
+             If you already know the exact change, you may also output the replacement code as plain text with the target path; Selfware will write it automatically.\n\n\
              Rules:\n\
-             - Do NOT call file_read, directory_tree, glob_find, grep_search, git_diff, cargo_check, cargo_test, pytest, npm test, or go test first.\n\
+             - Do NOT call file_read, directory_tree, glob_find, grep_search, git_diff, cargo_check, cargo_test, pytest, npm test, or go test BEFORE making an edit.\n\
+             - After you edit, you MAY run one targeted test command to verify the change.\n\
              - Do NOT create src/lib.rs unless this repository already has Cargo.toml and src/lib.rs is the real target.\n\
              - If you cannot identify a safe edit from the file context already present, stop with READ_LOOP_NO_EDIT instead of guessing.\n\
              </selfware_system_directive>"

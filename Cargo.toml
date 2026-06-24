@@ -172,8 +172,12 @@ redis = ["dep:redis"]
 # Browser automation module (currently stub implementation)
 browser = []
 
+# Legacy SWE-bench API (deprecated; kept only for source compatibility with
+# older experiments and integration tests).
+legacy-swebench = []
+
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser", "legacy-swebench"]
 
 [dev-dependencies]
 tokio-test = "0.4"

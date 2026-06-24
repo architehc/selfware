@@ -1,6 +1,6 @@
 # Selfware SWE-bench Pro Benchmark Leaderboard
 
-*Generated: 2026-06-24T10:12:57.735129+00:00*
+*Generated: 2026-06-24T10:13:34.198727+00:00*
 
 | Rank | Model | Sample | Pass | Completed | Pass Rate | $/instance | Speed (inst/hr) |
 |------|-------|--------|------|-----------|------------|------------|------------------|
