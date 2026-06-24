@@ -990,3 +990,156 @@ recommended = true
 tier = "large"
 tool_style = "xml"
 notes = "Mistral Large 3 675B; latest flagship instruct model from Mistral."
+
+[coding_models."ling-2.6-flash"]
+id = "inclusionai/ling-2.6-flash"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.01
+cost_output_per_1m = 0.03
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "inclusionAI Ling 2.6 Flash; extremely cheap general-purpose model."
+
+[coding_models."llama-3.1-8b"]
+id = "meta-llama/llama-3.1-8b-instruct"
+max_tokens = 8192
+context_window = 131072
+max_output_tokens = 8192
+context_length = 131072
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.02
+cost_output_per_1m = 0.03
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Meta Llama 3.1 8B Instruct; small, fast, open weights."
+
+[coding_models."mistral-nemo"]
+id = "mistralai/mistral-nemo"
+max_tokens = 8192
+context_window = 131072
+max_output_tokens = 8192
+context_length = 131072
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.02
+cost_output_per_1m = 0.03
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Mistral Nemo 12B; compact multilingual model."
+
+[coding_models."qwen2.5-7b"]
+id = "qwen/qwen-2.5-7b-instruct"
+max_tokens = 8192
+context_window = 131072
+max_output_tokens = 8192
+context_length = 131072
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.04
+cost_output_per_1m = 0.10
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Qwen2.5 7B Instruct; small but capable coding model."
+
+[coding_models."granite-4.1-8b"]
+id = "ibm-granite/granite-4.1-8b"
+max_tokens = 8192
+context_window = 131072
+max_output_tokens = 8192
+context_length = 131072
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.10
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "IBM Granite 4.1 8B; code-optimized small model."
+
+[coding_models."gemma-3-12b"]
+id = "google/gemma-3-12b-it"
+max_tokens = 8192
+context_window = 131072
+max_output_tokens = 8192
+context_length = 131072
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.05
+cost_output_per_1m = 0.15
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Google Gemma 3 12B; lightweight open model."
+
+[coding_models."nova-lite"]
+id = "amazon/nova-lite-v1"
+max_tokens = 8192
+context_window = 300000
+max_output_tokens = 8192
+context_length = 300000
+temperature = 0.1
+max_iterations = 25
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.06
+cost_output_per_1m = 0.24
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Amazon Nova Lite 1.0; cheap long-context model."
+
+[coding_models."qwen3-32b"]
+id = "qwen/qwen3-32b"
+max_tokens = 8192
+context_window = 131072
+max_output_tokens = 8192
+context_length = 131072
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.08
+cost_output_per_1m = 0.28
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Qwen3 32B; mid-size dense coding model."
+
+[coding_models."deepseek-v3.2"]
+id = "deepseek/deepseek-v3.2"
+max_tokens = 16384
+context_window = 131072
+max_output_tokens = 16384
+context_length = 131072
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.23
+cost_output_per_1m = 0.34
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "DeepSeek V3.2; upgraded MoE generalist, cheap for its size."
