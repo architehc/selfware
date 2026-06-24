@@ -769,3 +769,105 @@ tier = "small"
 tool_style = "xml"
 vision = true
 notes = "Mid-size vision-language model from Qwen."
+
+[coding_models."xiaomi-mimo-v2.5"]
+id = "xiaomi/mimo-v2.5"
+max_tokens = 16384
+context_window = 1048576
+max_output_tokens = 16384
+context_length = 1048576
+temperature = 0.1
+max_iterations = 35
+step_timeout_secs = 750
+parallelism = 2
+cost_input_per_1m = 0.14
+cost_output_per_1m = 0.28
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "High-usage coding model from Xiaomi; strong on agentic coding workflows."
+
+[coding_models.tencent-hy3-preview]
+id = "tencent/hy3-preview"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.063
+cost_output_per_1m = 0.21
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Tencent Hy3 preview; high efficiency MoE for agentic workflows."
+
+[coding_models.tencent-hy3-preview-free]
+id = "tencent/hy3-preview:free"
+max_tokens = 8192
+context_window = 262144
+max_output_tokens = 8192
+context_length = 262144
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "Free variant of Tencent Hy3 preview; rate-limited."
+
+[coding_models.openrouter-owl-alpha]
+id = "openrouter/owl-alpha"
+max_tokens = 16384
+context_window = 1048576
+max_output_tokens = 16384
+context_length = 1048576
+temperature = 0.1
+max_iterations = 35
+step_timeout_secs = 750
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "OpenRouter Owl Alpha; free agentic coding model."
+
+[coding_models."stepfun-step-3.7-flash"]
+id = "stepfun/step-3.7-flash"
+max_tokens = 8192
+context_window = 256000
+max_output_tokens = 8192
+context_length = 256000
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.2
+cost_output_per_1m = 1.15
+recommended = true
+tier = "small"
+tool_style = "xml"
+notes = "StepFun Step 3.7 Flash; strong SWE-Bench Pro numbers."
+
+[coding_models.nvidia-nemotron-3-ultra-free]
+id = "nvidia/nemotron-3-ultra-550b-a55b:free"
+max_tokens = 16384
+context_window = 1000000
+max_output_tokens = 16384
+context_length = 1000000
+temperature = 0.1
+max_iterations = 40
+step_timeout_secs = 900
+parallelism = 1
+cost_input_per_1m = 0.0
+cost_output_per_1m = 0.0
+recommended = true
+tier = "large"
+tool_style = "xml"
+notes = "NVIDIA Nemotron 3 Ultra free; 550B MoE, long-context reasoning model."

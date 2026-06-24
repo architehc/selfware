@@ -3,7 +3,7 @@
 # Do NOT put the real API key here; set SELFWARE_API_KEY in the environment.
 
 endpoint = "https://openrouter.ai/api/v1"
-model = "moonshotai/kimi-k2.7-code"
+model = "nvidia/nemotron-3-ultra-550b-a55b:free"
 max_tokens = 16384
 temperature = 0.1
 api_key = "$SELFWARE_API_KEY"
@@ -11,8 +11,8 @@ api_key = "$SELFWARE_API_KEY"
 [agent]
 max_iterations = 40
 step_timeout_secs = 900
-token_budget = 32768
-context_window = 256000
+token_budget = 131072
+context_window = 1000000
 native_function_calling = false
 streaming = false
 min_completion_steps = 2
@@ -27,7 +27,7 @@ max_delay_ms = 60000
 allowed_paths = ["./**", "/app/**"]
 
 [metadata]
-tier = "medium"
+tier = "large"
 tool_style = "xml"
 recommended = true
-notes = "Strong coding-specialized model with large context; higher cost but reliable."
+notes = "NVIDIA Nemotron 3 Ultra free; 550B MoE, long-context reasoning model."

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+matrix_outputs/
+pilot_outputs/
+pilot_outputs_v2/
+pilot_gold_eval/
+*.log
+runs_*/
+parallel_launches/
+swe_bench_pro_backup/
+full_sample_outputs*/
+benchmark_results*/
+*.pid
+out/
+eval/
+eval_recheck/
+predictions.jsonl

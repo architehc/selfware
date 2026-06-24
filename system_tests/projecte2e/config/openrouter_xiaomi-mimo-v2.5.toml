@@ -3,16 +3,16 @@
 # Do NOT put the real API key here; set SELFWARE_API_KEY in the environment.
 
 endpoint = "https://openrouter.ai/api/v1"
-model = "moonshotai/kimi-k2.7-code"
+model = "xiaomi/mimo-v2.5"
 max_tokens = 16384
 temperature = 0.1
 api_key = "$SELFWARE_API_KEY"
 
 [agent]
-max_iterations = 40
-step_timeout_secs = 900
+max_iterations = 35
+step_timeout_secs = 750
 token_budget = 32768
-context_window = 256000
+context_window = 1048576
 native_function_calling = false
 streaming = false
 min_completion_steps = 2
@@ -30,4 +30,4 @@ allowed_paths = ["./**", "/app/**"]
 tier = "medium"
 tool_style = "xml"
 recommended = true
-notes = "Strong coding-specialized model with large context; higher cost but reliable."
+notes = "High-usage coding model from Xiaomi; strong on agentic coding workflows."
