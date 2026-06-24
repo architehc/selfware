@@ -787,6 +787,40 @@ tier = "medium"
 tool_style = "xml"
 notes = "Fast cheap Google model; strong on the first 10-instance pilot."
 
+[coding_models."glm-5.2-nitro"]
+id = "z-ai/glm-5.2:nitro"
+max_tokens = 16384
+context_window = 32768
+max_output_tokens = 16384
+context_length = 32768
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.3
+cost_output_per_1m = 0.6
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "GLM 5.2 with OpenRouter Nitro routing (throughput-optimized providers)."
+
+[coding_models."gemini-3.5-flash-nitro"]
+id = "google/gemini-3.5-flash:nitro"
+max_tokens = 16384
+context_window = 1048576
+max_output_tokens = 16384
+context_length = 1048576
+temperature = 0.1
+max_iterations = 30
+step_timeout_secs = 600
+parallelism = 2
+cost_input_per_1m = 0.15
+cost_output_per_1m = 0.6
+recommended = true
+tier = "medium"
+tool_style = "xml"
+notes = "Gemini 3.5 Flash with OpenRouter Nitro routing (throughput-optimized providers)."
+
 [coding_models."kimi-k2.6"]
 id = "moonshotai/kimi-k2.6"
 max_tokens = 16384
