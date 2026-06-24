@@ -58,6 +58,7 @@ pub struct AgentConfig {
     /// Behavior when a mutation-required task loops on read-only tools.
     #[serde(default)]
     pub read_loop_policy: ReadLoopPolicy,
+
     /// When true, visual verification failures with confidence > 0.6 act as hard
     /// gates — the tool result is marked as needing retry and the assertion is
     /// logged to the checkpoint.  When false (default), failures are advisory only.
