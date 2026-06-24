@@ -46,6 +46,7 @@ ${VENV} run_selfware.py \
   --max-retries 1 \
   --diff-fallback \
   --early-diff-fallback \
+  --resume \
   2>&1 | tee -a "${LOG_FILE}" || true
 
 echo "[$(date -Iseconds)] Predictions done; starting evaluation" | tee -a "${LOG_FILE}"
