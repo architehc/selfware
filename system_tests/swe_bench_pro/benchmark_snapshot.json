@@ -1,6 +1,25 @@
 {
-  "generated_at": "2026-06-24T10:13:34.198727+00:00",
+  "generated_at": "2026-06-24T11:01:31.488888+00:00",
   "runs": [
+    {
+      "model": "gpt-5-mini",
+      "sample_size": 50,
+      "predictions": 46,
+      "completed": 12,
+      "passed": 1,
+      "pass_rate": 0.08333333333333333,
+      "fail_to_pass": [
+        3,
+        135
+      ],
+      "pass_to_pass": [
+        268,
+        413
+      ],
+      "estimated_cost_usd": 0.237,
+      "elapsed_hours": 8.3,
+      "instances_per_hour": 6.02
+    },
     {
       "model": "glm-5.2-nitro",
       "sample_size": 50,
@@ -19,25 +38,6 @@
       "estimated_cost_usd": 0.4278,
       "elapsed_hours": 7.17,
       "instances_per_hour": 6.97
-    },
-    {
-      "model": "gpt-5-mini",
-      "sample_size": 50,
-      "predictions": 44,
-      "completed": 41,
-      "passed": 1,
-      "pass_rate": 0.024390243902439025,
-      "fail_to_pass": [
-        3,
-        267
-      ],
-      "pass_to_pass": [
-        5333,
-        5483
-      ],
-      "estimated_cost_usd": 0.8097,
-      "elapsed_hours": null,
-      "instances_per_hour": null
     },
     {
       "model": "gemini-3.5-flash",
@@ -346,26 +346,26 @@
     {
       "model": "kimi-k2.6",
       "sample_size": 50,
-      "predictions": 21,
+      "predictions": 22,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.2289,
+      "estimated_cost_usd": 0.2398,
       "elapsed_hours": 0.23,
       "instances_per_hour": 217.39
     },
     {
       "model": "glm-5.2",
       "sample_size": 50,
-      "predictions": 14,
+      "predictions": 16,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.1302,
+      "estimated_cost_usd": 0.1488,
       "elapsed_hours": 0.18,
       "instances_per_hour": 277.78
     }
