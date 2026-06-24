@@ -238,10 +238,10 @@ def evaluate_instance(
     """Evaluate a single prediction and return scoring metadata."""
     instance_id = instance["instance_id"]
     image = f"docker.io/jefzda/sweap-images:{instance['dockerhub_tag']}"
-    # Include the output directory name in the container name so parallel
-    # evaluations of the same instance (e.g., different model runs) do not
-    # collide on the same rootless container.
-    name = container_name(instance_id, f"eval-{output_dir.name}")
+    # Include the run and output directory names in the container name so
+    # parallel evaluations of the same instance (e.g., different model runs)
+    # do not collide on the same rootless container.
+    name = container_name(instance_id, f"eval-{output_dir.parent.name}-{output_dir.name}")
 
     result: dict[str, Any] = {
         "instance_id": instance_id,

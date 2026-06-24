@@ -33,6 +33,7 @@ cd "${SWE_DIR}"
 echo "[$(date -Iseconds)] Starting model=${MODEL_PROFILE} podman_root=${PODMAN_ROOT} out=${OUT_DIR}" | tee -a "${LOG_FILE}"
 
 # 1. Generate predictions with the agentless adapter (cheaper/direct patch generation).
+# Continue to evaluation even if some predictions failed.
 ${VENV} run_selfware.py \
   --model-profile "${MODEL_PROFILE}" \
   --config-dir "${CONFIG_DIR}" \
@@ -47,7 +48,7 @@ ${VENV} run_selfware.py \
   --max-retries 2 \
   --diff-fallback \
   --early-diff-fallback \
-  2>&1 | tee -a "${LOG_FILE}"
+  2>&1 | tee -a "${LOG_FILE}" || true
 
 echo "[$(date -Iseconds)] Predictions done; starting evaluation" | tee -a "${LOG_FILE}"
 
@@ -57,7 +58,7 @@ ${VENV} evaluate_predictions.py \
   --output-dir "${OUT_DIR}/eval" \
   --sample-file "${SAMPLE_FILE}" \
   --timeout 600 \
-  2>&1 | tee -a "${LOG_FILE}"
+  2>&1 | tee -a "${LOG_FILE}" || true
 
 echo "[$(date -Iseconds)] Evaluation done" | tee -a "${LOG_FILE}"
 
