@@ -130,17 +130,45 @@ def load_instances(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _build_entryscript(instance: dict[str, Any]) -> str:
-    """Build the container entry script that applies the patch and runs tests."""
+    """Build the container entry script that applies the patch and runs tests.
+
+    The script is strict: if the patch is empty or cannot be applied, it writes
+    an output.json marking the instance as failed instead of silently running
+    tests on the unpatched base commit.
+    """
     selected = _load_list_field(instance.get("selected_test_files_to_run", []))
     test_arg = ",".join(selected)
     before_cmd = instance.get("before_repo_set_cmd", "") or ""
     return (
         "#!/bin/bash\n"
+        "set -euo pipefail\n"
         "cd /app\n"
         f"git reset --hard {instance['base_commit']}\n"
         f"git checkout {instance['base_commit']}\n"
         f"{before_cmd}\n"
-        "git apply -v /workspace/patch.diff\n"
+        "if [ ! -s /workspace/patch.diff ] || [ \"$(grep -v '^[[:space:]]*$' /workspace/patch.diff | wc -l)\" -eq 0 ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  echo 'PATCH_EMPTY' > /workspace/patch_apply_status.txt\n"
+        "  exit 0\n"
+        "fi\n"
+        "set +e\n"
+        "git apply -v /workspace/patch.diff > /workspace/patch_apply.log 2>&1\n"
+        "apply_status=$?\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  git apply --3way -v /workspace/patch.diff >> /workspace/patch_apply.log 2>&1\n"
+        "  apply_status=$?\n"
+        "fi\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  patch -p1 -i /workspace/patch.diff >> /workspace/patch_apply.log 2>&1\n"
+        "  apply_status=$?\n"
+        "fi\n"
+        "set -e\n"
+        "echo \"git apply exit code: $apply_status\" >> /workspace/patch_apply.log\n"
+        "echo $apply_status > /workspace/patch_apply_status.txt\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  exit 0\n"
+        "fi\n"
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
     )
@@ -320,10 +348,24 @@ def evaluate_instance(
         output_file = output_dir / f"{instance_id}.output.json"
         stdout_file = output_dir / f"{instance_id}.stdout.log"
         stderr_file = output_dir / f"{instance_id}.stderr.log"
+        patch_apply_log = output_dir / f"{instance_id}.patch_apply.log"
+        patch_apply_status = output_dir / f"{instance_id}.patch_apply_status.txt"
 
         _copy_artifact_out(name, "/workspace/output.json", output_file, logger)
         _copy_artifact_out(name, "/workspace/stdout.log", stdout_file, logger)
         _copy_artifact_out(name, "/workspace/stderr.log", stderr_file, logger)
+        _copy_artifact_out(name, "/workspace/patch_apply.log", patch_apply_log, logger)
+        _copy_artifact_out(name, "/workspace/patch_apply_status.txt", patch_apply_status, logger)
+
+        if patch_apply_status.exists():
+            status_text = patch_apply_status.read_text(encoding="utf-8").strip()
+            result["patch_apply_status"] = status_text
+            if status_text == "PATCH_EMPTY":
+                result["error"] = "empty patch"
+                return result
+            if status_text != "0":
+                result["error"] = "patch apply failed"
+                return result
 
         if not output_file.exists():
             result["error"] = "no output.json produced"

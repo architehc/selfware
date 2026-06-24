@@ -8,12 +8,19 @@ from pathlib import Path
 from typing import Any
 
 
-# Paths that are part of the harness or agent workspace and must never appear
-# in a submitted patch.
+# Paths that are part of the harness, agent workspace, or common build
+# artifacts and must never appear in a submitted patch.
 _DIFF_EXCLUDED_PREFIXES = (
     ".selfware_prompt.txt",
     ".selfware/",
     "agent_data/",
+    "target/",
+    "node_modules/",
+    ".pytest_cache/",
+    "__pycache__/",
+    ".mypy_cache/",
+    "*.orig",
+    "*.bak",
 )
 
 
@@ -33,7 +40,12 @@ def _is_excluded_diff_hunk(hunk_lines: list[str]) -> bool:
     if path is not None:
         if path.endswith("/"):
             path = path[:-1]
-        if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _DIFF_EXCLUDED_PREFIXES):
+        if any(
+            path == prefix.rstrip("/")
+            or path.startswith(prefix)
+            or path.endswith(prefix.lstrip("*"))
+            for prefix in _DIFF_EXCLUDED_PREFIXES
+        ):
             return True
 
     hunk_text = "".join(hunk_lines)
@@ -78,7 +90,7 @@ def apply_patch(repo_dir: Path, diff_text: str, logger: Any) -> bool:
             logger.warning("git apply attempt %s failed: %s", attempt, proc.stderr.strip())
 
         proc = subprocess.run(
-            ["patch", "-p1", "-i", str(patch_path)],
+            ["patch", "-p1", "--no-backup-if-mismatch", "-i", str(patch_path)],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,

@@ -336,7 +336,9 @@ def setup_logging(output_dir: Path) -> logging.Logger:
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.FileHandler(log_path), logging.StreamHandler(sys.stdout)],
     )
-    return logging.getLogger("selfware-sweap")
+    logger = logging.getLogger("selfware-sweap")
+    logger.propagate = False
+    return logger
 
 
 def load_list_field(value: Any) -> list[str]:
@@ -1685,6 +1687,7 @@ def _stream_to_file(proc: subprocess.Popen, stream, path: Path) -> None:
 
 
 def run_selfware_on_host(
+    instance_id: str,
     repo_dir: Path,
     config_path: Path,
     prompt_text: str,
@@ -1722,15 +1725,15 @@ def run_selfware_on_host(
     prompt_path.write_text(prompt_text, encoding="utf-8")
 
     # Also keep copies in the log dir for debugging.
-    (log_dir / f"{repo_dir.name}.prompt.txt").write_text(prompt_text, encoding="utf-8")
+    (log_dir / f"{instance_id}.prompt.txt").write_text(prompt_text, encoding="utf-8")
     if few_shot_path is not None:
-        (log_dir / f"{repo_dir.name}.few_shot_examples.txt").write_text(
+        (log_dir / f"{instance_id}.few_shot_examples.txt").write_text(
             few_shot_examples, encoding="utf-8"
         )
 
     # Isolate per-instance HOME/XDG directories so selfware's global episodic
     # memory (loaded from dirs::data_local_dir()) does not leak between runs.
-    agent_data_dir = output_dir / "agent_data" / repo_dir.name
+    agent_data_dir = output_dir / "agent_data" / instance_id
     agent_data_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
@@ -1750,8 +1753,8 @@ def run_selfware_on_host(
         "--no-tui",
     ]
 
-    stdout_path = log_dir / f"{repo_dir.name}.selfware.stdout.log"
-    stderr_path = log_dir / f"{repo_dir.name}.selfware.stderr.log"
+    stdout_path = log_dir / f"{instance_id}.selfware.stdout.log"
+    stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
 
     proc = subprocess.Popen(
         cmd,
@@ -1798,6 +1801,38 @@ def run_selfware_on_host(
 
     logger.info("selfware completed on host repo %s", repo_dir.name)
     return True
+
+
+def _verify_patch_applies(repo_dir: Path, patch: str, base_commit: str | None, logger: logging.Logger) -> bool:
+    """Check whether a captured patch applies cleanly on a reset base commit.
+
+    Returns True if the patch can be applied, False otherwise.  The repo is
+    restored to its current state afterwards.
+    """
+    if not patch.strip():
+        return False
+    commit = base_commit or "HEAD"
+    patch_file = repo_dir / ".selfware_verify_patch.diff"
+    patch_file.write_text(patch, encoding="utf-8")
+    try:
+        # Reset to base, try apply, then restore.
+        run_cmd(["git", "-C", str(repo_dir), "stash", "push", "-u", "-m", "verify"], logger=logger)
+        reset_proc = run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", commit], logger=logger)
+        if reset_proc.returncode != 0:
+            logger.warning("Failed to reset for patch verification: %s", reset_proc.stderr.strip())
+            run_cmd(["git", "-C", str(repo_dir), "stash", "pop"], logger=logger)
+            return False
+        check = run_cmd(["git", "-C", str(repo_dir), "apply", "--check", str(patch_file)], logger=logger)
+        applies = check.returncode == 0
+        if not applies:
+            logger.warning("Captured patch does not apply cleanly on base commit: %s", check.stderr.strip())
+        run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", commit], logger=logger)
+        stash_proc = run_cmd(["git", "-C", str(repo_dir), "stash", "pop"], logger=logger)
+        if stash_proc.returncode != 0:
+            logger.warning("Failed to restore repo after patch verification: %s", stash_proc.stderr.strip())
+        return applies
+    finally:
+        patch_file.unlink(missing_ok=True)
 
 
 def capture_patch_on_host(
@@ -2085,6 +2120,7 @@ def process_instance(
 
         # Run selfware on the host against the extracted repo.
         success = run_selfware_on_host(
+            instance_id,
             host_repo_dir,
             config_path,
             prompt_text,
@@ -2100,6 +2136,16 @@ def process_instance(
         patch = capture_patch_on_host(
             host_repo_dir, logger, base_commit=instance.get("base_commit")
         )
+
+        # Verify the captured patch applies cleanly on the base commit.  A
+        # patch that does not apply is useless for evaluation and should trigger
+        # the same recovery path as an empty patch.
+        if patch.strip() and not _verify_patch_applies(
+            host_repo_dir, patch, instance.get("base_commit"), logger
+        ):
+            logger.warning("Captured patch for %s does not apply; treating as empty", instance_id)
+            patch = ""
+
         save_prediction(output_dir, instance_id, patch, logger)
 
         if not patch.strip():
@@ -2112,6 +2158,7 @@ def process_instance(
                     "Do not complete until `git diff` shows a non-empty patch."
                 )
                 success = run_selfware_on_host(
+                    instance_id,
                     host_repo_dir,
                     config_path,
                     force_prompt,
@@ -2133,7 +2180,7 @@ def process_instance(
         # unified diff before spending time on recovery retries.
         # ------------------------------------------------------------------
         if not patch.strip() and args.early_diff_fallback:
-            stderr_path = log_dir / f"{host_repo_dir.name}.selfware.stderr.log"
+            stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
             failure_class = classify_failure(stderr_path)
             if failure_class in (JSON_PARSE_ERROR, MAX_ITERATIONS):
                 logger.warning(
@@ -2175,7 +2222,7 @@ def process_instance(
         # and retry up to --max-retries times with a tailored prompt.
         # ------------------------------------------------------------------
         if (not success or not patch.strip()) and args.retry_failures:
-            stderr_path = log_dir / f"{host_repo_dir.name}.selfware.stderr.log"
+            stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
             failure_class = classify_failure(stderr_path)
             logger.warning(
                 "Classified failure for %s as '%s'",
@@ -2243,6 +2290,7 @@ def process_instance(
                 )
 
                 success = run_selfware_on_host(
+                    instance_id,
                     host_repo_dir,
                     recovery_path,
                     recovery_prompt,
@@ -2265,7 +2313,7 @@ def process_instance(
                     break
 
                 # Re-classify from the latest stderr log for the next attempt.
-                stderr_path = log_dir / f"{host_repo_dir.name}.selfware.stderr.log"
+                stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
                 failure_class = classify_failure(stderr_path)
                 logger.warning(
                     "Re-classified failure for %s as '%s' after attempt %s",
