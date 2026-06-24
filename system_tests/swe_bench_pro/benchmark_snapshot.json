@@ -1,6 +1,25 @@
 {
-  "generated_at": "2026-06-24T09:51:04.786811+00:00",
+  "generated_at": "2026-06-24T10:12:57.735129+00:00",
   "runs": [
+    {
+      "model": "glm-5.2-nitro",
+      "sample_size": 50,
+      "predictions": 46,
+      "completed": 46,
+      "passed": 3,
+      "pass_rate": 0.06521739130434782,
+      "fail_to_pass": [
+        4,
+        285
+      ],
+      "pass_to_pass": [
+        5754,
+        5754
+      ],
+      "estimated_cost_usd": 0.4278,
+      "elapsed_hours": 7.17,
+      "instances_per_hour": 6.97
+    },
     {
       "model": "gpt-5-mini",
       "sample_size": 50,
@@ -38,6 +57,25 @@
       "estimated_cost_usd": 0.3172,
       "elapsed_hours": 7.07,
       "instances_per_hour": 7.07
+    },
+    {
+      "model": "gemini-3.5-flash-nitro",
+      "sample_size": 50,
+      "predictions": 46,
+      "completed": 46,
+      "passed": 1,
+      "pass_rate": 0.021739130434782608,
+      "fail_to_pass": [
+        9,
+        285
+      ],
+      "pass_to_pass": [
+        5705,
+        5754
+      ],
+      "estimated_cost_usd": 0.3243,
+      "elapsed_hours": 7.12,
+      "instances_per_hour": 7.02
     },
     {
       "model": "gemma-3-12b",
@@ -306,54 +344,28 @@
       "instances_per_hour": 7.81
     },
     {
-      "model": "gemini-3.5-flash-nitro",
-      "sample_size": 50,
-      "predictions": 46,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.3243,
-      "elapsed_hours": 6.78,
-      "instances_per_hour": 7.37
-    },
-    {
-      "model": "glm-5.2-nitro",
-      "sample_size": 50,
-      "predictions": 46,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.4278,
-      "elapsed_hours": 6.83,
-      "instances_per_hour": 7.32
-    },
-    {
       "model": "kimi-k2.6",
       "sample_size": 50,
-      "predictions": 20,
+      "predictions": 21,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.218,
+      "estimated_cost_usd": 0.2289,
       "elapsed_hours": 0.23,
       "instances_per_hour": 217.39
     },
     {
       "model": "glm-5.2",
       "sample_size": 50,
-      "predictions": 13,
+      "predictions": 14,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.1209,
+      "estimated_cost_usd": 0.1302,
       "elapsed_hours": 0.18,
       "instances_per_hour": 277.78
     }
