@@ -52,7 +52,7 @@ impl SafetyChecker {
                     self.check_path(path)?;
                 }
                 // Scan content of file_write and file_edit for secrets
-                if call.function.name == "file_write" || call.function.name == "file_edit" {
+                if tool_name == "file_write" || tool_name == "file_edit" {
                     let content = args
                         .get("content")
                         .or_else(|| args.get("new_str"))
@@ -158,9 +158,10 @@ impl SafetyChecker {
                 }
             }
             "git_status" | "git_diff" | "grep_search" | "glob_find" | "symbol_search"
-            | "process_list" | "process_logs" | "port_check" | "pip_list" | "pip_freeze"
-            | "npm_scripts" | "container_list" | "container_logs" | "container_images"
-            | "knowledge_query" | "knowledge_stats" | "knowledge_export" => {
+            | "tool_search" | "process_list" | "process_logs" | "port_check" | "pip_list"
+            | "pip_freeze" | "npm_scripts" | "container_list" | "container_logs"
+            | "container_images" | "knowledge_query" | "knowledge_stats" | "knowledge_export"
+            => {
                 // These are read-only operations, safe to execute
             }
             "knowledge_add" | "knowledge_relate" | "knowledge_remove" | "knowledge_clear" => {

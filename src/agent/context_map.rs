@@ -470,8 +470,8 @@ impl ContextMap {
     // ── Pre-load estimation ─────────────────────────────────────────────
 
     /// Check if loading a file at the given level fits in budget.
-    pub fn can_load(&self, path: &Path, level: ContextLevel) -> LoadEstimate {
-        let estimated = self.estimate_level_tokens(path, level);
+    pub async fn can_load(&self, path: &Path, level: ContextLevel) -> LoadEstimate {
+        let estimated = self.estimate_level_tokens(path, level).await;
         // Subtract current cost if already loaded (upgrade scenario).
         let current_cost = self
             .entries
@@ -493,7 +493,7 @@ impl ContextMap {
     }
 
     /// Estimate token cost for a file at a given level without loading it.
-    fn estimate_level_tokens(&self, path: &Path, level: ContextLevel) -> usize {
+    async fn estimate_level_tokens(&self, path: &Path, level: ContextLevel) -> usize {
         // If we already have cached costs, use them.
         if let Some(entry) = self.entries.get(path) {
             match level {
@@ -511,7 +511,10 @@ impl ContextMap {
             self.project_root.join(path)
         };
 
-        let file_size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
+        let file_size = tokio::fs::metadata(&full_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         match level {
             ContextLevel::Tree => 10, // single line entry
@@ -1053,7 +1056,7 @@ impl ContextMap {
     /// Promote the most relevant files to L3 based on a query,
     /// automatically managing budget by downgrading less relevant files.
     /// Returns which files were promoted.
-    pub fn focus_on_query(&mut self, query: &str, max_promote: usize) -> Vec<PathBuf> {
+    pub async fn focus_on_query(&mut self, query: &str, max_promote: usize) -> Vec<PathBuf> {
         let relevant = self.find_relevant_files(query);
         let mut promoted = Vec::new();
 
@@ -1066,7 +1069,7 @@ impl ContextMap {
             }
 
             // Estimate cost and ensure headroom.
-            let estimate = self.can_load(&path, ContextLevel::Full);
+            let estimate = self.can_load(&path, ContextLevel::Full).await;
             if !estimate.fits {
                 let needed = estimate.estimated_tokens.saturating_sub(self.remaining());
                 self.compress_to_fit(needed);
@@ -1085,7 +1088,7 @@ impl ContextMap {
     /// - files that should be promoted (loaded at higher detail)
     /// - files that are irrelevant and should be evicted
     /// - estimated token savings
-    pub fn recommend_context(&self, task: &str) -> ContextRecommendation {
+    pub async fn recommend_context(&self, task: &str) -> ContextRecommendation {
         let modality = ContextModality::from_task(task);
         let plan = modality.loading_plan();
 
@@ -1144,7 +1147,7 @@ impl ContextMap {
                         estimated_tokens: entry
                             .costs
                             .l3
-                            .max(self.estimate_level_tokens(&entry.path, ContextLevel::Full)),
+                            .max(self.estimate_level_tokens(&entry.path, ContextLevel::Full).await),
                     });
                 } else {
                     keep.push(entry.path.clone());
@@ -1725,8 +1728,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_can_load_estimate() {
+    #[tokio::test]
+    async fn test_can_load_estimate() {
         let mut map = ContextMap::new(1_000, 0.75, 0.20, 0.05);
         // Budget is 750 tokens.
 
@@ -1737,7 +1740,7 @@ mod tests {
 
         // Now try to load another file — should not fit.
         map.register_tree_entry("new.rs".into(), 9000);
-        let estimate = map.can_load(Path::new("new.rs"), ContextLevel::Full);
+        let estimate = map.can_load(Path::new("new.rs"), ContextLevel::Full).await;
         assert!(estimate.estimated_tokens > 0);
         // Budget mostly consumed + new file estimate → should not fit.
         assert!(estimate.usage_pct > 0.5, "should show significant usage");

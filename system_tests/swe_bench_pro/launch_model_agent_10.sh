@@ -38,6 +38,7 @@ ${VENV} run_selfware.py \
   --workers 1 \
   --timeout 1800 \
   --adaptive \
+  --auto-agentless \
   --retry-failures \
   --max-retries 1 \
   --diff-fallback \

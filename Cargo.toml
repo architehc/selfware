@@ -10,7 +10,7 @@ repository = "https://github.com/architehc/selfware"
 keywords = ["ai", "agent", "local-first", "cli", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
-rust-version = "1.91"
+rust-version = "1.85"
 documentation = "https://docs.rs/selfware"
 exclude = [
     "system_tests/",
@@ -126,7 +126,7 @@ metrics-exporter-prometheus = "0.12.1"
 syn = { version = "2.0", features = ["full", "parsing"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.29", features = ["signal"] }
 
 [features]
 default = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement"]

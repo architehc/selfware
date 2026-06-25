@@ -16,6 +16,9 @@ pub enum SelfwareError {
     #[error("Tool error: {0}")]
     Tool(#[from] ToolError),
 
+    #[error("Shell error: {0}")]
+    Shell(#[from] ShellError),
+
     #[error("Safety error: {0}")]
     Safety(#[from] SafetyError),
 
@@ -187,6 +190,12 @@ pub enum ToolError {
 
     #[error("File {path} changed on disk since you last read it. Re-read the file and try again.")]
     FileStale { path: String },
+}
+
+#[derive(Error, Debug)]
+pub enum ShellError {
+    #[error("Invalid working directory '{path}': {reason}")]
+    InvalidCwd { path: String, reason: String },
 }
 
 #[derive(Error, Debug)]

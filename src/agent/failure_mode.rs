@@ -217,12 +217,13 @@ impl FailureMode {
     /// `result_dir` is the directory the SWE-bench Pro harness uses for a
     /// single instance's artifacts. Failures here are non-fatal: artifact
     /// writing is best-effort and must never abort a run.
-    pub fn write_artifact(&self, result_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(result_dir)?;
-        let path = result_dir.join("failure_mode.json");
+    pub async fn write_artifact(&self, result_dir: &Path) -> std::io::Result<()> {
+        let result_dir = result_dir.to_path_buf();
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        let path = result_dir.join("failure_mode.json");
+        tokio::fs::create_dir_all(&result_dir).await?;
+        tokio::fs::write(&path, json).await
     }
 
     /// Render a multi-line CLI banner suitable for the end of a non-TUI run.
@@ -508,7 +509,7 @@ mod tests {
             advice: "ad".to_string(),
         };
         let dir = tempfile::tempdir().unwrap();
-        mode.write_artifact(dir.path()).unwrap();
+        mode.write_artifact(dir.path()).await.unwrap();
         let path = dir.path().join("failure_mode.json");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("ReadLoop"));

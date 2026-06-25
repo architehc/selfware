@@ -11,8 +11,6 @@
 
 use selfware::agent::Agent;
 use selfware::config::{AgentConfig, Config, ExecutionMode, ModelProfile, SafetyConfig};
-#[cfg(feature = "legacy-swebench")]
-use selfware::swebench::*;
 use selfware::tools::computer::{ComputerKeyboardTool, ComputerMouseTool, ComputerWindowTool};
 use selfware::tools::vision::{VisionAnalyze, VisionCompare};
 use selfware::tools::Tool;
@@ -372,69 +370,6 @@ async fn test_control_then_analyze_chain() {
     assert_eq!(score.suggestions.len(), 1);
 
     handle.abort();
-}
-
-/// Test SWE-bench evaluator + report generation chain.
-#[cfg(feature = "legacy-swebench")]
-#[tokio::test]
-async fn test_swebench_evaluator_chain() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dataset = tmp.path().join("tasks.jsonl");
-    std::fs::write(
-        &dataset,
-        r#"{"repo":"example/repo","instance_id":"test-001","problem_statement":"Fix bug","base_commit":"abc123","target_files":["auth/login.py"]}"#,
-    )
-    .unwrap();
-    let evaluator = SWEBenchEvaluator::new(PathBuf::from("/tmp/swebench_test"));
-
-    // Load tasks
-    let tasks = evaluator.load_tasks(dataset.to_str().unwrap()).unwrap();
-    assert!(!tasks.is_empty());
-    let task = &tasks[0];
-
-    // Verify task structure
-    assert!(!task.repo.is_empty());
-    assert!(!task.instance_id.is_empty());
-    assert!(!task.problem_statement.is_empty());
-    assert!(!task.base_commit.is_empty());
-
-    // Build an evaluation report manually
-    let report = EvaluationReport {
-        total_tasks: 1,
-        resolved: 1,
-        resolution_rate: 1.0,
-        results: vec![TestResult {
-            instance_id: task.instance_id.clone(),
-            success: true,
-            resolved: true,
-            duration_secs: 10.0,
-            iterations: 3,
-            tokens_used: 5000,
-            patch_applied: true,
-            tests_passed: true,
-            error: None,
-            trajectory: vec![
-                TrajectoryStep {
-                    step: 1,
-                    action: "setup".to_string(),
-                    observation: "Environment ready".to_string(),
-                    timestamp: "2026-03-24T12:00:00Z".to_string(),
-                },
-                TrajectoryStep {
-                    step: 2,
-                    action: "fix".to_string(),
-                    observation: "Applied patch".to_string(),
-                    timestamp: "2026-03-24T12:00:10Z".to_string(),
-                },
-            ],
-        }],
-        timestamp: "2026-03-24T12:00:00Z".to_string(),
-    };
-
-    // Generate and verify report
-    let output = evaluator.generate_report(&report);
-    assert!(output.contains("100.00%"));
-    assert!(output.contains("RESOLVED"));
 }
 
 /// Test the full visual feedback loop build_critic_prompt → mock VLM → parse chain.
@@ -817,76 +752,4 @@ async fn test_live_visual_feedback_loop() {
     }
 }
 
-/// Test SWE-bench task loading + prompt construction chain with live endpoint check.
-#[cfg(feature = "legacy-swebench")]
-#[tokio::test]
-async fn test_live_swebench_prompt_construction() {
-    let endpoint = vision_endpoint();
-    if !require_llm_endpoint_url(&endpoint).await {
-        eprintln!("SKIPPED: test_live_swebench_prompt_construction - endpoint not available");
-        return;
-    }
 
-    // Load tasks
-    let tmp = tempfile::tempdir().unwrap();
-    let dataset = tmp.path().join("tasks.jsonl");
-    std::fs::write(
-        &dataset,
-        r#"{"repo":"example/repo","instance_id":"test-001","problem_statement":"Fix bug","base_commit":"abc123","target_files":["auth/login.py"]}"#,
-    )
-    .unwrap();
-    let evaluator = SWEBenchEvaluator::new(PathBuf::from("/tmp/swebench_live_test"));
-    let tasks = evaluator.load_tasks(dataset.to_str().unwrap()).unwrap();
-    let task = &tasks[0];
-
-    // Build the prompt as the real pipeline would
-    let prompt = format!(
-        "SWE-bench Pro Task: {}\n\nRepository: {}\nProblem: {}\n\nFiles to modify: {:?}\n\n\
-         Describe a strategy to fix this issue. Be concise.",
-        task.instance_id, task.repo, task.problem_statement, task.target_files
-    );
-
-    // Send to the live model (text-only, no vision)
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .unwrap();
-
-    let body = json!({
-        "model": vision_model(),
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 256,
-        "temperature": 0.3,
-        "stream": false
-    });
-
-    let response = client
-        .post(format!("{}/chat/completions", endpoint))
-        .json(&body)
-        .send()
-        .await;
-
-    match response {
-        Ok(r) if r.status().is_success() => {
-            let json: serde_json::Value = r.json().await.unwrap();
-            let content = json["choices"][0]["message"]["content"]
-                .as_str()
-                .unwrap_or("");
-            if content.is_empty() {
-                // Some model configs may return empty for short prompts — not a failure
-                eprintln!("Note: Model returned empty response (acceptable for some configs)");
-            } else {
-                println!(
-                    "Live SWE-bench strategy: {}",
-                    &content[..content.len().min(500)]
-                );
-            }
-        }
-        Ok(r) => {
-            eprintln!("Note: Model returned HTTP {} (non-fatal)", r.status());
-        }
-        Err(e) => {
-            eprintln!("SKIPPED: model request failed: {}", e);
-        }
-    }
-}

@@ -20,14 +20,14 @@ pub mod swebench_store;
 /// Maximum number of memory entries before eviction kicks in.
 const MAX_MEMORY_ENTRIES: usize = 10_000;
 
-/// Maximum total estimated tokens across all memory entries.
-/// When exceeded, the oldest entries are evicted until under budget.
-/// This is complementary to the `MAX_MEMORY_ENTRIES` limit.
-const MAX_MEMORY_TOKENS: usize = 500_000;
 
 pub struct AgentMemory {
     context_window: usize,
+    max_memory_tokens: usize,
     entries: VecDeque<MemoryEntry>,
+    /// Running total of `entries[*].token_estimate`. Maintained incrementally so
+    /// that token-budget eviction is O(1) instead of O(N²).
+    total_tokens: usize,
 }
 
 pub struct MemoryEntry {
@@ -55,9 +55,15 @@ fn estimate_tokens(content: &str) -> usize {
 
 impl AgentMemory {
     pub fn new(config: &Config) -> Result<Self> {
+        // Use the model's advertised context length as the source of truth for
+        // the memory token cap. Reserve 5 % for tool definitions, formatting,
+        // and estimation variance.
+        let max_memory_tokens = config.context_length.saturating_mul(95) / 100;
         Ok(Self {
-            context_window: config.agent.token_budget,
+            context_window: config.context_length,
+            max_memory_tokens,
             entries: VecDeque::new(),
+            total_tokens: 0,
         })
     }
 
@@ -73,27 +79,32 @@ impl AgentMemory {
         // Entry count eviction
         if self.entries.len() >= MAX_MEMORY_ENTRIES {
             let remove_count = MAX_MEMORY_ENTRIES / 4;
-            self.entries.drain(..remove_count);
+            for removed in self.entries.drain(..remove_count) {
+                self.total_tokens = self.total_tokens.saturating_sub(removed.token_estimate);
+            }
         }
 
         let new_entry = MemoryEntry::from_message(msg);
+        let new_tokens = new_entry.token_estimate;
 
         // Token budget eviction -- evict oldest entries while over budget.
-        // Uses VecDeque::pop_front() for O(1) removal instead of Vec::remove(0)
-        // which was O(N) per eviction.
-        let new_tokens = new_entry.token_estimate;
-        while self.total_estimated_tokens() + new_tokens > MAX_MEMORY_TOKENS
+        // Uses the running `total_tokens` counter for O(1) eviction instead of
+        // re-summing the entire VecDeque on every pop.
+        while self.total_tokens + new_tokens > self.max_memory_tokens
             && !self.entries.is_empty()
         {
-            self.entries.pop_front();
+            if let Some(removed) = self.entries.pop_front() {
+                self.total_tokens = self.total_tokens.saturating_sub(removed.token_estimate);
+            }
         }
 
+        self.total_tokens = self.total_tokens.saturating_add(new_tokens);
         self.entries.push_back(new_entry);
     }
 
     /// Estimate total token usage across all memory entries.
     pub fn total_estimated_tokens(&self) -> usize {
-        self.entries.iter().map(|e| e.token_estimate).sum()
+        self.total_tokens
     }
 
     /// Get total estimated tokens in memory
@@ -101,14 +112,19 @@ impl AgentMemory {
         self.total_estimated_tokens()
     }
 
-    /// Check if memory is approaching the context window limit
+    /// Check if memory is approaching the memory token budget.
     pub fn is_near_limit(&self) -> bool {
-        self.total_tokens().saturating_mul(100) > self.context_window.saturating_mul(85)
+        self.total_tokens().saturating_mul(100) > self.max_memory_tokens.saturating_mul(85)
     }
 
     /// Get the context window size
     pub fn context_window(&self) -> usize {
         self.context_window
+    }
+
+    /// Get the maximum tokens allowed in memory.
+    pub fn max_memory_tokens(&self) -> usize {
+        self.max_memory_tokens
     }
 
     /// Get number of entries
@@ -124,6 +140,7 @@ impl AgentMemory {
     /// Clear all entries
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.total_tokens = 0;
     }
 
     /// Get recent entries (last n)
@@ -153,15 +170,17 @@ mod tests {
     fn test_agent_memory_new() {
         let config = Config::default();
         let memory = AgentMemory::new(&config).unwrap();
-        assert_eq!(memory.context_window(), config.agent.token_budget);
+        assert_eq!(memory.context_window(), config.context_length);
+        assert_eq!(memory.max_memory_tokens(), config.context_length * 95 / 100);
     }
 
     #[test]
-    fn test_agent_memory_uses_token_budget() {
+    fn test_agent_memory_uses_context_length() {
         let mut config = Config::default();
-        config.agent.token_budget = 100000;
+        config.context_length = 100000;
         let memory = AgentMemory::new(&config).unwrap();
         assert_eq!(memory.context_window(), 100000);
+        assert_eq!(memory.max_memory_tokens(), 95000);
     }
 
     #[test]
@@ -199,7 +218,7 @@ mod tests {
     #[test]
     fn test_memory_is_near_limit() {
         let mut config = Config::default();
-        config.agent.token_budget = 100; // Very small budget
+        config.context_length = 1000; // Very small context window
         let mut memory = AgentMemory::new(&config).unwrap();
 
         // Add enough content to exceed 85% threshold with tokenizer-based counting.
@@ -452,7 +471,7 @@ mod tests {
     #[test]
     fn test_memory_is_near_limit_boundary() {
         let mut config = Config::default();
-        config.agent.token_budget = 1000;
+        config.context_length = 1000;
         let mut memory = AgentMemory::new(&config).unwrap();
 
         // Add content that's well above 85% threshold with tokenizer-based counting.
@@ -465,7 +484,7 @@ mod tests {
     #[test]
     fn test_memory_context_window_accessor() {
         let mut config = Config::default();
-        config.agent.token_budget = 50000;
+        config.context_length = 50000;
         let memory = AgentMemory::new(&config).unwrap();
 
         assert_eq!(memory.context_window(), 50000);
@@ -625,7 +644,7 @@ mod tests {
     #[test]
     fn test_memory_context_window_small() {
         let mut config = Config::default();
-        config.agent.token_budget = 50;
+        config.context_length = 50;
         let memory = AgentMemory::new(&config).unwrap();
 
         assert_eq!(memory.context_window(), 50);
@@ -634,7 +653,7 @@ mod tests {
     #[test]
     fn test_memory_context_window_large() {
         let mut config = Config::default();
-        config.agent.token_budget = 1_000_000;
+        config.context_length = 1_000_000;
         let memory = AgentMemory::new(&config).unwrap();
 
         assert_eq!(memory.context_window(), 1_000_000);
@@ -701,20 +720,20 @@ mod tests {
         let config = Config::default();
         let mut memory = AgentMemory::new(&config).unwrap();
 
-        // Add many large messages to exceed the MAX_MEMORY_TOKENS budget.
+        // Add many large messages to exceed the memory token budget.
         // Each message is ~5000 chars which is roughly 1250-1666 tokens.
-        // MAX_MEMORY_TOKENS = 500_000, so ~300-400 of these should trigger eviction.
+        // With the default context length, ~300-400 of these should trigger eviction.
         let big_content = "a".repeat(5000);
         for _ in 0..500 {
             memory.add_message(&Message::user(&big_content));
         }
 
-        // After eviction, total tokens should be at or below MAX_MEMORY_TOKENS
+        // After eviction, total tokens should be at or below the memory budget.
         assert!(
-            memory.total_estimated_tokens() <= MAX_MEMORY_TOKENS,
-            "total_estimated_tokens ({}) should be <= MAX_MEMORY_TOKENS ({})",
+            memory.total_estimated_tokens() <= memory.max_memory_tokens(),
+            "total_estimated_tokens ({}) should be <= max_memory_tokens ({})",
             memory.total_estimated_tokens(),
-            MAX_MEMORY_TOKENS
+            memory.max_memory_tokens()
         );
     }
 

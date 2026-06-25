@@ -1,0 +1,212 @@
+[
+  {
+    "model": "0_llama-4-maverick",
+    "sample": "runs1",
+    "predictions": 2,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_mistral-large-3",
+    "sample": "runs1",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "0_qwen3-235b-a22b",
+    "sample": "runs1",
+    "predictions": 2,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_xiaomi-mimo-v2.5",
+    "sample": "runs1",
+    "predictions": 2,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_gemini-3.5-flash",
+    "sample": "runs5",
+    "predictions": 23,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_gemini-3.5-flash-nitro",
+    "sample": "runs5",
+    "predictions": 19,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_glm-5.2",
+    "sample": "runs5",
+    "predictions": 9,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_glm-5.2-nitro",
+    "sample": "runs5",
+    "predictions": 27,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_gpt-5-mini",
+    "sample": "runs5",
+    "predictions": 22,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "0_kimi-k2.6",
+    "sample": "runs5",
+    "predictions": 10,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "deepseek-v4-flash",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "gemma-4-31b",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "glm-5.2",
+    "sample": "runs",
+    "predictions": 9,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "minimax-m3",
+    "sample": "runs",
+    "predictions": 9,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "nvidia-nemotron-3-ultra-free",
+    "sample": "runs",
+    "predictions": 9,
+    "total": null,
+    "completed": null,
+    "errored": null,
+    "passed": null,
+    "pass_rate": null
+  },
+  {
+    "model": "openrouter-owl-alpha",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "poolside-laguna-xs.2-free",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "qwen3-next-80b-a3b-free",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "stepfun-step-3.7-flash",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "tencent-hy3-preview-free",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  },
+  {
+    "model": "xiaomi-mimo-v2.5",
+    "sample": "runs",
+    "predictions": 9,
+    "total": 9,
+    "completed": 9,
+    "errored": 0,
+    "passed": 0,
+    "pass_rate": 0.0
+  }
+]

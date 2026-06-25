@@ -414,15 +414,11 @@ impl Tool for CargoClippy {
             .unwrap_or(true)
         {
             cmd.arg("--").arg("-D").arg("warnings");
+        } else {
+            cmd.arg("--");
         }
 
-        cmd.args([
-            "--",
-            "-D",
-            "clippy::unwrap_used",
-            "-D",
-            "clippy::expect_used",
-        ]);
+        cmd.args(["-D", "clippy::unwrap_used", "-D", "clippy::expect_used"]);
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
         let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;

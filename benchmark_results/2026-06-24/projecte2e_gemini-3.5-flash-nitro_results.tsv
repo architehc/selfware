@@ -1,0 +1,8 @@
+scenario|type|difficulty|baseline_status|post_status|agent_status|timed_out|duration_secs|score|changed_files|error_hits|notes
+easy_calculator|coding|easy|0|0|1|0|77|70|4|3|baseline_already_green
+easy_string_ops|coding|easy|0|0|1|0|131|70|4|12|baseline_already_green
+medium_json_merge|coding|medium|0|0|1|0|145|70|4|4|baseline_already_green
+medium_bitset|coding|medium|0|101|124|1|610|0|5|38|baseline_already_green,agent_timeout
+hard_scheduler|coding|hard|101|0|1|0|30|90|5|7|
+hard_event_bus|coding|hard|101|0|1|0|97|90|6|6|
+swarm_session|swarm|n/a|n/a|n/a|0|0|12|100|3|0|spawned=3,status_mentions=2

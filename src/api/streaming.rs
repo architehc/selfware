@@ -42,22 +42,26 @@ impl StreamingResponse {
     pub async fn into_channel(self) -> mpsc::Receiver<Result<StreamChunk>> {
         let (tx, rx) = mpsc::channel(32);
 
+        // Acquire the permit before spawning so the number of outstanding
+        // streaming tasks is actually bounded by the semaphore rather than
+        // unbounded during the spawn itself.
+        let permit = match STREAM_SEMAPHORE.acquire().await {
+            Ok(p) => Some(p),
+            Err(e) => {
+                let _ = tx
+                    .send(Err(ApiError::Network(format!(
+                        "Stream semaphore error: {}",
+                        e
+                    ))
+                    .into()))
+                    .await;
+                return rx;
+            }
+        };
+
         // Spawn the stream processor with a permit to limit concurrent tasks
         tokio::spawn(async move {
-            // Acquire permit at start of task (will wait if limit reached)
-            let _permit = match STREAM_SEMAPHORE.acquire().await {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(ApiError::Network(format!(
-                            "Stream semaphore error: {}",
-                            e
-                        ))
-                        .into()))
-                        .await;
-                    return;
-                }
-            };
+            let _permit = permit;
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
             let mut pending_utf8 = Vec::new();

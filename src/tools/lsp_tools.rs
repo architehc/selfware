@@ -13,7 +13,9 @@ use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 use super::Tool;
+use crate::config::SafetyConfig;
 use crate::lsp::LspClient;
+use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
 /// Shared, lazily-initialized LSP client.
 ///
@@ -22,14 +24,16 @@ use crate::lsp::LspClient;
 pub struct LspClientHandle {
     client: OnceCell<LspClient>,
     project_root: PathBuf,
+    safety_config: Option<SafetyConfig>,
 }
 
 impl LspClientHandle {
     /// Create a new handle. The actual `LspClient` is created on first use.
-    pub fn new(project_root: PathBuf) -> Self {
+    pub fn new(project_root: PathBuf, safety_config: Option<SafetyConfig>) -> Self {
         Self {
             client: OnceCell::new(),
             project_root,
+            safety_config,
         }
     }
 
@@ -50,13 +54,14 @@ impl LspClientHandle {
 /// Call this from `ToolRegistry::new()` to register the tools.
 pub fn create_lsp_tools(
     project_root: PathBuf,
+    safety_config: Option<SafetyConfig>,
 ) -> (
     LspGotoDefinitionTool,
     LspFindReferencesTool,
     LspDocumentSymbolsTool,
     LspHoverTool,
 ) {
-    let handle = Arc::new(LspClientHandle::new(project_root));
+    let handle = Arc::new(LspClientHandle::new(project_root, safety_config));
     (
         LspGotoDefinitionTool {
             handle: Arc::clone(&handle),
@@ -69,6 +74,12 @@ pub fn create_lsp_tools(
         },
         LspHoverTool { handle },
     )
+}
+
+/// Validate that an LSP tool's `file` argument is safe to access.
+fn validate_lsp_file(path: &str, safety_config: Option<&SafetyConfig>) -> Result<()> {
+    let safety = resolve_safety_config(safety_config);
+    validate_tool_path(path, &safety)
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +132,7 @@ impl Tool for LspGotoDefinitionTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
+        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         // Ensure the file is open in the server.
@@ -196,6 +208,7 @@ impl Tool for LspFindReferencesTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
+        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         let content = tokio::fs::read_to_string(&args.file)
@@ -254,6 +267,7 @@ impl Tool for LspDocumentSymbolsTool {
             file: String,
         }
         let args: Args = serde_json::from_value(args)?;
+        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         let content = tokio::fs::read_to_string(&args.file)
@@ -320,6 +334,7 @@ impl Tool for LspHoverTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
+        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         let content = tokio::fs::read_to_string(&args.file)
@@ -346,12 +361,13 @@ impl Tool for LspHoverTool {
 /// sharing a single client handle.
 pub fn create_extra_lsp_tools(
     project_root: PathBuf,
+    safety_config: Option<SafetyConfig>,
 ) -> (
     LspDiagnosticsTool,
     LspWorkspaceSymbolsTool,
     LspGotoImplementationTool,
 ) {
-    let handle = Arc::new(LspClientHandle::new(project_root));
+    let handle = Arc::new(LspClientHandle::new(project_root, safety_config));
     (
         LspDiagnosticsTool {
             handle: Arc::clone(&handle),
@@ -403,6 +419,7 @@ impl Tool for LspDiagnosticsTool {
             file: String,
         }
         let args: Args = serde_json::from_value(args)?;
+        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         let diags = client.diagnostics(&args.file).await?;
@@ -528,6 +545,7 @@ impl Tool for LspGotoImplementationTool {
             column: u32,
         }
         let args: Args = serde_json::from_value(args)?;
+        validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
         let locations = client
@@ -558,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_goto_definition_tool_metadata() {
-        let (goto, _refs, _syms, _hover) = create_lsp_tools(PathBuf::from("/tmp/test"));
+        let (goto, _refs, _syms, _hover) = create_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(goto.name(), "lsp_goto_definition");
         assert!(!goto.description().is_empty());
 
@@ -571,14 +589,14 @@ mod tests {
 
     #[test]
     fn test_find_references_tool_metadata() {
-        let (_goto, refs, _syms, _hover) = create_lsp_tools(PathBuf::from("/tmp/test"));
+        let (_goto, refs, _syms, _hover) = create_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(refs.name(), "lsp_find_references");
         assert!(!refs.description().is_empty());
     }
 
     #[test]
     fn test_document_symbols_tool_metadata() {
-        let (_goto, _refs, syms, _hover) = create_lsp_tools(PathBuf::from("/tmp/test"));
+        let (_goto, _refs, syms, _hover) = create_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(syms.name(), "lsp_document_symbols");
 
         let schema = syms.schema();
@@ -588,14 +606,14 @@ mod tests {
 
     #[test]
     fn test_hover_tool_metadata() {
-        let (_goto, _refs, _syms, hover) = create_lsp_tools(PathBuf::from("/tmp/test"));
+        let (_goto, _refs, _syms, hover) = create_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(hover.name(), "lsp_hover");
         assert!(!hover.description().is_empty());
     }
 
     #[test]
     fn test_all_tools_share_handle() {
-        let (goto, refs, syms, hover) = create_lsp_tools(PathBuf::from("/tmp/test"));
+        let (goto, refs, syms, hover) = create_lsp_tools(PathBuf::from("/tmp/test"), None);
         // They all share the same Arc handle.
         assert!(Arc::ptr_eq(&goto.handle, &refs.handle));
         assert!(Arc::ptr_eq(&refs.handle, &syms.handle));
@@ -604,7 +622,7 @@ mod tests {
 
     #[test]
     fn test_diagnostics_tool_metadata() {
-        let (diag, _ws, _impl) = create_extra_lsp_tools(PathBuf::from("/tmp/test"));
+        let (diag, _ws, _impl) = create_extra_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(diag.name(), "lsp_diagnostics");
         assert!(!diag.description().is_empty());
 
@@ -615,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_workspace_symbols_tool_metadata() {
-        let (_diag, ws, _impl) = create_extra_lsp_tools(PathBuf::from("/tmp/test"));
+        let (_diag, ws, _impl) = create_extra_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(ws.name(), "lsp_workspace_symbols");
         assert!(!ws.description().is_empty());
 
@@ -626,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_goto_implementation_tool_metadata() {
-        let (_diag, _ws, imp) = create_extra_lsp_tools(PathBuf::from("/tmp/test"));
+        let (_diag, _ws, imp) = create_extra_lsp_tools(PathBuf::from("/tmp/test"), None);
         assert_eq!(imp.name(), "lsp_goto_implementation");
         assert!(!imp.description().is_empty());
 
@@ -635,5 +653,115 @@ mod tests {
         assert!(required.contains(&json!("file")));
         assert!(required.contains(&json!("line")));
         assert!(required.contains(&json!("column")));
+    }
+
+    fn default_test_safety_config() -> SafetyConfig {
+        SafetyConfig::default()
+    }
+
+    #[test]
+    fn test_validate_lsp_file_rejects_etc_passwd() {
+        let config = default_test_safety_config();
+        let result = validate_lsp_file("/etc/passwd", Some(&config));
+        assert!(
+            result.is_err(),
+            "/etc/passwd should be rejected by path validation"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("outside")
+                || err.contains("traversal")
+                || err.contains("system")
+                || err.contains("allowed"),
+            "Expected security error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_lsp_file_allows_workspace_file() {
+        let cwd = std::env::current_dir().unwrap();
+        let config = default_test_safety_config();
+        let file = cwd.join("src/tools/lsp_tools.rs");
+        let result = validate_lsp_file(file.to_str().unwrap(), Some(&config));
+        assert!(
+            result.is_ok(),
+            "Workspace file should be allowed, got error: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_goto_definition_rejects_etc_passwd() {
+        let (goto, _, _, _) = create_lsp_tools(
+            PathBuf::from("/tmp/test"),
+            Some(default_test_safety_config()),
+        );
+        let result = goto
+            .execute(json!({"file": "/etc/passwd", "line": 0, "column": 0}))
+            .await;
+        assert!(result.is_err(), "goto_definition should reject /etc/passwd");
+    }
+
+    #[tokio::test]
+    async fn test_find_references_rejects_etc_passwd() {
+        let (_, refs, _, _) = create_lsp_tools(
+            PathBuf::from("/tmp/test"),
+            Some(default_test_safety_config()),
+        );
+        let result = refs
+            .execute(json!({"file": "/etc/passwd", "line": 0, "column": 0}))
+            .await;
+        assert!(result.is_err(), "find_references should reject /etc/passwd");
+    }
+
+    #[tokio::test]
+    async fn test_document_symbols_rejects_etc_passwd() {
+        let (_, _, syms, _) = create_lsp_tools(
+            PathBuf::from("/tmp/test"),
+            Some(default_test_safety_config()),
+        );
+        let result = syms.execute(json!({"file": "/etc/passwd"})).await;
+        assert!(
+            result.is_err(),
+            "document_symbols should reject /etc/passwd"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hover_rejects_etc_passwd() {
+        let (_, _, _, hover) = create_lsp_tools(
+            PathBuf::from("/tmp/test"),
+            Some(default_test_safety_config()),
+        );
+        let result = hover
+            .execute(json!({"file": "/etc/passwd", "line": 0, "column": 0}))
+            .await;
+        assert!(result.is_err(), "hover should reject /etc/passwd");
+    }
+
+    #[tokio::test]
+    async fn test_diagnostics_rejects_etc_passwd() {
+        let (diag, _, _) = create_extra_lsp_tools(
+            PathBuf::from("/tmp/test"),
+            Some(default_test_safety_config()),
+        );
+        let result = diag.execute(json!({"file": "/etc/passwd"})).await;
+        assert!(result.is_err(), "diagnostics should reject /etc/passwd");
+    }
+
+    #[tokio::test]
+    async fn test_goto_implementation_rejects_etc_passwd() {
+        let (_, _, imp) = create_extra_lsp_tools(
+            PathBuf::from("/tmp/test"),
+            Some(default_test_safety_config()),
+        );
+        let result = imp
+            .execute(json!({"file": "/etc/passwd", "line": 0, "column": 0}))
+            .await;
+        assert!(
+            result.is_err(),
+            "goto_implementation should reject /etc/passwd"
+        );
     }
 }

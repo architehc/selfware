@@ -875,12 +875,12 @@ impl Agent {
                         .join("visual_evidence")
                         .join(&task_id);
 
-                    match std::fs::create_dir_all(&evidence_dir) {
+                    match tokio::fs::create_dir_all(&evidence_dir).await {
                         Ok(()) => {
                             let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
                             let filename = format!("step_{}_{}.png", current_step, timestamp);
                             let filepath = evidence_dir.join(&filename);
-                            match std::fs::write(&filepath, &png_bytes) {
+                            match tokio::fs::write(&filepath, &png_bytes).await {
                                 Ok(()) => Some((filepath, sha_hash)),
                                 Err(e) => {
                                     warn!(

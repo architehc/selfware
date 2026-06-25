@@ -167,13 +167,17 @@ pub(super) fn current_project_root() -> std::path::PathBuf {
 }
 
 fn extract_candidate_paths_from_text(text: &str) -> Vec<String> {
-    let mut paths = Vec::new();
-    let path_re = regex::Regex::new(
-        r#"(?:^|[\s`"'(])((?:src|tests|examples|benches)/[\w./-]+\.(?:rs|toml|md|txt|json|yaml|yml)|Cargo\.toml|README\.md|RUN_NOTES\.md)"#,
-    )
-    .expect("candidate path regex must compile");
+    use std::sync::LazyLock;
 
-    for caps in path_re.captures_iter(text) {
+    let mut paths = Vec::new();
+    static PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?:^|[\s`"'(])((?:src|tests|examples|benches)/[\w./-]+\.(?:rs|toml|md|txt|json|yaml|yml)|Cargo\.toml|README\.md|RUN_NOTES\.md)"#,
+        )
+        .expect("candidate path regex must compile")
+    });
+
+    for caps in PATH_RE.captures_iter(text) {
         if let Some(path) = caps.get(1) {
             let candidate = path.as_str().trim().to_string();
             if !paths.contains(&candidate) {
@@ -184,65 +188,76 @@ fn extract_candidate_paths_from_text(text: &str) -> Vec<String> {
 
     paths
 }
-
-fn read_bounded_file(path: &std::path::Path, max_chars: usize) -> Option<String> {
-    let content = std::fs::read_to_string(path).ok()?;
+async fn read_bounded_file(path: &std::path::Path, max_chars: usize) -> Option<String> {
+    let content = tokio::fs::read_to_string(path).await.ok()?;
     let bounded: String = content.chars().take(max_chars).collect();
     Some(bounded)
 }
 
 /// Detect the project type from marker files in the working directory or its ancestors.
-fn detect_project_type() -> ProjectType {
+async fn detect_project_type() -> ProjectType {
     let root = current_project_root();
-    if root.join("pyproject.toml").exists()
-        || root.join("setup.py").exists()
-        || root.join("requirements.txt").exists()
+    if try_exists(&root.join("pyproject.toml")).await
+        || try_exists(&root.join("setup.py")).await
+        || try_exists(&root.join("requirements.txt")).await
     {
         ProjectType::Python
-    } else if root.join("tsconfig.json").exists() {
+    } else if try_exists(&root.join("tsconfig.json")).await {
         ProjectType::TypeScript
-    } else if root.join("package.json").exists() {
+    } else if try_exists(&root.join("package.json")).await {
         ProjectType::JavaScript
-    } else if root.join("pom.xml").exists()
-        || root.join("build.gradle").exists()
-        || root.join("build.gradle.kts").exists()
+    } else if try_exists(&root.join("pom.xml")).await
+        || try_exists(&root.join("build.gradle")).await
+        || try_exists(&root.join("build.gradle.kts")).await
     {
         ProjectType::Java
-    } else if has_file_with_extension(&root, "csproj") || has_file_with_extension(&root, "sln") {
+    } else if has_file_with_extension(&root, "csproj").await
+        || has_file_with_extension(&root, "sln").await
+    {
         ProjectType::CSharp
-    } else if has_file_with_extension(&root, "cpp")
-        || has_file_with_extension(&root, "cc")
-        || has_file_with_extension(&root, "cxx")
-        || has_file_with_extension(&root, "c")
-        || root.join("CMakeLists.txt").exists()
+    } else if has_file_with_extension(&root, "cpp").await
+        || has_file_with_extension(&root, "cc").await
+        || has_file_with_extension(&root, "cxx").await
+        || has_file_with_extension(&root, "c").await
+        || try_exists(&root.join("CMakeLists.txt")).await
     {
         ProjectType::Cpp
-    } else if has_file_with_extension(&root, "sql") {
+    } else if has_file_with_extension(&root, "sql").await {
         ProjectType::Sql
-    } else if root.join("go.mod").exists() {
+    } else if try_exists(&root.join("go.mod")).await {
         ProjectType::Go
-    } else if root.join("Package.swift").exists() || has_file_with_extension(&root, "swift") {
+    } else if try_exists(&root.join("Package.swift")).await
+        || has_file_with_extension(&root, "swift").await
+    {
         ProjectType::Swift
-    } else if root.join("Cargo.toml").exists() {
+    } else if try_exists(&root.join("Cargo.toml")).await {
         ProjectType::Rust
     } else {
         ProjectType::Generic
     }
 }
 
-fn has_file_with_extension(root: &std::path::Path, ext: &str) -> bool {
-    std::fs::read_dir(root)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-        })
+async fn try_exists(path: &std::path::Path) -> bool {
+    tokio::fs::try_exists(path).await.unwrap_or(false)
+}
+
+async fn has_file_with_extension(root: &std::path::Path, ext: &str) -> bool {
+    match tokio::fs::read_dir(root).await {
+        Ok(mut entries) => {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+                {
+                    return true;
+                }
+            }
+            false
+        }
+        Err(_) => false,
+    }
 }
 
 /// Return (verify_step, test_step, completion_rule) for the detected project type.
@@ -577,10 +592,11 @@ impl Agent {
         let cache_config = config.cache.clone();
         let client = ApiClient::new(&config)?;
         let mut tools = ToolRegistry::with_safety_config(Some(&config.safety));
-        tools.register(crate::tools::fim::FileFimEdit::with_safety_config(
+        tools.register_critical(crate::tools::fim::FileFimEdit::with_safety_config(
             std::sync::Arc::new(client.clone()),
             config.safety.clone(),
         ));
+        tools.rebuild_search_index();
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);
         // Keep global init as fallback for tools not yet migrated to per-instance config.
@@ -612,7 +628,10 @@ impl Agent {
             .join("selfware")
             .join("improvement_engine.json");
 
-        let self_improvement = if improvement_engine_path.exists() {
+        let self_improvement = if tokio::fs::try_exists(&improvement_engine_path)
+            .await
+            .unwrap_or(false)
+        {
             match SelfImprovementEngine::load(&improvement_engine_path) {
                 Ok(engine) => {
                     info!("Loaded persisted self-improvement engine state");
@@ -631,7 +650,7 @@ impl Agent {
         };
 
         // Detect project type for verification instructions
-        let project_type = detect_project_type();
+        let project_type = detect_project_type().await;
         let (verify_step, test_step, completion_rule) = verification_instructions(project_type);
         info!("Detected project type: {:?}", project_type);
 
@@ -935,7 +954,7 @@ To call a tool, use this EXACT XML structure:
         // Initialize audit logger (writes JSONL events to ~/.selfware/audit/)
         let session_id = uuid::Uuid::new_v4().to_string();
         let audit_logger = crate::safety::audit::AuditLogger::new(&session_id);
-        let session_logger = session_log::SessionLogger::new(&session_id);
+        let session_logger = session_log::SessionLogger::new(&session_id).await;
         if let Some(ref logger) = audit_logger {
             logger.log_session_start();
         }
@@ -966,13 +985,18 @@ To call a tool, use this EXACT XML structure:
             .saturating_sub(config.max_tokens) // reserve for output tokens
             .saturating_sub(safety_margin); // tools + template + estimation safety
 
-        if max_context_tokens == 0 {
-            tracing::error!(
-                "max_context_tokens is 0! context_length ({}) is too small for max_tokens ({}) + {}% overhead. \
+        let max_context_tokens = if max_context_tokens == 0 {
+            let fallback = 4096_usize;
+            tracing::warn!(
+                "max_context_tokens calculated as 0 (context_length={}, max_tokens={}). \
+                 Falling back to {} tokens to prevent context collapse. \
                  Check that selfware.toml context_length matches your vLLM --max-model-len.",
-                model_context_limit, config.max_tokens, 20
+                model_context_limit, config.max_tokens, fallback
             );
-        }
+            fallback
+        } else {
+            max_context_tokens
+        };
         tracing::info!(
             "Context limits: model={}, max_context_tokens={} (safety_margin={}), token_budget={}",
             model_context_limit,
@@ -1170,12 +1194,12 @@ To call a tool, use this EXACT XML structure:
         tool_history
     }
 
-    fn collect_direct_project_context(&self, task: &str) -> String {
+    async fn collect_direct_project_context(&self, task: &str) -> String {
         const MAX_FILES: usize = 8;
         const MAX_CHARS_PER_FILE: usize = 8_000;
         const MAX_TOTAL_CHARS: usize = 40_000;
 
-        fn add_candidate_path(
+        async fn add_candidate_path(
             root: &std::path::Path,
             relative: String,
             candidates: &mut Vec<String>,
@@ -1189,7 +1213,11 @@ To call a tool, use this EXACT XML structure:
             }
 
             let full = root.join(&relative);
-            if full.is_file() {
+            let is_file = tokio::fs::metadata(&full)
+                .await
+                .map(|m| m.is_file())
+                .unwrap_or(false);
+            if is_file {
                 candidates.push(relative);
             }
         }
@@ -1199,16 +1227,16 @@ To call a tool, use this EXACT XML structure:
         let mut seen = HashSet::new();
 
         for relative in extract_candidate_paths_from_text(task) {
-            add_candidate_path(&root, relative, &mut candidates, &mut seen);
+            add_candidate_path(&root, relative, &mut candidates, &mut seen).await;
         }
 
         for relative in extract_candidate_paths_from_text(self.learning_context()) {
-            add_candidate_path(&root, relative, &mut candidates, &mut seen);
+            add_candidate_path(&root, relative, &mut candidates, &mut seen).await;
         }
 
         for msg in self.messages.iter().rev().take(20) {
             for relative in extract_candidate_paths_from_text(&msg.content.text_all()) {
-                add_candidate_path(&root, relative, &mut candidates, &mut seen);
+                add_candidate_path(&root, relative, &mut candidates, &mut seen).await;
             }
         }
 
@@ -1219,40 +1247,49 @@ To call a tool, use this EXACT XML structure:
             "README.md",
             "RUN_NOTES.md",
         ] {
-            add_candidate_path(&root, relative.to_string(), &mut candidates, &mut seen);
+            add_candidate_path(&root, relative.to_string(), &mut candidates, &mut seen).await;
         }
 
         for folder in ["src", "tests"] {
             let folder_path = root.join(folder);
-            if !folder_path.exists() {
+            if !tokio::fs::try_exists(&folder_path).await.unwrap_or(false) {
                 continue;
             }
 
             let mut discovered = Vec::new();
-            for entry in walkdir::WalkDir::new(&folder_path)
-                .max_depth(3)
-                .into_iter()
-                .filter_map(Result::ok)
-            {
-                let path = entry.path();
-                if !entry.file_type().is_file() {
-                    continue;
+            let root_for_walk = root.clone();
+            let folder_path = folder_path.clone();
+            let walk_result = tokio::task::spawn_blocking(move || {
+                let mut out = Vec::new();
+                for entry in walkdir::WalkDir::new(&folder_path)
+                    .max_depth(3)
+                    .into_iter()
+                    .filter_map(Result::ok)
+                {
+                    let path = entry.path();
+                    if !entry.file_type().is_file() {
+                        continue;
+                    }
+                    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                        continue;
+                    };
+                    if !matches!(ext, "rs" | "toml" | "md") {
+                        continue;
+                    }
+                    let Some(relative) = path.strip_prefix(&root_for_walk).ok().and_then(|p| p.to_str()) else {
+                        continue;
+                    };
+                    out.push(relative.replace('\\', "/"));
                 }
-                let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-                    continue;
-                };
-                if !matches!(ext, "rs" | "toml" | "md") {
-                    continue;
-                }
-                let Some(relative) = path.strip_prefix(&root).ok().and_then(|p| p.to_str()) else {
-                    continue;
-                };
-                discovered.push(relative.replace('\\', "/"));
-            }
+                out
+            })
+            .await
+            .unwrap_or_default();
+            discovered.extend(walk_result);
             discovered.sort();
 
             for relative in discovered {
-                add_candidate_path(&root, relative, &mut candidates, &mut seen);
+                add_candidate_path(&root, relative, &mut candidates, &mut seen).await;
                 if candidates.len() >= MAX_FILES {
                     break;
                 }
@@ -1270,7 +1307,7 @@ To call a tool, use this EXACT XML structure:
             }
 
             let full = root.join(&relative);
-            let Some(content) = read_bounded_file(&full, MAX_CHARS_PER_FILE) else {
+            let Some(content) = read_bounded_file(&full, MAX_CHARS_PER_FILE).await else {
                 continue;
             };
             file_context.push_str(&format!("\n--- {} ---\n{}\n", relative, content));
@@ -1317,7 +1354,7 @@ To call a tool, use this EXACT XML structure:
 
         let is_mutation_task = tool_dispatch::task_requires_mutation(task);
         if file_context.is_empty() && is_mutation_task {
-            file_context = self.collect_direct_project_context(task);
+            file_context = self.collect_direct_project_context(task).await;
         }
 
         let tool_history = self.collect_synthesis_tool_history();
@@ -1812,11 +1849,9 @@ To call a tool, use this EXACT XML structure:
         eprint!("  Allow? [Y]es / [N]o / [A]lways / Y[o]lo mode: ");
         io::stderr().flush()?;
 
-        // Read user input without blocking the async runtime
-        let input = tokio::task::block_in_place(|| {
-            let mut buf = String::new();
-            io::stdin().read_line(&mut buf).map(|_| buf)
-        })?;
+        // Read user input asynchronously while pausing the ESC listener so it
+        // does not compete for stdin events.
+        let input = execution::read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await?;
 
         match input.trim().to_lowercase().as_str() {
             "y" | "yes" => {

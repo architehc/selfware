@@ -4,19 +4,21 @@
 
 endpoint = "https://openrouter.ai/api/v1"
 model = "openai/gpt-5-mini"
-max_tokens = 4096
+max_tokens = 16384
 temperature = 0.1
 api_key = "$SELFWARE_API_KEY"
 
 [agent]
-max_iterations = 30
+max_iterations = 25
 step_timeout_secs = 600
 token_budget = 32768
-context_window = 0
+context_window = 8192
 native_function_calling = false
-streaming = true
+streaming = false
 min_completion_steps = 2
-require_verification_before_completion = true
+require_verification_before_completion = false
+disable_episodic_memory = true
+minimal_tool_catalog = true
 
 [retry]
 max_retries = 8
@@ -24,10 +26,11 @@ base_delay_ms = 2000
 max_delay_ms = 60000
 
 [safety]
-allowed_paths = ["./**", "/app/**"]
+allowed_paths = ["./**", "/app", "/app/**"]
 
 [metadata]
 tier = "small"
 tool_style = "json"
 recommended = false
-notes = "Cheap OpenAI GPT-5 Mini; untested in this harness."
+agentless_default = true
+notes = "Cheap OpenAI GPT-5 Mini; bypass multi-turn agent loop by default."

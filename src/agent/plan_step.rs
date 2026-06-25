@@ -202,7 +202,8 @@ impl Agent {
             plan_decision,
             content.text(),
             reasoning_for_artifact.as_deref(),
-        );
+        )
+        .await;
 
         self.log_turn_end_event(
             "planning",

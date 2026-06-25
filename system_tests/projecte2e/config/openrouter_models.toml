@@ -15,23 +15,6 @@ tier = "medium"
 tool_style = "xml"
 notes = "General-purpose coding model; reliable on mixed-language tasks."
 
-[coding_models.gemma-4-12b]
-id = "google/gemma-4-12b-it"
-max_tokens = 8192
-context_window = 128000
-max_output_tokens = 8192
-context_length = 128000
-temperature = 0.1
-max_iterations = 25
-step_timeout_secs = 600
-parallelism = 2
-cost_input_per_1m = 0.08
-cost_output_per_1m = 0.16
-recommended = false
-tier = "small"
-tool_style = "auto"
-notes = "Lightweight Gemma 4 variant; mark not recommended pending more data."
-
 [coding_models.gemma-4-26b-a4b]
 id = "google/gemma-4-26b-a4b-it"
 max_tokens = 8192
@@ -684,12 +667,12 @@ notes = "Newer Mistral Small (March 2026); cheap, untested in this harness."
 
 [coding_models.gpt-5-mini]
 id = "openai/gpt-5-mini"
-max_tokens = 4096
+max_tokens = 16384
 context_window = 400000
-max_output_tokens = 4096
+max_output_tokens = 16384
 context_length = 400000
 temperature = 0.1
-max_iterations = 30
+max_iterations = 25
 step_timeout_secs = 600
 parallelism = 2
 cost_input_per_1m = 0.25
@@ -697,7 +680,8 @@ cost_output_per_1m = 2.0
 recommended = false
 tier = "small"
 tool_style = "json"
-notes = "Cheap OpenAI GPT-5 Mini; untested in this harness."
+agentless_default = true
+notes = "Cheap OpenAI GPT-5 Mini; bypass multi-turn agent loop by default."
 
 [coding_models.gemma-3-27b-it]
 id = "google/gemma-3-27b-it"

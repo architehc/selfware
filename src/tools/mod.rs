@@ -32,7 +32,6 @@ pub mod computer;
 pub mod container;
 pub mod context;
 pub mod file;
-pub mod file_read;
 pub mod fim;
 pub mod git;
 pub mod git_worktree;
@@ -67,8 +66,7 @@ use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
 };
-use file::{DirectoryTree, FileDelete, FileEdit, FileMultiEdit, FileWrite};
-use file_read::FileRead;
+use file::{DirectoryTree, FileDelete, FileEdit, FileMultiEdit, FileRead, FileWrite};
 use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
 use git_worktree::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
 use grep_search::GrepSearch;
@@ -294,6 +292,11 @@ pub struct ToolRegistry {
     /// Set of tool names that are currently "activated" (available for use)
     /// This starts with critical tools and grows as tools are discovered.
     activated_tools: HashSet<String>,
+    /// Shared index backing the `tool_search` tool. Populated after registration
+    /// so the search tool can return real results instead of the placeholder.
+    /// Uses a std::sync::RwLock because the index is updated from sync
+    /// registry methods that may be called inside an async runtime.
+    tool_search_index: Arc<std::sync::RwLock<Vec<tool_search::ToolSearchResult>>>,
 }
 
 /// List of critical tools that are always available.
@@ -333,12 +336,15 @@ impl ToolRegistry {
     /// When `safety_config` is `Some`, all file/git tools are initialized with
     /// per-instance configs instead of relying on the deprecated global fallback.
     pub fn with_safety_config(safety_config: Option<&crate::config::SafetyConfig>) -> Self {
+        let tool_search_index = Arc::new(std::sync::RwLock::new(Vec::new()));
         let mut registry = Self {
             all_tools: HashMap::new(),
             activated_tools: HashSet::new(),
+            tool_search_index: Arc::clone(&tool_search_index),
         };
 
         // Register critical tools first (File operations)
+        registry.register_critical(tool_search::ToolSearchTool::new(tool_search_index));
         if let Some(cfg) = safety_config {
             registry.register_critical(FileRead::with_safety_config(cfg.clone()));
             registry.register_critical(FileWrite::with_safety_config(cfg.clone()));
@@ -363,9 +369,7 @@ impl ToolRegistry {
         registry.register_critical(GlobFind);
         // SymbolSearch is deferred - less commonly used
 
-        // Critical: ToolSearch - enables discovering deferred tools
-        // Note: tool_search is handled specially by the agent dispatch
-        registry.register_critical(tool_search::ToolSearchTool::placeholder());
+
 
         // Deferred: Git operations (can be discovered via tool_search)
         if let Some(cfg) = safety_config {
@@ -481,13 +485,14 @@ impl ToolRegistry {
         let project_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) =
-            lsp_tools::create_lsp_tools(project_root.clone());
+            lsp_tools::create_lsp_tools(project_root.clone(), safety_config.cloned());
         registry.register_deferred(lsp_goto);
         registry.register_deferred(lsp_refs);
         registry.register_deferred(lsp_syms);
         registry.register_deferred(lsp_hover);
 
-        let (lsp_diag, lsp_ws, lsp_impl) = lsp_tools::create_extra_lsp_tools(project_root);
+        let (lsp_diag, lsp_ws, lsp_impl) =
+            lsp_tools::create_extra_lsp_tools(project_root, safety_config.cloned());
         registry.register_deferred(lsp_diag);
         registry.register_deferred(lsp_ws);
         registry.register_deferred(lsp_impl);
@@ -509,6 +514,7 @@ impl ToolRegistry {
         // Deferred: Patch apply tool
         registry.register_deferred(PatchApply);
 
+        registry.rebuild_search_index();
         registry
     }
 
@@ -545,6 +551,21 @@ impl ToolRegistry {
     /// Defaults to deferred registration.
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
         self.register_deferred(tool);
+    }
+
+    /// Rebuild the index used by the `tool_search` tool from the current set
+    /// of registered tools. Call this after registering any tools that should
+    /// be discoverable.
+    pub fn rebuild_search_index(&mut self) {
+        let mut index = self.tool_search_index.write().expect("tool_search index poisoned");
+        index.clear();
+        index.extend(self.all_tools.values().map(|info| tool_search::ToolSearchResult {
+            name: info.tool.name().to_string(),
+            description: info.tool.description().to_string(),
+            schema: info.tool.schema(),
+            is_critical: info.is_critical,
+            category: info.category.clone(),
+        }));
     }
 
     /// Look up a tool by name, returning `None` if not found.

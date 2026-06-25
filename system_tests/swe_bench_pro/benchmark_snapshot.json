@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-06-24T11:01:31.488888+00:00",
+  "generated_at": "2026-06-24T19:22:15.033645+00:00",
   "runs": [
     {
       "model": "gpt-5-mini",
@@ -76,6 +76,44 @@
       "estimated_cost_usd": 0.3243,
       "elapsed_hours": 7.12,
       "instances_per_hour": 7.02
+    },
+    {
+      "model": "kimi-k2.6",
+      "sample_size": 50,
+      "predictions": 45,
+      "completed": 1,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        1
+      ],
+      "pass_to_pass": [
+        0,
+        0
+      ],
+      "estimated_cost_usd": 0.0109,
+      "elapsed_hours": 15.32,
+      "instances_per_hour": 3.26
+    },
+    {
+      "model": "lfm-2.5-1.2b-thinking-free-sweap-v2",
+      "sample_size": 10,
+      "predictions": 10,
+      "completed": 0,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        0
+      ],
+      "pass_to_pass": [
+        0,
+        0
+      ],
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 38.46
     },
     {
       "model": "gemma-3-12b",
@@ -211,6 +249,25 @@
       "instances_per_hour": 4.76
     },
     {
+      "model": "qwen3-32b-v2",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 2,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        1,
+        7
+      ],
+      "pass_to_pass": [
+        453,
+        459
+      ],
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
       "model": "xiaomi-mimo-v2.5",
       "sample_size": 10,
       "predictions": 9,
@@ -344,30 +401,238 @@
       "instances_per_hour": 7.81
     },
     {
-      "model": "kimi-k2.6",
-      "sample_size": 50,
-      "predictions": 22,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.2398,
-      "elapsed_hours": 0.23,
-      "instances_per_hour": 217.39
-    },
-    {
       "model": "glm-5.2",
       "sample_size": 50,
-      "predictions": 16,
+      "predictions": 32,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.1488,
+      "estimated_cost_usd": 0.2976,
       "elapsed_hours": 0.18,
       "instances_per_hour": 277.78
+    },
+    {
+      "model": "gpt-5-mini-v2",
+      "sample_size": 50,
+      "predictions": 15,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "gemma-4-26b-a4b-free-sweap-v2",
+      "sample_size": 50,
+      "predictions": 12,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "deepseek-v4-flash-sweap-v2",
+      "sample_size": 50,
+      "predictions": 11,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "poolside-laguna-xs.2-free-sweap-v2",
+      "sample_size": 10,
+      "predictions": 10,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 38.46
+    },
+    {
+      "model": "amazon-nova-lite-sweap-v2",
+      "sample_size": 50,
+      "predictions": 9,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "qwen3-coder-free-sweap-v2",
+      "sample_size": 50,
+      "predictions": 9,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "seed-2.0-mini-sweap-v2",
+      "sample_size": 50,
+      "predictions": 9,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "qwen3.5-27b-sweap-v2",
+      "sample_size": 50,
+      "predictions": 6,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "gemma-4-26b-a4b-free-v3",
+      "sample_size": 10,
+      "predictions": 5,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "gemma-4-31b-sweap-v2",
+      "sample_size": 50,
+      "predictions": 5,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "qwen3-coder-30b-a3b-instruct-sweap-v2",
+      "sample_size": 50,
+      "predictions": 5,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "qwen3.5-flash-sweap-v2",
+      "sample_size": 50,
+      "predictions": 4,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "qwen3.5-9b-sweap-v2",
+      "sample_size": 50,
+      "predictions": 3,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "cohere-north-mini-code-free-sweap-v2",
+      "sample_size": 10,
+      "predictions": 2,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 38.46
+    },
+    {
+      "model": "qwen2.5-7b-v2",
+      "sample_size": 10,
+      "predictions": 1,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "gemma-4-12b-v2",
+      "sample_size": 10,
+      "predictions": 0,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "gemma-4-26b-a4b-free-v2",
+      "sample_size": 10,
+      "predictions": 0,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
     }
   ]
 }

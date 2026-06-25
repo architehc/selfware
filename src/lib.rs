@@ -124,7 +124,6 @@ pub use observability::telemetry;
 
 // Backward-compatible re-exports for orchestration module
 pub use orchestration::multiagent;
-pub use orchestration::planning;
 pub use orchestration::swarm;
 pub use orchestration::visual_loop;
 pub use orchestration::workflows;
@@ -144,8 +143,7 @@ pub use testing::visual_verification;
 #[cfg(feature = "browser")]
 pub mod browser;
 pub mod profiles;
-#[cfg(feature = "legacy-swebench")]
-pub mod swebench;
+
 
 // ============================================================================
 // Utility modules

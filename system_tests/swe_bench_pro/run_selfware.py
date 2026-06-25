@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tomllib
@@ -41,11 +42,17 @@ from harness_recovery import (
 )
 
 from small_model_adapter import (
+    _extract_failing_test_snippets,
+    _extract_test_hints,
+    _format_test_command,
+    _is_strong_identifier,
     _new_files_from_patch,
+    _tokenize_problem,
     build_agentless_prompt,
     build_agentless_retry_prompt,
     build_small_model_prompt,
     rank_files_by_relevance,
+    truncate_file_reads,
 )
 
 from patch_utils import (
@@ -57,6 +64,7 @@ from patch_utils import (
     extract_diff,
     extract_partial_diff,
     filter_patch_to_files,
+    filter_patch_to_source_files,
     is_truncated_diff,
     verify_edits_apply,
     _apply_diff_with_check,
@@ -81,6 +89,12 @@ CONTAINER_REPO_DIR = "/app"
 
 # Lock for serializing appends to predictions.jsonl when running instances in parallel.
 PREDICTIONS_LOCK = threading.Lock()
+
+# Global Podman options applied to every podman invocation.  The most important
+# one for SWE-bench Pro is --storage-opt ignore_chown_errors=true: the official
+# images contain files owned by UIDs/GIDs far outside the host user's subuid
+# range, and without this option rootless podman cannot unpack the layers.
+_PODMAN_GLOBAL_OPTS: list[str] = ["--storage-opt", "ignore_chown_errors=true"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -376,19 +390,35 @@ def _parse_model_size(model_id: str) -> float | None:
     return None
 
 
-def infer_capability_tier(model_id: str) -> str:
-    """Infer a capability tier from the configured model id.
+def infer_capability_tier(model_id: str, config: dict[str, Any] | None = None) -> str:
+    """Infer a capability tier from the configured model id and config metadata.
 
     Tiers:
-      - small:  local endpoints or models <=13B
+      - small:  local endpoints, explicitly small metadata, or models <=13B
       - medium: known mid-size models (qwen3.5-27b, qwen3.6-27b, gemma4-12b) or <=31B
       - large:  everything else
     """
+    if config is not None:
+        metadata_tier = (config.get("metadata", {}) or {}).get("tier")
+        if metadata_tier in ("small", "medium", "large"):
+            return metadata_tier
+
     lower = model_id.lower()
     if "local" in lower:
         return "small"
-    if any(name in lower for name in ("qwen3.5-27b", "qwen3.6-27b", "gemma4-12b")):
+
+    # Explicit aliases for models whose names do not encode parameter counts.
+    small_aliases = ("gpt-5-mini", "gemini-3.5-flash", "llama-3.1-8b", "qwen2.5-7b")
+    medium_aliases = (
+        "qwen3.5-27b", "qwen3.6-27b", "gemma4-12b", "gemma-3-12b",
+        "granite-4.1-8b", "llama-4-scout", "mistral-nemo", "nova-lite",
+        "ling-2.6-flash",
+    )
+    if any(alias in lower for alias in small_aliases):
+        return "small"
+    if any(alias in lower for alias in medium_aliases):
         return "medium"
+
     size = _parse_model_size(model_id)
     if size is not None:
         if size <= 13:
@@ -442,10 +472,10 @@ def _small_model_adapter_enabled(
     """Return (enabled, tier) for the small-model adapter."""
     if args.small_model:
         model_id = config.get("model", args.model_profile)
-        return True, infer_capability_tier(model_id)
+        return True, infer_capability_tier(model_id, config)
     if args.compact_prompt:
         model_id = config.get("model", args.model_profile)
-        tier = infer_capability_tier(model_id)
+        tier = infer_capability_tier(model_id, config)
         if tier == "small":
             return True, tier
     return False, ""
@@ -477,7 +507,7 @@ def prepare_effective_config(
         patched = True
 
     model_id = config.get("model", args.model_profile)
-    tier = infer_capability_tier(model_id)
+    tier = infer_capability_tier(model_id, config)
     adapter_enabled, adapter_tier = _small_model_adapter_enabled(args, config)
     args.small_model_adapter = adapter_enabled
     if adapter_enabled:
@@ -529,7 +559,7 @@ def add_host_repo_to_safety_allowed_paths(
     safety = config.setdefault("safety", {})
     allowed = list(safety.get("allowed_paths", []))
 
-    for entry in ("./**", "/app/**"):
+    for entry in ("./**", "/app", "/app/**"):
         if entry not in allowed:
             allowed.append(entry)
 
@@ -701,20 +731,16 @@ def build_prompt(
     repair_feedback: str | None = None,
     compact: bool = False,
     few_shot_examples: str | None = None,
+    repo_path: str | Path = CONTAINER_REPO_DIR,
+    ranked_files: list[str] | None = None,
 ) -> str:
     tests = load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
     pass_to_pass = load_list_field(instance.get("pass_to_pass", []))
     language = (instance.get("repo_language") or "").lower()
-
-    if language == "python":
-        test_cmd = f"python -m pytest {' '.join(tests)}" if tests else "python -m pytest"
-    elif language == "javascript" or language == "typescript":
-        test_cmd = f"npm test -- {' '.join(tests)}" if tests else "npm test"
-    elif language == "go":
-        test_cmd = f"go test {' '.join(tests)}" if tests else "go test ./..."
-    else:
-        test_cmd = "run the relevant test suite"
+    test_cmd = _format_test_command(language, tests)
+    test_hints = _extract_test_hints(instance.get("test_patch", "") or "")
+    test_snippets = _extract_failing_test_snippets(instance.get("test_patch", "") or "")
 
     if compact:
         requirements_text = (
@@ -724,8 +750,28 @@ def build_prompt(
     else:
         requirements_text = instance.get("requirements", "")
 
+    repo_display = str(repo_path)
+
+    def _is_test_file(rel: str) -> bool:
+        name = rel.lower()
+        return name.endswith("_test.go") or name.startswith("test_") or name.endswith("_test.py") or name.endswith("_test.js") or name.endswith("_test.ts")
+
+    source_ranked = [f for f in (ranked_files or []) if not _is_test_file(f)]
+    editable_manifest = "\n".join(f"- {f}" for f in source_ranked[:10]) or "- (none identified; use file_read to locate the relevant source file)"
+
+    search_text = f"{instance.get('problem_statement', '')}\n{requirements_text}".strip()
+    snippet_terms = [t for t in _tokenize_problem(search_text) if _is_strong_identifier(t)]
+    snippets = truncate_file_reads(
+        source_ranked[:3],
+        repo_path=repo_path,
+        max_lines=150,
+        max_chars=6000,
+        highlight_terms=snippet_terms,
+    ) if source_ranked else "(no source snippets available)\n"
+
     sections = [
-        f"Repo: {CONTAINER_REPO_DIR} ({instance.get('repo')} @ {instance.get('base_commit')})",
+        f"Repo: {repo_display} ({instance.get('repo')} @ {instance.get('base_commit')})",
+        "Working directory: the repo root shown above. Use relative paths only (e.g. lib/auth/grpcserver.go). Do NOT use absolute paths like /app/...; they will be rejected.",
         "",
         "GOAL: Fix the issue with the smallest source-code patch. Your final output is a git diff, so you MUST modify source files.",
         "",
@@ -751,33 +797,66 @@ def build_prompt(
         "",
         f"Run tests: {test_cmd}",
         "",
+        "Test-patch hints (the evaluator applies the full test patch; do NOT edit tests):",
+        test_hints or "- (none extracted)",
+        "",
+        "Failing test code snippets (added by the test patch; these are the tests you must make pass):",
+        test_snippets or "- (none extracted)",
+        "",
+        "Relevant source excerpts (line numbers are for reference only):",
+        snippets,
+        "",
+        "Editable file candidates — prioritize these source files:",
+        editable_manifest,
+        "You may read or edit other source files if the fix clearly requires it, but state why in one sentence first.",
+        "",
         "MANDATORY WORKFLOW:",
     ])
     if compact:
         sections.extend([
-            "1. Read the issue and relevant test/source files.",
-            "2. Use file_edit to apply the minimal source fix.",
-            "3. Run the test command. If it fails, edit again.",
-            "4. Finish only after at least one file_edit and one test run.",
+            "1. Read the issue and the most relevant source file from the excerpts above.",
+            "2. Your FIRST concrete action must be file_edit on the relevant source file.",
+            "3. Run the test command. If any fail-to-pass test still fails, edit again.",
+            "4. Finish only after at least one file_edit and the fail-to-pass tests pass (or you prove the failure is unrelated to your change).",
         ])
     else:
         sections.extend([
-            "1. PLAN (steps 1-5): Read issue + relevant test/source files. Stop once you know the root cause.",
-            "2. EDIT (by step 8): Use file_edit to apply the minimal source fix. Do not read past step 8 without editing.",
-            "3. VERIFY: Run the test command. If it fails, edit again.",
-            "4. COMPLETE: Only finish after at least one file_edit and one test run.",
+            "1. READ (steps 1-3): Read the issue + the top-ranked source file excerpt. Stop once you know the root cause.",
+            "2. EDIT (by step 4): Use file_edit to apply the minimal source fix. Do not read past step 4 without editing.",
+            "3. VERIFY: Run the fail-to-pass tests. If any still fail, edit again.",
+            "4. COMPLETE: Only finish after at least one file_edit and the fail-to-pass tests pass (or you prove the failure is unrelated to your change).",
         ])
     sections.extend([
+        "",
+        "CORRECT file_edit EXAMPLE (format only; replace with the real old/new lines from the file you edit):",
+        "",
+        "### FILE: lib/auth/grpcserver.go",
+        "<<<<<<< SEARCH",
+        "func processRequest() error {",
+        "    err := doWork()",
+        "    return trace.Wrap(err)",
+        "}",
+        "=======",
+        "func processRequest() error {",
+        "    if err := validate(); err != nil {",
+        "        return trace.Wrap(err)",
+        "    }",
+        "    err := doWork()",
+        "    return trace.Wrap(err)",
+        "}",
+        ">>>>>>> REPLACE",
         "",
         "CRITICAL RULES:",
         "- Modify source files only. Do NOT edit tests, Dockerfiles, binaries, configs, docs, or unrelated code.",
         "- Do NOT produce an empty patch. At least one source file must change.",
         "- You MUST call file_edit at least once before finishing. No exceptions.",
         "- Your final deliverable is the git diff of source-file changes.",
-        "- Make your first file_edit by step 8.",
+        "- Make your first file_edit by step 4.",
         "- Prefer file_edit over file_write; include 3-5 lines of context.",
         "- Keep the patch minimal: no formatting, comment, or unrelated changes.",
-        "- If tests fail only because of missing environment dependencies, still finish after the source edit.",
+        "- Use relative paths only. Do NOT use /app/... or other absolute paths.",
+        "- Do not create new source files unless the test patch explicitly requires them.",
+        "- Implement only the smallest change that makes the fail-to-pass tests pass. Do not gold-plate.",
     ])
     if few_shot_examples:
         sections.extend([
@@ -991,13 +1070,25 @@ def run_diff_fallback(
     )
 
     diff_text = extract_diff(response)
-    if not diff_text:
-        logger.warning("Diff fallback for %s produced no diff block", instance_id)
-        return ""
+    if diff_text:
+        if _apply_diff_with_check(host_repo_dir, diff_text, logger):
+            logger.info("Diff fallback applied unified diff for %s", instance_id)
+        else:
+            logger.warning("Diff fallback for %s could not apply diff", instance_id)
+            diff_text = ""
 
-    if not _apply_diff_with_check(host_repo_dir, diff_text, logger):
-        logger.warning("Diff fallback for %s could not apply diff", instance_id)
-        return ""
+    if not diff_text:
+        # Some models return SEARCH/REPLACE blocks even when asked for a diff.
+        # Accept any applyable patch shape before giving up.
+        applied, _ = apply_model_response_with_missing(
+            host_repo_dir, response, logger
+        )
+        if not applied:
+            logger.warning(
+                "Diff fallback for %s produced no applyable patch", instance_id
+            )
+            return ""
+        logger.info("Diff fallback applied SEARCH/REPLACE edits for %s", instance_id)
 
     patch = capture_patch_on_host(
         host_repo_dir, logger, base_commit=instance.get("base_commit")
@@ -1013,17 +1104,20 @@ def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bo
     """Return True when the agent loop should be skipped entirely."""
     if args.agentless:
         return True
+
+    metadata = config.get("metadata", {}) or {}
+    if metadata.get("agentless_default"):
+        return True
+
     if args.auto_agentless:
-        # Infer capability from the model id itself rather than the config
-        # registry, so cheap small-parameter models default to the direct path
-        # while better small models (e.g. Mistral Small 24B) still use the
-        # agent loop unless explicitly flagged.
+        # Infer capability from the model id and config metadata so cheap
+        # small-parameter models default to the direct patch path.
         model_id = config.get("model", "")
-        if infer_capability_tier(model_id) == "small":
+        if infer_capability_tier(model_id, config) == "small":
             return True
-        # Also respect an explicit config flag that requests agentless mode.
-        metadata = config.get("metadata", {})
-        if metadata.get("agentless_default"):
+        # Treat explicitly not-recommended models as fragile and bypass the
+        # multi-turn agent loop.
+        if metadata.get("recommended") is False:
             return True
     return False
 
@@ -1053,7 +1147,9 @@ def run_agentless(
     """Run the direct one-shot patch path and return the captured git diff.
 
     If the first response cannot be applied, reset the repo and retry once with
-    a stricter prompt that includes exact file contents.
+    a stricter prompt that includes exact file contents. If the retry also fails
+    and ``args.diff_fallback`` is set, reset the repo again and try a one-shot
+    unified-diff fallback.
     """
     instance_id = instance["instance_id"]
     base_commit = instance.get("base_commit", "")
@@ -1112,8 +1208,8 @@ def run_agentless(
             )
             # Keep any new files the model created (e.g., test fixtures) rather
             # than filtering them out because they were not in the ranked set.
-            allowed_files = set(relevant) | set(_new_files_from_patch(instance.get("test_patch", "") or ""))
-            patch = filter_patch_to_files(patch, allowed_files)
+            extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or ""))
+            patch = filter_patch_to_source_files(patch, extra_allowed=extra_allowed)
             if patch.strip():
                 logger.info(
                     "Agentless path produced a non-empty patch for %s%s",
@@ -1152,6 +1248,7 @@ def run_agentless(
         few_shot_examples=few_shot_examples,
         top_k=5,
         context_window=context_window,
+        expand_to_package=True,
     )
     patch, ok, _ = _attempt(agentless_prompt, "", allow_retry=True)
     if ok:
@@ -1167,9 +1264,54 @@ def run_agentless(
         few_shot_examples=few_shot_examples,
         top_k=5,
         context_window=context_window,
+        expand_to_package=True,
     )
     patch, ok, _ = _attempt(retry_prompt, ".retry", allow_retry=False)
-    return patch
+    if patch.strip():
+        return patch
+
+    # Final one-shot unified-diff fallback when SEARCH/REPLACE edits fail.
+    if args.diff_fallback:
+        if not _reset_repo(host_repo_dir, base_commit, logger):
+            return ""
+
+        tests = load_list_field(instance.get("selected_test_files_to_run", []))
+        fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
+        search_text = instance.get("problem_statement", "") or ""
+        requirements_text = instance.get("requirements", "") or ""
+        if requirements_text:
+            search_text = f"{search_text}\n{requirements_text}".strip()
+        ranked_files = rank_files_by_relevance(
+            host_repo_dir,
+            search_text,
+            test_names=tests + fail_to_pass,
+            top_k=20,
+        )
+        logger.info(
+            "Ranked files for agentless diff fallback for %s: %s",
+            instance_id,
+            ranked_files,
+        )
+
+        fallback_patch = run_diff_fallback(
+            host_repo_dir,
+            instance,
+            agentless_prompt,
+            ranked_files,
+            patch_config,
+            args,
+            log_dir,
+            logger,
+            name,
+        )
+        if fallback_patch.strip():
+            logger.info(
+                "Agentless diff fallback produced a non-empty patch for %s",
+                instance_id,
+            )
+            return fallback_patch
+
+    return ""
 
 
 def run_plan_then_patch(
@@ -1232,6 +1374,7 @@ def run_cmd(
     input_text: str | None = None,
     timeout: int | None = None,
     check: bool = False,
+    cwd: str | Path | None = None,
     logger: logging.Logger | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a command and return a CompletedProcess object."""
@@ -1245,6 +1388,7 @@ def run_cmd(
             text=True,
             timeout=timeout,
             check=check,
+            cwd=str(cwd) if cwd is not None else None,
             errors="replace",
         )
     except subprocess.TimeoutExpired as exc:
@@ -1261,7 +1405,7 @@ def podman(
     logger: logging.Logger | None = None,
 ) -> subprocess.CompletedProcess:
     return run_cmd(
-        ["podman", *args],
+        ["podman", *_PODMAN_GLOBAL_OPTS, *args],
         input_text=input_text,
         timeout=timeout,
         check=check,
@@ -1642,7 +1786,7 @@ def extract_repo_from_image(
         # podman cp can fail with "read/write on closed pipe" on large repos.
         # Use podman export piped to tar instead; it is slower but reliable.
         export_proc = subprocess.Popen(
-            ["podman", "export", name],
+            ["podman", *_PODMAN_GLOBAL_OPTS, "export", name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
@@ -1812,7 +1956,8 @@ def _verify_patch_applies(repo_dir: Path, patch: str, base_commit: str | None, l
     if not patch.strip():
         return False
     commit = base_commit or "HEAD"
-    patch_file = repo_dir / ".selfware_verify_patch.diff"
+    # Write the patch outside the repo so it survives "git stash -u".
+    patch_file = Path(tempfile.gettempdir()) / f"selfware_verify_{repo_dir.name}_{os.getpid()}.diff"
     patch_file.write_text(patch, encoding="utf-8")
     try:
         # Reset to base, try apply, then restore.
@@ -1833,6 +1978,97 @@ def _verify_patch_applies(repo_dir: Path, patch: str, base_commit: str | None, l
         return applies
     finally:
         patch_file.unlink(missing_ok=True)
+
+
+def _changed_files_from_patch(patch: str) -> list[str]:
+    """Return repo-relative paths introduced or modified by a git diff."""
+    files: list[str] = []
+    for line in patch.splitlines():
+        if line.startswith("diff --git a/"):
+            match = re.match(r"^diff --git a/(.+?) b/(.+?)(?:\s|$)", line)
+            if match:
+                files.append(match.group(2))
+    return files
+
+
+def _check_patch_builds(
+    repo_dir: Path,
+    patch: str,
+    language: str,
+    logger: logging.Logger,
+) -> bool:
+    """Run a lightweight compile/type-check gate on the current working tree.
+
+    The patch is assumed to have already been applied.  If the source no longer
+    compiles or fails a syntax check, we discard it rather than sending a
+    build-breaking patch to the evaluator.
+    """
+    if not patch.strip():
+        return True
+
+    language = (language or "").lower()
+    logger.info("Running build/type-check gate for language=%s", language)
+
+    if language == "go":
+        if shutil.which("go") is None:
+            logger.info("Build gate skipped: go binary not available on host")
+            return True
+        proc = run_cmd(
+            ["go", "build", "./..."],
+            cwd=repo_dir,
+            timeout=180,
+            logger=logger,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "Build gate failed (go build): %s",
+                proc.stderr.strip()[:500],
+            )
+            return False
+        return True
+
+    if language == "python":
+        files = _changed_files_from_patch(patch)
+        py_files = [f for f in files if f.endswith(".py")]
+        if not py_files:
+            return True
+        proc = run_cmd(
+            [sys.executable, "-m", "py_compile", *py_files],
+            cwd=repo_dir,
+            timeout=120,
+            logger=logger,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "Build gate failed (py_compile): %s",
+                proc.stderr.strip()[:500],
+            )
+            return False
+        return True
+
+    if language in ("javascript", "typescript"):
+        tsconfig = repo_dir / "tsconfig.json"
+        if not tsconfig.is_file():
+            return True
+        if shutil.which("npx") is None:
+            logger.info("Build gate skipped: npx not available on host")
+            return True
+        proc = run_cmd(
+            ["npx", "tsc", "--noEmit"],
+            cwd=repo_dir,
+            timeout=180,
+            logger=logger,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "Build gate failed (tsc --noEmit): %s",
+                proc.stderr.strip()[:500],
+            )
+            return False
+        return True
+
+    # No gate for other languages.
+    return True
 
 
 def capture_patch_on_host(
@@ -2031,6 +2267,22 @@ def process_instance(
                 name,
                 few_shot_examples=few_shot_examples,
             )
+            if patch.strip() and not _verify_patch_applies(
+                host_repo_dir, patch, instance.get("base_commit"), logger
+            ):
+                logger.warning("Agentless patch for %s does not apply; treating as empty", instance_id)
+                patch = ""
+            if patch.strip():
+                language = (instance.get("repo_language") or "").lower()
+                if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                    logger.warning(
+                        "Agentless patch for %s breaks the build; treating as empty", instance_id
+                    )
+                    patch = ""
+                    run_cmd(
+                        ["git", "-C", str(host_repo_dir), "reset", "--hard", instance["base_commit"]],
+                        logger=logger,
+                    )
             save_prediction(output_dir, instance_id, patch, logger)
             if (args.tdr and patch.strip()) or args.ensemble_models:
                 patch, success = _run_tdr_block(
@@ -2078,6 +2330,22 @@ def process_instance(
                 return False
             return True
 
+        # Pre-compute ranked files so the prompt can anchor the agent to concrete
+        # source targets and so the diff fallback has focused snippets.
+        tests = load_list_field(instance.get("selected_test_files_to_run", []))
+        fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
+        search_text = instance.get("problem_statement", "") or ""
+        requirements_text = instance.get("requirements", "") or ""
+        if requirements_text:
+            search_text = f"{search_text}\n{requirements_text}".strip()
+        ranked_files = rank_files_by_relevance(
+            host_repo_dir,
+            search_text,
+            test_names=tests + fail_to_pass,
+            top_k=10,
+        )
+        logger.info("Ranked files for prompt/fallback: %s", ranked_files)
+
         if args.small_model_adapter:
             context_window = patch_config.get("agent", {}).get("context_window", 32768)
             prompt_text = build_small_model_prompt(
@@ -2095,28 +2363,13 @@ def process_instance(
                 repair_feedback=feedback,
                 compact=args.compact_prompt,
                 few_shot_examples=few_shot_examples,
+                repo_path=host_repo_dir,
+                ranked_files=ranked_files,
             )
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / f"{name}.prompt.txt").write_text(
             prompt_text, encoding="utf-8"
         )
-
-        # Pre-compute ranked files so the diff fallback has focused snippets even
-        # when the agent loop itself fails to edit anything.  Include requirements
-        # because they usually name the exact functions/types that need changing.
-        tests = load_list_field(instance.get("selected_test_files_to_run", []))
-        fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
-        search_text = instance.get("problem_statement", "") or ""
-        requirements_text = instance.get("requirements", "") or ""
-        if requirements_text:
-            search_text = f"{search_text}\n{requirements_text}".strip()
-        ranked_files = rank_files_by_relevance(
-            host_repo_dir,
-            search_text,
-            test_names=tests + fail_to_pass,
-            top_k=5,
-        )
-        logger.info("Ranked files for diff fallback: %s", ranked_files)
 
         # Run selfware on the host against the extracted repo.
         success = run_selfware_on_host(
@@ -2145,6 +2398,32 @@ def process_instance(
         ):
             logger.warning("Captured patch for %s does not apply; treating as empty", instance_id)
             patch = ""
+
+        # Compile / type-check gate: reject build-breaking patches before they
+        # reach the evaluator and waste a test run.
+        if patch.strip():
+            language = (instance.get("repo_language") or "").lower()
+            if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                logger.warning(
+                    "Captured patch for %s breaks the build; treating as empty", instance_id
+                )
+                patch = ""
+                reset_proc = run_cmd(
+                    [
+                        "git",
+                        "-C",
+                        str(host_repo_dir),
+                        "reset",
+                        "--hard",
+                        instance["base_commit"],
+                    ],
+                    logger=logger,
+                )
+                if reset_proc.returncode != 0:
+                    logger.error(
+                        "Failed to reset repo after build-gate failure: %s",
+                        reset_proc.stderr.strip(),
+                    )
 
         save_prediction(output_dir, instance_id, patch, logger)
 
@@ -2438,9 +2717,16 @@ def main() -> int:
     if not args.plan_then_patch:
         logger.info("Using binary: %s", binary_path)
 
-    logger.info("Loading SWE-bench Pro dataset...")
-    dataset = load_dataset("ScaleAI/SWE-bench_Pro", split="test")
-    logger.info("Loaded %s instances", len(dataset))
+    # Only load the full HF dataset when we actually need it.  When a sample
+    # file or explicit instance IDs are supplied we can work from those rows
+    # alone, which avoids long HF startup and rate-limit issues.
+    if args.sample_file or args.instance_ids:
+        dataset = None
+        logger.info("Skipping full HF dataset load; using provided sample file or instance IDs")
+    else:
+        logger.info("Loading SWE-bench Pro dataset...")
+        dataset = load_dataset("ScaleAI/SWE-bench_Pro", split="test")
+        logger.info("Loaded %s instances", len(dataset))
 
     existing = load_existing_predictions(output_dir)
     if existing:

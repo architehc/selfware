@@ -228,59 +228,69 @@ impl Agent {
     }
 
     /// Walk the project directory and register all files at L1 in the context map.
-    pub(super) fn build_l1_project_tree(&mut self) {
+    pub(super) async fn build_l1_project_tree(&mut self) {
         use walkdir::WalkDir;
 
         let root = super::current_project_root();
-        let mut count = 0usize;
-        for entry in WalkDir::new(&root)
-            .max_depth(10)
-            .into_iter()
-            .filter_entry(|e| {
-                let name = e.file_name().to_string_lossy();
-                // Skip hidden dirs, build artifacts, and other non-source directories.
-                if name.starts_with('.') {
-                    return false;
+        let entries = tokio::task::spawn_blocking(move || {
+            let mut entries = Vec::new();
+            for entry in WalkDir::new(&root)
+                .max_depth(10)
+                .into_iter()
+                .filter_entry(|e| {
+                    let name = e.file_name().to_string_lossy();
+                    // Skip hidden dirs, build artifacts, and other non-source directories.
+                    if name.starts_with('.') {
+                        return false;
+                    }
+                    !matches!(
+                        name.as_ref(),
+                        "target"
+                            | "node_modules"
+                            | ".venv"
+                            | "__pycache__"
+                            | ".mypy_cache"
+                            | "vendor"
+                            | "dist"
+                            | "build"
+                            | "out"
+                            | "pkg"
+                            // ML/data directories that pollute agent context
+                            | "Hunyuan3D-2"
+                            | "TRELLIS.2"
+                            | "instantmesh_repo"
+                            | "models"
+                            | "data"
+                            | ".cache"
+                            | "gen3d_outputs"
+                            | "hunyuan3d_outputs"
+                            | "trellis2_outputs"
+                            | "calibration"
+                    )
+                })
+            {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                if !entry.file_type().is_file() {
+                    continue;
                 }
-                !matches!(
-                    name.as_ref(),
-                    "target"
-                        | "node_modules"
-                        | ".venv"
-                        | "__pycache__"
-                        | ".mypy_cache"
-                        | "vendor"
-                        | "dist"
-                        | "build"
-                        | "out"
-                        | "pkg"
-                        // ML/data directories that pollute agent context
-                        | "Hunyuan3D-2"
-                        | "TRELLIS.2"
-                        | "instantmesh_repo"
-                        | "models"
-                        | "data"
-                        | ".cache"
-                        | "gen3d_outputs"
-                        | "hunyuan3d_outputs"
-                        | "trellis2_outputs"
-                        | "calibration"
-                )
-            })
-        {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            if !entry.file_type().is_file() {
-                continue;
+                let path = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .unwrap_or(entry.path())
+                    .to_path_buf();
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                entries.push((path, size));
             }
-            let path = entry
-                .path()
-                .strip_prefix(&root)
-                .unwrap_or(entry.path())
-                .to_path_buf();
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            entries
+        })
+        .await
+        .unwrap_or_default();
+
+        let mut count = 0usize;
+        for (path, size) in entries {
             self.context_map.register_tree_entry(path, size);
             count += 1;
         }
@@ -293,7 +303,7 @@ impl Agent {
 
     /// For Review modality: auto-load L2 skeletons for all source files
     /// so the model can see the codebase structure without reading every file.
-    pub(super) fn auto_load_skeletons_for_review(&mut self) {
+    pub(super) async fn auto_load_skeletons_for_review(&mut self) {
         use super::context_map::{extract_rust_skeleton, ContextLevel};
 
         let root = super::current_project_root();
@@ -323,7 +333,7 @@ impl Agent {
             }
 
             // Check budget before loading.
-            let estimate = self.context_map.can_load(&path, ContextLevel::Skeleton);
+            let estimate = self.context_map.can_load(&path, ContextLevel::Skeleton).await;
             if !estimate.fits {
                 tracing::info!(
                     "Skeleton budget exhausted after {} files ({:.0}% used)",
@@ -334,7 +344,7 @@ impl Agent {
             }
 
             let full_path = root.join(&path);
-            let content = match std::fs::read_to_string(&full_path) {
+            let content = match tokio::fs::read_to_string(&full_path).await {
                 Ok(c) => c,
                 Err(_) => continue,
             };
@@ -388,13 +398,14 @@ impl Agent {
     }
 
     /// Track a file_read in the context map at L3 (full content).
-    pub(super) fn track_file_read_in_context_map(&mut self, path: &str, content: &str) {
+    pub(super) async fn track_file_read_in_context_map(&mut self, path: &str, content: &str) {
         use std::path::Path;
         let p = Path::new(path);
         // Estimate before loading.
         let estimate = self
             .context_map
-            .can_load(p, super::context_map::ContextLevel::Full);
+            .can_load(p, super::context_map::ContextLevel::Full)
+            .await;
         if !estimate.fits {
             // Auto-compress to make room.
             let needed = estimate
@@ -450,7 +461,7 @@ impl Agent {
                 }
 
                 // Check budget.
-                let estimate = self.context_map.can_load(&path, ContextLevel::Full);
+                let estimate = self.context_map.can_load(&path, ContextLevel::Full).await;
                 if !estimate.fits {
                     // Try to compress existing content to make room.
                     let needed = estimate
@@ -927,7 +938,7 @@ mod tests {
         let agent = make_test_agent(&server).await;
 
         let input = "just a plain message with no file references";
-        let (expanded, files) = agent.expand_file_references(input);
+        let (expanded, files) = agent.expand_file_references(input).await;
         assert_eq!(expanded, input, "input without @ refs should pass through");
         assert!(files.is_empty(), "no files should be reported");
 
@@ -940,7 +951,7 @@ mod tests {
         let agent = make_test_agent(&server).await;
 
         let input = "check @nonexistent_file_that_does_not_exist.rs please";
-        let (expanded, files) = agent.expand_file_references(input);
+        let (expanded, files) = agent.expand_file_references(input).await;
         // The file does not exist and is not a directory, so it stays unchanged.
         assert_eq!(
             expanded, input,
@@ -966,7 +977,7 @@ mod tests {
 
         let path_str = file_path.display().to_string();
         let input = format!("read @{} now", path_str);
-        let (expanded, files) = agent.expand_file_references(&input);
+        let (expanded, files) = agent.expand_file_references(&input).await;
 
         assert!(
             expanded.contains("hello world"),
@@ -999,7 +1010,7 @@ mod tests {
 
         let path_str = file_path.display().to_string();
         let input = format!("look at @{}", path_str);
-        let (expanded, _) = agent.expand_file_references(&input);
+        let (expanded, _) = agent.expand_file_references(&input).await;
 
         // format_file_size for 12 bytes produces "12B"
         assert!(
@@ -1022,7 +1033,7 @@ mod tests {
         std::fs::write(&f2, "content B").unwrap();
 
         let input = format!("compare @{} with @{}", f1.display(), f2.display());
-        let (expanded, files) = agent.expand_file_references(&input);
+        let (expanded, files) = agent.expand_file_references(&input).await;
 
         assert!(expanded.contains("content A"));
         assert!(expanded.contains("content B"));
@@ -1284,8 +1295,11 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
         let dir = tempdir().unwrap();
-        agent.session_logger =
-            super::session_log::new_test_session_logger("trim-log", dir.path().to_path_buf());
+        agent.session_logger = super::session_log::new_test_session_logger(
+            "trim-log",
+            dir.path().to_path_buf(),
+        )
+        .await;
 
         for i in 0..6 {
             agent
@@ -1809,7 +1823,7 @@ mod tests {
 
         let dir_str = dir.path().display().to_string();
         let input = format!("list @{}/", dir_str);
-        let (expanded, included) = agent.expand_file_references(&input);
+        let (expanded, included) = agent.expand_file_references(&input).await;
 
         // A directory reference produces a directory tree listing.
         assert!(
@@ -1834,7 +1848,7 @@ mod tests {
 
         // A lone "@" with no following path should not crash and should pass through.
         let input = "email me @ work";
-        let (expanded, files) = agent.expand_file_references(input);
+        let (expanded, files) = agent.expand_file_references(input).await;
 
         // The regex requires at least one alphanumeric char after '@', so a bare
         // "@ " should not be matched and input should come through unchanged.

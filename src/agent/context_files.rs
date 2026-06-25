@@ -332,8 +332,7 @@ impl Agent {
     /// Expand @file references in input (e.g., "@src/main.rs" becomes file content)
     /// Also supports @directory/ to include a directory tree (max depth 3)
     /// Returns the expanded input and the list of files that were included
-    pub(super) fn expand_file_references(&self, input: &str) -> (String, Vec<String>) {
-        use std::fs;
+    pub(super) async fn expand_file_references(&self, input: &str) -> (String, Vec<String>) {
         use std::sync::LazyLock;
 
         static FILE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -354,7 +353,11 @@ impl Agent {
             };
             let path = std::path::Path::new(file_path);
 
-            if path.is_dir() {
+            let is_dir = tokio::fs::metadata(path)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if is_dir {
                 // Directory reference: include tree listing + file contents (max depth 3)
                 let mut dir_content = format!("Directory tree for {}:\n```\n", file_path);
                 let mut file_count = 0;
@@ -386,7 +389,7 @@ impl Agent {
                     file_path.trim_end_matches('/'),
                     file_count
                 ));
-            } else if let Ok(content) = fs::read_to_string(file_path) {
+            } else if let Ok(content) = tokio::fs::read_to_string(file_path).await {
                 let file_block = format!(
                     "\n```{} ({})\n{}\n```\n",
                     file_path,
