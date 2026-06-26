@@ -4,6 +4,21 @@ use anyhow::Result;
 
 use crate::ui::style::Glyphs;
 
+/// Print helper that respects the global `--quiet` flag.
+macro_rules! wizard_print {
+    () => {
+        if !crate::output::is_quiet() {
+            print!("\n");
+        }
+    };
+    ($($arg:tt)*) => {
+        if !crate::output::is_quiet() {
+            print!($($arg)*);
+            print!("\n");
+        }
+    };
+}
+
 pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
     use std::io::{self, BufRead, Write};
     use std::path::PathBuf;
@@ -13,12 +28,12 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
         return write_template_config(tmpl);
     }
 
-    println!();
-    println!(
+    wizard_print!();
+    wizard_print!(
         "{} Welcome to Selfware! Let's set up your workspace.",
         Glyphs::seedling()
     );
-    println!();
+    wizard_print!();
 
     // Detect project type
     let project_type = if std::path::Path::new("Cargo.toml").exists() {
@@ -34,15 +49,15 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
     } else {
         "Unknown"
     };
-    println!("  Detecting project type... Found: {}", project_type);
-    println!();
+    wizard_print!("  Detecting project type... Found: {}", project_type);
+    wizard_print!();
 
     // Step 1: Endpoint
-    println!("Step 1/4: API Endpoint");
-    println!("  Where should Selfware connect?");
-    println!("  [1] Local (http://127.0.0.1:1234/v1) - LM Studio, Ollama, vLLM");
-    println!("  [2] OpenAI-compatible API (https://api.openai.com/v1)");
-    println!("  [3] Custom endpoint");
+    wizard_print!("Step 1/4: API Endpoint");
+    wizard_print!("  Where should Selfware connect?");
+    wizard_print!("  [1] Local (http://127.0.0.1:1234/v1) - LM Studio, Ollama, vLLM");
+    wizard_print!("  [2] OpenAI-compatible API (https://api.openai.com/v1)");
+    wizard_print!("  [3] Custom endpoint");
     print!("  > ");
     io::stdout().flush()?;
     let mut choice = String::new();
@@ -58,10 +73,10 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
         }
         _ => "http://127.0.0.1:1234/v1".to_string(),
     };
-    println!();
+    wizard_print!();
 
     // Step 2: Model
-    println!("Step 2/4: Model");
+    wizard_print!("Step 2/4: Model");
     let default_model = if endpoint.contains("openai") {
         "gpt-4"
     } else {
@@ -76,14 +91,14 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
     } else {
         model.trim().to_string()
     };
-    println!();
+    wizard_print!();
 
     // Step 3: Allowed paths
-    println!("Step 3/4: Allowed Paths");
-    println!("  Which directories can Selfware access?");
-    println!("  [1] Current directory only (.)");
-    println!("  [2] Home directory (~)");
-    println!("  [3] Custom paths");
+    wizard_print!("Step 3/4: Allowed Paths");
+    wizard_print!("  Which directories can Selfware access?");
+    wizard_print!("  [1] Current directory only (.)");
+    wizard_print!("  [2] Home directory (~)");
+    wizard_print!("  [3] Custom paths");
     print!("  > ");
     io::stdout().flush()?;
     let mut path_choice = String::new();
@@ -110,14 +125,14 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
             format!("[\"{}\"]", cwd.display())
         }
     };
-    println!();
+    wizard_print!();
 
     // Step 4: Execution mode
-    println!("Step 4/4: Execution Mode");
-    println!("  How should Selfware handle file changes?");
-    println!("  [1] Normal - Ask before every edit (safest)");
-    println!("  [2] AutoEdit - Auto-approve file edits, confirm commands");
-    println!("  [3] YOLO - Auto-approve everything (use with caution!)");
+    wizard_print!("Step 4/4: Execution Mode");
+    wizard_print!("  How should Selfware handle file changes?");
+    wizard_print!("  [1] Normal - Ask before every edit (safest)");
+    wizard_print!("  [2] AutoEdit - Auto-approve file edits, confirm commands");
+    wizard_print!("  [3] YOLO - Auto-approve everything (use with caution!)");
     print!("  > ");
     io::stdout().flush()?;
     let mut mode_choice = String::new();
@@ -127,7 +142,7 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
         "3" => "yolo",
         _ => "normal",
     };
-    println!();
+    wizard_print!();
 
     // Write config
     write_config_file(&endpoint, &model, mode, &allowed_paths)
@@ -139,7 +154,7 @@ fn write_template_config(template: &str) -> Result<()> {
     // Scaffold project files for known language templates
     match template {
         "rust" | "python" | "node" | "nodejs" | "typescript" => {
-            println!("  {} Using '{}' template...", Glyphs::gear(), template);
+            wizard_print!("  {} Using '{}' template...", Glyphs::gear(), template);
 
             let lang_key = match template {
                 "node" | "nodejs" | "typescript" => "nodejs",
@@ -163,18 +178,18 @@ fn write_template_config(template: &str) -> Result<()> {
 
             match engine.scaffold_project(lang_key, &project_name, &cwd, &opts) {
                 Ok(files) => {
-                    println!("  {} Scaffolded {} files:", Glyphs::bloom(), files.len());
+                    wizard_print!("  {} Scaffolded {} files:", Glyphs::bloom(), files.len());
                     for f in &files {
-                        println!("    {}", f);
+                        wizard_print!("    {}", f);
                     }
                 }
                 Err(e) => {
-                    println!("  {} Could not scaffold project: {}", Glyphs::frost(), e);
+                    wizard_print!("  {} Could not scaffold project: {}", Glyphs::frost(), e);
                 }
             }
         }
         "minimal" => {
-            println!("  {} Using 'minimal' template...", Glyphs::gear());
+            wizard_print!("  {} Using 'minimal' template...", Glyphs::gear());
         }
         other => {
             anyhow::bail!(
@@ -215,7 +230,7 @@ fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &st
     if config_path.exists() {
         use std::io::{self, BufRead, Write};
 
-        println!(
+        wizard_print!(
             "  {} Configuration already exists at {}",
             Glyphs::frost(),
             config_path.display()
@@ -225,7 +240,7 @@ fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &st
         let mut answer = String::new();
         io::stdin().lock().read_line(&mut answer)?;
         if !answer.trim().eq_ignore_ascii_case("y") {
-            println!("  Aborted. Existing configuration preserved.");
+            wizard_print!("  Aborted. Existing configuration preserved.");
             return Ok(());
         }
     }
@@ -249,13 +264,13 @@ allowed_paths = {}
     );
 
     std::fs::write(&config_path, &content)?;
-    println!(
+    wizard_print!(
         "  {} Configuration saved to {}",
         Glyphs::bloom(),
         config_path.display()
     );
-    println!();
-    println!(
+    wizard_print!();
+    wizard_print!(
         "  {} Run `selfware` to start your workshop!",
         Glyphs::sprout()
     );

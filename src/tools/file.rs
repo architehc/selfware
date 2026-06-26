@@ -36,6 +36,18 @@ pub fn init_safety_config(config: &SafetyConfig) {
     }
 }
 
+/// Reset the process-global safety config to the default for tests.
+///
+/// This prevents tests that run after agent-initialization tests from
+/// inheriting a permissive config left behind in `SAFETY_CONFIG`.
+#[cfg(test)]
+pub(crate) fn reset_safety_config_for_tests() {
+    let lock = SAFETY_CONFIG.get_or_init(|| RwLock::new(SafetyConfig::default()));
+    if let Ok(mut guard) = lock.write() {
+        *guard = SafetyConfig::default();
+    }
+}
+
 /// Maximum file size for reads (50 MB) to prevent OOM from accidentally reading huge files.
 const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
 /// Maximum file size for writes (10 MB) to prevent accidentally writing huge files.

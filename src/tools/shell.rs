@@ -497,6 +497,7 @@ mod tests {
     #[tokio::test]
     #[cfg(not(target_os = "windows"))]
     async fn test_cwd_etc_rejected() {
+        crate::tools::file::reset_safety_config_for_tests();
         let tool = ShellExec::new();
         let args = serde_json::json!({
             "command": "echo test",

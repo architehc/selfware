@@ -1631,6 +1631,7 @@ mod tests {
 
     #[test]
     fn test_validate_browser_output_path_rejects_unsafe_absolute_path() {
+        crate::tools::file::reset_safety_config_for_tests();
         let err = validate_browser_output_path("/etc/selfware-shot.png", "browser_screenshot")
             .expect_err("absolute output outside allowed paths must be rejected");
         assert!(err.to_string().contains("output_path validation failed"));
