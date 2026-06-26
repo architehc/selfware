@@ -5,6 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
+use wait_timeout::ChildExt;
 
 use super::catalog::QuantSpec;
 
@@ -132,14 +133,25 @@ pub struct LlamaServer {
 }
 
 impl LlamaServer {
-    /// Best-effort kill of any existing `llama-server` and a short pause to let
-    /// the kernel reclaim the GPU.  Mirrors `stop_llama_server()` in run.py.
+    /// Best-effort kill of any existing `llama-server` owned by the current
+    /// user and a short pause to let the kernel reclaim the GPU.  Mirrors
+    /// `stop_llama_server()` in run.py but avoids killing other users' servers.
     pub fn stop_existing() {
-        let _ = Command::new("pkill")
-            .args(["-f", "llama-server"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let uid = Command::new("id")
+            .args(["-u"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        if !uid.is_empty() {
+            let _ = Command::new("pkill")
+                .args(["-u", &uid, "-f", "llama-server"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
         std::thread::sleep(Duration::from_secs(2));
     }
 
@@ -185,11 +197,13 @@ impl LlamaServer {
         };
 
         let deadline = Instant::now() + opts.boot_timeout;
+        let mut probe_delay = Duration::from_millis(100);
         while Instant::now() < deadline {
             if probe_endpoint(port) {
                 return Ok(server);
             }
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(probe_delay);
+            probe_delay = (probe_delay * 2).min(Duration::from_secs(2));
         }
 
         // Boot failed — drop the server and propagate.
@@ -208,17 +222,13 @@ impl Drop for LlamaServer {
 }
 
 fn probe_endpoint(port: u16) -> bool {
-    Command::new("curl")
-        .args([
-            "-sf",
-            "-m",
-            "1",
-            &format!("http://127.0.0.1:{}/v1/models", port),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
+    let url = format!("http://127.0.0.1:{}/v1/models", port);
+    reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .ok()
+        .and_then(|client| client.get(&url).send().ok())
+        .map(|response| response.status().is_success())
         .unwrap_or(false)
 }
 
@@ -344,10 +354,12 @@ pub fn run_selfware(
         buf
     });
 
-    // Poll-with-timeout. `Child::wait` has no native timeout; we bound it.
+    // Wait-with-timeout. `Child::wait_timeout` blocks until the child exits or
+    // the poll interval elapses, avoiding the busy 500 ms polling of the old loop.
     let deadline = started + timeout;
+    let poll_interval = Duration::from_millis(500);
     loop {
-        match child.try_wait()? {
+        match child.wait_timeout(poll_interval)? {
             Some(status) => {
                 let stdout_text = stdout_handle.join().unwrap_or_default();
                 let exit_code = status.code().unwrap_or(-1);
@@ -382,7 +394,6 @@ pub fn run_selfware(
                         parsed_result: None,
                     });
                 }
-                std::thread::sleep(Duration::from_millis(500));
             }
         }
     }
@@ -432,7 +443,14 @@ pub struct RunOutcome {
 /// writes these outside the cloned repo, but stale relative paths must never
 /// become submitted model patches.
 pub fn capture_patch(workdir: &Path) -> Result<String> {
+    // Stage changes into a temporary index so we do not mutate the user's real
+    // git index. This makes capture_patch safe to call during a live benchmark.
+    let tmp_index = workdir
+        .join(".git")
+        .join(format!("selfware-tmp-index-{}", std::process::id()));
+
     let _ = Command::new("git")
+        .env("GIT_INDEX_FILE", &tmp_index)
         .args(["-C"])
         .arg(workdir)
         .args(["add", "-A"])
@@ -441,6 +459,7 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         .status();
 
     let out = Command::new("git")
+        .env("GIT_INDEX_FILE", &tmp_index)
         .args(["-C"])
         .arg(workdir)
         .args([
@@ -464,6 +483,8 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
         ])
         .output()
         .with_context(|| format!("running git diff in {}", workdir.display()))?;
+
+    let _ = std::fs::remove_file(&tmp_index);
 
     if !out.status.success() {
         bail!(
@@ -750,5 +771,14 @@ mod tests {
         assert!(patch.contains("src/app.py"));
         assert!(!patch.contains("reports/swebench_pro"));
         assert!(!patch.contains("failure_mode.json"));
+
+        // The real git index must not have been mutated.
+        let real_index_diff = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(repo)
+            .args(["diff", "--cached", "--quiet"])
+            .status()
+            .unwrap();
+        assert!(real_index_diff.success(), "capture_patch mutated the real git index");
     }
 }

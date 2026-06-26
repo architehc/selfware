@@ -7,6 +7,12 @@
 //! The output is stored per-agent (on the `Agent` struct) rather than in
 //! process-global state, which makes testing and multi-agent scenarios safe.
 
+/// Maximum characters of full tool output retained for `/last`.
+const MAX_FULL_OUTPUT_LEN: usize = 16_384;
+
+/// Maximum characters of the one-line semantic summary retained.
+const MAX_SUMMARY_LEN: usize = 512;
+
 /// Captured output from the most recent tool execution.
 #[derive(Debug, Clone, Default)]
 pub struct LastToolOutput {
@@ -26,7 +32,12 @@ pub struct LastToolOutput {
 
 impl super::Agent {
     /// Store the output of the most recent tool execution.
-    pub fn store_last_tool_output(&mut self, output: LastToolOutput) {
+    ///
+    /// Long outputs are truncated to bounded sizes so the agent struct cannot
+    /// grow without limit when a tool returns a huge response.
+    pub fn store_last_tool_output(&mut self, mut output: LastToolOutput) {
+        output.full_output.truncate(MAX_FULL_OUTPUT_LEN);
+        output.summary.truncate(MAX_SUMMARY_LEN);
         self.last_tool_output = Some(output);
     }
 
@@ -55,5 +66,30 @@ mod tests {
         assert!(!output.success);
         assert!(output.exit_code.is_none());
         assert_eq!(output.duration_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn storing_long_output_truncates() {
+        let config = crate::config::Config {
+            endpoint: "http://localhost:0/v1".to_string(),
+            model: "mock-model".to_string(),
+            context_length: 500_000,
+            max_tokens: 8192,
+            execution_mode: crate::config::ExecutionMode::Yolo,
+            ..Default::default()
+        };
+        let mut agent = crate::agent::Agent::new(config).await.expect("agent creation");
+        let output = LastToolOutput {
+            tool_name: "shell_exec".to_string(),
+            summary: "x".repeat(MAX_SUMMARY_LEN + 100),
+            full_output: "y".repeat(MAX_FULL_OUTPUT_LEN + 100),
+            success: true,
+            exit_code: Some(0),
+            duration_ms: 42,
+        };
+        agent.store_last_tool_output(output);
+        let stored = agent.retrieve_last_tool_output().unwrap();
+        assert_eq!(stored.summary.len(), MAX_SUMMARY_LEN);
+        assert_eq!(stored.full_output.len(), MAX_FULL_OUTPUT_LEN);
     }
 }

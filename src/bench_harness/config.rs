@@ -18,6 +18,12 @@ pub struct HarnessConfig {
     pub temperature: f32,
     /// Timeout per request in seconds.
     pub timeout_secs: u64,
+    /// Maximum retry attempts for transient failures.
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Initial delay between retries in milliseconds.
+    #[serde(default)]
+    pub retry_delay_ms: u64,
     /// Directory for output reports.
     pub output_dir: PathBuf,
     /// Extra body parameters for the API request (e.g., chat_template_kwargs).
@@ -34,6 +40,8 @@ impl Default for HarnessConfig {
             max_tokens: 65536,
             temperature: 0.2,
             timeout_secs: 300,
+            max_retries: 3,
+            retry_delay_ms: 500,
             output_dir: PathBuf::from("bench_results"),
             extra_body: serde_json::json!({
                 "chat_template_kwargs": {"enable_thinking": false}

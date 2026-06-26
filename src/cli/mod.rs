@@ -2205,6 +2205,7 @@ async fn handle_command(
                         timeout_secs: 120,
                         output_dir: "bench_results/cli_bench".into(),
                         extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                        ..Default::default()
                     };
 
                     let runner = HarnessRunner::new(bench_config)?;
@@ -2272,6 +2273,7 @@ async fn handle_command(
                         timeout_secs: 120,
                         output_dir: "bench_results/cli_bench".into(),
                         extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                        ..Default::default()
                     };
 
                     let runner = HarnessRunner::new(bench_config)?;

@@ -551,6 +551,10 @@ impl Tool for GitPush {
             .unwrap_or("origin");
         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        if force {
+            anyhow::bail!("Force push is blocked by the safety checker.");
+        }
+
         // Validate cwd is within allowed paths
         validate_git_path(".", self.safety_config.as_ref())?;
 
@@ -571,11 +575,7 @@ impl Tool for GitPush {
         };
 
         let mut cmd = tokio::process::Command::new("git");
-        cmd.arg("push");
-        if force {
-            cmd.arg("--force");
-        }
-        cmd.arg("--").arg(remote).arg(&branch);
+        cmd.arg("push").arg("--").arg(remote).arg(&branch);
 
         let output = cmd.output().await.context("Failed to execute git push")?;
         let success = output.status.success();

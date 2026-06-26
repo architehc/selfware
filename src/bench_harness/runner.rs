@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
-use tokio::sync::{mpsc, Semaphore};
+
 use tracing::{debug, error, info, warn};
 
 use super::config::HarnessConfig;
@@ -17,7 +18,6 @@ use super::task::{BenchTask, StreamResult};
 /// Orchestrates concurrent benchmark execution with bounded parallelism.
 pub struct HarnessRunner {
     config: HarnessConfig,
-    semaphore: Arc<Semaphore>,
     client: Client,
     sequence: Arc<AtomicU64>,
 }
@@ -36,11 +36,8 @@ impl HarnessRunner {
             .build()
             .context("Failed to build HTTP client")?;
 
-        let semaphore = Arc::new(Semaphore::new(config.max_concurrent));
-
         Ok(Self {
             config,
-            semaphore,
             client,
             sequence: Arc::new(AtomicU64::new(0)),
         })
@@ -56,37 +53,23 @@ impl HarnessRunner {
             total_tasks, self.config.max_concurrent, self.config.model,
         );
 
-        // Channel for collecting results
-        let (tx, mut rx) = mpsc::channel::<StreamResult>(total_tasks.max(1));
+        // Use a buffered stream so we only poll `max_concurrent` tasks at a
+        // time instead of spawning every task eagerly.
+        let mut stream = futures::stream::iter(tasks)
+            .map(|task| {
+                let client = self.client.clone();
+                let config = self.config.clone();
+                let seq = self.sequence.clone();
+                async move {
+                    let stream_id = seq.fetch_add(1, Ordering::Relaxed) as usize;
+                    execute_task(&client, &config, &task, stream_id).await
+                }
+            })
+            .buffer_unordered(self.config.max_concurrent.max(1));
 
-        // Spawn all tasks — semaphore bounds actual concurrency
-        let mut handles = Vec::with_capacity(total_tasks);
-        for task in tasks {
-            let permit_sem = self.semaphore.clone();
-            let client = self.client.clone();
-            let config = self.config.clone();
-            let tx = tx.clone();
-            let seq = self.sequence.clone();
-
-            let handle = tokio::spawn(async move {
-                let _permit = permit_sem
-                    .acquire()
-                    .await
-                    .expect("semaphore closed unexpectedly");
-                let stream_id = seq.fetch_add(1, Ordering::Relaxed) as usize;
-                let result = execute_task(&client, &config, &task, stream_id).await;
-                let _ = tx.send(result).await;
-            });
-            handles.push(handle);
-        }
-
-        // Drop our sender so rx completes when all tasks finish
-        drop(tx);
-
-        // Collect results
         let mut results = Vec::with_capacity(total_tasks);
         let mut completed = 0usize;
-        while let Some(result) = rx.recv().await {
+        while let Some(result) = stream.next().await {
             completed += 1;
             let status = if result.success { "OK" } else { "FAIL" };
             let score_str = result
@@ -99,13 +82,6 @@ impl HarnessRunner {
                 result.task_id, result.latency_ms, result.prompt_tokens, result.completion_tokens,
             );
             results.push(result);
-        }
-
-        // Wait for all spawned tasks to complete
-        for handle in handles {
-            if let Err(e) = handle.await {
-                warn!("Task join error: {e}");
-            }
         }
 
         let total_duration = run_start.elapsed();
@@ -153,39 +129,59 @@ async fn execute_task(
 
     debug!(task_id = %task.id, stream_id, "Sending request");
 
-    let response = match client.post(&url).json(&body).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            error!(task_id = %task.id, "Request failed: {e}");
-            return StreamResult {
-                task_id: task.id.clone(),
-                stream_id,
-                success: false,
-                response: String::new(),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                latency_ms: start.elapsed().as_millis() as u64,
-                eval: None,
-                error: Some(format!("Request error: {e}")),
-            };
-        }
-    };
+    let max_attempts = (config.max_retries + 1).max(1);
+    let mut attempt = 0u32;
+    let mut delay_ms = config.retry_delay_ms.max(1);
 
-    let status = response.status();
-    let body_text = match response.text().await {
-        Ok(t) => t,
-        Err(e) => {
-            return StreamResult {
-                task_id: task.id.clone(),
-                stream_id,
-                success: false,
-                response: String::new(),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                latency_ms: start.elapsed().as_millis() as u64,
-                eval: None,
-                error: Some(format!("Body read error: {e}")),
-            };
+    let (status, body_text) = loop {
+        attempt += 1;
+        match client.post(&url).json(&body).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    break (status, body_text);
+                }
+                if is_retryable_status(status) && attempt < max_attempts {
+                    warn!(
+                        task_id = %task.id,
+                        stream_id,
+                        attempt,
+                        max_attempts,
+                        "Retryable HTTP {status}; retrying after {delay_ms}ms"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms = (delay_ms * 2).min(10_000);
+                    continue;
+                }
+                break (status, body_text);
+            }
+            Err(e) => {
+                if attempt < max_attempts {
+                    warn!(
+                        task_id = %task.id,
+                        stream_id,
+                        attempt,
+                        max_attempts,
+                        "Request failed: {e}; retrying after {delay_ms}ms"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    delay_ms = (delay_ms * 2).min(10_000);
+                    continue;
+                }
+                error!(task_id = %task.id, "Request failed: {e}");
+                return StreamResult {
+                    task_id: task.id.clone(),
+                    stream_id,
+                    success: false,
+                    response: String::new(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    eval: None,
+                    error: Some(format!("Request error: {e}")),
+                };
+            }
         }
     };
 
@@ -258,6 +254,10 @@ async fn execute_task(
         eval: Some(eval),
         error: None,
     }
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
 }
 
 #[cfg(test)]

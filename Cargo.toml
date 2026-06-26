@@ -60,6 +60,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 git2 = "0.20"  # Updated for security fixes (CVE-2024-24575, CVE-2024-24577)
 walkdir = "2.4"
+wait-timeout = "0.2"
 regex = "1.11"
 colored = "3.1"
 chrono = { version = "0.4", features = ["serde"] }

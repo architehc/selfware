@@ -954,3 +954,23 @@ async fn test_progress_emitter_records_tool_call_started_and_completed() {
     );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn test_agent_new_rejects_tiny_context_budget() {
+    let config = Config {
+        endpoint: "http://localhost:0/v1".to_string(),
+        model: "mock-model".to_string(),
+        context_length: 4096,
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let err = match Agent::new(config).await {
+        Ok(_) => panic!("expected Agent::new to fail for tiny context budget"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("max_context_tokens too small"),
+        "unexpected error: {}",
+        err
+    );
+}

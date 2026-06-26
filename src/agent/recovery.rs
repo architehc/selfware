@@ -115,7 +115,9 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
         match rest[start..].find("</think>") {
             Some(end) => rest = &rest[start + end + 8..],
             None => {
-                rest = "";
+                // Unclosed opening tag — preserve the content after it rather
+                // than discarding the rest of the response.
+                rest = &rest[start + 7..];
                 break;
             }
         }
@@ -1046,5 +1048,11 @@ mod tests {
     fn strip_think_blocks_extracts_after_paired_end_tag() {
         let content = "<think>thinking</think>  the answer  ";
         assert_eq!(strip_think_blocks(content), "the answer");
+    }
+
+    #[test]
+    fn strip_think_blocks_preserves_content_after_unclosed_open_tag() {
+        let content = "prefix <think> actual answer";
+        assert_eq!(strip_think_blocks(content), "prefix  actual answer");
     }
 }

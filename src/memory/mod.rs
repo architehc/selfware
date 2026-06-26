@@ -10,6 +10,7 @@
 use crate::api::types::Message;
 use crate::config::Config;
 use crate::token_count::estimate_tokens_with_overhead;
+use crate::tools::codemap::update_memory_tokens;
 use anyhow::Result;
 use chrono::Utc;
 use std::collections::VecDeque;
@@ -100,6 +101,7 @@ impl AgentMemory {
 
         self.total_tokens = self.total_tokens.saturating_add(new_tokens);
         self.entries.push_back(new_entry);
+        update_memory_tokens(self.total_tokens);
     }
 
     /// Estimate total token usage across all memory entries.
@@ -141,6 +143,7 @@ impl AgentMemory {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.total_tokens = 0;
+        update_memory_tokens(0);
     }
 
     /// Get recent entries (last n)

@@ -659,8 +659,9 @@ pub(super) fn shell_command_is_observational(command: &str) -> bool {
 
     read_only_prefixes.iter().any(|prefix| {
         normalized == *prefix
-            || normalized.starts_with(&format!("{} ", prefix))
-            || normalized.starts_with(&format!("{} --", prefix))
+            || (normalized.starts_with(prefix)
+                && (normalized[prefix.len()..].starts_with(' ')
+                    || normalized[prefix.len()..].starts_with("--")))
     })
 }
 
@@ -2209,7 +2210,10 @@ impl Agent {
             );
         }
         if success {
-            self.clear_failed_tool_attempts();
+            // Forgive failures only for the tool that succeeded, mirroring the
+            // parallel-tool batch behavior. Unrelated failures stay recorded.
+            self.clear_failed_tool_attempts_for_tool(&name);
+            self.consecutive_suppressions = 0;
         } else {
             self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
         }

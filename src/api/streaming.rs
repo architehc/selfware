@@ -94,6 +94,10 @@ impl StreamingResponse {
                     Ok(bytes) => {
                         append_utf8_chunk(&mut buffer, &mut pending_utf8, &bytes);
 
+                        // Normalize CRLF line endings so the delimiter scan only
+                        // needs to look for \n\n.
+                        buffer = buffer.replace("\r\n", "\n");
+
                         // Process complete SSE events
                         while let Some(pos) = buffer.find("\n\n") {
                             let event = buffer[..pos].to_string();
@@ -328,7 +332,7 @@ impl ToolCallAccumulator {
             .unwrap_or("")
             .to_string();
 
-        if let Some(entry) = self.pending.get_mut(&index) {
+        let entry = if let Some(entry) = self.pending.get_mut(&index) {
             entry.3.push_str(&args_chunk);
             if !id.is_empty() {
                 entry.0 = id;
@@ -339,11 +343,32 @@ impl ToolCallAccumulator {
             if !name.is_empty() {
                 entry.2 = name;
             }
+            (entry.0.clone(), entry.1.clone(), entry.2.clone(), entry.3.clone())
         } else {
             self.pending
-                .insert(index, (id, call_type, name, args_chunk));
+                .insert(index, (id.clone(), call_type.clone(), name.clone(), args_chunk.clone()));
+            (id, call_type, name, args_chunk)
+        };
+
+        // Emit the tool call as soon as all required fields are present and the
+        // accumulated arguments form a complete JSON object. This allows the
+        // agent to act on tool_calls mid-stream instead of only at stream end.
+        let complete = !entry.0.is_empty()
+            && !entry.2.is_empty()
+            && serde_json::from_str::<serde_json::Value>(&entry.3).is_ok();
+        if complete {
+            self.pending.remove(&index);
+            Some(types::ToolCall {
+                id: entry.0,
+                call_type: entry.1,
+                function: types::ToolFunction {
+                    name: entry.2,
+                    arguments: entry.3,
+                },
+            })
+        } else {
+            None
         }
-        None
     }
 
     pub(crate) fn flush(&mut self) -> Vec<types::ToolCall> {
@@ -359,13 +384,14 @@ impl ToolCallAccumulator {
                     arguments: args,
                 },
             })
+            .filter(|tc| !tc.id.is_empty() && !tc.function.name.is_empty())
             .collect()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::append_utf8_chunk;
+    use super::{append_utf8_chunk, parse_sse_event, StreamChunk, ToolCallAccumulator};
 
     #[test]
     fn append_utf8_chunk_preserves_split_multibyte_codepoint() {
@@ -382,6 +408,15 @@ mod tests {
         assert_eq!(buffer, text);
         assert!(pending.is_empty());
     }
+
+    #[test]
+    fn parse_sse_event_handles_crlf_delimiters() {
+        let event = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\r\n\r\n";
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = parse_sse_event(event, &mut acc);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::Content(text) if text == "hello"));
+    }
 }
 
 /// Parse a Server-Sent Events (SSE) event, returning zero or more StreamChunks.
@@ -392,65 +427,72 @@ pub(crate) fn parse_sse_event(
     let mut chunks = Vec::new();
 
     for line in event.lines() {
-        if let Some(data) = line.strip_prefix("data: ") {
-            if data == "[DONE]" {
-                for call in accumulator.flush() {
-                    chunks.push(StreamChunk::ToolCall(call));
-                }
-                chunks.push(StreamChunk::Done);
-                return chunks;
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+
+        if data == "[DONE]" {
+            for call in accumulator.flush() {
+                chunks.push(StreamChunk::ToolCall(call));
             }
+            chunks.push(StreamChunk::Done);
+            return chunks;
+        }
 
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                let choice = json.get("choices").and_then(|c| c.get(0));
-                let delta = choice.and_then(|c| c.get("delta"));
+        let json = match serde_json::from_str::<serde_json::Value>(data) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!("Failed to parse SSE data line as JSON: {} (data: {})", e, data);
+                continue;
+            }
+        };
+        let choice = json.get("choices").and_then(|c| c.get(0));
+        let delta = choice.and_then(|c| c.get("delta"));
 
-                if let Some(content) = delta
-                    .and_then(|d| d.get("content"))
-                    .and_then(|c| c.as_str())
-                {
-                    if !content.is_empty() {
-                        chunks.push(StreamChunk::Content(content.to_string()));
-                    }
+        if let Some(content) = delta
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            if !content.is_empty() {
+                chunks.push(StreamChunk::Content(content.to_string()));
+            }
+        }
+
+        if let Some(reasoning) = delta
+            .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
+            .and_then(|c| c.as_str())
+        {
+            if !reasoning.is_empty() {
+                chunks.push(StreamChunk::Reasoning(reasoning.to_string()));
+            }
+        }
+
+        if let Some(tool_calls) = delta
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+        {
+            for tc_delta in tool_calls {
+                if let Some(completed) = accumulator.process_delta(tc_delta) {
+                    chunks.push(StreamChunk::ToolCall(completed));
                 }
+            }
+        }
 
-                if let Some(reasoning) = delta
-                    .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
-                    .and_then(|c| c.as_str())
-                {
-                    if !reasoning.is_empty() {
-                        chunks.push(StreamChunk::Reasoning(reasoning.to_string()));
-                    }
-                }
+        if let Some(finish) = choice
+            .and_then(|c| c.get("finish_reason"))
+            .and_then(|f| f.as_str())
+        {
+            for call in accumulator.flush() {
+                chunks.push(StreamChunk::ToolCall(call));
+            }
+            if !finish.is_empty() {
+                chunks.push(StreamChunk::FinishReason(finish.to_string()));
+            }
+        }
 
-                if let Some(tool_calls) = delta
-                    .and_then(|d| d.get("tool_calls"))
-                    .and_then(|tc| tc.as_array())
-                {
-                    for tc_delta in tool_calls {
-                        if let Some(completed) = accumulator.process_delta(tc_delta) {
-                            chunks.push(StreamChunk::ToolCall(completed));
-                        }
-                    }
-                }
-
-                if let Some(finish) = choice
-                    .and_then(|c| c.get("finish_reason"))
-                    .and_then(|f| f.as_str())
-                {
-                    for call in accumulator.flush() {
-                        chunks.push(StreamChunk::ToolCall(call));
-                    }
-                    if !finish.is_empty() {
-                        chunks.push(StreamChunk::FinishReason(finish.to_string()));
-                    }
-                }
-
-                if let Some(usage) = json.get("usage") {
-                    if let Ok(u) = serde_json::from_value::<Usage>(usage.clone()) {
-                        chunks.push(StreamChunk::Usage(u));
-                    }
-                }
+        if let Some(usage) = json.get("usage") {
+            if let Ok(u) = serde_json::from_value::<Usage>(usage.clone()) {
+                chunks.push(StreamChunk::Usage(u));
             }
         }
     }

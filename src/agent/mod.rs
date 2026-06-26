@@ -985,18 +985,13 @@ To call a tool, use this EXACT XML structure:
             .saturating_sub(config.max_tokens) // reserve for output tokens
             .saturating_sub(safety_margin); // tools + template + estimation safety
 
-        let max_context_tokens = if max_context_tokens == 0 {
-            let fallback = 4096_usize;
-            tracing::warn!(
-                "max_context_tokens calculated as 0 (context_length={}, max_tokens={}). \
-                 Falling back to {} tokens to prevent context collapse. \
-                 Check that selfware.toml context_length matches your vLLM --max-model-len.",
-                model_context_limit, config.max_tokens, fallback
+        if max_context_tokens < 2048 {
+            anyhow::bail!(
+                "max_context_tokens too small ({}). context_length={}, max_tokens={}. \
+                 Increase context_length or decrease max_tokens so at least 2048 tokens remain for conversation.",
+                max_context_tokens, model_context_limit, config.max_tokens
             );
-            fallback
-        } else {
-            max_context_tokens
-        };
+        }
         tracing::info!(
             "Context limits: model={}, max_context_tokens={} (safety_margin={}), token_budget={}",
             model_context_limit,
@@ -1916,17 +1911,11 @@ To call a tool, use this EXACT XML structure:
 
     /// Count of tool calls that have been hard-blocked after repeated failures.
     ///
-    /// The underlying vector may record the same `(tool_name, args_hash)`
-    /// signature multiple times because the permanent-block hook can fire on
-    /// every retry attempt of the same tool.  Returning the deduplicated
-    /// count keeps `FailureMode` evidence honest and stops the same blocked
-    /// signature from being counted three times in the CLI banner.
+    /// `note_permanently_blocked` deduplicates on write, so the stored vector
+    /// already contains unique blocked tool names and its length is the honest
+    /// count surfaced to `FailureMode` and the CLI banner.
     pub fn permanently_blocked_tool_calls_len(&self) -> usize {
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for entry in &self.permanently_blocked_tool_calls {
-            seen.insert(entry.as_str());
-        }
-        seen.len()
+        self.permanently_blocked_tool_calls.len()
     }
 
     /// Cumulative token usage across all LLM calls in the current task.

@@ -395,14 +395,34 @@ impl Tool for GlobFind {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
 
-            // Combine base path with pattern
-            let full_pattern = if pattern_str.starts_with('/') || pattern_str.starts_with("./") {
+            // Combine base path with pattern. Patterns that are absolute, already
+            // relative to the current directory, or recursive-from-root (`**`)
+            // are used as-is.
+            let full_pattern = if pattern_str.starts_with('/')
+                || pattern_str.starts_with("./")
+                || pattern_str.starts_with("**")
+            {
                 pattern_str.to_string()
             } else {
                 format!("{}/{}", base_path, pattern_str)
             };
 
-            let glob_pattern = glob::Pattern::new(&full_pattern).context("Invalid glob pattern")?;
+            // WalkDir may prefix paths with `./` when the base path is `.`.
+            // Strip that from both the pattern and the path so matching is
+            // independent of how the base path was expressed.
+            let match_pattern = full_pattern.strip_prefix("./").unwrap_or(&full_pattern);
+
+            let glob_pattern =
+                glob::Pattern::new(match_pattern).context("Invalid glob pattern")?;
+
+            // `*` should match within a single path component, while `**` should
+            // match across directory boundaries. The default `glob::Pattern`
+            // lets `*` cross `/`, so we require literal separators.
+            let glob_options = glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            };
 
             let mut files = Vec::new();
 
@@ -427,7 +447,9 @@ impl Tool for GlobFind {
                     continue;
                 }
 
-                if glob_pattern.matches(&path_str) {
+                let match_path = path_str.strip_prefix("./").unwrap_or(&path_str);
+
+                if glob_pattern.matches_with(match_path, glob_options) {
                     let metadata = std::fs::metadata(path).ok();
                     let modified = metadata.as_ref().and_then(|m| {
                         m.modified().ok().map(|t| {
@@ -659,6 +681,7 @@ fn build_symbol_patterns(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // =========================================================================
     // cached_regex tests
@@ -1013,6 +1036,49 @@ mod tests {
         let meta = GlobFind.metadata();
         assert!(meta.read_only);
     }
+
+    #[tokio::test]
+    async fn test_glob_find_starstar_recursion() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("top.rs");
+        let nested = dir.path().join("src").join("nested.rs");
+        let deep = dir.path().join("src").join("deep").join("bottom.rs");
+
+        std::fs::create_dir_all(top.parent().unwrap()).unwrap();
+        std::fs::write(&top, "").unwrap();
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "").unwrap();
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, "").unwrap();
+
+        let tool = GlobFind;
+
+        // `**/*.rs` must recurse arbitrarily deep.
+        let result = tool
+            .execute(json!({"pattern": "**/*.rs", "path": dir.path()}))
+            .await
+            .unwrap();
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3, "expected all three .rs files");
+        let names: Vec<&str> = files
+            .iter()
+            .map(|v| v["path"].as_str().unwrap())
+            .collect();
+        assert!(names.iter().any(|p| p.ends_with("top.rs")));
+        assert!(names.iter().any(|p| p.ends_with("nested.rs")));
+        assert!(names.iter().any(|p| p.ends_with("bottom.rs")));
+
+        // `*.rs` must match only the top-level file.
+        let result = tool
+            .execute(json!({"pattern": "*.rs", "path": dir.path()}))
+            .await
+            .unwrap();
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "expected only top-level .rs file");
+        assert!(files[0]["path"].as_str().unwrap().ends_with("top.rs"));
+    }
+
+
 
     #[test]
     fn test_symbol_search_metadata_read_only() {

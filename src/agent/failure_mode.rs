@@ -262,7 +262,7 @@ fn classify_max_iter_failure(
     // Order matters: most specific signals first.
 
     // 1) Prose-only termination.
-    if no_action_consecutive >= super::recovery::FORCE_FALLBACK_AFTER && mutating == 0 {
+    if no_action_consecutive >= super::recovery::MAX_NO_ACTION_PROMPTS && mutating == 0 {
         return FailureMode {
             kind: FailureKind::NontermProse,
             evidence: format!(
@@ -323,10 +323,11 @@ fn classify_max_iter_failure(
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max).collect::<String>())
+    // `char_indices()` guarantees we slice at a valid UTF-8 boundary and only
+    // walks the string once.
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => format!("{}…", &s[..idx]),
+        None => s.to_string(),
     }
 }
 
@@ -547,5 +548,18 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         assert!(json.contains("PrefillBreaker"));
         assert!(json.contains("\"kind\""));
+    }
+
+    #[test]
+    fn truncate_splits_at_char_boundaries() {
+        // "αβγδ" is 4 Greek letters; slicing at byte index 3 would panic.
+        let s = "αβγδ";
+        assert_eq!(truncate(s, 4), "αβγδ");
+        assert_eq!(truncate(s, 3), "αβγ…");
+        assert_eq!(truncate(s, 0), "…");
+
+        // ASCII fallback.
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello", 3), "hel…");
     }
 }

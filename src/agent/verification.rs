@@ -552,6 +552,34 @@ impl Agent {
             return Some(msg);
         }
 
+        // If any file has been written (including auto-written code from assistant
+        // text), require at least one successful verification tool call before the
+        // task can complete. This closes the bypass where auto-write injects code
+        // and the model then answers without verifying.
+        if self.has_written_any_file && !self.should_skip_cargo_verification().await {
+            let has_verification = self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| {
+                    cp.tool_calls.iter().any(|tc| {
+                        tc.success
+                            && matches!(
+                                tc.tool_name.as_str(),
+                                "cargo_check" | "cargo_test" | "cargo_clippy"
+                            )
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_verification {
+                return Some(
+                    "You have written code, but you have not verified it. \
+                     Run cargo_check, cargo_test, or cargo_clippy successfully before completing."
+                        .to_string(),
+                );
+            }
+        }
+
         // Reject completion when the task requires code changes but no source files
         // were written at all. This catches the "context insufficient" early-quit
         // pattern where the model gives a text-only answer without doing any work.

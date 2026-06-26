@@ -15,6 +15,9 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::token_count::estimate_content_tokens;
+use crate::tools::codemap::{
+    update_context_map_tokens, update_files_in_context, update_total_budget,
+};
 
 // ─── Context Levels ─────────────────────────────────────────────────────────
 
@@ -397,6 +400,10 @@ impl ContextMap {
             (thinking_ratio * 100.0) as u32,
         );
 
+        update_total_budget(token_budget);
+        update_context_map_tokens(0);
+        update_files_in_context(0);
+
         Self {
             entries: HashMap::new(),
             total_tokens: 0,
@@ -406,6 +413,13 @@ impl ContextMap {
             modality: None,
             project_root: super::current_project_root(),
         }
+    }
+
+    /// Publish the context-map portion of the shared `ContextBudget` so tools
+    /// like `context_budget` see a single, combined view of memory + map usage.
+    fn sync_budget(&self) {
+        update_context_map_tokens(self.total_tokens);
+        update_files_in_context(self.entries.len());
     }
 
     // ── Budget queries ──────────────────────────────────────────────────
@@ -557,10 +571,11 @@ impl ContextMap {
             },
         );
         self.total_tokens += l1_cost;
+        self.sync_budget();
     }
 
-    /// Load or upgrade a file to L2 (skeleton). Returns the skeleton for injection.
-    pub fn load_skeleton(&mut self, path: &Path, skeleton: FileSkeleton) -> &FileSkeleton {
+    /// Load or upgrade a file to L2 (skeleton).
+    pub fn load_skeleton(&mut self, path: &Path, skeleton: FileSkeleton) {
         let token_cost = skeleton.token_count;
         let path_buf = path.to_path_buf();
 
@@ -589,8 +604,7 @@ impl ContextMap {
         entry.full_content = None;
         self.total_tokens += token_cost;
 
-        // Store skeleton and return reference to it.
-        // This is safe because we just set it to Some above.
+        // Store skeleton.
         entry.skeleton = Some(skeleton);
 
         debug!(
@@ -600,12 +614,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
-
-        // Return reference to skeleton - we know it's Some because we just set it.
-        match entry.skeleton.as_ref() {
-            Some(s) => s,
-            None => unreachable!("skeleton was just set to Some above"),
-        }
+        self.sync_budget();
     }
 
     /// Load or upgrade a file to L3 (full content).
@@ -643,6 +652,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
+        self.sync_budget();
     }
 
     /// Downgrade a file from L3 to L2 (skeleton), freeing tokens.
@@ -673,6 +683,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
+        self.sync_budget();
 
         freed
     }
@@ -692,6 +703,7 @@ impl ContextMap {
         entry.full_content = None;
         let freed = old_cost.saturating_sub(tree_cost);
         self.total_tokens = self.total_tokens.saturating_sub(freed);
+        self.sync_budget();
         freed
     }
 
@@ -744,6 +756,7 @@ impl ContextMap {
             );
         }
 
+        self.sync_budget();
         freed
     }
 
@@ -931,6 +944,7 @@ impl ContextMap {
                 stale_l2.len()
             );
         }
+        self.sync_budget();
         freed
     }
 
@@ -985,6 +999,7 @@ impl ContextMap {
             "Added external context '{}' from {}: {} tokens",
             key, source, token_cost
         );
+        self.sync_budget();
     }
 
     /// Remove a specific context entry entirely.
@@ -993,6 +1008,7 @@ impl ContextMap {
             let freed = entry.current_tokens;
             self.total_tokens = self.total_tokens.saturating_sub(freed);
             debug!("Removed context {}: freed {} tokens", path.display(), freed);
+            self.sync_budget();
             freed
         } else {
             0

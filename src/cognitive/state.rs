@@ -269,6 +269,9 @@ Phase: {:?}
     }
 }
 
+/// Maximum number of approach attempts retained in `WorkingMemory`.
+const MAX_APPROACH_DEPTH: usize = 20;
+
 /// Working Memory - the agent's "scratchpad"
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkingMemory {
@@ -371,8 +374,15 @@ impl WorkingMemory {
         }
     }
 
-    /// Push an approach attempt for backtracking
+    /// Push an approach attempt for backtracking.
+    ///
+    /// The stack is capped at [`MAX_APPROACH_DEPTH`]; when the cap is reached,
+    /// the oldest attempt is discarded so the structure cannot grow without
+    /// bound during long retry loops.
     pub fn push_approach(&mut self, description: &str, files_modified: Vec<String>) {
+        if self.approach_stack.len() >= MAX_APPROACH_DEPTH {
+            self.approach_stack.remove(0);
+        }
         self.approach_stack.push(ApproachAttempt {
             description: description.to_string(),
             files_modified,
@@ -841,6 +851,20 @@ mod tests {
 
         assert_eq!(wm.approach_stack.len(), 2);
         assert!(!wm.approach_stack[0].outcome.as_ref().unwrap().success);
+    }
+
+    #[test]
+    fn test_working_memory_approach_stack_capped() {
+        let mut wm = WorkingMemory::new();
+        for i in 0..MAX_APPROACH_DEPTH + 5 {
+            wm.push_approach(&format!("approach {}", i), vec![]);
+        }
+        assert_eq!(wm.approach_stack.len(), MAX_APPROACH_DEPTH);
+        assert_eq!(wm.approach_stack[0].description, "approach 5");
+        assert_eq!(
+            wm.approach_stack[MAX_APPROACH_DEPTH - 1].description,
+            format!("approach {}", MAX_APPROACH_DEPTH + 4)
+        );
     }
 
     #[test]
