@@ -52,6 +52,7 @@ pub fn update_files_in_context(files: usize) {
 /// Update all budget counters at once (convenience for tests and diagnostics).
 pub fn update_budget(used: usize, total: usize, files: usize) {
     CONTEXT_MAP_USED_TOKENS.store(used, Ordering::Relaxed);
+    MEMORY_USED_TOKENS.store(0, Ordering::Relaxed);
     TOTAL_BUDGET.store(total, Ordering::Relaxed);
     FILES_IN_CONTEXT.store(files, Ordering::Relaxed);
 }

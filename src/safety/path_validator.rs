@@ -81,6 +81,49 @@ fn canonicalize_or_fail(path: &Path) -> Result<PathBuf> {
     })
 }
 
+/// Resolve a path that does not yet exist by canonicalizing its deepest
+/// existing ancestor and appending the missing components. This allows safe
+/// validation of paths that will be created by tools like `file_write`.
+fn resolve_missing_path(path: &Path) -> Result<PathBuf> {
+    for ancestor in path.ancestors() {
+        match open_nofollow_and_resolve(ancestor) {
+            Ok(real) => {
+                let suffix = path
+                    .strip_prefix(ancestor)
+                    .map_err(|_| {
+                        SelfwareError::Safety(SafetyError::PathCanonicalizationFailed {
+                            path: path.display().to_string(),
+                        })
+                    })?
+                    .iter()
+                    .collect::<PathBuf>();
+                return Ok(real.join(suffix));
+            }
+            Err(e) if e.raw_os_error() == Some(ELOOP) => {
+                // Symlink in the existing portion — let the caller resolve it
+                // with the dedicated symlink safety check.
+                return Err(SelfwareError::Safety(SafetyError::PathCanonicalizationFailed {
+                    path: path.display().to_string(),
+                }));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Keep walking up until we find an existing ancestor.
+                continue;
+            }
+            Err(_) => {
+                return Err(SelfwareError::Safety(
+                    SafetyError::PathCanonicalizationFailed {
+                        path: path.display().to_string(),
+                    },
+                ))
+            }
+        }
+    }
+    Err(SelfwareError::Safety(SafetyError::PathCanonicalizationFailed {
+        path: path.display().to_string(),
+    }))
+}
+
 #[derive(Clone)]
 pub struct PathValidator {
     config: SafetyConfig,
@@ -174,6 +217,12 @@ impl PathValidator {
                             let safe_parent = self.check_symlink_safety(parent)?;
                             canonicalize_or_fail(&safe_parent)?
                                 .join(resolved.file_name().unwrap_or_default())
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Parent (and possibly higher ancestors) don't exist yet.
+                            // Resolve from the deepest existing ancestor so tools that
+                            // create nested directories can still be validated safely.
+                            resolve_missing_path(&resolved)?
                         }
                         Err(_) => {
                             return Err(SelfwareError::Safety(

@@ -563,19 +563,22 @@ fn test_error_message_format() {
 
 #[test]
 fn test_parse_sse_event_with_tool_call() {
-    // Test parsing SSE event with complete tool call delta
+    // A complete tool call delta is emitted immediately mid-stream.
     let mut acc = ToolCallAccumulator::new();
     let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#;
     let results = parse_sse_event(event, &mut acc);
-    // Tool call is buffered in accumulator, not emitted yet
-    assert!(results.is_empty());
+    assert_eq!(results.len(), 1);
+    let tc = match &results[0] {
+        StreamChunk::ToolCall(tc) => tc,
+        other => panic!("expected ToolCall, got {:?}", other),
+    };
+    assert_eq!(tc.id, "call_123");
+    assert_eq!(tc.function.name, "file_read");
+    assert!(tc.function.arguments.contains("/test"));
 
-    // Flush to get the completed tool call
+    // Already-emitted calls are not buffered for a later flush.
     let calls = acc.flush();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_123");
-    assert_eq!(calls[0].function.name, "file_read");
-    assert!(calls[0].function.arguments.contains("/test"));
+    assert!(calls.is_empty());
 }
 
 #[test]
@@ -593,28 +596,24 @@ fn test_parse_sse_event_incremental_tool_call() {
     let r2 = parse_sse_event(event2, &mut acc);
     assert!(r2.is_empty());
 
-    // Third chunk: finish args
+    // Third chunk: finish args — the accumulated JSON object is now complete
+    // and the call is emitted mid-stream.
     let event3 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"content\":\"hello\"}"}}]}}]}"#;
     let r3 = parse_sse_event(event3, &mut acc);
-    assert!(r3.is_empty());
+    assert_eq!(r3.len(), 1);
+    assert!(matches!(&r3[0], StreamChunk::ToolCall(tc) if tc.id == "call_456"));
 
-    // Flush to get the completed tool call with assembled arguments
+    // Nothing remains pending after the call is emitted.
     let calls = acc.flush();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_456");
-    assert_eq!(calls[0].function.name, "file_write");
-    assert_eq!(
-        calls[0].function.arguments,
-        "{\"path\":\"/tmp/test\",\"content\":\"hello\"}"
-    );
+    assert!(calls.is_empty());
 }
 
 #[test]
 fn test_parse_sse_event_tool_calls_flushed_on_done() {
-    // Tool calls should be flushed before the Done marker
+    // Incomplete tool calls are flushed before the Done marker.
     let mut acc = ToolCallAccumulator::new();
 
-    let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_789","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}"#;
+    let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_789","type":"function","function":{"name":"git_status","arguments":"{"}}]}}]}"#;
     parse_sse_event(event1, &mut acc);
 
     let done_event = "data: [DONE]";
@@ -641,8 +640,8 @@ fn test_parse_sse_event_finish_reason() {
 
 #[test]
 fn test_process_delta_progressive_emission() {
-    // Interleaved chunks should not trigger premature emission.
-    // Calls are emitted only on flush in stable index order.
+    // Complete calls are emitted as soon as their own arguments form valid JSON,
+    // even while an earlier index is still accumulating arguments.
     let mut acc = ToolCallAccumulator::new();
 
     // Index 0 — first tool call (partial args)
@@ -653,44 +652,39 @@ fn test_process_delta_progressive_emission() {
     let result0 = acc.process_delta(&delta0);
     assert!(result0.is_none());
 
-    // Index 1 starts before index 0 is fully complete.
+    // Index 1 starts before index 0 is fully complete, but its arguments are
+    // already complete, so it is emitted immediately.
     let delta1 = serde_json::json!({
         "index": 1, "id": "call_b", "type": "function",
         "function": {"name": "file_read", "arguments": "{\"path\":\"/b\"}"}
     });
     let result1 = acc.process_delta(&delta1);
-    assert!(result1.is_none());
+    assert!(result1.is_some());
 
-    // Index 0 receives a late continuation chunk.
+    // Index 0 receives a late continuation chunk and is now complete.
     let delta0_late = serde_json::json!({
         "index": 0,
         "function": {"arguments": "\"content\":\"hello\"}"}
     });
     let result2 = acc.process_delta(&delta0_late);
-    assert!(result2.is_none());
+    assert!(result2.is_some());
 
     let calls = acc.flush();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].id, "call_a");
-    assert_eq!(calls[0].function.name, "file_write");
-    assert_eq!(
-        calls[0].function.arguments,
-        "{\"path\":\"/a\",\"content\":\"hello\"}"
-    );
-    assert_eq!(calls[1].id, "call_b");
+    assert!(calls.is_empty());
 }
 
 #[test]
 fn test_parse_sse_event_flushes_on_finish_reason() {
     let mut acc = ToolCallAccumulator::new();
 
-    let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_finish","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}"#;
+    // Buffer an incomplete tool call.
+    let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_finish","type":"function","function":{"name":"git_status","arguments":"{"}}]}}]}"#;
     let r1 = parse_sse_event(event1, &mut acc);
     assert!(r1.is_empty());
 
     let finish = r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
     let r2 = parse_sse_event(finish, &mut acc);
-    // Now: one accumulated tool call followed by the propagated finish_reason.
+    // The pending call is flushed before the propagated finish_reason chunk.
     assert_eq!(r2.len(), 2);
     assert!(matches!(&r2[0], StreamChunk::ToolCall(tc) if tc.id == "call_finish"));
     assert!(matches!(&r2[1], StreamChunk::FinishReason(r) if r == "tool_calls"));
@@ -884,14 +878,16 @@ fn test_tool_call_accumulator_single_delta() {
         "function": {"name": "test_fn", "arguments": "{\"key\":\"value\"}"}
     });
     let result = acc.process_delta(&delta);
-    assert!(result.is_none(), "process_delta should always return None");
+    assert!(result.is_some(), "complete deltas should emit immediately");
+    let tc = result.unwrap();
+    assert_eq!(tc.id, "call_single");
+    assert_eq!(tc.call_type, "function");
+    assert_eq!(tc.function.name, "test_fn");
+    assert_eq!(tc.function.arguments, "{\"key\":\"value\"}");
 
+    // Already-emitted calls are not buffered for a later flush.
     let calls = acc.flush();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_single");
-    assert_eq!(calls[0].call_type, "function");
-    assert_eq!(calls[0].function.name, "test_fn");
-    assert_eq!(calls[0].function.arguments, "{\"key\":\"value\"}");
+    assert!(calls.is_empty());
 }
 
 #[test]
@@ -914,21 +910,23 @@ fn test_tool_call_accumulator_continuation_appends_args() {
     });
     acc.process_delta(&d2);
 
-    // Another continuation
+    // Another continuation completes the JSON object.
     let d3 = serde_json::json!({
         "index": 0,
         "function": {"arguments": "\"data\":\"hi\"}"}
     });
-    acc.process_delta(&d3);
-
-    let calls = acc.flush();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_multi");
-    assert_eq!(calls[0].function.name, "write");
+    let result = acc.process_delta(&d3);
+    assert!(result.is_some());
+    let tc = result.unwrap();
+    assert_eq!(tc.id, "call_multi");
+    assert_eq!(tc.function.name, "write");
     assert_eq!(
-        calls[0].function.arguments,
+        tc.function.arguments,
         "{\"path\":\"/tmp/f\",\"data\":\"hi\"}"
     );
+
+    let calls = acc.flush();
+    assert!(calls.is_empty());
 }
 
 #[test]
@@ -942,51 +940,53 @@ fn test_tool_call_accumulator_updates_id_type_name_on_continuation() {
     });
     acc.process_delta(&d1);
 
-    // Second delta provides id, type, name
+    // Second delta provides id, type, name and completes the JSON object.
     let d2 = serde_json::json!({
         "index": 0,
         "id": "call_late_id",
         "type": "function",
         "function": {"name": "late_fn", "arguments": "}"}
     });
-    acc.process_delta(&d2);
+    let result = acc.process_delta(&d2);
+    assert!(result.is_some());
+    let tc = result.unwrap();
+    assert_eq!(tc.id, "call_late_id");
+    assert_eq!(tc.call_type, "function");
+    assert_eq!(tc.function.name, "late_fn");
+    assert_eq!(tc.function.arguments, "{\"a\":1}");
 
     let calls = acc.flush();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_late_id");
-    assert_eq!(calls[0].call_type, "function");
-    assert_eq!(calls[0].function.name, "late_fn");
-    assert_eq!(calls[0].function.arguments, "{\"a\":1}");
+    assert!(calls.is_empty());
 }
 
 #[test]
 fn test_tool_call_accumulator_multiple_indices_sorted() {
     let mut acc = ToolCallAccumulator::new();
 
-    // Insert index 2 first
+    // Insert index 2 first (incomplete args so it stays pending)
     let d2 = serde_json::json!({
         "index": 2, "id": "call_c", "type": "function",
-        "function": {"name": "fn_c", "arguments": "{}"}
+        "function": {"name": "fn_c", "arguments": "{"}
     });
-    acc.process_delta(&d2);
+    assert!(acc.process_delta(&d2).is_none());
 
     // Then index 0
     let d0 = serde_json::json!({
         "index": 0, "id": "call_a", "type": "function",
-        "function": {"name": "fn_a", "arguments": "{}"}
+        "function": {"name": "fn_a", "arguments": "{"}
     });
-    acc.process_delta(&d0);
+    assert!(acc.process_delta(&d0).is_none());
 
     // Then index 1
     let d1 = serde_json::json!({
         "index": 1, "id": "call_b", "type": "function",
-        "function": {"name": "fn_b", "arguments": "{}"}
+        "function": {"name": "fn_b", "arguments": "{"}
     });
-    acc.process_delta(&d1);
+    assert!(acc.process_delta(&d1).is_none());
 
     let calls = acc.flush();
     assert_eq!(calls.len(), 3);
-    // Should be sorted by index
+    // Should be sorted by index regardless of insertion order
     assert_eq!(calls[0].id, "call_a");
     assert_eq!(calls[1].id, "call_b");
     assert_eq!(calls[2].id, "call_c");
@@ -1011,11 +1011,12 @@ fn test_tool_call_accumulator_delta_missing_index_returns_none() {
 #[test]
 fn test_tool_call_accumulator_flush_clears_pending() {
     let mut acc = ToolCallAccumulator::new();
+    // Use incomplete args so the call stays pending until flush.
     let delta = serde_json::json!({
         "index": 0, "id": "call_x", "type": "function",
-        "function": {"name": "fn_x", "arguments": "{}"}
+        "function": {"name": "fn_x", "arguments": "{"}
     });
-    acc.process_delta(&delta);
+    assert!(acc.process_delta(&delta).is_none());
 
     let calls1 = acc.flush();
     assert_eq!(calls1.len(), 1);
@@ -1068,23 +1069,23 @@ fn test_parse_sse_empty_reasoning_not_emitted() {
 #[test]
 fn test_parse_sse_multiple_tool_call_deltas_in_one_event() {
     let mut acc = ToolCallAccumulator::new();
+    // Both deltas are complete, so both are emitted immediately.
     let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"fn1","arguments":"{}"}},{"index":1,"id":"c2","type":"function","function":{"name":"fn2","arguments":"{}"}}]}}]}"#;
     let results = parse_sse_event(event, &mut acc);
-    // Tool calls are buffered, not emitted
-    assert!(results.is_empty());
+    assert_eq!(results.len(), 2);
+    assert!(matches!(&results[0], StreamChunk::ToolCall(tc) if tc.function.name == "fn1"));
+    assert!(matches!(&results[1], StreamChunk::ToolCall(tc) if tc.function.name == "fn2"));
 
     let calls = acc.flush();
-    assert_eq!(calls.len(), 2);
-    assert_eq!(calls[0].function.name, "fn1");
-    assert_eq!(calls[1].function.name, "fn2");
+    assert!(calls.is_empty());
 }
 
 #[test]
 fn test_parse_sse_finish_reason_flushes_tool_calls() {
     let mut acc = ToolCallAccumulator::new();
 
-    // First event: buffer a tool call
-    let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c_fin","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}"#;
+    // First event: buffer an incomplete tool call.
+    let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c_fin","type":"function","function":{"name":"read","arguments":"{"}}]}}]}"#;
     let r1 = parse_sse_event(event1, &mut acc);
     assert!(r1.is_empty());
 
@@ -1101,17 +1102,17 @@ fn test_parse_sse_finish_reason_flushes_tool_calls() {
 fn test_parse_sse_done_flushes_multiple_tool_calls() {
     let mut acc = ToolCallAccumulator::new();
 
-    // Buffer two tool calls
+    // Buffer two incomplete tool calls
     let d0 = serde_json::json!({
         "index": 0, "id": "a", "type": "function",
-        "function": {"name": "fn_a", "arguments": "{}"}
+        "function": {"name": "fn_a", "arguments": "{"}
     });
     let d1 = serde_json::json!({
         "index": 1, "id": "b", "type": "function",
-        "function": {"name": "fn_b", "arguments": "{}"}
+        "function": {"name": "fn_b", "arguments": "{"}
     });
-    acc.process_delta(&d0);
-    acc.process_delta(&d1);
+    assert!(acc.process_delta(&d0).is_none());
+    assert!(acc.process_delta(&d1).is_none());
 
     let results = parse_sse_event("data: [DONE]", &mut acc);
     // Should be: ToolCall(a), ToolCall(b), Done
@@ -3052,17 +3053,19 @@ fn test_parse_sse_event_negative_index_ignored() {
 #[test]
 fn test_parse_sse_event_large_index() {
     let mut acc = ToolCallAccumulator::new();
-    // Large index should work fine
+    // Large index should work fine; a complete delta emits immediately.
     let delta = serde_json::json!({
         "index": 999999,
         "id": "call_large",
         "type": "function",
         "function": {"name": "test", "arguments": "{}"}
     });
-    acc.process_delta(&delta);
+    let result = acc.process_delta(&delta);
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().id, "call_large");
+
     let calls = acc.flush();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].id, "call_large");
+    assert!(calls.is_empty());
 }
 
 // ============================================
@@ -3078,9 +3081,13 @@ fn test_tool_call_accumulator_empty_function_name() {
         "type": "function",
         "function": {"name": "", "arguments": "{}"}
     });
-    acc.process_delta(&delta);
+    // Empty name prevents a complete tool call from being emitted.
+    let result = acc.process_delta(&delta);
+    assert!(result.is_none());
+
+    // flush also filters out entries with empty names.
     let calls = acc.flush();
-    assert_eq!(calls[0].function.name, "");
+    assert!(calls.is_empty());
 }
 
 #[test]
@@ -3096,30 +3103,34 @@ fn test_tool_call_accumulator_partial_update_preserves_existing() {
     });
     acc.process_delta(&d1);
 
-    // Second delta only updates arguments, not name
+    // Second delta only updates arguments, not name, and completes the object.
     let d2 = serde_json::json!({
         "index": 0,
         "function": {"arguments": ",\"b\":2}"}
     });
-    acc.process_delta(&d2);
+    let result = acc.process_delta(&d2);
+    assert!(result.is_some());
+    let tc = result.unwrap();
+    assert_eq!(tc.id, "call_1");
+    assert_eq!(tc.function.name, "original_name");
+    assert_eq!(tc.function.arguments, "{\"a\":1,\"b\":2}");
 
     let calls = acc.flush();
-    assert_eq!(calls[0].id, "call_1");
-    assert_eq!(calls[0].function.name, "original_name");
-    assert_eq!(calls[0].function.arguments, "{\"a\":1,\"b\":2}");
+    assert!(calls.is_empty());
 }
 
 #[test]
 fn test_tool_call_accumulator_multiple_flushes_idempotent() {
     let mut acc = ToolCallAccumulator::new();
 
+    // Keep the call pending with incomplete args so flush has work to do.
     let delta = serde_json::json!({
         "index": 0,
         "id": "call_multi",
         "type": "function",
-        "function": {"name": "test", "arguments": "{}"}
+        "function": {"name": "test", "arguments": "{"}
     });
-    acc.process_delta(&delta);
+    assert!(acc.process_delta(&delta).is_none());
 
     // First flush
     let calls1 = acc.flush();

@@ -2210,10 +2210,7 @@ impl Agent {
             );
         }
         if success {
-            // Forgive failures only for the tool that succeeded, mirroring the
-            // parallel-tool batch behavior. Unrelated failures stay recorded.
-            self.clear_failed_tool_attempts_for_tool(&name);
-            self.consecutive_suppressions = 0;
+            self.clear_failed_tool_attempts();
         } else {
             self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
         }
