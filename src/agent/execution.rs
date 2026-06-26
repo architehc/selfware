@@ -662,11 +662,19 @@ impl Agent {
                 && self.mutating_tool_call_count() > 0
                 && is_observational_shell_batch(&tool_calls)
             {
-                bail!(
-                    "VERIFICATION_LOOP_AFTER_EDIT: repeated observational shell commands after a successful mutation; stopping so the captured patch can be evaluated"
+                self.post_edit_observational_shell_count += 1;
+                if self.post_edit_observational_shell_count > 2 {
+                    bail!(
+                        "VERIFICATION_LOOP_AFTER_EDIT: repeated observational shell commands after a successful mutation; stopping so the captured patch can be evaluated"
+                    );
+                }
+                info!(
+                    "Post-edit observational shell loop detected ({}); injecting correction",
+                    self.post_edit_observational_shell_count
                 );
+            } else {
+                info!("Repetition loop detected, injecting correction");
             }
-            info!("Repetition loop detected, injecting correction");
             self.messages
                 .push(crate::api::types::Message::user(loop_msg));
             return Ok(false);

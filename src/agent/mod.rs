@@ -539,6 +539,11 @@ pub struct Agent {
     /// logic nudges or blocks more read-only batches until the agent edits code
     /// or otherwise changes project state.
     consecutive_read_only_steps: usize,
+    /// Number of times a post-mutation observational shell batch has been
+    /// detected as a repetition loop. Small models often need 1–2 verification
+    /// cycles to repair syntax errors, so the agent is only hard-stopped after
+    /// this counter exceeds a small threshold.
+    post_edit_observational_shell_count: usize,
     /// How many times the terminal progress guard fired without producing a write.
     /// After 2 hits the run fails with READ_LOOP_NO_EDIT.
     terminal_guard_hits: usize,
@@ -1078,6 +1083,7 @@ To call a tool, use this EXACT XML structure:
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
             consecutive_read_only_steps: 0,
+            post_edit_observational_shell_count: 0,
             terminal_guard_hits: 0,
             last_read_file: None,
             has_written_any_file: false,
@@ -1991,6 +1997,7 @@ To call a tool, use this EXACT XML structure:
         self.mutating_tool_call_count += 1;
         self.mutation_sequence += 1;
         self.last_failed_verification_summary = None;
+        self.post_edit_observational_shell_count = 0;
     }
 
     /// Increment the total tool-call counter. Should be called for every

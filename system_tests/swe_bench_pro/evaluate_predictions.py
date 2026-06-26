@@ -169,8 +169,13 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         "  echo '{\"tests\": []}' > /workspace/output.json\n"
         "  exit 0\n"
         "fi\n"
+        "set +e\n"
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
+        "run_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
+        "if [ ! -f /workspace/output.json ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "fi\n"
     )
 
 

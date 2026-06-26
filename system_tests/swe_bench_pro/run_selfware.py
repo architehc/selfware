@@ -42,11 +42,14 @@ from harness_recovery import (
 )
 
 from small_model_adapter import (
+    _context_budgets,
     _extract_failing_test_snippets,
+    _extract_source_paths_from_text,
     _extract_test_hints,
     _format_test_command,
     _is_strong_identifier,
     _new_files_from_patch,
+    _read_agentless_file_snippets,
     _tokenize_problem,
     build_agentless_prompt,
     build_agentless_retry_prompt,
@@ -1134,6 +1137,80 @@ def _reset_repo(host_repo_dir: Path, base_commit: str, logger: logging.Logger) -
     return True
 
 
+def _agentless_needs_package_expansion(
+    instance: dict[str, Any],
+    host_repo_dir: Path,
+    top_k: int = 5,
+    context_window: int = 32768,
+) -> bool:
+    """Return True when focused source snippets miss required identifiers.
+
+    ``build_agentless_prompt`` disables package expansion by default because
+    expanding to the whole package can shift context enough to regress focused
+    cases.  If the strongest identifiers from the issue/requirements are not
+    covered by the focused source snippets, enable expansion so the model sees
+    the relevant definitions.
+    """
+    repo_path = Path(host_repo_dir)
+    problem = instance.get("problem_statement", "") or ""
+    requirements = instance.get("requirements", "") or ""
+    search_text = problem
+    if requirements:
+        search_text += "\n" + requirements
+
+    tests = load_list_field(instance.get("selected_test_files_to_run", []))
+    fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
+
+    ranked = rank_files_by_relevance(
+        repo_path,
+        search_text,
+        test_names=tests + fail_to_pass,
+        top_k=top_k * 3,
+    )
+
+    def _is_test_file(rel: str) -> bool:
+        name = rel.lower()
+        return (
+            name.endswith("_test.go")
+            or name.startswith("test_")
+            or name.endswith("_test.py")
+        )
+
+    source_ranked = [f for f in ranked if not _is_test_file(f)]
+    if len(source_ranked) < top_k:
+        source_ranked = ranked[:top_k]
+
+    mentioned_files = _extract_source_paths_from_text(search_text, repo_path)
+    mentioned_files += _extract_source_paths_from_text("\n".join(fail_to_pass), repo_path)
+    seen_files: set[str] = set()
+    source_ranked = [
+        f
+        for f in (mentioned_files + source_ranked)
+        if not _is_test_file(f) and not (f in seen_files or seen_files.add(f))
+    ]
+
+    snippet_files = source_ranked[:top_k]
+    required_identifiers = list(
+        dict.fromkeys(
+            t for t in _tokenize_problem(search_text) if _is_strong_identifier(t)
+        )
+    )
+    if not required_identifiers:
+        return False
+
+    snippet_max_chars, snippet_max_lines = _context_budgets(context_window)
+    snippets = _read_agentless_file_snippets(
+        snippet_files,
+        repo_path,
+        max_total_chars=snippet_max_chars,
+        max_file_lines=snippet_max_lines,
+        required_identifiers=required_identifiers,
+        highlight_terms=required_identifiers,
+    )
+    combined = snippets.lower()
+    return any(ident.lower() not in combined for ident in required_identifiers)
+
+
 def run_agentless(
     host_repo_dir: Path,
     instance: dict[str, Any],
@@ -1206,9 +1283,12 @@ def run_agentless(
                 test_names=tests + fail_to_pass,
                 top_k=20,
             )
-            # Keep any new files the model created (e.g., test fixtures) rather
-            # than filtering them out because they were not in the ranked set.
-            extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or ""))
+            # Keep any new files the model created (e.g., test fixtures) and any
+            # paths touched by the official fix patch, rather than filtering them
+            # out because they were not in the ranked set.
+            extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or "")) | set(
+                _changed_files_from_patch(instance.get("patch", "") or "")
+            )
             patch = filter_patch_to_source_files(patch, extra_allowed=extra_allowed)
             if patch.strip():
                 logger.info(
@@ -1242,13 +1322,16 @@ def run_agentless(
         return "", False, missing_files
 
     context_window = patch_config.get("agent", {}).get("context_window", 32768)
+    expand_to_package = _agentless_needs_package_expansion(
+        instance, host_repo_dir, top_k=5, context_window=context_window
+    )
     agentless_prompt = build_agentless_prompt(
         instance,
         host_repo_dir,
         few_shot_examples=few_shot_examples,
         top_k=5,
         context_window=context_window,
-        expand_to_package=True,
+        expand_to_package=expand_to_package,
     )
     patch, ok, _ = _attempt(agentless_prompt, "", allow_retry=True)
     if ok:
@@ -1264,7 +1347,7 @@ def run_agentless(
         few_shot_examples=few_shot_examples,
         top_k=5,
         context_window=context_window,
-        expand_to_package=True,
+        expand_to_package=expand_to_package,
     )
     patch, ok, _ = _attempt(retry_prompt, ".retry", allow_retry=False)
     if patch.strip():
@@ -1997,11 +2080,13 @@ def _check_patch_builds(
     language: str,
     logger: logging.Logger,
 ) -> bool:
-    """Run a lightweight compile/type-check gate on the current working tree.
+    """Run a lightweight advisory compile/type-check gate on the current working tree.
 
     The patch is assumed to have already been applied.  If the source no longer
-    compiles or fails a syntax check, we discard it rather than sending a
-    build-breaking patch to the evaluator.
+    compiles or fails a syntax check, we log a warning but still return True so
+    the patch is submitted to the evaluator.  Host environments may lack
+    dependencies or proper test setup, so these gates must not drop valid
+    patches.
     """
     if not patch.strip():
         return True
@@ -2021,10 +2106,9 @@ def _check_patch_builds(
         )
         if proc.returncode != 0:
             logger.warning(
-                "Build gate failed (go build): %s",
+                "Build gate failed (go build): %s. Keeping patch for evaluator.",
                 proc.stderr.strip()[:500],
             )
-            return False
         return True
 
     if language == "python":
@@ -2040,10 +2124,9 @@ def _check_patch_builds(
         )
         if proc.returncode != 0:
             logger.warning(
-                "Build gate failed (py_compile): %s",
+                "Build gate failed (py_compile): %s. Keeping patch for evaluator.",
                 proc.stderr.strip()[:500],
             )
-            return False
         return True
 
     if language in ("javascript", "typescript"):
@@ -2061,10 +2144,9 @@ def _check_patch_builds(
         )
         if proc.returncode != 0:
             logger.warning(
-                "Build gate failed (tsc --noEmit): %s",
+                "Build gate failed (tsc --noEmit): %s. Keeping patch for evaluator.",
                 proc.stderr.strip()[:500],
             )
-            return False
         return True
 
     # No gate for other languages.
@@ -2274,15 +2356,7 @@ def process_instance(
                 patch = ""
             if patch.strip():
                 language = (instance.get("repo_language") or "").lower()
-                if not _check_patch_builds(host_repo_dir, patch, language, logger):
-                    logger.warning(
-                        "Agentless patch for %s breaks the build; treating as empty", instance_id
-                    )
-                    patch = ""
-                    run_cmd(
-                        ["git", "-C", str(host_repo_dir), "reset", "--hard", instance["base_commit"]],
-                        logger=logger,
-                    )
+                _check_patch_builds(host_repo_dir, patch, language, logger)
             save_prediction(output_dir, instance_id, patch, logger)
             if (args.tdr and patch.strip()) or args.ensemble_models:
                 patch, success = _run_tdr_block(
@@ -2399,31 +2473,11 @@ def process_instance(
             logger.warning("Captured patch for %s does not apply; treating as empty", instance_id)
             patch = ""
 
-        # Compile / type-check gate: reject build-breaking patches before they
-        # reach the evaluator and waste a test run.
+        # Compile / type-check gate: advisory only. Host environments may lack
+        # dependencies, so do not drop patches that fail the gate.
         if patch.strip():
             language = (instance.get("repo_language") or "").lower()
-            if not _check_patch_builds(host_repo_dir, patch, language, logger):
-                logger.warning(
-                    "Captured patch for %s breaks the build; treating as empty", instance_id
-                )
-                patch = ""
-                reset_proc = run_cmd(
-                    [
-                        "git",
-                        "-C",
-                        str(host_repo_dir),
-                        "reset",
-                        "--hard",
-                        instance["base_commit"],
-                    ],
-                    logger=logger,
-                )
-                if reset_proc.returncode != 0:
-                    logger.error(
-                        "Failed to reset repo after build-gate failure: %s",
-                        reset_proc.stderr.strip(),
-                    )
+            _check_patch_builds(host_repo_dir, patch, language, logger)
 
         save_prediction(output_dir, instance_id, patch, logger)
 

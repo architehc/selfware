@@ -117,19 +117,48 @@ def _read_ranked_file_excerpts(
 
 
 def _build_entryscript(instance: dict[str, Any]) -> str:
-    """Reproduce the official SWE-bench Pro evaluator entry script."""
+    """Build the container entry script that applies the patch and runs tests.
+
+    The script is strict: if the patch is empty or cannot be applied, it writes
+    an output.json marking the instance as failed instead of silently running
+    tests on the unpatched base commit.
+    """
     selected = _load_list_field(instance.get("selected_test_files_to_run", []))
     test_arg = ",".join(selected)
     before_cmd = instance.get("before_repo_set_cmd", "") or ""
     return (
         "#!/bin/bash\n"
+        "set -euo pipefail\n"
         "cd /app\n"
         f"git reset --hard {instance['base_commit']}\n"
         f"git checkout {instance['base_commit']}\n"
         f"{before_cmd}\n"
-        "git apply -v /workspace/patch.diff\n"
+        "if [ ! -s /workspace/patch.diff ] || [ \"$(grep -v '^[[:space:]]*$' /workspace/patch.diff | wc -l)\" -eq 0 ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  echo 'PATCH_EMPTY' > /workspace/patch_apply_status.txt\n"
+        "  exit 0\n"
+        "fi\n"
+        "set +e\n"
+        "git apply -v /workspace/patch.diff > /workspace/patch_apply.log 2>&1\n"
+        "apply_status=$?\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  git apply --3way -v /workspace/patch.diff >> /workspace/patch_apply.log 2>&1\n"
+        "  apply_status=$?\n"
+        "fi\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  patch -p1 --no-backup-if-mismatch -i /workspace/patch.diff >> /workspace/patch_apply.log 2>&1\n"
+        "  apply_status=$?\n"
+        "fi\n"
+        "echo \"patch apply exit code: $apply_status\" >> /workspace/patch_apply.log\n"
+        "echo $apply_status > /workspace/patch_apply_status.txt\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  exit 0\n"
+        "fi\n"
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
+        "test_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
+        "exit $test_status\n"
     )
 
 
@@ -337,10 +366,14 @@ def _run_tests_once(
     output_file = log_dir / f"{container}.tdr.{iteration}.output.json"
     stdout_file = log_dir / f"{container}.tdr.{iteration}.stdout.log"
     stderr_file = log_dir / f"{container}.tdr.{iteration}.stderr.log"
+    patch_apply_log = log_dir / f"{container}.tdr.{iteration}.patch_apply.log"
+    patch_apply_status = log_dir / f"{container}.tdr.{iteration}.patch_apply_status.txt"
 
     _copy_artifact_out(container, "/workspace/output.json", output_file, logger)
     _copy_artifact_out(container, "/workspace/stdout.log", stdout_file, logger)
     _copy_artifact_out(container, "/workspace/stderr.log", stderr_file, logger)
+    _copy_artifact_out(container, "/workspace/patch_apply.log", patch_apply_log, logger)
+    _copy_artifact_out(container, "/workspace/patch_apply_status.txt", patch_apply_status, logger)
 
     stdout_text = stdout_file.read_text(encoding="utf-8", errors="ignore") if stdout_file.exists() else ""
     stderr_text = stderr_file.read_text(encoding="utf-8", errors="ignore") if stderr_file.exists() else ""

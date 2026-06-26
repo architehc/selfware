@@ -375,6 +375,7 @@ def is_truncated_diff(response: str) -> bool:
     This happens when the model runs out of output tokens inside a `` ```diff ``
     block.  A truncated response is not applyable as-is.
     """
+    original_ends_newline = response.endswith("\n")
     response = response.strip()
     if not response:
         return False
@@ -388,7 +389,7 @@ def is_truncated_diff(response: str) -> bool:
         # If the last line is a context/deletion/addition without a trailing
         # newline terminator, treat it as possibly truncated.
         lines = after_hunk.splitlines()
-        if lines and re.match(r"^[-+ ]", lines[-1]) and not lines[-1].endswith("\n"):
+        if lines and re.match(r"^[-+ ]", lines[-1]) and not original_ends_newline:
             return True
     return False
 
@@ -402,17 +403,27 @@ def extract_partial_diff(response: str) -> str | None:
     diff = extract_diff(response)
     if not diff:
         return None
-    # Find the last complete hunk boundary and keep everything up to it.
     lines = diff.splitlines()
-    last_complete = -1
-    for i, line in enumerate(lines):
-        if line.startswith("@@"):
-            last_complete = i
-    if last_complete <= 0:
+    hunk_starts = [i for i, line in enumerate(lines) if line.startswith("@@")]
+    if not hunk_starts:
         return None
-    # Keep lines up to and including the last complete hunk header; drop any
-    # partial hunk lines after it.
-    return "\n".join(lines[:last_complete]) + "\n"
+
+    # A hunk is complete only if its header is followed by at least one body
+    # line and the response is not otherwise truncated.
+    last_hunk_start = hunk_starts[-1]
+    last_hunk_complete = not is_truncated_diff(response) and last_hunk_start < len(lines) - 1
+
+    if last_hunk_complete:
+        keep_up_to = len(lines)
+    else:
+        keep_up_to = last_hunk_start
+
+    # Ensure we are keeping at least one complete hunk (header + body line).
+    if not any(i < keep_up_to - 1 for i in hunk_starts):
+        return None
+    if keep_up_to <= 0:
+        return None
+    return "\n".join(lines[:keep_up_to]) + "\n"
 
 
 def _apply_diff_with_check(repo_dir: Path, diff_text: str, logger: Any) -> bool:
