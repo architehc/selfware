@@ -80,33 +80,40 @@ impl Agent {
                 .collect()
         };
 
-        // Pre-scan: estimate total tokens from file sizes before loading
-        let mut estimated_tokens: usize = 0;
-        let mut file_count: usize = 0;
-        for entry in WalkDir::new(".").into_iter().filter_map(|e| e.ok()) {
-            if entry.file_type().is_file() {
-                let p = entry.path().display().to_string();
-                if p.contains("/target/")
-                    || p.contains("/node_modules/")
-                    || p.contains("/.git/")
-                    || p.contains("/__pycache__/")
-                {
-                    continue;
-                }
-                let ext = entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                if extensions.contains(&ext) {
-                    if let Ok(meta) = entry.metadata() {
-                        // Rough estimate: ~4 chars per token
-                        estimated_tokens += meta.len() as usize / 4;
-                        file_count += 1;
+        // Pre-scan: estimate total tokens from file sizes before loading.
+        // walkdir performs blocking I/O, so run it on the blocking pool.
+        let extensions_owned: Vec<String> = extensions.iter().map(|s| s.to_string()).collect();
+        let (estimated_tokens, file_count) = tokio::task::spawn_blocking(move || {
+            let mut estimated_tokens: usize = 0;
+            let mut file_count: usize = 0;
+            for entry in WalkDir::new(".").into_iter().filter_map(|e| e.ok()) {
+                if entry.file_type().is_file() {
+                    let p = entry.path().display().to_string();
+                    if p.contains("/target/")
+                        || p.contains("/node_modules/")
+                        || p.contains("/.git/")
+                        || p.contains("/__pycache__/")
+                    {
+                        continue;
+                    }
+                    let ext = entry
+                        .path()
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("");
+                    if extensions_owned.iter().any(|e| e == ext) {
+                        if let Ok(meta) = entry.metadata() {
+                            // Rough estimate: ~4 chars per token
+                            estimated_tokens += meta.len() as usize / 4;
+                            file_count += 1;
+                        }
                     }
                 }
             }
-        }
+            (estimated_tokens, file_count)
+        })
+        .await
+        .unwrap_or((0, 0));
 
         let budget = self.memory.context_window();
         if budget > 0 && estimated_tokens > budget {
@@ -147,26 +154,40 @@ impl Agent {
         );
         println!();
 
-        for entry in WalkDir::new(".")
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path();
-            let path_str = path.display().to_string();
-
-            // Skip build artifacts and hidden dirs
-            if path_str.contains("/target/")
-                || path_str.contains("/node_modules/")
-                || path_str.contains("/.git/")
-                || path_str.contains("/__pycache__/")
+        // Collect matching paths on the blocking pool, then read them asynchronously.
+        let extensions_owned: Vec<String> = extensions.iter().map(|s| s.to_string()).collect();
+        let paths = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
             {
-                continue;
-            }
+                let path = entry.path().to_path_buf();
+                let path_str = path.display().to_string();
 
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if extensions.contains(&ext) {
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
+                // Skip build artifacts and hidden dirs
+                if path_str.contains("/target/")
+                    || path_str.contains("/node_modules/")
+                    || path_str.contains("/.git/")
+                    || path_str.contains("/__pycache__/")
+                {
+                    continue;
+                }
+
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if extensions_owned.iter().any(|e| e == ext) {
+                    out.push(path);
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
+
+        for path in paths {
+            let path_str = path.display().to_string();
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
                     let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
                     let full_content = format!("{}{}", file_header, content);
                     let file_tokens =
@@ -194,7 +215,6 @@ impl Agent {
                     loaded += 1;
                 }
             }
-        }
 
         let window = self.memory.context_window();
         let pct = if window > 0 {
@@ -258,23 +278,36 @@ impl Agent {
         let mut output = String::new();
         let extensions = ["rs", "toml"];
 
-        for entry in WalkDir::new(".")
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let path = entry.path();
-            let path_str = path.display().to_string();
+        // Directory traversal is blocking I/O; collect matching paths on the blocking pool
+        // and then read their contents asynchronously.
+        let paths = tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for entry in WalkDir::new(".")
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+            {
+                let path = entry.path().to_path_buf();
+                let path_str = path.display().to_string();
 
-            if path_str.contains("/target/") || path_str.contains("/.git/") {
-                continue;
-            }
-
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if extensions.contains(&ext) {
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
-                    output.push_str(&format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n{}\n", path_str, content));
+                if path_str.contains("/target/") || path_str.contains("/.git/") {
+                    continue;
                 }
+
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if extensions.contains(&ext) {
+                    out.push(path);
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default();
+
+        for path in paths {
+            let path_str = path.display().to_string();
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                output.push_str(&format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n{}\n", path_str, content));
             }
         }
 
@@ -359,30 +392,36 @@ impl Agent {
                 .unwrap_or(false);
             if is_dir {
                 // Directory reference: include tree listing + file contents (max depth 3)
-                let mut dir_content = format!("Directory tree for {}:\n```\n", file_path);
-                let mut file_count = 0;
-                for entry in walkdir::WalkDir::new(file_path)
-                    .max_depth(3)
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                {
-                    let entry_path = entry.path();
-                    let display = entry_path.display().to_string();
-                    if display.contains("/target/")
-                        || display.contains("\\target\\")
-                        || display.contains("/.git/")
-                        || display.contains("\\.git\\")
-                        || display.contains("/node_modules/")
-                        || display.contains("\\node_modules\\")
+                let file_path_owned = file_path.to_string();
+                let (dir_content, file_count) = tokio::task::spawn_blocking(move || {
+                    let mut dir_content = format!("Directory tree for {}:\n```\n", file_path_owned);
+                    let mut file_count = 0;
+                    for entry in walkdir::WalkDir::new(&file_path_owned)
+                        .max_depth(3)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
                     {
-                        continue;
+                        let entry_path = entry.path();
+                        let display = entry_path.display().to_string();
+                        if display.contains("/target/")
+                            || display.contains("\\target\\")
+                            || display.contains("/.git/")
+                            || display.contains("\\.git\\")
+                            || display.contains("/node_modules/")
+                            || display.contains("\\node_modules\\")
+                        {
+                            continue;
+                        }
+                        if entry.file_type().is_file() {
+                            dir_content.push_str(&format!("  {}\n", display));
+                            file_count += 1;
+                        }
                     }
-                    if entry.file_type().is_file() {
-                        dir_content.push_str(&format!("  {}\n", display));
-                        file_count += 1;
-                    }
-                }
-                dir_content.push_str("```\n");
+                    dir_content.push_str("```\n");
+                    (dir_content, file_count)
+                })
+                .await
+                .unwrap_or_default();
                 expanded = expanded.replacen(full_match, &dir_content, 1);
                 included_files.push(format!(
                     "{}/ ({} files)",

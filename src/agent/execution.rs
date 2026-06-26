@@ -465,7 +465,7 @@ impl Agent {
                 if self.consecutive_no_action_prompts >= 5 {
                     // Model is repeating itself many times. Only accept if
                     // the completion gate passes — otherwise nudge it.
-                    if self.check_completion_gate().is_none() {
+                    if self.check_completion_gate().await.is_none() {
                         info!(
                             "Accepting repeated completion after {} identical responses (gate passed)",
                             self.consecutive_no_action_prompts
@@ -565,7 +565,7 @@ impl Agent {
             }
 
             // Check completion gate before accepting task as done
-            if let Some(gate_msg) = self.check_completion_gate() {
+            if let Some(gate_msg) = self.check_completion_gate().await {
                 info!("Completion gate rejected: {}", gate_msg);
                 // Refine the previously-written turn artifact: this turn ended
                 // with a gate refusal, not a plain "no tool call".
@@ -1789,7 +1789,7 @@ mod tests {
         config.agent.require_verification_before_completion = false;
         let agent = Agent::new(config).await.unwrap();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_none(), "Expected gate to pass, got: {:?}", result);
 
         server.stop().await;
@@ -1804,7 +1804,7 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         agent.current_task_context = "Implement the requested change".to_string();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("only"));
@@ -1826,7 +1826,7 @@ mod tests {
             .required_task_tools
             .insert("vision_analyze".to_string());
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         assert!(result.unwrap().contains("vision_analyze"));
 
@@ -1859,7 +1859,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }
@@ -1893,7 +1893,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some(), "Capability disclaimers should never pass");
         assert!(
             result.unwrap().contains("capability disclaimer"),
@@ -1915,7 +1915,7 @@ mod tests {
         agent.last_assistant_response = "python validate.py".to_string();
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Exact literal responses should pass"
         );
 
@@ -1934,7 +1934,7 @@ mod tests {
         agent.last_assistant_response =
             "The default full validation CLI command is `python validate.py`.".to_string();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some(), "Non-exact literal responses should fail");
         assert!(
             result.unwrap().contains("exact literal response"),
@@ -1955,7 +1955,7 @@ mod tests {
             "What is the default full validation CLI command for this workspace?".to_string();
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "read-only tasks should not be forced through the min-step gate"
         );
 
@@ -1970,7 +1970,7 @@ mod tests {
         config.agent.require_verification_before_completion = true;
         let agent = Agent::new(config).await.unwrap();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("verification"));
@@ -1990,7 +1990,7 @@ mod tests {
             "I need to read the tests to understand what to implement.\n\nfile_read: tests/chart_tests.rs"
                 .to_string();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_some(),
             "Incomplete planning response should reject completion"
@@ -2027,7 +2027,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_none(),
             "Expected gate to pass with verification, got: {:?}",
@@ -2059,7 +2059,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some(), "Failed verification should reject");
 
         server.stop().await;
@@ -2087,7 +2087,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }
@@ -2114,7 +2114,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }
@@ -2127,7 +2127,7 @@ mod tests {
         config.agent.require_verification_before_completion = true;
         let agent = Agent::new(config).await.unwrap();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("step"));
@@ -2172,7 +2172,7 @@ mod tests {
 
         // Gate should pass — no cargo verification needed for browser-only tasks
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Browser-only tasks should bypass the cargo verification gate"
         );
 
@@ -2202,7 +2202,7 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Vision-only tasks should bypass the cargo verification gate"
         );
 
@@ -2240,7 +2240,7 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Computer-control tasks should bypass the cargo verification gate"
         );
 
@@ -2270,7 +2270,7 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "HTTP-only tasks should bypass the cargo verification gate"
         );
 
@@ -2310,7 +2310,7 @@ mod tests {
 
         // Gate should REJECT — mixed task with file_write still needs cargo verification
         // (we're running from the selfware project root which has a Cargo.toml)
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_some(),
             "Mixed Rust + browser tasks should still require cargo verification"
@@ -2360,7 +2360,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_none(),
             "Non-Rust project (no Cargo.toml) should bypass cargo verification, got: {:?}",
@@ -2393,7 +2393,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         // Should NOT mention cargo for non-Rust tasks
@@ -2455,7 +2455,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result
                 .as_deref()
@@ -4173,7 +4173,7 @@ pub fn other() -> i32 {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }

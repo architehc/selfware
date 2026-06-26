@@ -7,9 +7,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use tracing::warn;
+use tokio::sync::RwLock;
 
 /// Cache entry with value and expiration
 #[derive(Clone)]
@@ -59,18 +58,15 @@ impl ToolCache {
     }
 
     /// Get a cached result if available and not expired
-    pub fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
+    pub async fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
         let key = Self::cache_key(tool_name, args);
-        let entries = self.entries.read().unwrap_or_else(|poisoned| {
-            warn!("ToolCache read lock poisoned, recovering");
-            poisoned.into_inner()
-        });
+        let entries = self.entries.read().await;
 
         if let Some(entry) = entries.get(&key) {
             if !entry.is_expired() {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                     let current_mtime =
-                        std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+                        tokio::fs::metadata(path).await.ok().and_then(|m| m.modified().ok());
 
                     if entry.is_file_stale(current_mtime) {
                         return None;
@@ -83,19 +79,25 @@ impl ToolCache {
     }
 
     /// Store a result in the cache
-    pub fn set(&self, tool_name: &str, args: &Value, value: Value) {
-        self.set_with_ttl(tool_name, args, value, self.default_ttl);
+    pub async fn set(&self, tool_name: &str, args: &Value, value: Value) {
+        self.set_with_ttl(tool_name, args, value, self.default_ttl).await;
     }
 
     /// Store a result with a custom TTL
-    pub fn set_with_ttl(&self, tool_name: &str, args: &Value, value: Value, ttl: Duration) {
+    pub async fn set_with_ttl(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        value: Value,
+        ttl: Duration,
+    ) {
         let key = Self::cache_key(tool_name, args);
 
-        let file_mtime = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .and_then(|path| std::fs::metadata(path).ok())
-            .and_then(|m| m.modified().ok());
+        let file_mtime = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+            tokio::fs::metadata(path).await.ok().and_then(|m| m.modified().ok())
+        } else {
+            None
+        };
 
         let entry = CacheEntry {
             value,
@@ -104,16 +106,11 @@ impl ToolCache {
             file_mtime,
         };
 
-        {
-            let mut entries = self.entries.write().unwrap_or_else(|poisoned| {
-                warn!("ToolCache write lock poisoned, recovering");
-                poisoned.into_inner()
-            });
-            if entries.len() >= self.max_entries {
-                self.evict_expired(&mut entries);
-            }
-            entries.insert(key, entry);
+        let mut entries = self.entries.write().await;
+        if entries.len() >= self.max_entries {
+            self.evict_expired(&mut entries);
         }
+        entries.insert(key, entry);
     }
 
     /// Remove expired entries
@@ -135,25 +132,20 @@ impl ToolCache {
     }
 
     /// Invalidate entries related to a specific file path
-    pub fn invalidate_path(&self, path: &str) {
-        if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|key, _| !key.contains(path));
-        }
+    pub async fn invalidate_path(&self, path: &str) {
+        let mut entries = self.entries.write().await;
+        entries.retain(|key, _| !key.contains(path));
     }
 
     /// Clear all entries
-    pub fn clear(&self) {
-        if let Ok(mut entries) = self.entries.write() {
-            entries.clear();
-        }
+    pub async fn clear(&self) {
+        let mut entries = self.entries.write().await;
+        entries.clear();
     }
 
     /// Get cache statistics
-    pub fn stats(&self) -> CacheStats {
-        let entries = self
-            .entries
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pub async fn stats(&self) -> CacheStats {
+        let entries = self.entries.read().await;
         CacheStats {
             entries: entries.len(),
             max_entries: self.max_entries,
@@ -297,7 +289,7 @@ impl LlmCache {
     }
 
     /// Look up a cached response by prompt similarity
-    pub fn lookup(
+    pub async fn lookup(
         &self,
         _prompt: &str,
         embedding: &[f32],
@@ -310,15 +302,8 @@ impl LlmCache {
         // Normalize the query embedding
         let normalized_query = Self::l2_normalize(embedding);
 
-        let entries = self.entries.read().unwrap_or_else(|poisoned| {
-            warn!("LlmCache entries read lock poisoned, recovering");
-            poisoned.into_inner()
-        });
-
-        let embeddings = self.embeddings.read().unwrap_or_else(|poisoned| {
-            warn!("LlmCache embeddings read lock poisoned, recovering");
-            poisoned.into_inner()
-        });
+        let entries = self.entries.read().await;
+        let embeddings = self.embeddings.read().await;
 
         let mut best_match: Option<(String, f32)> = None;
 
@@ -349,7 +334,7 @@ impl LlmCache {
     }
 
     /// Store a response in the cache
-    pub fn store(&self, entry: LlmCacheEntry) {
+    pub async fn store(&self, entry: LlmCacheEntry) {
         if !self.config.enabled {
             return;
         }
@@ -358,30 +343,23 @@ impl LlmCache {
         // Store normalized embedding for cosine similarity
         let embedding = Self::l2_normalize(&entry.embedding);
 
-        {
-            let mut entries = self.entries.write().unwrap_or_else(|poisoned| {
-                warn!("LlmCache entries write lock poisoned, recovering");
-                poisoned.into_inner()
-            });
+        let mut entries = self.entries.write().await;
+        let mut embeddings = self.embeddings.write().await;
 
-            if entries.len() >= self.config.max_entries && !entries.contains_key(&id) {
-                self.evict_oldest(&mut entries);
-            }
-
-            entries.insert(id.clone(), entry);
+        if entries.len() >= self.config.max_entries && !entries.contains_key(&id) {
+            self.evict_oldest(&mut entries, &mut embeddings);
         }
 
-        {
-            let mut embeddings = self.embeddings.write().unwrap_or_else(|poisoned| {
-                warn!("LlmCache embeddings write lock poisoned, recovering");
-                poisoned.into_inner()
-            });
-            embeddings.insert(id, embedding);
-        }
+        entries.insert(id.clone(), entry);
+        embeddings.insert(id, embedding);
     }
 
     /// Evict oldest entries when at capacity
-    fn evict_oldest(&self, entries: &mut HashMap<String, LlmCacheEntry>) {
+    fn evict_oldest(
+        &self,
+        entries: &mut HashMap<String, LlmCacheEntry>,
+        embeddings: &mut HashMap<String, Vec<f32>>,
+    ) {
         let mut items: Vec<_> = entries
             .iter()
             .map(|(k, v)| (k.clone(), v.created_at))
@@ -397,24 +375,14 @@ impl LlmCache {
 
         for id in &ids_to_remove {
             entries.remove(id);
-        }
-
-        let mut embeddings = self
-            .embeddings
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        for id in &ids_to_remove {
             embeddings.remove(id);
         }
     }
 
     /// Invalidate entries for a file path
-    pub fn invalidate_path(&self, path: &str) {
+    pub async fn invalidate_path(&self, path: &str) {
         let ids_to_remove: Vec<_> = {
-            let entries = self
-                .entries
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let entries = self.entries.read().await;
             entries
                 .iter()
                 .filter(|(_, entry)| entry.file_paths.iter().any(|p| p.contains(path)))
@@ -423,23 +391,39 @@ impl LlmCache {
         };
 
         {
-            let mut entries = self
-                .entries
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut entries = self.entries.write().await;
             for id in &ids_to_remove {
                 entries.remove(id);
             }
         }
 
         {
-            let mut embeddings = self
-                .embeddings
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut embeddings = self.embeddings.write().await;
             for id in &ids_to_remove {
                 embeddings.remove(id);
             }
+        }
+    }
+
+    /// Clear all entries
+    pub async fn clear(&self) {
+        {
+            let mut entries = self.entries.write().await;
+            entries.clear();
+        }
+        {
+            let mut embeddings = self.embeddings.write().await;
+            embeddings.clear();
+        }
+    }
+
+    /// Get cache statistics
+    pub async fn stats(&self) -> CacheStats {
+        let entries = self.entries.read().await;
+        CacheStats {
+            entries: entries.len(),
+            max_entries: self.config.max_entries,
+            default_ttl_secs: self.config.ttl_secs,
         }
     }
 }
@@ -476,9 +460,9 @@ impl CacheManager {
     }
 
     /// Invalidate caches for a file path
-    pub fn invalidate_path(&self, path: &str) {
-        self.tool_cache.invalidate_path(path);
-        self.llm_cache.invalidate_path(path);
+    pub async fn invalidate_path(&self, path: &str) {
+        self.tool_cache.invalidate_path(path).await;
+        self.llm_cache.invalidate_path(path).await;
     }
 }
 
@@ -492,16 +476,18 @@ impl Default for CacheManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_tool_cache_basic() {
+    #[tokio::test]
+    async fn test_tool_cache_basic() {
         let cache = ToolCache::new();
         let args = serde_json::json!({"path": "test.txt"});
 
-        assert!(cache.get("file_read", &args).is_none());
+        assert!(cache.get("file_read", &args).await.is_none());
 
-        cache.set("file_read", &args, serde_json::json!("content"));
+        cache
+            .set("file_read", &args, serde_json::json!("content"))
+            .await;
         assert_eq!(
-            cache.get("file_read", &args),
+            cache.get("file_read", &args).await,
             Some(serde_json::json!("content"))
         );
     }
@@ -560,12 +546,12 @@ mod tests {
         assert!(cost > 0.0);
     }
 
-    #[test]
-    fn test_llm_cache_lookup_and_store() {
+    #[tokio::test]
+    async fn test_llm_cache_lookup_and_store() {
         let cache = LlmCache::default();
 
         // Should return None for empty cache
-        let result = cache.lookup("test", &[0.1, 0.2, 0.3], 0);
+        let result = cache.lookup("test", &[0.1, 0.2, 0.3], 0).await;
         assert!(result.is_none());
 
         // Store an entry
@@ -582,18 +568,18 @@ mod tests {
             context_hash: 0,
             file_paths: vec![],
         };
-        cache.store(entry);
+        cache.store(entry).await;
 
         // Should find with exact match
-        let result = cache.lookup("test prompt", &[1.0, 0.0, 0.0], 0);
+        let result = cache.lookup("test prompt", &[1.0, 0.0, 0.0], 0).await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().response, "test response");
     }
 
-    #[test]
-    fn test_cache_manager_new() {
+    #[tokio::test]
+    async fn test_cache_manager_new() {
         let manager = CacheManager::default();
-        assert_eq!(manager.tool_cache.stats().entries, 0);
+        assert_eq!(manager.tool_cache.stats().await.entries, 0);
     }
 
     #[test]

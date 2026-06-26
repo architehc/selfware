@@ -868,7 +868,7 @@ impl Agent {
             }
 
             if input == "/stats" {
-                self.show_session_stats();
+                self.show_session_stats().await;
                 continue;
             }
 

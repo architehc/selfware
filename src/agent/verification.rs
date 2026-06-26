@@ -269,9 +269,11 @@ impl Agent {
     /// 3. **Only read-only tools used** — the task only read files, searched, or
     ///    queried information without making any changes. No code was modified,
     ///    so there is nothing to verify.
-    pub(super) fn should_skip_cargo_verification(&self) -> bool {
+    pub(super) async fn should_skip_cargo_verification(&self) -> bool {
         // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
-        if !super::current_project_root().join("Cargo.toml").exists() {
+        let cargo_toml_path = super::current_project_root().join("Cargo.toml");
+        let has_cargo_toml = tokio::fs::try_exists(&cargo_toml_path).await.unwrap_or(false);
+        if !has_cargo_toml {
             debug!(
                 "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
             );
@@ -462,7 +464,7 @@ impl Agent {
 
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
-    pub(super) fn check_completion_gate(&self) -> Option<String> {
+    pub(super) async fn check_completion_gate(&self) -> Option<String> {
         let context_target =
             (!self.current_task_context.is_empty()).then_some(self.current_task_context.as_str());
         let literal_target = self
@@ -492,7 +494,7 @@ impl Agent {
 
         if step_count < min_steps && !skip_min_steps_for_read_only {
             // Tailor the message: don't mention cargo for non-Rust tasks
-            let verification_hint = if self.should_skip_cargo_verification() {
+            let verification_hint = if self.should_skip_cargo_verification().await {
                 "Continue working: review your results and ensure the task is fully complete."
             } else {
                 "Continue working: verify your changes compile with cargo_check and pass tests with cargo_test."
@@ -593,7 +595,7 @@ impl Agent {
             // gate. Mutation-required tasks are handled by
             // mutation_completion_gate(), which is language-aware and requires
             // verification after the latest edit.
-            if self.should_skip_cargo_verification() {
+            if self.should_skip_cargo_verification().await {
                 debug!("Completion gate: bypassing cargo verification for non-Rust task");
                 return None;
             }
