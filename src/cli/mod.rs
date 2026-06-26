@@ -1450,7 +1450,7 @@ async fn handle_command(
                     return Ok(());
                 }
 
-                let result = daemon::evolve(evo_config, &repo_root);
+                let result = daemon::evolve(evo_config, &repo_root).await;
 
                 println!(
                     "\n   {} Evolution complete: {} generations, {} improvements",

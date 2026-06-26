@@ -205,11 +205,11 @@ fn write_template_config(template: &str) -> Result<()> {
 fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &str) -> Result<()> {
     use std::path::PathBuf;
 
-    let config_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from(".config"))
-        .join("selfware");
-    std::fs::create_dir_all(&config_dir)?;
-    let config_path = config_dir.join("config.toml");
+    // Write the workspace config to `./selfware.toml` so the loader finds it
+    // before falling back to the global config directory.
+    let config_path = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("selfware.toml");
 
     // Check if config already exists
     if config_path.exists() {

@@ -432,6 +432,23 @@ enum LineInput {
     Line(String),
 }
 
+/// RAII guard that disables raw mode on drop. Ensures the terminal is
+/// restored even if the code between enable/disable panics.
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enable() -> Result<Self> {
+        terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
 /// Read a line from stdin.  If the terminal is a TTY, briefly enter raw mode
 /// to detect an Esc keypress; otherwise fall back to a plain `read_line`.
 fn read_line_or_esc() -> Result<LineInput> {
@@ -445,10 +462,8 @@ fn read_line_or_esc() -> Result<LineInput> {
 
     // In a terminal: enter raw mode so we can detect Esc immediately, but
     // otherwise accumulate characters into a line buffer until Enter.
-    terminal::enable_raw_mode()?;
-    let result = read_line_raw();
-    let _ = terminal::disable_raw_mode();
-    result
+    let _guard = RawModeGuard::enable()?;
+    read_line_raw()
 }
 
 /// Raw-mode line reader that recognises Esc as a cancellation signal.

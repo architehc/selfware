@@ -42,7 +42,7 @@ pub struct EvolutionResult {
 }
 
 /// Run the evolution daemon
-pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
+pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
     let start = Instant::now();
     let mut hall_of_fame: Vec<GenerationWinner> = Vec::new();
     let mut generation: usize = 0;
@@ -137,7 +137,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
         // ─── Step 2: Generate hypotheses via agent swarm ───
         let llm_start = Instant::now();
         let hypotheses =
-            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root);
+            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root).await;
 
         log_event(
             repo_root,
@@ -474,7 +474,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════
 
-fn generate_hypotheses(
+async fn generate_hypotheses(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
@@ -485,13 +485,13 @@ fn generate_hypotheses(
 
     if use_micro_mode {
         log_phase("Micro mode: Using simplified prompts for small model");
-        generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
+        generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root).await
     } else {
-        generate_standard_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
+        generate_standard_hypotheses(config, telemetry_prompt, history_prompt, repo_root).await
     }
 }
 
-fn generate_standard_hypotheses(
+async fn generate_standard_hypotheses(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
@@ -506,7 +506,7 @@ fn generate_standard_hypotheses(
     let system_prompt = build_system_prompt(config.population_size);
     let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
 
-    match call_llm(&config.llm, &system_prompt, &user_prompt) {
+    match call_llm(&config.llm, &system_prompt, &user_prompt).await {
         Ok(response) => {
             log_phase(&format!(
                 "LLM response ({} chars): {}",
@@ -522,7 +522,7 @@ fn generate_standard_hypotheses(
     }
 }
 
-fn generate_micro_hypotheses(
+async fn generate_micro_hypotheses(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
@@ -559,7 +559,7 @@ fn generate_micro_hypotheses(
     let system_prompt = micro_mode::build_micro_system_prompt(micro_population);
     let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
 
-    match call_llm(&config.llm, &system_prompt, &user_prompt) {
+    match call_llm(&config.llm, &system_prompt, &user_prompt).await {
         Ok(response) => {
             log_phase(&format!(
                 "Micro mode: LLM response ({} chars)",
@@ -865,7 +865,7 @@ pub fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -
     prompt
 }
 
-fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+async fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
     let url = format!("{}/chat/completions", llm.endpoint.trim_end_matches('/'));
 
     let mut headers = reqwest::header::HeaderMap::new();
@@ -893,7 +893,7 @@ fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<S
         "chat_template_kwargs": {"enable_thinking": false},
     });
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
@@ -903,16 +903,18 @@ fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<S
         .headers(headers)
         .json(&body)
         .send()
+        .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().unwrap_or_default();
+        let body = resp.text().await.unwrap_or_default();
         return Err(format!("LLM API returned {}: {}", status, body));
     }
 
     let json: serde_json::Value = resp
         .json()
+        .await
         .map_err(|e| format!("Failed to parse LLM response JSON: {}", e))?;
 
     json["choices"][0]["message"]["content"]
