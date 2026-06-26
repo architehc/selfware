@@ -39,9 +39,20 @@ def classify_error(instance: dict) -> str:
     return "test failures"
 
 
+def repo_from_instance_id(iid: str) -> str:
+    """Extract a repo slug from an instance_id like instance_org__repo-...."""
+    if iid.startswith("instance_"):
+        rest = iid[len("instance_") :]
+        # Repo slug ends at the first hyphen (the one before the commit hash).
+        if "-" in rest:
+            return rest.split("-", 1)[0]
+    return "unknown"
+
+
 def main() -> None:
     rows = []
     global_error_counter: Counter = Counter()
+    repo_failure_counter: Counter = Counter()
     test_failure_counter: Counter = Counter()
     model_results: list[dict] = []
     failure_examples: dict[str, list[tuple[str, str]]] = defaultdict(list)
@@ -55,13 +66,14 @@ def main() -> None:
 
         total = report.get("total_instances", 0)
         completed = report.get("completed_instances", 0)
+        errored = report.get("errored_instances", total - completed)
         overall_pass = report.get("overall_passed_instances", 0)
         overall_rate = report.get("overall_pass_rate", 0.0)
         ftp_rate = report.get("fail_to_pass_rate", 0.0)
         ptp_rate = report.get("pass_to_pass_rate", 0.0)
 
         rows.append(
-            f"| {model_name} | {total} | {completed} | {overall_pass}/{completed} "
+            f"| {model_name} | {total} | {completed} | {errored} | {overall_pass}/{completed} "
             f"({overall_rate:.1%}) | {ftp_rate:.1%} | {ptp_rate:.1%} |"
         )
 
@@ -78,6 +90,8 @@ def main() -> None:
             err = classify_error(inst)
             global_error_counter[err] += 1
             if err == "test failures":
+                repo = repo_from_instance_id(inst["instance_id"])
+                repo_failure_counter[repo] += 1
                 for detail in inst.get("fail_to_pass_details", []):
                     if not detail.get("passed"):
                         test_name = detail.get("test", "unknown")
@@ -105,8 +119,8 @@ def main() -> None:
         "",
         "## Per-Model Results",
         "",
-        "| Model | Total | Completed | Overall Pass | Fail-to-Pass | Pass-to-Pass |",
-        "|-------|-------|-----------|--------------|--------------|--------------|",
+        "| Model | Total | Completed | Errored | Overall Pass | Fail-to-Pass | Pass-to-Pass |",
+        "|-------|-------|-----------|---------|--------------|--------------|--------------|",
     ]
     lines.extend(rows)
     lines.append("")
@@ -129,19 +143,41 @@ def main() -> None:
             "",
         ]
     )
-    top_errors = global_error_counter.most_common(3)
-    for idx, (err, count) in enumerate(top_errors, start=1):
+    # Build three concrete categories: NodeBB test failures, qutebrowser test failures, empty patches.
+    top3 = [
+        ("NodeBB test failures", repo_failure_counter.get("NodeBB__NodeBB", 0)),
+        ("qutebrowser test failures", repo_failure_counter.get("qutebrowser__qutebrowser", 0)),
+        ("empty patch", global_error_counter.get("empty patch", 0)),
+    ]
+    for idx, (err, count) in enumerate(top3, start=1):
         lines.append(f"### {idx}. {err} ({count} instances)")
         lines.append("")
-        if err == "test failures":
-            lines.append("Most frequently failing tests:")
+        if "test failures" in err:
+            repo_key = "NodeBB__NodeBB" if "NodeBB" in err else "qutebrowser__qutebrowser"
+            lines.append("Most frequently failing tests in this repo:")
             lines.append("")
             lines.append("| Failing Test | Count | Example Model / Instance |")
             lines.append("|--------------|-------|--------------------------|")
-            for test_name, tcnt in test_failure_counter.most_common(5):
-                examples = failure_examples.get(test_name, [])
+            repo_tests = Counter()
+            repo_examples: dict[str, list[tuple[str, str]]] = defaultdict(list)
+            for model in MODELS:
+                model_name = model.replace("runs10_", "")
+                report = load_report(ROOT / model) or {}
+                for inst in report.get("per_instance", []):
+                    if repo_from_instance_id(inst["instance_id"]) != repo_key:
+                        continue
+                    if classify_error(inst) != "test failures":
+                        continue
+                    for detail in inst.get("fail_to_pass_details", []):
+                        if not detail.get("passed"):
+                            tname = detail.get("test", "unknown")
+                            repo_tests[tname] += 1
+                            if len(repo_examples[tname]) < 3:
+                                repo_examples[tname].append((model_name, inst["instance_id"]))
+            for tname, tcnt in repo_tests.most_common(5):
+                examples = repo_examples.get(tname, [])
                 example_str = "; ".join(f"{m}: {iid}" for m, iid in examples[:2])
-                lines.append(f"| `{test_name}` | {tcnt} | {example_str} |")
+                lines.append(f"| `{tname}` | {tcnt} | {example_str} |")
             lines.append("")
         else:
             examples = [
@@ -150,7 +186,7 @@ def main() -> None:
                 for inst in (
                     load_report(ROOT / model) or {}
                 ).get("per_instance", [])
-                if classify_error(inst) == err
+                if classify_error(inst) == "empty patch"
             ][:3]
             lines.append("Example occurrences:")
             lines.append("")
