@@ -2328,7 +2328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gate_bypassed_when_no_cargo_toml_in_cwd() {
+    async fn test_gate_accepts_non_rust_verification() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let mut config = test_config(format!("{}/v1", server.url()));
         config.agent.min_completion_steps = 0;
@@ -2349,9 +2349,8 @@ mod tests {
         }
         let _guard = CwdGuard(original_dir);
 
-        // Task with file_write in a non-Rust project — should bypass gate.
-        // The completion gate scans agent.messages for file_write tool calls,
-        // so we must add one there in addition to the checkpoint.
+        // Task with file_write in a non-Rust project — a successful test/build
+        // command (e.g. pytest) should satisfy the verification gate.
         agent.messages.push(fake_file_write_message());
 
         let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
@@ -2366,12 +2365,20 @@ mod tests {
             success: true,
             duration_ms: Some(50),
         });
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: r#"{"command":"pytest"}"#.to_string(),
+            result: Some("passed".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
         agent.current_checkpoint = Some(checkpoint);
 
         let result = agent.check_completion_gate().await;
         assert!(
             result.is_none(),
-            "Non-Rust project (no Cargo.toml) should bypass cargo verification, got: {:?}",
+            "Non-Rust verification (pytest) should satisfy the completion gate, got: {:?}",
             result,
         );
 

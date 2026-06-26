@@ -613,7 +613,7 @@ impl Agent {
                     return Some(
                         "You have not written or edited ANY files yet. The task requires you to \
                          write code. Use file_write or file_edit to create the implementation, \
-                         then run cargo test to verify. Do NOT give up or say context is insufficient \
+                         then run the relevant test/build command to verify. Do NOT give up or say context is insufficient \
                          — read the files and start coding."
                             .to_string(),
                     );
@@ -622,8 +622,26 @@ impl Agent {
         }
 
         if self.config.agent.require_verification_before_completion {
-            let has_verification = self.has_successful_verification_tool_call();
-            if !has_verification {
+            // Only require a verification tool call when the task is not
+            // exclusively using read-only / non-code tools (browser, vision,
+            // HTTP, desktop control, etc.). If no checkpoint exists yet, or if
+            // any code/state-changing tool was used, verification is required.
+            let all_calls_are_non_code_or_read_only = self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| {
+                    !cp.tool_calls.is_empty()
+                        && cp.tool_calls.iter().all(|tc| {
+                            Self::READ_ONLY_TOOLS.contains(&tc.tool_name.as_str())
+                                || Self::NON_RUST_TOOL_PREFIXES
+                                    .iter()
+                                    .any(|prefix| tc.tool_name.starts_with(prefix))
+                        })
+                })
+                .unwrap_or(false);
+
+            if !all_calls_are_non_code_or_read_only && !self.has_successful_verification_tool_call()
+            {
                 return Some(
                     "You must run at least one verification tool (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
                      successfully before completing the task. Please verify your work now."
