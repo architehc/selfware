@@ -373,7 +373,7 @@ pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
         "file_delete" => ToolMetadata::file_destructive(),
 
         // Search operations (read-only)
-        "grep_search" | "glob_find" | "symbol_search" => ToolMetadata::read_only(),
+        "grep_search" | "glob_find" | "symbol_search" | "tool_search" => ToolMetadata::read_only(),
 
         // Shell execution
         "shell_exec" | "pty_shell" => ToolMetadata::shell(),
@@ -568,6 +568,11 @@ mod tests {
         assert_eq!(
             default_tool_metadata("shell_exec").risk_level,
             RiskLevel::High
+        );
+        assert!(default_tool_metadata("tool_search").read_only);
+        assert_eq!(
+            default_tool_metadata("tool_search").risk_level,
+            RiskLevel::Low
         );
     }
 

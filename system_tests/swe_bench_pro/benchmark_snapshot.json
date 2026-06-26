@@ -1,6 +1,196 @@
 {
-  "generated_at": "2026-06-24T05:43:10.519653+00:00",
+  "generated_at": "2026-06-24T19:22:15.033645+00:00",
   "runs": [
+    {
+      "model": "gpt-5-mini",
+      "sample_size": 50,
+      "predictions": 46,
+      "completed": 12,
+      "passed": 1,
+      "pass_rate": 0.08333333333333333,
+      "fail_to_pass": [
+        3,
+        135
+      ],
+      "pass_to_pass": [
+        268,
+        413
+      ],
+      "estimated_cost_usd": 0.237,
+      "elapsed_hours": 8.3,
+      "instances_per_hour": 6.02
+    },
+    {
+      "model": "glm-5.2-nitro",
+      "sample_size": 50,
+      "predictions": 46,
+      "completed": 46,
+      "passed": 3,
+      "pass_rate": 0.06521739130434782,
+      "fail_to_pass": [
+        4,
+        285
+      ],
+      "pass_to_pass": [
+        5754,
+        5754
+      ],
+      "estimated_cost_usd": 0.4278,
+      "elapsed_hours": 7.17,
+      "instances_per_hour": 6.97
+    },
+    {
+      "model": "gemini-3.5-flash",
+      "sample_size": 50,
+      "predictions": 45,
+      "completed": 45,
+      "passed": 1,
+      "pass_rate": 0.022222222222222223,
+      "fail_to_pass": [
+        9,
+        284
+      ],
+      "pass_to_pass": [
+        5754,
+        5754
+      ],
+      "estimated_cost_usd": 0.3172,
+      "elapsed_hours": 7.07,
+      "instances_per_hour": 7.07
+    },
+    {
+      "model": "gemini-3.5-flash-nitro",
+      "sample_size": 50,
+      "predictions": 46,
+      "completed": 46,
+      "passed": 1,
+      "pass_rate": 0.021739130434782608,
+      "fail_to_pass": [
+        9,
+        285
+      ],
+      "pass_to_pass": [
+        5705,
+        5754
+      ],
+      "estimated_cost_usd": 0.3243,
+      "elapsed_hours": 7.12,
+      "instances_per_hour": 7.02
+    },
+    {
+      "model": "kimi-k2.6",
+      "sample_size": 50,
+      "predictions": 45,
+      "completed": 1,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        1
+      ],
+      "pass_to_pass": [
+        0,
+        0
+      ],
+      "estimated_cost_usd": 0.0109,
+      "elapsed_hours": 15.32,
+      "instances_per_hour": 3.26
+    },
+    {
+      "model": "lfm-2.5-1.2b-thinking-free-sweap-v2",
+      "sample_size": 10,
+      "predictions": 10,
+      "completed": 0,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        0
+      ],
+      "pass_to_pass": [
+        0,
+        0
+      ],
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 38.46
+    },
+    {
+      "model": "gemma-3-12b",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        108
+      ],
+      "pass_to_pass": [
+        922,
+        922
+      ],
+      "estimated_cost_usd": 0.0175,
+      "elapsed_hours": 0.33,
+      "instances_per_hour": 30.3
+    },
+    {
+      "model": "granite-4.1-8b",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        108
+      ],
+      "pass_to_pass": [
+        922,
+        922
+      ],
+      "estimated_cost_usd": 0.014,
+      "elapsed_hours": 0.69,
+      "instances_per_hour": 14.49
+    },
+    {
+      "model": "llama-4-maverick",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        108
+      ],
+      "pass_to_pass": [
+        922,
+        922
+      ],
+      "estimated_cost_usd": 0.0662,
+      "elapsed_hours": 1.55,
+      "instances_per_hour": 6.45
+    },
+    {
+      "model": "llama-4-scout",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        108
+      ],
+      "pass_to_pass": [
+        922,
+        922
+      ],
+      "estimated_cost_usd": 0.0351,
+      "elapsed_hours": 0.25,
+      "instances_per_hour": 40.0
+    },
     {
       "model": "mistral-large-3",
       "sample_size": 10,
@@ -21,72 +211,262 @@
       "instances_per_hour": 111.11
     },
     {
-      "model": "glm-5.2-nitro",
-      "sample_size": 50,
-      "predictions": 28,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.2604,
+      "model": "mistral-nemo",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        108
+      ],
+      "pass_to_pass": [
+        870,
+        922
+      ],
+      "estimated_cost_usd": 0.0049,
+      "elapsed_hours": 0.51,
+      "instances_per_hour": 19.61
+    },
+    {
+      "model": "qwen3-235b-a22b",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        18,
+        108
+      ],
+      "pass_to_pass": [
+        921,
+        922
+      ],
+      "estimated_cost_usd": 0.1925,
+      "elapsed_hours": 2.1,
+      "instances_per_hour": 4.76
+    },
+    {
+      "model": "qwen3-32b-v2",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 2,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        1,
+        7
+      ],
+      "pass_to_pass": [
+        453,
+        459
+      ],
+      "estimated_cost_usd": null,
       "elapsed_hours": null,
       "instances_per_hour": null
     },
     {
-      "model": "gemini-3.5-flash",
+      "model": "xiaomi-mimo-v2.5",
+      "sample_size": 10,
+      "predictions": 9,
+      "completed": 9,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        18,
+        108
+      ],
+      "pass_to_pass": [
+        922,
+        922
+      ],
+      "estimated_cost_usd": 0.0391,
+      "elapsed_hours": 2.39,
+      "instances_per_hour": 4.18
+    },
+    {
+      "model": "deepseek-v3.2",
+      "sample_size": 10,
+      "predictions": 8,
+      "completed": 8,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        104
+      ],
+      "pass_to_pass": [
+        884,
+        884
+      ],
+      "estimated_cost_usd": 0.0494,
+      "elapsed_hours": 2.22,
+      "instances_per_hour": 4.5
+    },
+    {
+      "model": "ling-2.6-flash",
+      "sample_size": 10,
+      "predictions": 8,
+      "completed": 8,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        76
+      ],
+      "pass_to_pass": [
+        922,
+        922
+      ],
+      "estimated_cost_usd": 0.0031,
+      "elapsed_hours": 0.53,
+      "instances_per_hour": 18.87
+    },
+    {
+      "model": "llama-3.1-8b",
+      "sample_size": 10,
+      "predictions": 7,
+      "completed": 7,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        72
+      ],
+      "pass_to_pass": [
+        740,
+        740
+      ],
+      "estimated_cost_usd": 0.0038,
+      "elapsed_hours": 1.63,
+      "instances_per_hour": 6.13
+    },
+    {
+      "model": "qwen2.5-7b",
+      "sample_size": 10,
+      "predictions": 7,
+      "completed": 7,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        72
+      ],
+      "pass_to_pass": [
+        751,
+        751
+      ],
+      "estimated_cost_usd": 0.0098,
+      "elapsed_hours": 1.56,
+      "instances_per_hour": 6.41
+    },
+    {
+      "model": "qwen3-32b",
+      "sample_size": 10,
+      "predictions": 7,
+      "completed": 7,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        72
+      ],
+      "pass_to_pass": [
+        723,
+        884
+      ],
+      "estimated_cost_usd": 0.0241,
+      "elapsed_hours": 3.52,
+      "instances_per_hour": 2.84
+    },
+    {
+      "model": "nova-lite",
+      "sample_size": 10,
+      "predictions": 6,
+      "completed": 6,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "fail_to_pass": [
+        0,
+        57
+      ],
+      "pass_to_pass": [
+        688,
+        688
+      ],
+      "estimated_cost_usd": 0.0169,
+      "elapsed_hours": 1.28,
+      "instances_per_hour": 7.81
+    },
+    {
+      "model": "glm-5.2",
       "sample_size": 50,
-      "predictions": 24,
+      "predictions": 32,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.1692,
-      "elapsed_hours": 0.2,
-      "instances_per_hour": 250.0
+      "estimated_cost_usd": 0.2976,
+      "elapsed_hours": 0.18,
+      "instances_per_hour": 277.78
     },
     {
-      "model": "gpt-5-mini",
+      "model": "gpt-5-mini-v2",
       "sample_size": 50,
-      "predictions": 23,
+      "predictions": 15,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.4542,
-      "elapsed_hours": 0.21,
-      "instances_per_hour": 238.1
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
     },
     {
-      "model": "gemini-3.5-flash-nitro",
+      "model": "gemma-4-26b-a4b-free-sweap-v2",
       "sample_size": 50,
-      "predictions": 21,
+      "predictions": 12,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.148,
-      "elapsed_hours": null,
-      "instances_per_hour": null
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
     },
     {
-      "model": "kimi-k2.6",
+      "model": "deepseek-v4-flash-sweap-v2",
       "sample_size": 50,
+      "predictions": 11,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "poolside-laguna-xs.2-free-sweap-v2",
+      "sample_size": 10,
       "predictions": 10,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.109,
-      "elapsed_hours": 0.23,
-      "instances_per_hour": 217.39
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 38.46
     },
     {
-      "model": "glm-5.2",
+      "model": "amazon-nova-lite-sweap-v2",
       "sample_size": 50,
       "predictions": 9,
       "completed": null,
@@ -94,12 +474,51 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0837,
-      "elapsed_hours": 0.18,
-      "instances_per_hour": 277.78
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
     },
     {
-      "model": "llama-4-scout",
+      "model": "qwen3-coder-free-sweap-v2",
+      "sample_size": 50,
+      "predictions": 9,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "seed-2.0-mini-sweap-v2",
+      "sample_size": 50,
+      "predictions": 9,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "qwen3.5-27b-sweap-v2",
+      "sample_size": 50,
+      "predictions": 6,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
+    },
+    {
+      "model": "gemma-4-26b-a4b-free-v3",
       "sample_size": 10,
       "predictions": 5,
       "completed": null,
@@ -107,64 +526,64 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0195,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
     },
     {
-      "model": "xiaomi-mimo-v2.5",
-      "sample_size": 10,
+      "model": "gemma-4-31b-sweap-v2",
+      "sample_size": 50,
+      "predictions": 5,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "qwen3-coder-30b-a3b-instruct-sweap-v2",
+      "sample_size": 50,
+      "predictions": 5,
+      "completed": null,
+      "passed": null,
+      "pass_rate": null,
+      "fail_to_pass": null,
+      "pass_to_pass": null,
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
+    },
+    {
+      "model": "qwen3.5-flash-sweap-v2",
+      "sample_size": 50,
       "predictions": 4,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0174,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
     },
     {
-      "model": "gemma-3-12b",
-      "sample_size": 10,
+      "model": "qwen3.5-9b-sweap-v2",
+      "sample_size": 50,
       "predictions": 3,
       "completed": null,
       "passed": null,
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0058,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 192.31
     },
     {
-      "model": "granite-4.1-8b",
-      "sample_size": 10,
-      "predictions": 3,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0047,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "llama-4-maverick",
-      "sample_size": 10,
-      "predictions": 3,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0221,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "ling-2.6-flash",
+      "model": "cohere-north-mini-code-free-sweap-v2",
       "sample_size": 10,
       "predictions": 2,
       "completed": null,
@@ -172,38 +591,12 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0008,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": 0.26,
+      "instances_per_hour": 38.46
     },
     {
-      "model": "mistral-nemo",
-      "sample_size": 10,
-      "predictions": 2,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0011,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "qwen3-235b-a22b",
-      "sample_size": 10,
-      "predictions": 2,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0428,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "llama-3.1-8b",
+      "model": "qwen2.5-7b-v2",
       "sample_size": 10,
       "predictions": 1,
       "completed": null,
@@ -211,12 +604,12 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0005,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
     },
     {
-      "model": "deepseek-v3.2",
+      "model": "gemma-4-12b-v2",
       "sample_size": 10,
       "predictions": 0,
       "completed": null,
@@ -224,12 +617,12 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
     },
     {
-      "model": "nova-lite",
+      "model": "gemma-4-26b-a4b-free-v2",
       "sample_size": 10,
       "predictions": 0,
       "completed": null,
@@ -237,35 +630,9 @@
       "pass_rate": null,
       "fail_to_pass": null,
       "pass_to_pass": null,
-      "estimated_cost_usd": 0.0,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "qwen2.5-7b",
-      "sample_size": 10,
-      "predictions": 0,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
-    },
-    {
-      "model": "qwen3-32b",
-      "sample_size": 10,
-      "predictions": 0,
-      "completed": null,
-      "passed": null,
-      "pass_rate": null,
-      "fail_to_pass": null,
-      "pass_to_pass": null,
-      "estimated_cost_usd": 0.0,
-      "elapsed_hours": 0.01,
-      "instances_per_hour": 1000.0
+      "estimated_cost_usd": null,
+      "elapsed_hours": null,
+      "instances_per_hour": null
     }
   ]
 }

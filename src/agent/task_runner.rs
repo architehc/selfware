@@ -169,7 +169,7 @@ impl Agent {
 
         // Initialize hierarchical context map: set modality + build L1 tree.
         self.context_map.set_modality_from_task(&task_description);
-        self.build_l1_project_tree();
+        self.build_l1_project_tree().await;
 
         // For Review modality: auto-load L2 skeletons so the model
         // doesn't need to read 100+ files one by one.
@@ -177,7 +177,7 @@ impl Agent {
             self.context_map.modality(),
             Some(super::context_map::ContextModality::Review)
         ) {
-            self.auto_load_skeletons_for_review();
+            self.auto_load_skeletons_for_review().await;
         }
 
         // Inject task-focused preamble into the system prompt itself
@@ -402,7 +402,7 @@ impl Agent {
     /// Build a progress injection message for periodic budget awareness.
     /// Returns `Some(message)` every 5 steps to remind the agent of budget and status.
     fn build_progress_injection(&self, step: usize) -> Option<String> {
-        if step == 0 || !(step + 1).is_multiple_of(5) {
+        if step == 0 || (step + 1) % 5 != 0 {
             return None;
         }
 
@@ -568,7 +568,7 @@ impl Agent {
                     self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
                     self.finalize_failure_mode(RunOutcome::Failed {
                         reason: reason.clone(),
-                    });
+                    }).await;
                     anyhow::bail!("{}", reason);
                 }
             }
@@ -580,7 +580,7 @@ impl Agent {
                     self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
                     self.finalize_failure_mode(RunOutcome::Failed {
                         reason: reason.clone(),
-                    });
+                    }).await;
                     anyhow::bail!("{}", reason);
                 }
             }
@@ -654,7 +654,7 @@ impl Agent {
                         Ok(PlannedToolExecution::Completed) => {
                             record_state_transition("Executing", "Completed");
                             self.record_task_outcome(task_description, Outcome::Success, None);
-                            let fm = self.finalize_failure_mode(RunOutcome::NaturalCompletion);
+                            let fm = self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
                             if mode == LoopMode::NewTask {
                                 self.emit_event(AgentEvent::Completed {
                                     message: format!(
@@ -762,7 +762,7 @@ impl Agent {
                                 // written to a file instead of accepted as text.
                                 if super::execution::contains_unwritten_code(&answer) {
                                     if let Some((path, code)) =
-                                        super::execution::extract_code_and_path(&answer)
+                                        super::execution::extract_code_and_path(&answer).await
                                     {
                                         info!("Synthesis produced code — auto-writing to {}", path);
                                         let calls: Vec<super::execution::CollectedToolCall> =
@@ -799,7 +799,7 @@ impl Agent {
                                     progress.complete_phase();
                                 }
                                 self.record_task_outcome(task_description, Outcome::Success, None);
-                                self.finalize_failure_mode(RunOutcome::NaturalCompletion);
+                                self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -830,7 +830,7 @@ impl Agent {
                                     progress.complete_phase();
                                 }
                                 self.record_task_outcome(task_description, Outcome::Success, None);
-                                self.finalize_failure_mode(RunOutcome::NaturalCompletion);
+                                self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -934,8 +934,9 @@ impl Agent {
                     {
                         if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
                             recovery_attempts += 1;
-                            recovered =
-                                self.try_self_healing_recovery(&error, "run_execution_loop");
+                            recovered = self
+                                .try_self_healing_recovery(&error, "run_execution_loop")
+                                .await;
                         } else {
                             warn!(
                                 "Auto-recovery attempts exhausted ({})",
@@ -1051,7 +1052,7 @@ impl Agent {
                         progress.complete_phase();
                     }
                     self.record_task_outcome(task_description, Outcome::Success, Some("[green]"));
-                    self.finalize_failure_mode(RunOutcome::NaturalCompletion);
+                    self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -1065,7 +1066,7 @@ impl Agent {
 
                     let fm = self.finalize_failure_mode(RunOutcome::Failed {
                         reason: reason.clone(),
-                    });
+                    }).await;
                     if mode == LoopMode::NewTask {
                         self.emit_event(AgentEvent::Error {
                             message: format!("Task aborted ({}): {}", fm.kind.tag(), fm.evidence),
@@ -1094,14 +1095,14 @@ impl Agent {
             self.loop_control.current_step()
         );
         self.record_task_outcome(task_description, Outcome::Partial, Some(&detail));
-        self.finalize_failure_mode(RunOutcome::Partial);
+        self.finalize_failure_mode(RunOutcome::Partial).await;
         Ok(())
     }
 
     /// Build a `FailureMode` for the current run state and surface it on the
     /// CLI. Also writes a `failure_mode.json` artifact next to the agent's
     /// checkpoint directory (best-effort; never fails the run).
-    fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
+    async fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());
         // Emit a structured progress event so non-TUI consumers can see the
@@ -1119,7 +1120,7 @@ impl Agent {
         cli_println!("{}", mode.cli_banner());
         // Best-effort artifact write so the SWE-bench Pro harness can pick it up.
         if let Some(dir) = self.failure_mode_artifact_dir() {
-            if let Err(e) = mode.write_artifact(&dir) {
+            if let Err(e) = mode.write_artifact(&dir).await {
                 warn!(
                     "Failed to write failure_mode.json to {}: {}",
                     dir.display(),
@@ -1211,7 +1212,7 @@ mod tests {
         max_iterations: usize,
         has_verification: bool,
     ) -> Option<String> {
-        if step == 0 || !(step + 1).is_multiple_of(5) {
+        if step == 0 || (step + 1) % 5 != 0 {
             return None;
         }
         let pct = ((step + 1) as f64 / max_iterations as f64 * 100.0).min(100.0);

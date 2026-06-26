@@ -69,6 +69,46 @@ NON_SOURCE_EXTENSIONS: frozenset[str] = frozenset({
     ".sum",
 })
 
+def _format_test_command(language: str, tests: list[str]) -> str:
+    """Return a sensible test command for the given language and test targets.
+
+    ``tests`` comes from ``selected_test_files_to_run``.  For Go it contains
+    test function names, so we build a ``-run`` regex.  For Python/JS it
+    usually contains file paths.
+    """
+    if not tests:
+        if language == "python":
+            return "python -m pytest"
+        if language == "go":
+            return "go test ./..."
+        if language in ("javascript", "typescript"):
+            return "npm test"
+        return "run the relevant test suite"
+
+    if language == "python":
+        return f"python -m pytest {' '.join(tests)}"
+
+    if language == "go":
+        # ``tests`` are test names; collapse to top-level test roots so the
+        # regex does not become enormous.
+        roots: list[str] = []
+        seen_roots: set[str] = set()
+        for t in tests:
+            root = t.split("/")[0].split("#")[0].strip()
+            if root and root not in seen_roots:
+                seen_roots.add(root)
+                roots.append(root)
+        if not roots:
+            return "go test ./..."
+        run_re = "|".join(re.escape(r) for r in roots)
+        return f"go test -run '{run_re}' ./..."
+
+    if language in ("javascript", "typescript"):
+        return f"npm test -- {' '.join(tests)}"
+
+    return "run the relevant test suite"
+
+
 # English stopwords plus very common programming words that are poor search
 # signals on their own.
 _STOPWORDS: frozenset[str] = frozenset({
@@ -496,6 +536,160 @@ def _find_function_definitions(
     ]
 
 
+def _is_local_source(rel: Path) -> bool:
+    """True for files the harness usually considers editable source."""
+    name = rel.name.lower()
+    if name == "changelog.md":
+        return False
+    if any(name.endswith(ext) for ext in NON_SOURCE_EXTENSIONS):
+        return False
+    return True
+
+
+def _extract_local_imports(repo_path: Path, rel: str) -> list[str]:
+    """Return repo-relative paths imported/required by ``rel`` in the same project.
+
+    This is intentionally language-agnostic and regex-based.  It catches:
+      * Go:      import "github.com/org/repo/lib/foo"
+      * Python:  from . import foo / from pkg.bar import baz
+      * JS/TS:   import ... from './foo' / require('./foo')
+    Only imports that map to an existing file under ``repo_path`` are returned.
+    """
+    path = repo_path / rel
+    if not path.is_file():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    rel_path = Path(rel)
+    rel_dir = rel_path.parent
+    found: list[str] = []
+
+    # Go imports.
+    for m in re.finditer(r'import\s+(?:\([^)]*\)|"([^"]+)")', text, re.DOTALL):
+        raw = (m.group(1) or "").strip()
+        if not raw:
+            # Multi-line import block.
+            block = m.group(0)
+            for qm in re.finditer(r'"([^"]+)"', block):
+                raw = qm.group(1)
+                if raw:
+                    found.extend(_resolve_import_path(repo_path, raw))
+        else:
+            found.extend(_resolve_import_path(repo_path, raw))
+
+    # Python relative imports.
+    for m in re.finditer(
+        r'^(?:from\s+([\w.]+)\s+import|import\s+([\w.]+))',
+        text,
+        re.MULTILINE,
+    ):
+        mod = (m.group(1) or m.group(2) or "").strip()
+        if not mod or mod.startswith(("os", "sys", "typing", "collections", "json", "re", "math", "random", "datetime", "urllib", "http", "logging", "pathlib", "subprocess")):
+            continue
+        found.extend(_resolve_python_import(repo_path, rel_dir, mod))
+
+    # JS/TS local imports.
+    for m in re.finditer(
+        r'(?:import\s+.*?\s+from\s+|require\s*\(\s*)["\'](\.[^"\']+)["\']',
+        text,
+    ):
+        raw = m.group(1)
+        if raw:
+            found.extend(_resolve_js_import(repo_path, rel_dir, raw))
+
+    return found
+
+
+def _resolve_import_path(repo_path: Path, imp: str) -> list[str]:
+    """Map a Go-style import path to a repo file path."""
+    # If the import path ends with the repo name or starts with the module path,
+    # try to find the file by stripping module prefix and appending .go.
+    parts = imp.strip('"').split("/")
+    candidates: list[Path] = []
+    # Try every suffix of the import path as a relative path.
+    for i in range(len(parts)):
+        rel = "/".join(parts[i:])
+        for suffix in (".go", "/index.go", ""):
+            p = repo_path / (rel + suffix)
+            if p.is_file():
+                candidates.append(p)
+    return [c.relative_to(repo_path).as_posix() for c in candidates]
+
+
+def _resolve_python_import(repo_path: Path, rel_dir: Path, mod: str) -> list[str]:
+    """Map a Python module string to repo file path(s)."""
+    parts = mod.split(".")
+    # Absolute package imports: try from repo root.
+    candidates: list[Path] = []
+    for base in (repo_path, repo_path / rel_dir):
+        p = base / ("/".join(parts) + ".py")
+        if p.is_file():
+            candidates.append(p)
+        p_init = base / "/".join(parts) / "__init__.py"
+        if p_init.is_file():
+            candidates.append(p_init)
+    return [c.relative_to(repo_path).as_posix() for c in candidates]
+
+
+def _resolve_js_import(repo_path: Path, rel_dir: Path, raw: str) -> list[str]:
+    """Map a JS/TS relative import to repo file path(s)."""
+    base = (repo_path / rel_dir / raw).resolve()
+    candidates: list[Path] = []
+    for suffix in ("", ".js", ".ts", ".jsx", ".tsx", "/index.js", "/index.ts"):
+        p = Path(str(base) + suffix)
+        if p.is_file():
+            candidates.append(p)
+    return [c.relative_to(repo_path).as_posix() for c in candidates]
+
+
+def _cross_file_signal(
+    repo_path: Path,
+    ranked: list[str],
+    tokens: list[str],
+    exclude: set[str],
+    top_k: int,
+) -> list[str]:
+    """Extend the ranked list with second-degree neighbours of top files.
+
+    Files imported by the top-ranked files are likely helpers or callers that
+    also need a small change for multi-file fixes.  They are added after the
+    original ranking so they do not drown out the primary files.
+    """
+    if not ranked or not tokens:
+        return ranked
+
+    existing = set(ranked)
+    neighbours: list[str] = []
+    for rel in ranked[:10]:
+        for nb in _extract_local_imports(repo_path, rel):
+            if nb in existing:
+                continue
+            rel_path = Path(nb)
+            if any(part in exclude for part in rel_path.parts):
+                continue
+            if not _is_local_source(rel_path):
+                continue
+            neighbours.append(nb)
+            existing.add(nb)
+
+    # Score neighbours by problem-statement token matches so the most relevant
+    # neighbours rise to the top of the appended group.
+    regexes = [re.compile(r"\b" + re.escape(t) + r"\b", re.IGNORECASE) for t in tokens]
+    scores: dict[str, float] = {}
+    for nb in neighbours:
+        try:
+            text = (repo_path / nb).read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        scores[nb] = sum(1 for rx in regexes for _ in rx.finditer(text))
+
+    ordered_neighbours = sorted(scores, key=lambda x: scores[x], reverse=True)
+    return ranked + ordered_neighbours[: max(0, top_k - len(ranked))]
+
+
 def rank_files_by_relevance(
     repo_path: str | Path,
     problem_statement: str,
@@ -510,6 +704,8 @@ def rank_files_by_relevance(
     available; otherwise a pure-Python scan is used as a fallback.
     Test names and strong identifiers that name a defined function are promoted
     to the top so the model sees the actual implementation it needs to change.
+    Second-degree neighbours (imports of the top files) are appended so
+    cross-file fixes are not filtered out.
     """
     repo_path = Path(repo_path)
     if not repo_path.is_dir():
@@ -554,6 +750,9 @@ def rank_files_by_relevance(
         if f not in seen:
             seen.add(f)
             combined.append(f)
+
+    # Append second-degree neighbours so multi-file fixes keep their context.
+    combined = _cross_file_signal(repo_path, combined, tokens, exclude, top_k)
     return combined[:top_k]
 
 
@@ -578,6 +777,7 @@ def _extract_relevant_windows(
     max_lines: int = 300,
     window: int = 40,
     required_line: int | None = None,
+    include_line_numbers: bool = True,
 ) -> str:
     """Extract context windows around occurrences of ``tokens``.
 
@@ -585,13 +785,18 @@ def _extract_relevant_windows(
     windows are merged and scored by the number of *distinct* tokens they
     contain, so a single repeated token (e.g. ``BadParameter``) cannot drown
     out the function definition that actually needs to change.  Line numbers
-    are included as a left-hand margin so the model can emit accurate hunk
-    headers.
+    are included as a left-hand margin by default; agentless prompts disable
+    them so SEARCH blocks copy source text exactly.
     """
+    def _fmt(idx: int, line: str) -> str:
+        if include_line_numbers:
+            return f"{idx + 1:5d} | {line}"
+        return line
+
     if not tokens:
         snippet_lines = lines[:max_lines]
         return "\n".join(
-            f"{i + 1:5d} | {line}" for i, line in enumerate(snippet_lines)
+            _fmt(i, line) for i, line in enumerate(snippet_lines)
         )
 
     token_regexes = [
@@ -609,7 +814,7 @@ def _extract_relevant_windows(
     if not events:
         snippet_lines = lines[:max_lines]
         return "\n".join(
-            f"{i + 1:5d} | {line}" for i, line in enumerate(snippet_lines)
+            _fmt(i, line) for i, line in enumerate(snippet_lines)
         )
 
     events.sort(key=lambda x: x[0])
@@ -705,9 +910,10 @@ def _extract_relevant_windows(
 
     out: list[str] = []
     for start, end, _ in merged:
-        out.append(f"// --- lines {start + 1}-{end + 1} ---")
+        if include_line_numbers:
+            out.append(f"// --- lines {start + 1}-{end + 1} ---")
         for i in range(start, end + 1):
-            out.append(f"{i + 1:5d} | {lines[i]}")
+            out.append(_fmt(i, lines[i]))
     return "\n".join(out)
 
 
@@ -871,7 +1077,9 @@ def _read_agentless_file_snippets(
         header = f"--- {rel} ---"
         if len(lines) <= max_file_lines:
             # Include the complete file so SEARCH text can match exactly.
-            body = "\n".join(f"{i + 1:5d} | {line}" for i, line in enumerate(lines))
+            # No line-number gutters: small models sometimes copy them back into
+            # SEARCH blocks and the gutter-stripping fallback cannot always save it.
+            body = "\n".join(lines)
             part = f"{header}\nFULL FILE:\n{body}\n"
         else:
             # Try to center the excerpt on the function/type the model must edit.
@@ -883,14 +1091,15 @@ def _read_agentless_file_snippets(
                     max_lines=max_file_lines,
                     window=max_file_lines // 4,
                     required_line=required_line,
+                    include_line_numbers=False,
                 )
                 part = f"{header}\nEXCERPT (centered on target function):\n{body}\n"
             else:
                 half = max_file_lines // 2
                 body_lines = (
-                    [f"{i + 1:5d} | {lines[i]}" for i in range(half)]
+                    lines[:half]
                     + [f"\n... ({len(lines) - max_file_lines} lines omitted) ...\n"]
-                    + [f"{len(lines) - half + i + 1:5d} | {lines[-half + i]}" for i in range(half)]
+                    + lines[-half:]
                 )
                 body = "\n".join(body_lines)
                 part = f"{header}\nEXCERPT:\n{body}\n"
@@ -924,6 +1133,76 @@ def _new_files_from_patch(patch_text: str) -> list[str]:
     return new_files
 
 
+def _plausible_source_path(path: str) -> bool:
+    """Return True for repo-relative source-file paths we might edit or create."""
+    if not path or path.startswith(("http", "www", "/", "#", "-")):
+        return False
+    if "." not in Path(path).name:
+        return False
+    return bool(
+        re.search(
+            r"\.(js|ts|jsx|tsx|go|py|java|rb|rs|cpp|c|h|hpp|swift|kt|kts|scala|php|cs)$",
+            path,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _extract_new_file_hints(text: str, repo_path: Path) -> list[str]:
+    """Find repo-relative source-file paths that the issue says to create.
+
+    Heuristic: look for backtick/quote-enclosed paths (e.g. ``src/foo.js``)
+    near phrases like "new file", "should be created", or "create a".  Only
+    paths that do not already exist are returned.
+    """
+    if not text:
+        return []
+    hints: list[str] = []
+    seen: set[str] = set()
+    # Sentences that mention creating a file.
+    create_phrases = re.finditer(
+        r"(?:new (?:file|controller|router|module)|create[ds]?|should be created)[^.]*?"
+        r"(?:`([^`\n]+\.[a-z0-9]+)`|\"([^\"\n]+\.[a-z0-9]+)\"|'([^'\n]+\.[a-z0-9]+)')",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    for m in create_phrases:
+        path = m.group(1) or m.group(2) or m.group(3)
+        if not path or path in seen or not _plausible_source_path(path):
+            continue
+        candidate = repo_path / path
+        if not candidate.exists():
+            seen.add(path)
+            hints.append(path)
+    return hints
+
+
+def _extract_source_paths_from_text(text: str, repo_path: Path) -> list[str]:
+    """Return existing source-file paths mentioned in the issue/requirements/tests.
+
+    These are added to the agentless context so the model sees files it is
+    likely to need even when the embedding ranker misses them.
+    """
+    if not text:
+        return []
+    found: list[str] = []
+    seen: set[str] = set()
+    # Backtick/quoted paths, plus bare paths starting with common source prefixes.
+    for m in re.finditer(
+        r"(?:`([^`\n]+\.[a-z0-9]+)`|\"([^\"\n]+\.[a-z0-9]+)\"|'([^'\n]+\.[a-z0-9]+)'|(\b(?:src|lib|pkg|app|internal|server|client|core|utils?|helpers?|models?|controllers?|routes?|components?)/[^\s:,;\"'`<>()]+\.[a-z0-9]+))",
+        text,
+        re.IGNORECASE,
+    ):
+        path = m.group(1) or m.group(2) or m.group(3) or m.group(4)
+        if not path or path in seen or not _plausible_source_path(path):
+            continue
+        candidate = repo_path / path
+        if candidate.is_file():
+            seen.add(path)
+            found.append(path)
+    return found
+
+
 def _extract_test_hints(patch_text: str, max_chars: int = 2000) -> str:
     """Extract a concise, model-readable hint block from the official test patch.
 
@@ -943,6 +1222,9 @@ def _extract_test_hints(patch_text: str, max_chars: int = 2000) -> str:
         if line.startswith("diff --git a/"):
             match = re.match(r"^diff --git a/(.+?) b/(.+?)(?:\s|$)", line)
             current_path = match.group(2) if match else None
+            continue
+        # Skip diff metadata lines so we do not surface index modes as hints.
+        if line.startswith(("index ", "--- ", "+++ ", "@@")):
             continue
         if current_path and current_path.endswith("_test.go"):
             # Go test functions: func TestXxx(t *testing.T) or subtests t.Run("name").
@@ -975,6 +1257,187 @@ def _extract_test_hints(patch_text: str, max_chars: int = 2000) -> str:
     if len(text) > max_chars:
         text = text[:max_chars].rsplit("\n", 1)[0] + "\n... (more test hints omitted) ..."
     return text
+
+
+def _extract_failing_test_snippets(patch_text: str, max_chars: int = 3000) -> str:
+    """Extract concrete added test code from the official test patch.
+
+    Seeing the assertions the new tests make is often more informative than
+    hint lists.  We return the first 1-2 new test functions per modified test
+    file, truncated to keep the prompt compact.
+    """
+    if not patch_text:
+        return ""
+    from collections import defaultdict
+
+    added_by_file: dict[str, list[str]] = defaultdict(list)
+    current_file: str | None = None
+    for line in patch_text.splitlines():
+        if line.startswith("+++ "):
+            current_file = line[6:] if line.startswith("+++ b/") else line[5:].strip()
+        elif line.startswith("+") and current_file:
+            added_by_file[current_file].append(line[1:])
+
+    snippets: list[str] = []
+    for path, lines in added_by_file.items():
+        basename = os.path.basename(path)
+        if not any(
+            path.endswith(ext)
+            for ext in ("_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx")
+        ) and not basename.startswith("test_"):
+            continue
+        is_python_test = path.endswith("_test.py") or basename.startswith("test_")
+        funcs: list[tuple[str, str]] = []
+        i = 0
+        while i < len(lines):
+            l = lines[i]
+            name: str | None = None
+            if path.endswith("_test.go"):
+                m = re.search(r"func\s+(Test[A-Za-z0-9_]+)", l)
+                if m:
+                    name = m.group(1)
+            elif is_python_test and l.strip().startswith("def test_"):
+                name = l.strip().split("(")[0].replace("def ", "")
+            elif path.endswith((".js", ".ts", ".tsx")):
+                m = re.search(r"\b(it|test|describe)\s*\(\s*[\"']([^\"']+)", l)
+                if m:
+                    name = f"{m.group(1)}('{m.group(2)}')"
+            if name:
+                body = [l]
+                j = i + 1
+                while j < min(i + 18, len(lines)):
+                    body.append(lines[j])
+                    j += 1
+                funcs.append((name, "\n".join(body)))
+                i = j
+            else:
+                i += 1
+        for name, body in funcs[:2]:
+            snippets.append(f"### {path} — {name}\n{body}")
+
+    if not snippets:
+        return ""
+    text = "\n\n".join(snippets)
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit("\n", 1)[0] + "\n... (truncated) ..."
+    return text
+
+
+def _parse_interface(interface_text: str | None) -> list[dict[str, str]]:
+    """Parse the structured ``interface`` field into API entries.
+
+    The field is a free-text block with repeated blocks like::
+
+        Type: Function
+
+        Name: hide_qt_warning
+
+        Path: qutebrowser/utils/qtlog.py
+
+        Input: pattern: str, logger: str = 'qt'
+
+        Output: context manager (Iterator[None])
+
+        Description: Temporarily suppresses Qt log warnings.
+
+    Returns a list of dicts with keys: type, name, path, input, output,
+    description, public_api.
+    """
+    if not interface_text:
+        return []
+
+    known_keys = {"type", "name", "path", "input", "output", "description", "public_api"}
+
+    def _normalize_key(key: str) -> str:
+        return key.strip().lower().replace(" ", "_")
+
+    entries: list[dict[str, str]] = []
+    current_entry: dict[str, str] | None = None
+    current_key: str | None = None
+
+    for line in interface_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            current_key = None
+            continue
+
+        if ": " in stripped:
+            maybe_key, _, value = stripped.partition(": ")
+            maybe_key = _normalize_key(maybe_key)
+            if maybe_key in known_keys:
+                if maybe_key == "type" and current_entry:
+                    entries.append(current_entry)
+                    current_entry = None
+                if current_entry is None:
+                    current_entry = {}
+                current_entry[maybe_key] = value.strip()
+                current_key = maybe_key
+                continue
+
+        # Continuation line for the current key.
+        if current_key and current_entry is not None:
+            current_entry[current_key] = f"{current_entry[current_key]}\n{stripped}"
+
+    if current_entry:
+        entries.append(current_entry)
+    return entries
+
+
+def _format_target_api_section(interface_text: str | None) -> str:
+    """Format the parsed ``interface`` field for inclusion in the prompt."""
+    entries = _parse_interface(interface_text)
+    if not entries:
+        return ""
+
+    lines = ["Target API (functions/classes you may need to modify):"]
+    for entry in entries:
+        api_type = entry.get("type", "API")
+        name = entry["name"]
+        path = entry.get("path", "(unknown path)")
+        input_sig = entry.get("input", "")
+        output_sig = entry.get("output", "")
+        description = entry.get("description", "")
+        public_api = entry.get("public_api", "")
+
+        lines.append(f"- {api_type}: `{name}` — {path}")
+        if input_sig:
+            lines.append(f"  Input: {input_sig}")
+        if output_sig:
+            lines.append(f"  Output: {output_sig}")
+        if public_api:
+            lines.append(f"  Public API: {public_api}")
+        if description:
+            lines.append(f"  Description: {description}")
+
+    return "\n".join(lines)
+
+
+def _build_focused_test_oracle(patch_text: str | None, max_chars: int = 4000) -> str:
+    """Build a compact but concrete oracle from the official test patch.
+
+    Combines concrete failing test code snippets with a short list of key
+    assertion hints. This gives the model the exact assertions it must satisfy
+    without dumping the entire test patch into the prompt.
+    """
+    if not patch_text:
+        return ""
+
+    snippets = _extract_failing_test_snippets(patch_text, max_chars=max_chars)
+    if not snippets:
+        return ""
+
+    # Reserve most of the budget for the snippets; hints get the remainder.
+    hints_budget = max(0, max_chars - len(snippets) - 200)
+    hints = _extract_test_hints(patch_text, max_chars=hints_budget)
+
+    if hints:
+        return (
+            "Key assertion hints (from the failing tests):\n"
+            f"{hints}\n\n"
+            "Failing test code snippets (do NOT edit tests):\n"
+            f"{snippets}"
+        )
+    return "Failing test code snippets (do NOT edit tests):\n" + snippets
 
 
 def _expand_to_package(
@@ -1088,14 +1551,7 @@ def build_agentless_prompt(
     tests = _load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = _load_list_field(instance.get("fail_to_pass", []))
 
-    if language == "python":
-        test_cmd = f"python -m pytest {' '.join(tests)}" if tests else "python -m pytest"
-    elif language in ("javascript", "typescript"):
-        test_cmd = f"npm test -- {' '.join(tests)}" if tests else "npm test"
-    elif language == "go":
-        test_cmd = f"go test {' '.join(tests)}" if tests else "go test ./..."
-    else:
-        test_cmd = "run the relevant test suite"
+    test_cmd = _format_test_command(language, tests)
 
     search_text = problem
     if requirements:
@@ -1121,6 +1577,16 @@ def build_agentless_prompt(
     # hurt cases that worked with the focused file list.
     if expand_to_package:
         source_ranked = _expand_to_package(repo_path, source_ranked)
+    # Surface source files explicitly mentioned in the issue/requirements/tests.
+    # The embedding ranker often misses files named in prose (e.g., router paths).
+    mentioned_files = _extract_source_paths_from_text(search_text, repo_path)
+    mentioned_files += _extract_source_paths_from_text("\n".join(fail_to_pass), repo_path)
+    # De-duplicate while preserving order: mentioned files first, then ranked.
+    seen_files: set[str] = set()
+    source_ranked = [
+        f for f in (mentioned_files + source_ranked)
+        if not _is_test_file(f) and not (f in seen_files or seen_files.add(f))
+    ]
     # Prefer full file contents for small files so SEARCH blocks match exactly.
     # Larger files are excerpted around relevant identifiers.
     snippet_terms = [t for t in _tokenize_problem(search_text) if _is_strong_identifier(t)]
@@ -1155,9 +1621,26 @@ def build_agentless_prompt(
     # create matching source/testdata files.
     test_patch = instance.get("test_patch", "") or ""
     new_files = _new_files_from_patch(test_patch)
+    requirement_hints = _extract_new_file_hints(
+        f"{problem}\n{requirements}", repo_path
+    )
+    new_files = list(dict.fromkeys(new_files + requirement_hints))
     test_hints = _extract_test_hints(test_patch)
+    test_snippets = _extract_failing_test_snippets(test_patch)
     editable_manifest = _build_editable_manifest(
         snippet_files, repo_path, new_files=new_files
+    )
+
+    create_example = (
+        "### FILE: src/controllers/well-known.js\n"
+        "<<<<<<< SEARCH\n"
+        "=======\n"
+        "\"use strict\";\n"
+        "\n"
+        "module.exports = function (router) {\n"
+        "    router.get(\"/.well-known/webfinger\", ...);\n"
+        "};\n"
+        ">>>>>>> REPLACE"
     )
 
     example = (
@@ -1196,14 +1679,17 @@ def build_agentless_prompt(
         "Test-patch hints (the evaluator applies the full test patch; do not edit tests):",
         test_hints or "- (none extracted)",
         "",
+        "Failing test code snippets (added by the test patch; these are the tests you must make pass):",
+        test_snippets or "- (none extracted)",
+        "",
         f"External test command (run by the evaluator, NOT you): {test_cmd}",
         "",
-        "Likely relevant source files (line numbers are for reference only):",
+        "Likely relevant source files:",
         snippets,
         "",
-        "Editable files manifest (you may ONLY edit files listed here):",
+        "Editable files manifest — prioritize these source files:",
         editable_manifest,
-        "If the fix requires a file not listed above, respond with NO_PATCH and nothing else.",
+        "You may edit other source files if the fix clearly requires it, but the files listed above are the best starting point.",
         "",
         "PATCH FORMAT — return one or more SEARCH/REPLACE blocks exactly like this:",
         "",
@@ -1217,17 +1703,21 @@ def build_agentless_prompt(
         "Example:",
         example,
         "",
+        "Example for CREATING a new file (empty SEARCH block):",
+        create_example,
+        "",
         "CRITICAL RULES:",
         "- Modify source files only. Do NOT edit tests, configs, docs, or unrelated code.",
         "- Keep the patch minimal: no formatting, comment, or unrelated changes.",
         "- Do NOT produce an empty patch.",
-        "- Do NOT invent file paths. Only use paths from the Editable files manifest.",
-        "- The SEARCH text must match the source file EXACTLY (including indentation).",
+        "- Prefer paths from the Editable files manifest, but you may edit other existing source files if the fix clearly requires it.",
+        "- The SEARCH text must match the source file EXACTLY (including indentation). Copy it verbatim from the file content shown above.",
         "- Files marked FULL FILE above are shown completely. Copy SEARCH text from those exact lines.",
         "- Files marked EXCERPT are truncated. Only SEARCH for text that appears inside the excerpt; do not guess at omitted lines.",
-        "- Line numbers in the left gutter (e.g. '  123 | ') are for reference ONLY. Do NOT include them in SEARCH or REPLACE.",
+        "- Do NOT include line numbers, '  123 | ', or '// --- lines X-Y ---' markers in SEARCH or REPLACE.",
         "- Do NOT wrap the whole patch in a markdown code fence. Return raw SEARCH/REPLACE blocks only.",
         "- If the SEARCH text contains special characters, copy them exactly from the source.",
+        "- If you cannot match the exact text in the excerpt, choose a smaller SEARCH block that is fully visible rather than guessing.",
         "- To CREATE a new file, use an empty SEARCH block:\n"
         "  ### FILE: path/to/new_file.go\n"
         "  <<<<<<< SEARCH\n"
@@ -1306,6 +1796,10 @@ def build_agentless_retry_prompt(
 
     test_patch = instance.get("test_patch", "") or ""
     new_files = _new_files_from_patch(test_patch)
+    requirement_hints = _extract_new_file_hints(
+        f"{problem}\n{requirements}", repo_path
+    )
+    new_files = list(dict.fromkeys(new_files + requirement_hints))
     test_hints = _extract_test_hints(test_patch)
     editable_manifest = _build_editable_manifest(
         snippet_files, repo_path, new_files=new_files
@@ -1344,11 +1838,13 @@ def build_agentless_retry_prompt(
         "- Modify source files only. Do NOT edit tests, configs, docs, or unrelated code.",
         "- Keep the patch minimal: no formatting, comment, or unrelated changes.",
         "- Do NOT produce an empty patch.",
-        "- Do NOT invent file paths. Only use paths from the Editable files manifest.",
-        "- The SEARCH text must match the source file EXACTLY (including indentation).",
+        "- Prefer paths from the Editable files manifest, but you may edit other existing source files if the fix clearly requires it.",
+        "- The SEARCH text must match the source file EXACTLY (including indentation). Copy it verbatim from the file content shown above.",
         "- Files marked FULL FILE above are shown completely. Copy SEARCH text from those exact lines.",
-        "- Line numbers in the left gutter are for reference ONLY. Do NOT include them in SEARCH or REPLACE.",
+        "- Do NOT include line numbers, '  123 | ', or '// --- lines X-Y ---' markers in SEARCH or REPLACE.",
         "- Do NOT wrap the patch in ``` or any markdown fence.",
+        "- If the SEARCH text contains special characters, copy them exactly from the source.",
+        "- If you cannot match the exact text, choose a smaller SEARCH block that is fully visible rather than guessing.",
         "- To CREATE a new file, use an empty SEARCH block:\n"
         "  ### FILE: path/to/new_file.go\n"
         "  <<<<<<< SEARCH\n"
@@ -1399,20 +1895,15 @@ def build_small_model_prompt(
     tests = _load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = _load_list_field(instance.get("fail_to_pass", []))
 
-    if language == "python":
-        test_cmd = f"python -m pytest {' '.join(tests)}" if tests else "python -m pytest"
-    elif language in ("javascript", "typescript"):
-        test_cmd = f"npm test -- {' '.join(tests)}" if tests else "npm test"
-    elif language == "go":
-        test_cmd = f"go test {' '.join(tests)}" if tests else "go test ./..."
-    else:
-        test_cmd = "run the relevant test suite"
+    test_cmd = _format_test_command(language, tests)
 
     tree = compact_directory_tree(
         repo_path,
         max_depth=tree_max_depth,
         max_files=tree_max_files,
     )
+    test_patch = instance.get("test_patch", "") or ""
+    test_hints = _extract_test_hints(test_patch)
     search_text = problem
     if requirements:
         search_text += "\n" + requirements
@@ -1444,6 +1935,9 @@ def build_small_model_prompt(
         "Requirements / implementation notes:",
         requirements or "- (none provided)",
         "",
+        "Test-patch hints (the evaluator applies the full test patch; do not edit tests):",
+        test_hints or "- (none extracted)",
+        "",
         "Test files / cases:",
         "\n".join(f"- {t}" for t in tests) or "- (none specified)",
         "",
@@ -1455,7 +1949,7 @@ def build_small_model_prompt(
         "Directory layout (shallow, key files only):",
         tree,
         "",
-        "Likely relevant source files (line numbers are for reference only):",
+        "Likely relevant source files:",
         snippets,
         "",
         "YOUR TASK:",

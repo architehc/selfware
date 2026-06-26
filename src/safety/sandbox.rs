@@ -817,8 +817,11 @@ impl AuditSummary {
     }
 }
 
-/// Confirmation token required when disabling the sandbox via `set_enabled`.
-pub const SANDBOX_DISABLE_TOKEN: &str = "CONFIRM_SANDBOX_DISABLE";
+/// Generate a runtime-only confirmation token for disabling the sandbox.
+/// Using a fresh random token prevents automated bypass of `set_enabled`.
+fn generate_sandbox_disable_token() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
 
 /// Security sandbox combining all policies
 #[derive(Debug)]
@@ -833,6 +836,8 @@ pub struct SecuritySandbox {
     pub resources: ResourceLimits,
     /// Audit logger
     pub audit: AuditLogger,
+    /// Runtime-only token required to disable the sandbox.
+    disable_token: String,
     /// Enabled
     pub enabled: bool,
 }
@@ -852,6 +857,7 @@ impl SecuritySandbox {
             network: NetworkPolicy::new(),
             resources: ResourceLimits::new(),
             audit: AuditLogger::new(),
+            disable_token: generate_sandbox_disable_token(),
             enabled: true,
         }
     }
@@ -877,6 +883,7 @@ impl SecuritySandbox {
                 .timeout_secs(300)
                 .max_procs(10),
             audit: AuditLogger::new().with_min_risk(RiskLevel::Low),
+            disable_token: generate_sandbox_disable_token(),
             enabled: true,
         }
     }
@@ -895,6 +902,7 @@ impl SecuritySandbox {
             },
             resources: ResourceLimits::new(),
             audit: AuditLogger::new().with_min_risk(RiskLevel::High),
+            disable_token: generate_sandbox_disable_token(),
             enabled: true,
         }
     }
@@ -905,16 +913,21 @@ impl SecuritySandbox {
         self
     }
 
+    /// Return the runtime-generated token needed to disable this sandbox.
+    pub fn disable_token(&self) -> &str {
+        &self.disable_token
+    }
+
     /// Enable/disable the sandbox.
     ///
     /// WARNING: Disabling the sandbox bypasses all safety checks.
     ///
-    /// Callers must supply `confirmation: Some(SANDBOX_DISABLE_TOKEN)` when
+    /// Callers must supply `confirmation: Some(sandbox.disable_token())` when
     /// disabling. Re-enabling does not require a token.
     pub fn set_enabled(&mut self, enabled: bool, confirmation: Option<&str>) -> Result<()> {
         if self.enabled && !enabled {
             match confirmation {
-                Some(token) if token == SANDBOX_DISABLE_TOKEN => {}
+                Some(token) if token == self.disable_token => {}
                 Some(_) => {
                     self.audit.log_action(
                         "sandbox_disable_rejected",
@@ -937,7 +950,7 @@ impl SecuritySandbox {
                     );
                     return Err(anyhow!(
                         "Sandbox disable rejected: confirmation token required. \
-                         Pass confirmation: Some(SANDBOX_DISABLE_TOKEN) to confirm."
+                         Retrieve the token via `sandbox.disable_token()` and pass it to confirm."
                     ));
                 }
             }
@@ -1424,8 +1437,9 @@ mod tests {
     #[test]
     fn test_security_sandbox_disabled() {
         let mut sandbox = SecuritySandbox::new();
+        let token = sandbox.disable_token().to_string();
         sandbox
-            .set_enabled(false, Some(SANDBOX_DISABLE_TOKEN))
+            .set_enabled(false, Some(&token))
             .expect("disabling with correct token should succeed");
 
         assert!(!sandbox.needs_confirmation(RiskLevel::Critical));
@@ -1434,13 +1448,12 @@ mod tests {
     #[test]
     fn test_security_sandbox_disable_requires_token() {
         let mut sandbox = SecuritySandbox::new();
+        let token = sandbox.disable_token().to_string();
         assert!(sandbox.set_enabled(false, None).is_err());
         assert!(sandbox.enabled);
         assert!(sandbox.set_enabled(false, Some("wrong")).is_err());
         assert!(sandbox.enabled);
-        assert!(sandbox
-            .set_enabled(false, Some(SANDBOX_DISABLE_TOKEN))
-            .is_ok());
+        assert!(sandbox.set_enabled(false, Some(&token)).is_ok());
         assert!(!sandbox.enabled);
         assert!(sandbox.set_enabled(true, None).is_ok());
         assert!(sandbox.enabled);
@@ -1923,8 +1936,9 @@ mod tests {
     #[test]
     fn test_security_sandbox_disabled_network() {
         let mut sandbox = SecuritySandbox::new();
+        let token = sandbox.disable_token().to_string();
         sandbox
-            .set_enabled(false, Some(SANDBOX_DISABLE_TOKEN))
+            .set_enabled(false, Some(&token))
             .expect("disabling with correct token should succeed");
 
         // When disabled, even external hosts should be allowed

@@ -200,7 +200,7 @@
         let agent = make_test_agent(&server).await;
 
         let input = "just a plain message with no file references";
-        let (expanded, files) = agent.expand_file_references(input);
+        let (expanded, files) = agent.expand_file_references(input).await;
         assert_eq!(expanded, input, "input without @ refs should pass through");
         assert!(files.is_empty(), "no files should be reported");
 
@@ -213,7 +213,7 @@
         let agent = make_test_agent(&server).await;
 
         let input = "check @nonexistent_file_that_does_not_exist.rs please";
-        let (expanded, files) = agent.expand_file_references(input);
+        let (expanded, files) = agent.expand_file_references(input).await;
         // The file does not exist and is not a directory, so it stays unchanged.
         assert_eq!(
             expanded, input,
@@ -239,7 +239,7 @@
 
         let path_str = file_path.display().to_string();
         let input = format!("read @{} now", path_str);
-        let (expanded, files) = agent.expand_file_references(&input);
+        let (expanded, files) = agent.expand_file_references(&input).await;
 
         assert!(
             expanded.contains("hello world"),
@@ -272,7 +272,7 @@
 
         let path_str = file_path.display().to_string();
         let input = format!("look at @{}", path_str);
-        let (expanded, _) = agent.expand_file_references(&input);
+        let (expanded, _) = agent.expand_file_references(&input).await;
 
         // format_file_size for 12 bytes produces "12B"
         assert!(
@@ -295,7 +295,7 @@
         std::fs::write(&f2, "content B").unwrap();
 
         let input = format!("compare @{} with @{}", f1.display(), f2.display());
-        let (expanded, files) = agent.expand_file_references(&input);
+        let (expanded, files) = agent.expand_file_references(&input).await;
 
         assert!(expanded.contains("content A"));
         assert!(expanded.contains("content B"));
@@ -557,8 +557,11 @@
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
         let dir = tempdir().unwrap();
-        agent.session_logger =
-            super::session_log::new_test_session_logger("trim-log", dir.path().to_path_buf());
+        agent.session_logger = super::session_log::new_test_session_logger(
+            "trim-log",
+            dir.path().to_path_buf(),
+        )
+        .await;
 
         for i in 0..6 {
             agent
@@ -1052,7 +1055,7 @@
 
         let dir_str = dir.path().display().to_string();
         let input = format!("list @{}/", dir_str);
-        let (expanded, included) = agent.expand_file_references(&input);
+        let (expanded, included) = agent.expand_file_references(&input).await;
 
         // A directory reference produces a directory tree listing.
         assert!(
@@ -1077,7 +1080,7 @@
 
         // A lone "@" with no following path should not crash and should pass through.
         let input = "email me @ work";
-        let (expanded, files) = agent.expand_file_references(input);
+        let (expanded, files) = agent.expand_file_references(input).await;
 
         // The regex requires at least one alphanumeric char after '@', so a bare
         // "@ " should not be matched and input should come through unchanged.

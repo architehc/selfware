@@ -365,6 +365,9 @@ pub struct Pattern {
     pub description: String,
     /// Examples from codebase
     pub examples: Vec<PatternExample>,
+    /// Creation timestamp for eviction ordering.
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 impl Pattern {
@@ -378,6 +381,7 @@ impl Pattern {
             confidence: 1.0,
             description: String::new(),
             examples: Vec::new(),
+            created_at: KnowledgeGraph::now_secs(),
         }
     }
 
@@ -591,6 +595,9 @@ pub struct CodeSmellInstance {
     pub severity: u8,
     /// Suggested fix
     pub suggestion: String,
+    /// Creation timestamp for eviction ordering.
+    #[serde(default)]
+    pub created_at: u64,
 }
 
 impl CodeSmellInstance {
@@ -604,6 +611,7 @@ impl CodeSmellInstance {
             description: format!("{} detected", smell),
             severity: smell.severity(),
             suggestion: smell.suggested_fix().to_string(),
+            created_at: KnowledgeGraph::now_secs(),
         }
     }
 
@@ -616,6 +624,12 @@ impl CodeSmellInstance {
 
 /// Maximum number of entities before LRU eviction kicks in.
 const MAX_GRAPH_ENTITIES: usize = 50_000;
+
+/// Maximum number of patterns retained in the knowledge graph.
+const MAX_PATTERNS: usize = 10_000;
+
+/// Maximum number of code-smell instances retained in the knowledge graph.
+const MAX_SMELLS: usize = 10_000;
 
 /// The codebase knowledge graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -851,11 +865,34 @@ impl KnowledgeGraph {
         self.relations.get(id)
     }
 
-    /// Add a pattern
+    /// Add a pattern, evicting the oldest patterns if the cap is exceeded.
     pub fn add_pattern(&mut self, pattern: Pattern) -> String {
+        if self.patterns.len() >= MAX_PATTERNS {
+            self.evict_oldest_patterns();
+        }
         let id = pattern.id.clone();
         self.patterns.insert(id.clone(), pattern);
         id
+    }
+
+    /// Evict least-recently-created patterns down to 90% capacity.
+    fn evict_oldest_patterns(&mut self) {
+        let target = MAX_PATTERNS * 9 / 10;
+        let to_remove = self.patterns.len().saturating_sub(target);
+        if to_remove == 0 {
+            return;
+        }
+
+        let mut entries: Vec<(String, u64)> = self
+            .patterns
+            .iter()
+            .map(|(id, p)| (id.clone(), p.created_at))
+            .collect();
+        entries.select_nth_unstable_by_key(to_remove, |(_, ts)| *ts);
+
+        for (id, _) in &entries[..to_remove] {
+            self.patterns.remove(id);
+        }
     }
 
     /// Get a pattern by ID
@@ -863,8 +900,23 @@ impl KnowledgeGraph {
         self.patterns.get(id)
     }
 
-    /// Add a code smell
+    /// Add a code smell, deduplicating and capping the list.
     pub fn add_smell(&mut self, smell: CodeSmellInstance) {
+        // Deduplicate by (file, smell type, line).
+        if self
+            .smells
+            .iter()
+            .any(|s| s.smell == smell.smell && s.file == smell.file && s.line == smell.line)
+        {
+            return;
+        }
+
+        if self.smells.len() >= MAX_SMELLS {
+            let target = MAX_SMELLS * 9 / 10;
+            let to_remove = self.smells.len().saturating_sub(target);
+            self.smells.drain(0..to_remove);
+        }
+
         self.smells.push(smell);
     }
 
@@ -1796,6 +1848,74 @@ mod tests {
         assert_eq!(entity.file, Some(PathBuf::from("src/lib.rs")));
         assert_eq!(entity.line, Some(10));
         assert_eq!(entity.column, Some(1));
+    }
+
+    #[test]
+    fn test_pattern_cap_evicts_oldest() {
+        let mut graph = KnowledgeGraph::new();
+        let mut ids = Vec::new();
+        for i in 0..MAX_PATTERNS * 2 + 1 {
+            let mut p = Pattern::new(format!("pattern-{}", i), PatternType::Idiom);
+            // Manual, monotonic timestamps make eviction order deterministic
+            // without sleeping.
+            p.created_at = i as u64;
+            ids.push(graph.add_pattern(p));
+        }
+        // The cap keeps the graph between the 90% target and MAX_PATTERNS.
+        assert!(
+            graph.patterns.len() <= MAX_PATTERNS,
+            "pattern count {} exceeded cap {}",
+            graph.patterns.len(),
+            MAX_PATTERNS
+        );
+        assert!(
+            graph.patterns.len() >= MAX_PATTERNS * 9 / 10,
+            "pattern count {} dropped below target {}",
+            graph.patterns.len(),
+            MAX_PATTERNS * 9 / 10
+        );
+        // The oldest patterns should have been evicted.
+        for id in &ids[..5] {
+            assert!(
+                !graph.patterns.contains_key(id),
+                "oldest pattern {} should have been evicted",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_smell_cap_evicts_oldest_and_deduplicates() {
+        let mut graph = KnowledgeGraph::new();
+        for i in 0..MAX_SMELLS * 2 + 1 {
+            graph.add_smell(CodeSmellInstance::new(
+                CodeSmell::MagicNumber,
+                format!("entity-{}", i),
+                PathBuf::from("src/lib.rs"),
+                i,
+            ));
+        }
+        assert!(
+            graph.smells.len() <= MAX_SMELLS,
+            "smell count {} exceeded cap {}",
+            graph.smells.len(),
+            MAX_SMELLS
+        );
+        assert!(
+            graph.smells.len() >= MAX_SMELLS * 9 / 10,
+            "smell count {} dropped below target {}",
+            graph.smells.len(),
+            MAX_SMELLS * 9 / 10
+        );
+
+        // Deduplicate: same (file, smell, line) should not add another entry.
+        graph.add_smell(CodeSmellInstance::new(
+            CodeSmell::MagicNumber,
+            "duplicate-entity",
+            PathBuf::from("src/lib.rs"),
+            MAX_SMELLS * 2 + 10,
+        ));
+        assert!(graph.smells.len() <= MAX_SMELLS);
     }
 
     #[test]

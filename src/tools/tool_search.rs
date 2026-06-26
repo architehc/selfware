@@ -15,11 +15,16 @@ use std::sync::Arc;
 /// Use this when you need a specialized tool not in your current tool set.
 /// Returns matching tools with their schemas, making them available for use.
 pub struct ToolSearchTool {
-    registry: Arc<tokio::sync::RwLock<dyn ToolSearchable>>,
+    /// Shared, mutable index of tools that this search queries.
+    /// Using a shared `Vec` avoids a circular dependency between the registry
+    /// and the search tool and lets the registry refresh the index whenever
+    /// tools are added. A std::sync::RwLock is used because the registry may
+    /// rebuild the index from within an async runtime.
+    index: Arc<std::sync::RwLock<Vec<ToolSearchResult>>>,
 }
 
 /// Trait for types that can search tools.
-/// This allows ToolSearchTool to work with ToolRegistry without circular dependencies.
+/// Kept for backward compatibility with existing call sites/tests.
 pub trait ToolSearchable: Send + Sync {
     /// Search for tools matching the query string.
     /// Returns up to `limit` matching tool names.
@@ -41,25 +46,37 @@ pub struct ToolSearchResult {
     pub category: String,
 }
 
+impl ToolSearchable for Vec<ToolSearchResult> {
+    fn search(&self, query: &str, limit: usize) -> Vec<ToolSearchResult> {
+        let query_lower = query.to_lowercase();
+        self.iter()
+            .filter(|r| {
+                r.name.to_lowercase().contains(&query_lower)
+                    || r.description.to_lowercase().contains(&query_lower)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+}
+
 impl ToolSearchTool {
-    /// Create a new ToolSearchTool with a registry to search.
-    pub fn new(registry: Arc<tokio::sync::RwLock<dyn ToolSearchable>>) -> Self {
-        Self { registry }
+    /// Create a new ToolSearchTool backed by a shared index.
+    pub fn new(index: Arc<std::sync::RwLock<Vec<ToolSearchResult>>>) -> Self {
+        Self { index }
     }
 
-    /// Create a placeholder ToolSearchTool for initial registration.
-    /// The actual registry will be set later when the agent is created.
+    /// Create a ToolSearchTool with an empty index.
+    /// The index should be populated by `ToolRegistry` after all tools are registered.
     pub fn placeholder() -> Self {
-        // Create a dummy searchable that returns empty results
-        struct DummySearchable;
-        impl ToolSearchable for DummySearchable {
-            fn search(&self, _query: &str, _limit: usize) -> Vec<ToolSearchResult> {
-                vec![]
-            }
-        }
         Self {
-            registry: Arc::new(tokio::sync::RwLock::new(DummySearchable)),
+            index: Arc::new(std::sync::RwLock::new(Vec::new())),
         }
+    }
+
+    /// Return a clone of the shared index so the registry can populate it.
+    pub fn index(&self) -> Arc<std::sync::RwLock<Vec<ToolSearchResult>>> {
+        Arc::clone(&self.index)
     }
 }
 
@@ -109,9 +126,9 @@ impl Tool for ToolSearchTool {
             .unwrap_or(5)
             .clamp(1, 20);
 
-        let registry = self.registry.read().await;
-        let results = registry.search(query, limit);
-        drop(registry);
+        let index = self.index.read().expect("tool_search index poisoned");
+        let results = index.search(query, limit);
+        drop(index);
 
         let found_tools: Vec<Value> = results
             .into_iter()
@@ -177,47 +194,26 @@ pub fn categorize_tool(name: &str) -> &'static str {
 mod tests {
     use super::*;
 
-    struct MockSearchable {
-        tools: Vec<ToolSearchResult>,
-    }
-
-    impl ToolSearchable for MockSearchable {
-        fn search(&self, query: &str, limit: usize) -> Vec<ToolSearchResult> {
-            let query_lower = query.to_lowercase();
-            self.tools
-                .iter()
-                .filter(|t| {
-                    t.name.to_lowercase().contains(&query_lower)
-                        || t.description.to_lowercase().contains(&query_lower)
-                })
-                .take(limit)
-                .cloned()
-                .collect()
-        }
-    }
-
     #[tokio::test]
     async fn test_tool_search_basic() {
-        let mock = MockSearchable {
-            tools: vec![
-                ToolSearchResult {
-                    name: "git_status".to_string(),
-                    description: "Get git repository status".to_string(),
-                    schema: json!({}),
-                    is_critical: false,
-                    category: "git".to_string(),
-                },
-                ToolSearchResult {
-                    name: "git_commit".to_string(),
-                    description: "Commit changes".to_string(),
-                    schema: json!({}),
-                    is_critical: false,
-                    category: "git".to_string(),
-                },
-            ],
-        };
+        let index = vec![
+            ToolSearchResult {
+                name: "git_status".to_string(),
+                description: "Get git repository status".to_string(),
+                schema: json!({}),
+                is_critical: false,
+                category: "git".to_string(),
+            },
+            ToolSearchResult {
+                name: "git_commit".to_string(),
+                description: "Commit changes".to_string(),
+                schema: json!({}),
+                is_critical: false,
+                category: "git".to_string(),
+            },
+        ];
 
-        let tool = ToolSearchTool::new(Arc::new(tokio::sync::RwLock::new(mock)));
+        let tool = ToolSearchTool::new(Arc::new(std::sync::RwLock::new(index)));
         let result = tool
             .execute(json!({"query": "git", "limit": 10}))
             .await
@@ -230,33 +226,31 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_search_limit() {
-        let mock = MockSearchable {
-            tools: vec![
-                ToolSearchResult {
-                    name: "tool1".to_string(),
-                    description: "First tool".to_string(),
-                    schema: json!({}),
-                    is_critical: false,
-                    category: "test".to_string(),
-                },
-                ToolSearchResult {
-                    name: "tool2".to_string(),
-                    description: "Second tool".to_string(),
-                    schema: json!({}),
-                    is_critical: false,
-                    category: "test".to_string(),
-                },
-                ToolSearchResult {
-                    name: "tool3".to_string(),
-                    description: "Third tool".to_string(),
-                    schema: json!({}),
-                    is_critical: false,
-                    category: "test".to_string(),
-                },
-            ],
-        };
+        let index = vec![
+            ToolSearchResult {
+                name: "tool1".to_string(),
+                description: "First tool".to_string(),
+                schema: json!({}),
+                is_critical: false,
+                category: "test".to_string(),
+            },
+            ToolSearchResult {
+                name: "tool2".to_string(),
+                description: "Second tool".to_string(),
+                schema: json!({}),
+                is_critical: false,
+                category: "test".to_string(),
+            },
+            ToolSearchResult {
+                name: "tool3".to_string(),
+                description: "Third tool".to_string(),
+                schema: json!({}),
+                is_critical: false,
+                category: "test".to_string(),
+            },
+        ];
 
-        let tool = ToolSearchTool::new(Arc::new(tokio::sync::RwLock::new(mock)));
+        let tool = ToolSearchTool::new(Arc::new(std::sync::RwLock::new(index)));
         let result = tool
             .execute(json!({"query": "tool", "limit": 2}))
             .await
@@ -268,8 +262,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_search_missing_query() {
-        let mock = MockSearchable { tools: vec![] };
-        let tool = ToolSearchTool::new(Arc::new(tokio::sync::RwLock::new(mock)));
+        let index: Vec<ToolSearchResult> = vec![];
+        let tool = ToolSearchTool::new(Arc::new(std::sync::RwLock::new(index)));
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
     }

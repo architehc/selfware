@@ -47,6 +47,7 @@ impl Default for BrowserBenchConfig {
                 extra_body: serde_json::json!({
                     "chat_template_kwargs": {"enable_thinking": false}
                 }),
+                ..Default::default()
             },
             max_browser_concurrent: 4, // Browser sessions are heavier than LLM calls
             output_dir: "bench_results/browser".into(),

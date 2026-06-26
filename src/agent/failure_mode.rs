@@ -217,12 +217,13 @@ impl FailureMode {
     /// `result_dir` is the directory the SWE-bench Pro harness uses for a
     /// single instance's artifacts. Failures here are non-fatal: artifact
     /// writing is best-effort and must never abort a run.
-    pub fn write_artifact(&self, result_dir: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(result_dir)?;
-        let path = result_dir.join("failure_mode.json");
+    pub async fn write_artifact(&self, result_dir: &Path) -> std::io::Result<()> {
+        let result_dir = result_dir.to_path_buf();
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)
+        let path = result_dir.join("failure_mode.json");
+        tokio::fs::create_dir_all(&result_dir).await?;
+        tokio::fs::write(&path, json).await
     }
 
     /// Render a multi-line CLI banner suitable for the end of a non-TUI run.
@@ -261,7 +262,7 @@ fn classify_max_iter_failure(
     // Order matters: most specific signals first.
 
     // 1) Prose-only termination.
-    if no_action_consecutive >= super::recovery::FORCE_FALLBACK_AFTER && mutating == 0 {
+    if no_action_consecutive >= super::recovery::MAX_NO_ACTION_PROMPTS && mutating == 0 {
         return FailureMode {
             kind: FailureKind::NontermProse,
             evidence: format!(
@@ -322,10 +323,11 @@ fn classify_max_iter_failure(
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", s.chars().take(max).collect::<String>())
+    // `char_indices()` guarantees we slice at a valid UTF-8 boundary and only
+    // walks the string once.
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => format!("{}…", &s[..idx]),
+        None => s.to_string(),
     }
 }
 
@@ -508,7 +510,7 @@ mod tests {
             advice: "ad".to_string(),
         };
         let dir = tempfile::tempdir().unwrap();
-        mode.write_artifact(dir.path()).unwrap();
+        mode.write_artifact(dir.path()).await.unwrap();
         let path = dir.path().join("failure_mode.json");
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("ReadLoop"));
@@ -546,5 +548,18 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         assert!(json.contains("PrefillBreaker"));
         assert!(json.contains("\"kind\""));
+    }
+
+    #[test]
+    fn truncate_splits_at_char_boundaries() {
+        // "αβγδ" is 4 Greek letters; slicing at byte index 3 would panic.
+        let s = "αβγδ";
+        assert_eq!(truncate(s, 4), "αβγδ");
+        assert_eq!(truncate(s, 3), "αβγ…");
+        assert_eq!(truncate(s, 0), "…");
+
+        // ASCII fallback.
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello", 3), "hel…");
     }
 }

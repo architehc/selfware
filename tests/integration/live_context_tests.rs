@@ -155,8 +155,8 @@ fn test_modality_from_real_tasks() {
 
 // ─── Recommend Context ──────────────────────────────────────────────────────
 
-#[test]
-fn test_recommend_context_for_real_codebase() {
+#[tokio::test]
+async fn test_recommend_context_for_real_codebase() {
     let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
 
     // Register real .rs files.
@@ -171,7 +171,7 @@ fn test_recommend_context_for_real_codebase() {
         map.register_tree_entry(path, size);
     }
 
-    let rec = map.recommend_context("fix the no-action detection in recovery.rs");
+    let rec = map.recommend_context("fix the no-action detection in recovery.rs").await;
     assert!(
         !rec.promote.is_empty() || !rec.evict.is_empty(),
         "should have some recommendations"

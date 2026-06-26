@@ -24,7 +24,8 @@ impl WorktreeManager {
     /// Create a new detached worktree for the given id, using the repo at `source`.
     pub async fn create_worktree(&self, id: &str, source: &Path) -> Result<PathBuf> {
         let worktree_path = self.base_dir.join(id);
-        std::fs::create_dir_all(&self.base_dir)
+        tokio::fs::create_dir_all(&self.base_dir)
+            .await
             .with_context(|| format!("Failed to create base dir: {}", self.base_dir.display()))?;
 
         let git_root = Self::find_git_root(source).await?;
@@ -59,7 +60,7 @@ impl WorktreeManager {
     /// worktree is not recognised), falls back to a manual directory removal.
     pub async fn remove_worktree(&self, id: &str) -> Result<()> {
         let worktree_path = self.base_dir.join(id);
-        if !worktree_path.exists() {
+        if !tokio::fs::try_exists(&worktree_path).await.unwrap_or(false) {
             warn!(worktree_id = %id, "Worktree does not exist, skipping removal");
             return Ok(());
         }
@@ -104,15 +105,20 @@ impl WorktreeManager {
     }
 
     /// List all managed worktree paths.
-    pub fn list_worktrees(&self) -> Vec<PathBuf> {
-        std::fs::read_dir(&self.base_dir)
-            .ok()
-            .map(|rd| {
-                rd.filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.is_dir())
-                    .collect()
-            })
-            .unwrap_or_default()
+    pub async fn list_worktrees(&self) -> Vec<PathBuf> {
+        match tokio::fs::read_dir(&self.base_dir).await {
+            Ok(mut rd) => {
+                let mut paths = Vec::new();
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    let path = entry.path();
+                    if tokio::fs::metadata(&path).await.map(|m| m.is_dir()).unwrap_or(false) {
+                        paths.push(path);
+                    }
+                }
+                paths
+            }
+            Err(_) => Vec::new(),
+        }
     }
 
     pub async fn find_git_root(path: &Path) -> Result<PathBuf> {
@@ -185,12 +191,12 @@ mod tests {
         assert!(wt.join(".git").exists() || wt.join(".git").is_symlink());
         assert!(wt.join("README.md").exists());
 
-        let listed = manager.list_worktrees();
+        let listed = manager.list_worktrees().await;
         assert_eq!(listed.len(), 1);
 
         manager.remove_worktree("wt-1").await.unwrap();
         assert!(!wt.exists());
-        assert!(manager.list_worktrees().is_empty());
+        assert!(manager.list_worktrees().await.is_empty());
     }
 
     #[tokio::test]

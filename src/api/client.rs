@@ -397,36 +397,71 @@ impl ApiClient {
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json");
+        let mut delay_ms = self.retry_config.initial_delay_ms;
+        let max_attempts = self.retry_config.max_retries + 1;
 
-        if let Some(ref key) = self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key.expose()));
-        }
+        for attempt in 1..=max_attempts {
+            let mut request = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json");
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send streaming request")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(ApiError::HttpStatus {
-                status: status.as_u16(),
-                message: text,
+            if let Some(ref key) = self.config.api_key {
+                request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
-            .into());
+
+            match request.json(&body).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        let stream_chunk_timeout_secs = self.config.agent.step_timeout_secs.max(30);
+                        return Ok(StreamingResponse::new(
+                            response,
+                            Duration::from_secs(stream_chunk_timeout_secs),
+                        ));
+                    }
+
+                    let text = response.text().await.unwrap_or_default();
+                    if Self::is_retryable_status(status) && attempt < max_attempts {
+                        warn!(
+                            "Streaming request retryable error {} (attempt {}/{}); retrying after {}ms",
+                            status, attempt, max_attempts, delay_ms
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                        continue;
+                    }
+                    return Err(ApiError::HttpStatus {
+                        status: status.as_u16(),
+                        message: text,
+                    }
+                    .into());
+                }
+                Err(e) => {
+                    if attempt < max_attempts {
+                        warn!(
+                            "Streaming request network error: {} (attempt {}/{}); retrying after {}ms",
+                            e, attempt, max_attempts, delay_ms
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                        continue;
+                    }
+                    return Err(ApiError::Network(format!(
+                        "Failed to send streaming request after {} attempts: {}",
+                        attempt, e
+                    ))
+                    .into());
+                }
+            }
         }
 
-        let stream_chunk_timeout_secs = self.config.agent.step_timeout_secs.max(30);
-        Ok(StreamingResponse::new(
-            response,
-            Duration::from_secs(stream_chunk_timeout_secs),
-        ))
+        // Unreachable because the loop always returns, but keeps the compiler happy.
+        Err(ApiError::Network("Streaming request exhausted retries".to_string()).into())
+    }
+
+    fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+        status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
     }
 
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
@@ -456,6 +491,7 @@ impl ApiClient {
         let url = format!("{}/chat/completions", endpoint);
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay_ms = self.retry_config.initial_delay_ms;
+        let mut honored_retry_after = false;
 
         for attempt in 0..=self.retry_config.max_retries {
             if attempt > 0 {
@@ -464,10 +500,17 @@ impl ApiClient {
                     attempt, self.retry_config.max_retries, delay_ms
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
-                let jitter = (delay_ms as f64 * 0.1 * (rand_jitter() - 0.5)) as i64;
-                delay_ms = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
-                delay_ms = delay_ms.min(self.retry_config.max_delay_ms);
+
+                // If the server explicitly told us how long to wait, do not
+                // also apply exponential backoff doubling for this iteration.
+                if honored_retry_after {
+                    honored_retry_after = false;
+                } else {
+                    delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                    let jitter = (delay_ms as f64 * 0.1 * (rand_jitter() - 0.5)) as i64;
+                    delay_ms = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
+                    delay_ms = delay_ms.min(self.retry_config.max_delay_ms);
+                }
             }
 
             debug!("Sending request to {} (attempt {})", url, attempt + 1);
@@ -534,7 +577,8 @@ impl ApiClient {
                         // Honour Retry-After but never exceed the configured max_delay_ms.
                         if let Some(retry_secs) = retry_after_secs {
                             let retry_ms = retry_secs * 1000;
-                            delay_ms = delay_ms.max(retry_ms).min(self.retry_config.max_delay_ms);
+                            delay_ms = retry_ms.min(self.retry_config.max_delay_ms);
+                            honored_retry_after = true;
                         }
                         continue;
                     }

@@ -10,7 +10,7 @@ repository = "https://github.com/architehc/selfware"
 keywords = ["ai", "agent", "local-first", "cli", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
-rust-version = "1.91"
+rust-version = "1.85"
 documentation = "https://docs.rs/selfware"
 exclude = [
     "system_tests/",
@@ -60,6 +60,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 git2 = "0.20"  # Updated for security fixes (CVE-2024-24575, CVE-2024-24577)
 walkdir = "2.4"
+wait-timeout = "0.2"
 regex = "1.11"
 colored = "3.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -126,7 +127,7 @@ metrics-exporter-prometheus = "0.12.1"
 syn = { version = "2.0", features = ["full", "parsing"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["signal"] }
+nix = { version = "0.29", features = ["signal"] }
 
 [features]
 default = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement"]
@@ -172,8 +173,12 @@ redis = ["dep:redis"]
 # Browser automation module (currently stub implementation)
 browser = []
 
+# Legacy SWE-bench API (deprecated; kept only for source compatibility with
+# older experiments and integration tests).
+legacy-swebench = []
+
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser", "legacy-swebench"]
 
 [dev-dependencies]
 tokio-test = "0.4"

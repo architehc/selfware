@@ -269,9 +269,11 @@ impl Agent {
     /// 3. **Only read-only tools used** — the task only read files, searched, or
     ///    queried information without making any changes. No code was modified,
     ///    so there is nothing to verify.
-    pub(super) fn should_skip_cargo_verification(&self) -> bool {
+    pub(super) async fn should_skip_cargo_verification(&self) -> bool {
         // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
-        if !super::current_project_root().join("Cargo.toml").exists() {
+        let cargo_toml_path = super::current_project_root().join("Cargo.toml");
+        let has_cargo_toml = tokio::fs::try_exists(&cargo_toml_path).await.unwrap_or(false);
+        if !has_cargo_toml {
             debug!(
                 "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
             );
@@ -460,9 +462,24 @@ impl Agent {
         None
     }
 
+    fn has_successful_verification_tool_call(&self) -> bool {
+        self.current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls.iter().any(|tc| {
+                    tc.success
+                        && super::tool_dispatch::tool_call_is_verification(
+                            &tc.tool_name,
+                            &tc.arguments,
+                        )
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
-    pub(super) fn check_completion_gate(&self) -> Option<String> {
+    pub(super) async fn check_completion_gate(&self) -> Option<String> {
         let context_target =
             (!self.current_task_context.is_empty()).then_some(self.current_task_context.as_str());
         let literal_target = self
@@ -492,7 +509,7 @@ impl Agent {
 
         if step_count < min_steps && !skip_min_steps_for_read_only {
             // Tailor the message: don't mention cargo for non-Rust tasks
-            let verification_hint = if self.should_skip_cargo_verification() {
+            let verification_hint = if self.should_skip_cargo_verification().await {
                 "Continue working: review your results and ensure the task is fully complete."
             } else {
                 "Continue working: verify your changes compile with cargo_check and pass tests with cargo_test."
@@ -535,7 +552,7 @@ impl Agent {
         if super::execution::contains_unwritten_code(&self.last_assistant_response) {
             return Some(
                 "Your response contains code that was NOT written to any file. \
-                 Use file_write to save it to a file, then verify with cargo check. \
+                 Use file_write to save it to a file, then verify with a relevant test/build command. \
                  Do NOT output code as text — use tools."
                     .to_string(),
             );
@@ -548,6 +565,22 @@ impl Agent {
 
         if let Some(msg) = self.mutation_completion_gate() {
             return Some(msg);
+        }
+
+        // If any file has been written (including auto-written code from assistant
+        // text), require at least one successful verification tool call before the
+        // task can complete. This closes the bypass where auto-write injects code
+        // and the model then answers without verifying.
+        if self.has_written_any_file {
+            let has_verification = self.has_successful_verification_tool_call();
+            if !has_verification {
+                return Some(
+                    "You have written code, but you have not verified it. \
+                     Run a verification command (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
+                     successfully before completing."
+                        .to_string(),
+                );
+            }
         }
 
         // Reject completion when the task requires code changes but no source files
@@ -580,7 +613,7 @@ impl Agent {
                     return Some(
                         "You have not written or edited ANY files yet. The task requires you to \
                          write code. Use file_write or file_edit to create the implementation, \
-                         then run cargo test to verify. Do NOT give up or say context is insufficient \
+                         then run the relevant test/build command to verify. Do NOT give up or say context is insufficient \
                          — read the files and start coding."
                             .to_string(),
                     );
@@ -589,32 +622,28 @@ impl Agent {
         }
 
         if self.config.agent.require_verification_before_completion {
-            // For non-mutation/non-Rust tasks, skip the legacy cargo-only
-            // gate. Mutation-required tasks are handled by
-            // mutation_completion_gate(), which is language-aware and requires
-            // verification after the latest edit.
-            if self.should_skip_cargo_verification() {
-                debug!("Completion gate: bypassing cargo verification for non-Rust task");
-                return None;
-            }
-
-            let has_verification = self
+            // Only require a verification tool call when the task is not
+            // exclusively using read-only / non-code tools (browser, vision,
+            // HTTP, desktop control, etc.). If no checkpoint exists yet, or if
+            // any code/state-changing tool was used, verification is required.
+            let all_calls_are_non_code_or_read_only = self
                 .current_checkpoint
                 .as_ref()
                 .map(|cp| {
-                    cp.tool_calls.iter().any(|tc| {
-                        tc.success
-                            && matches!(
-                                tc.tool_name.as_str(),
-                                "cargo_check" | "cargo_test" | "cargo_clippy"
-                            )
-                    })
+                    !cp.tool_calls.is_empty()
+                        && cp.tool_calls.iter().all(|tc| {
+                            Self::READ_ONLY_TOOLS.contains(&tc.tool_name.as_str())
+                                || Self::NON_RUST_TOOL_PREFIXES
+                                    .iter()
+                                    .any(|prefix| tc.tool_name.starts_with(prefix))
+                        })
                 })
                 .unwrap_or(false);
 
-            if !has_verification {
+            if !all_calls_are_non_code_or_read_only && !self.has_successful_verification_tool_call()
+            {
                 return Some(
-                    "You must run at least one verification tool (cargo_check, cargo_test, or cargo_clippy) \
+                    "You must run at least one verification tool (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
                      successfully before completing the task. Please verify your work now."
                         .to_string(),
                 );
@@ -875,12 +904,12 @@ impl Agent {
                         .join("visual_evidence")
                         .join(&task_id);
 
-                    match std::fs::create_dir_all(&evidence_dir) {
+                    match tokio::fs::create_dir_all(&evidence_dir).await {
                         Ok(()) => {
                             let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
                             let filename = format!("step_{}_{}.png", current_step, timestamp);
                             let filepath = evidence_dir.join(&filename);
-                            match std::fs::write(&filepath, &png_bytes) {
+                            match tokio::fs::write(&filepath, &png_bytes).await {
                                 Ok(()) => Some((filepath, sha_hash)),
                                 Err(e) => {
                                     warn!(
@@ -1107,5 +1136,80 @@ mod tests {
             "text": "hello"
         });
         assert!(visual_verification_expectation("computer_keyboard", &args).is_none());
+    }
+
+    #[cfg(test)]
+    mod completion_gate_tests {
+        use super::*;
+        use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
+        use crate::config::Config;
+
+        fn test_config() -> Config {
+            let mut config = Config::default();
+            config.agent.min_completion_steps = 0;
+            config.agent.require_verification_before_completion = true;
+            config
+        }
+
+        async fn agent_with_checkpoint(tool_calls: Vec<ToolCallLog>) -> Agent {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            let mut checkpoint = TaskCheckpoint::new("task_1".to_string(), "test task".to_string());
+            for tc in tool_calls {
+                checkpoint.log_tool_call(tc);
+            }
+            agent.current_checkpoint = Some(checkpoint);
+            agent.has_written_any_file = true;
+            agent
+        }
+
+        fn shell_exec(command: &str, success: bool) -> ToolCallLog {
+            ToolCallLog {
+                timestamp: chrono::Utc::now(),
+                tool_name: "shell_exec".to_string(),
+                arguments: serde_json::json!({"command": command}).to_string(),
+                result: Some(if success {
+                    "ok".to_string()
+                } else {
+                    "failed".to_string()
+                }),
+                success,
+                duration_ms: Some(100),
+            }
+        }
+
+        #[tokio::test]
+        async fn accepts_completion_after_successful_pytest() {
+            let agent = agent_with_checkpoint(vec![shell_exec("pytest tests/", true)]).await;
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "completion should be accepted after a successful pytest shell_exec"
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_completion_when_no_verification_tool_call_succeeded() {
+            let agent = agent_with_checkpoint(vec![]).await;
+            let result = agent.check_completion_gate().await;
+            assert!(
+                result.is_some(),
+                "completion should be rejected when no verification tool succeeded"
+            );
+            let msg = result.unwrap();
+            assert!(
+                msg.contains("pytest") || msg.contains("cargo_test") || msg.contains("npm test"),
+                "rejection message should mention verification examples: {}",
+                msg
+            );
+        }
+
+        #[tokio::test]
+        async fn rejects_completion_when_only_failing_pytest_exists() {
+            let agent = agent_with_checkpoint(vec![shell_exec("pytest tests/", false)]).await;
+            let result = agent.check_completion_gate().await;
+            assert!(
+                result.is_some(),
+                "completion should be rejected when the only verification attempt failed"
+            );
+        }
     }
 }

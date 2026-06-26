@@ -73,28 +73,26 @@ pub struct SessionLogger {
 }
 
 impl SessionLogger {
-    pub fn new(session_id: &str) -> Option<Self> {
-        let dir = Self::default_dir()?;
-        Self::new_in(session_id, dir)
+    pub async fn new(session_id: &str) -> Option<Self> {
+        let dir = Self::default_dir().await?;
+        Self::new_in(session_id, dir).await
     }
 
-    fn default_dir() -> Option<PathBuf> {
+    async fn default_dir() -> Option<PathBuf> {
         let dir = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("selfware")
             .join("session_logs");
 
-        // Synchronous file operation in a sync context - acceptable
-        std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
+        tokio::fs::create_dir_all(&dir).await.unwrap_or_else(|e| {
             warn!("Failed to create session log directory {:?}: {}", dir, e);
         });
 
         Some(dir)
     }
 
-    fn new_in(session_id: &str, dir: PathBuf) -> Option<Self> {
-        // Synchronous file operation in a sync context - acceptable
-        std::fs::create_dir_all(&dir).ok()?;
+    async fn new_in(session_id: &str, dir: PathBuf) -> Option<Self> {
+        tokio::fs::create_dir_all(&dir).await.ok()?;
 
         let path = dir.join(format!("{}.jsonl", session_id));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -135,12 +133,12 @@ impl SessionLogger {
     }
 
     /// Read recent events from a session log file.
-    pub fn read_recent(path: &Path, limit: usize) -> Result<Vec<SessionLogEvent>> {
-        if !path.exists() {
+    pub async fn read_recent(path: &Path, limit: usize) -> Result<Vec<SessionLogEvent>> {
+        if !tokio::fs::try_exists(path).await.unwrap_or(false) {
             return Ok(Vec::new());
         }
 
-        let content = std::fs::read_to_string(path)?;
+        let content = tokio::fs::read_to_string(path).await?;
 
         let mut lines: Vec<&str> = content
             .lines()
@@ -644,11 +642,11 @@ impl Agent {
         });
     }
 
-    pub(super) fn print_session_debug_log(&self) {
-        self.print_session_debug_log_with_options(false);
+    pub(super) async fn print_session_debug_log(&self) {
+        self.print_session_debug_log_with_options(false).await;
     }
 
-    pub(super) fn print_session_debug_log_with_options(&self, full: bool) {
+    pub(super) async fn print_session_debug_log_with_options(&self, full: bool) {
         println!();
         println!("  {} Session Debug Log", ">>".bright_cyan());
         let Some(logger) = &self.session_logger else {
@@ -662,7 +660,7 @@ impl Agent {
         let events = {
             let recent = logger.recent_events(10);
             if recent.is_empty() {
-                SessionLogger::read_recent(logger.path(), 10).unwrap_or_default()
+                SessionLogger::read_recent(logger.path(), 10).await.unwrap_or_default()
             } else {
                 recent
             }
@@ -746,8 +744,8 @@ impl Agent {
 }
 
 #[cfg(test)]
-pub(super) fn new_test_session_logger(session_id: &str, dir: PathBuf) -> Option<SessionLogger> {
-    SessionLogger::new_in(session_id, dir)
+pub(super) async fn new_test_session_logger(session_id: &str, dir: PathBuf) -> Option<SessionLogger> {
+    SessionLogger::new_in(session_id, dir).await
 }
 
 impl Drop for Agent {
@@ -791,7 +789,9 @@ mod tests {
     #[tokio::test]
     async fn session_logger_writes_and_reads_recent_events() {
         let dir = tempdir().unwrap();
-        let logger = SessionLogger::new_in("session-test", dir.path().to_path_buf()).unwrap();
+        let logger = SessionLogger::new_in("session-test", dir.path().to_path_buf())
+            .await
+            .unwrap();
         let path = logger.path().to_path_buf();
 
         logger.log(SessionLogEvent {
@@ -823,7 +823,7 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        let events = SessionLogger::read_recent(&path, 10).unwrap();
+        let events = SessionLogger::read_recent(&path, 10).await.unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].event_type, SessionEventType::SessionStart);
         assert_eq!(events[1].event_type, SessionEventType::ToolCall);

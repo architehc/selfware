@@ -32,7 +32,8 @@ cd "${SWE_DIR}"
 
 echo "[$(date -Iseconds)] Starting model=${MODEL_PROFILE} podman_root=${PODMAN_ROOT} out=${OUT_DIR}" | tee -a "${LOG_FILE}"
 
-# Full agent loop (no --agentless). Adaptive settings adjust iterations/tool catalog.
+# Full agent loop. Adaptive settings adjust iterations/tool catalog.
+# --auto-agentless lets small/unrecommended models bypass the multi-turn loop.
 ${VENV} run_selfware.py \
   --model-profile "${MODEL_PROFILE}" \
   --config-dir "${CONFIG_DIR}" \
@@ -42,6 +43,7 @@ ${VENV} run_selfware.py \
   --workers 1 \
   --timeout 2400 \
   --adaptive \
+  --auto-agentless \
   --retry-failures \
   --max-retries 1 \
   --diff-fallback \

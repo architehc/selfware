@@ -51,7 +51,7 @@ pub(super) async fn read_line_pausing_esc(
 /// the count and skip well-known build / dependency / cache directories. The
 /// scaffold target `src/lib.rs` itself is excluded so that an empty SAB
 /// template still reports zero.
-pub(super) fn count_source_files_in_workdir(cap: usize) -> usize {
+pub(super) async fn count_source_files_in_workdir(cap: usize) -> usize {
     use std::path::Path;
 
     const SOURCE_EXTS: &[&str] = &[
@@ -81,46 +81,50 @@ pub(super) fn count_source_files_in_workdir(cap: usize) -> usize {
         Err(_) => return 0,
     };
 
-    let mut count = 0usize;
-    let walker = walkdir::WalkDir::new(&workdir)
-        .max_depth(4)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| {
-            let name = e.file_name().to_string_lossy();
-            if e.depth() == 0 {
-                return true;
+    tokio::task::spawn_blocking(move || {
+        let mut count = 0usize;
+        let walker = walkdir::WalkDir::new(&workdir)
+            .max_depth(4)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                if e.depth() == 0 {
+                    return true;
+                }
+                !EXCLUDED_DIRS.contains(&name.as_ref())
+            });
+
+        for entry in walker.flatten() {
+            if !entry.file_type().is_file() {
+                continue;
             }
-            !EXCLUDED_DIRS.contains(&name.as_ref())
-        });
+            let path = entry.path();
 
-    for entry in walker.flatten() {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
+            // Skip the scaffold target itself.
+            if path.file_name() == Some(std::ffi::OsStr::new("lib.rs"))
+                && path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("src"))
+                && path.parent().and_then(Path::parent) == Some(workdir.as_path())
+            {
+                continue;
+            }
 
-        // Skip the scaffold target itself.
-        if path.file_name() == Some(std::ffi::OsStr::new("lib.rs"))
-            && path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("src"))
-            && path.parent().and_then(Path::parent) == Some(workdir.as_path())
-        {
-            continue;
+            let ext = match path.extension().and_then(|e| e.to_str()) {
+                Some(e) => e.to_ascii_lowercase(),
+                None => continue,
+            };
+            if !SOURCE_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+            count += 1;
+            if count >= cap {
+                return count;
+            }
         }
-
-        let ext = match path.extension().and_then(|e| e.to_str()) {
-            Some(e) => e.to_ascii_lowercase(),
-            None => continue,
-        };
-        if !SOURCE_EXTS.contains(&ext.as_str()) {
-            continue;
-        }
-        count += 1;
-        if count >= cap {
-            return count;
-        }
-    }
-    count
+        count
+    })
+    .await
+    .unwrap_or(0)
 }
 
 /// Try to extract a `base64_png` field from a JSON tool result string.
@@ -188,7 +192,7 @@ impl Agent {
     /// Called from within `execute_step_internal` once we know what the
     /// agent decided to do with the model's response.  Honours
     /// `agent.disable_turn_artifacts`; failures are logged, never returned.
-    pub(super) fn write_turn_artifact(
+    pub(super) async fn write_turn_artifact(
         &self,
         step: usize,
         chat_metadata: Option<&crate::api::types::ChatMetadata>,
@@ -253,7 +257,7 @@ impl Agent {
             agent_decision: decision,
             elapsed_ms: meta.elapsed_ms,
         };
-        super::turn_artifacts::write_artifact(&workdir, &artifact);
+        super::turn_artifacts::write_artifact(&workdir, &artifact).await;
     }
 
     /// Internal execution logic
@@ -294,6 +298,17 @@ impl Agent {
             response.reasoning_content.as_deref(),
             response.native_tool_calls.as_ref(),
         );
+
+        // Detect a FILES: checklist in the assistant response. Small models often
+        // jump straight to editing; requiring them to name the files first
+        // reduces catastrophic edits on the wrong files.
+        if super::recovery::strip_think_blocks(&content)
+            .lines()
+            .any(|line| line.trim_start().starts_with("FILES:"))
+        {
+            self.files_checklist_seen = true;
+        }
+
         // Convert XML-extracted CollectedToolCall back to the structured
         // ToolCall shape that goes into the artifact.  Use a deterministic
         // synthetic id when the XML branch produced none.
@@ -345,14 +360,14 @@ impl Agent {
             initial_decision,
             &content,
             response.reasoning_content.as_deref(),
-        );
+        ).await;
 
         // Check if the response contains code alongside tool calls.
         // Models often output file_read tool calls AND code text in the same
         // response. The tool calls get executed, but the code gets ignored.
         // If we detect code in the residual text, auto-write it.
         if !tool_calls.is_empty() && contains_unwritten_code(&content) {
-            if let Some((path, code)) = extract_code_and_path(&content) {
+            if let Some((path, code)) = extract_code_and_path(&content).await {
                 info!(
                     "Response contains tool calls AND code text — auto-writing {} lines to {}",
                     code.lines().count(),
@@ -461,7 +476,7 @@ impl Agent {
                 if self.consecutive_no_action_prompts >= 5 {
                     // Model is repeating itself many times. Only accept if
                     // the completion gate passes — otherwise nudge it.
-                    if self.check_completion_gate().is_none() {
+                    if self.check_completion_gate().await.is_none() {
                         info!(
                             "Accepting repeated completion after {} identical responses (gate passed)",
                             self.consecutive_no_action_prompts
@@ -474,11 +489,14 @@ impl Agent {
                         return Ok(true);
                     }
                     // Gate rejected — tell the model to keep working.
+                    // Do NOT reset the counter to zero; keep it at the threshold so
+                    // the next identical response immediately re-checks the gate
+                    // instead of looping through five more identical turns.
                     info!(
                         "Completion gate rejected after {} identical responses — nudging",
                         self.consecutive_no_action_prompts
                     );
-                    self.consecutive_no_action_prompts = 0;
+                    self.consecutive_no_action_prompts = 5;
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
                          You keep repeating the same response, but the task is NOT complete. \
@@ -537,61 +555,28 @@ impl Agent {
 
             // Detect text responses that contain code — the model should
             // use file_write/file_edit tools, not output code as text.
-            // If we can extract the code and a target path, auto-write it.
-            let has_code = contains_unwritten_code(&content);
-            tracing::debug!(
-                "Code check: has_code={} content_len={} has_backticks={} lines={}",
-                has_code,
-                content.len(),
-                content.contains("```"),
-                content.lines().count()
-            );
-            if has_code {
-                if let Some((path, code)) = extract_code_and_path(&content) {
-                    info!(
-                        "Auto-writing {} lines of code to {} (model outputted code as text)",
-                        code.lines().count(),
-                        path
-                    );
-                    // Synthesize a file_write tool call from the model's text output
-                    let synthetic_calls: Vec<super::execution::CollectedToolCall> = vec![(
-                        "file_write".to_string(),
-                        serde_json::json!({"path": path, "content": code}).to_string(),
-                        None,
-                    )];
-                    self.consecutive_read_only_steps = 0;
-                    self.has_written_any_file = true;
-                    self.terminal_guard_hits = 0;
-                    self.execute_tool_batch(synthetic_calls).await?;
-                    self.messages.push(crate::api::types::Message::user(
-                        "<selfware_system_directive>\n\
-                         Your code was automatically written to the file. \
-                         Now verify it compiles: use shell_exec with \"cargo check\" or \"cargo test\".\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
-                    return Ok(false);
-                } else {
-                    // Can't extract a clear path — ask the model to use tools
-                    info!("Rejected text response containing code — nudging to use tools");
-                    self.note_mutation_no_tool_stall("code-like text without extractable path")?;
-                    self.messages.push(crate::api::types::Message::user(
-                        "<selfware_system_directive>\n\
-                         You wrote code in your text response instead of using tools. \
-                         DO NOT output code as text. Use file_edit on the existing target file you already read. \
-                         Do NOT create src/lib.rs unless the repository already is a Rust crate.\n\n\
-                         <tool>\n<name>file_write</name>\n\
-                         <arguments>{\"path\": \"PATH_YOU_ALREADY_READ\", \"content\": \"FULL UPDATED FILE CONTENT\"}</arguments>\n\
-                         </tool>\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
-                    return Ok(false);
-                }
+            // Auto-writing assistant text was removed so that the completion
+            // gate runs before any state mutation and cannot be bypassed by a
+            // synthetic file_write that masks unverified code.
+            if contains_unwritten_code(&content) {
+                info!("Rejected text response containing code — nudging to use tools");
+                self.note_mutation_no_tool_stall("code-like text without extractable path")?;
+                self.messages.push(crate::api::types::Message::user(
+                    "<selfware_system_directive>\n\
+                     You wrote code in your text response instead of using tools. \
+                     DO NOT output code as text. Use file_edit on the existing target file you already read. \
+                     Do NOT create src/lib.rs unless the repository already is a Rust crate.\n\n\
+                     <tool>\n<name>file_write</name>\n\
+                     <arguments>{\"path\": \"PATH_YOU_ALREADY_READ\", \"content\": \"FULL UPDATED FILE CONTENT\"}</arguments>\n\
+                     </tool>\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+                return Ok(false);
             }
 
             // Check completion gate before accepting task as done
-            if let Some(gate_msg) = self.check_completion_gate() {
+            if let Some(gate_msg) = self.check_completion_gate().await {
                 info!("Completion gate rejected: {}", gate_msg);
                 // Refine the previously-written turn artifact: this turn ended
                 // with a gate refusal, not a plain "no tool call".
@@ -604,7 +589,7 @@ impl Agent {
                     },
                     &content,
                     response.reasoning_content.as_deref(),
-                );
+                ).await;
                 self.messages
                     .push(crate::api::types::Message::user(gate_msg));
                 return Ok(false);
@@ -632,7 +617,7 @@ impl Agent {
                 },
                 &content,
                 response.reasoning_content.as_deref(),
-            );
+            ).await;
             self.last_assistant_response = clean_content;
             return Ok(true);
         }
@@ -688,11 +673,19 @@ impl Agent {
                 && self.mutating_tool_call_count() > 0
                 && is_observational_shell_batch(&tool_calls)
             {
-                bail!(
-                    "VERIFICATION_LOOP_AFTER_EDIT: repeated observational shell commands after a successful mutation; stopping so the captured patch can be evaluated"
+                self.post_edit_observational_shell_count += 1;
+                if self.post_edit_observational_shell_count > 2 {
+                    bail!(
+                        "VERIFICATION_LOOP_AFTER_EDIT: repeated observational shell commands after a successful mutation; stopping so the captured patch can be evaluated"
+                    );
+                }
+                info!(
+                    "Post-edit observational shell loop detected ({}); injecting correction",
+                    self.post_edit_observational_shell_count
                 );
+            } else {
+                info!("Repetition loop detected, injecting correction");
             }
-            info!("Repetition loop detected, injecting correction");
             self.messages
                 .push(crate::api::types::Message::user(loop_msg));
             return Ok(false);
@@ -708,6 +701,21 @@ impl Agent {
             self.consecutive_read_only_steps = 0;
         } else {
             self.consecutive_read_only_steps += 1;
+        }
+
+        // P2.1: require a FILES: checklist before the first mutating edit.
+        if has_write_tool
+            && !self.has_written_any_file
+            && !self.files_checklist_seen
+        {
+            info!("Blocked premature edit: no FILES: checklist yet");
+            self.messages.push(crate::api::types::Message::user(
+                "Before editing, identify which files need to change. \
+                 Read or search the relevant source files, then list them in a FILES: line. \
+                 After that, perform the edits."
+                    .to_string(),
+            ));
+            return Ok(false);
         }
 
         self.execute_tool_batch(tool_calls).await?;
@@ -794,7 +802,7 @@ impl Agent {
                 // Second time hitting terminal guard without any writes.
                 // Check if src/lib.rs already has substantial content (template project).
                 // If so, do NOT overwrite with scaffold — nudge targeted edits instead.
-                let existing_content = std::fs::read_to_string("src/lib.rs").unwrap_or_default();
+                let existing_content = tokio::fs::read_to_string("src/lib.rs").await.unwrap_or_default();
                 let meaningful_lines = existing_content
                     .lines()
                     .filter(|l| {
@@ -829,7 +837,7 @@ impl Agent {
                 // Writing a Rust stub into a Go / JS / Python repo overwrites or
                 // pollutes real code and produces nonsense `git diff` output that
                 // looks like progress but isn't.
-                let real_codebase_evidence = count_source_files_in_workdir(5);
+                let real_codebase_evidence = count_source_files_in_workdir(5).await;
                 if real_codebase_evidence > 0 {
                     info!(
                         "ESCALATED progress guard: {} read-only steps, but workdir has {} existing source file(s) outside src/lib.rs — refusing to inject Rust scaffold; nudging targeted edit",
@@ -958,7 +966,7 @@ impl Agent {
 /// Try to extract a target file path and code content from a model's text response.
 /// Public so task_runner can use it for synthesis code extraction.
 /// Returns Some((path, code)) if both can be identified.
-pub(super) fn extract_code_and_path(content: &str) -> Option<(String, String)> {
+pub(super) async fn extract_code_and_path(content: &str) -> Option<(String, String)> {
     let stripped = super::recovery::strip_think_blocks(content);
 
     // Extract path from mentions like "src/lib.rs", "src/main.rs", etc.
@@ -970,18 +978,18 @@ pub(super) fn extract_code_and_path(content: &str) -> Option<(String, String)> {
         .expect("Invalid path regex")
     });
     let explicit_path = path_re.captures(&stripped).map(|c| c[1].to_string());
-    let path = explicit_path.or_else(|| {
-        if std::path::Path::new("Cargo.toml").exists() {
-            // Rust-only fallback for SAB-style scratch projects.
-            Some(if stripped.contains("fn main(") {
-                "src/main.rs".to_string()
-            } else {
-                "src/lib.rs".to_string()
-            })
+    let path = if let Some(path) = explicit_path {
+        path
+    } else if tokio::fs::try_exists("Cargo.toml").await.unwrap_or(false) {
+        // Rust-only fallback for SAB-style scratch projects.
+        if stripped.contains("fn main(") {
+            "src/main.rs".to_string()
         } else {
-            None
+            "src/lib.rs".to_string()
         }
-    })?;
+    } else {
+        return None;
+    };
 
     // Extract code: prefer fenced code blocks, fall back to raw code
     let code = if stripped.contains("```") {
@@ -1153,27 +1161,27 @@ mod tests {
     /// Detect a real existing codebase to suppress the Rust scaffold injection.
     /// Empty dir + the SAB scratch shape (only src/lib.rs) must report zero.
     /// Anything with another source file must report ≥ 1.
-    #[test]
-    fn count_source_files_skips_scaffold_target_and_excluded_dirs() {
+    #[tokio::test]
+    async fn count_source_files_skips_scaffold_target_and_excluded_dirs() {
         // Save + restore cwd so we don't poison sibling tests.
         let saved = std::env::current_dir().unwrap();
 
         // 1. Genuinely empty workdir → 0
         let empty = tempfile::tempdir().unwrap();
         std::env::set_current_dir(empty.path()).unwrap();
-        assert_eq!(count_source_files_in_workdir(5), 0);
+        assert_eq!(count_source_files_in_workdir(5).await, 0);
 
         // 2. SAB-style: only src/lib.rs → 0 (the scaffold target itself doesn't count)
         let sab = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(sab.path().join("src")).unwrap();
         std::fs::write(sab.path().join("src/lib.rs"), "// empty\n").unwrap();
         std::env::set_current_dir(sab.path()).unwrap();
-        assert_eq!(count_source_files_in_workdir(5), 0);
+        assert_eq!(count_source_files_in_workdir(5).await, 0);
 
         // 3. Real Rust codebase: tests/foo.rs alongside src/lib.rs → 1
         std::fs::create_dir_all(sab.path().join("tests")).unwrap();
         std::fs::write(sab.path().join("tests/foo.rs"), "fn it_works() {}\n").unwrap();
-        assert!(count_source_files_in_workdir(5) >= 1);
+        assert!(count_source_files_in_workdir(5).await >= 1);
 
         // 4. Excluded dirs (target/, node_modules/) must not count
         let go_repo = tempfile::tempdir().unwrap();
@@ -1186,11 +1194,11 @@ mod tests {
         )
         .unwrap();
         std::env::set_current_dir(go_repo.path()).unwrap();
-        assert_eq!(count_source_files_in_workdir(5), 0);
+        assert_eq!(count_source_files_in_workdir(5).await, 0);
 
         // 5. Real non-Rust codebase: a top-level .go file → 1 (must NOT scaffold)
         std::fs::write(go_repo.path().join("main.go"), "package main\n").unwrap();
-        assert!(count_source_files_in_workdir(5) >= 1);
+        assert!(count_source_files_in_workdir(5).await >= 1);
 
         // 6. Cap is honoured (returns early once threshold reached)
         let many = tempfile::tempdir().unwrap();
@@ -1198,7 +1206,7 @@ mod tests {
             std::fs::write(many.path().join(format!("f{i}.py")), "x = 1\n").unwrap();
         }
         std::env::set_current_dir(many.path()).unwrap();
-        assert_eq!(count_source_files_in_workdir(3), 3);
+        assert_eq!(count_source_files_in_workdir(3).await, 3);
 
         std::env::set_current_dir(saved).unwrap();
     }
@@ -1815,7 +1823,7 @@ mod tests {
         config.agent.require_verification_before_completion = false;
         let agent = Agent::new(config).await.unwrap();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_none(), "Expected gate to pass, got: {:?}", result);
 
         server.stop().await;
@@ -1830,7 +1838,7 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         agent.current_task_context = "Implement the requested change".to_string();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("only"));
@@ -1852,7 +1860,7 @@ mod tests {
             .required_task_tools
             .insert("vision_analyze".to_string());
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         assert!(result.unwrap().contains("vision_analyze"));
 
@@ -1885,7 +1893,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }
@@ -1919,7 +1927,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some(), "Capability disclaimers should never pass");
         assert!(
             result.unwrap().contains("capability disclaimer"),
@@ -1941,7 +1949,7 @@ mod tests {
         agent.last_assistant_response = "python validate.py".to_string();
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Exact literal responses should pass"
         );
 
@@ -1960,7 +1968,7 @@ mod tests {
         agent.last_assistant_response =
             "The default full validation CLI command is `python validate.py`.".to_string();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some(), "Non-exact literal responses should fail");
         assert!(
             result.unwrap().contains("exact literal response"),
@@ -1981,7 +1989,7 @@ mod tests {
             "What is the default full validation CLI command for this workspace?".to_string();
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "read-only tasks should not be forced through the min-step gate"
         );
 
@@ -1996,7 +2004,7 @@ mod tests {
         config.agent.require_verification_before_completion = true;
         let agent = Agent::new(config).await.unwrap();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("verification"));
@@ -2016,7 +2024,7 @@ mod tests {
             "I need to read the tests to understand what to implement.\n\nfile_read: tests/chart_tests.rs"
                 .to_string();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_some(),
             "Incomplete planning response should reject completion"
@@ -2053,7 +2061,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_none(),
             "Expected gate to pass with verification, got: {:?}",
@@ -2085,7 +2093,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some(), "Failed verification should reject");
 
         server.stop().await;
@@ -2113,7 +2121,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }
@@ -2140,7 +2148,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }
@@ -2153,7 +2161,7 @@ mod tests {
         config.agent.require_verification_before_completion = true;
         let agent = Agent::new(config).await.unwrap();
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("step"));
@@ -2198,7 +2206,7 @@ mod tests {
 
         // Gate should pass — no cargo verification needed for browser-only tasks
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Browser-only tasks should bypass the cargo verification gate"
         );
 
@@ -2228,7 +2236,7 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Vision-only tasks should bypass the cargo verification gate"
         );
 
@@ -2266,7 +2274,7 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "Computer-control tasks should bypass the cargo verification gate"
         );
 
@@ -2296,7 +2304,7 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(
-            agent.check_completion_gate().is_none(),
+            agent.check_completion_gate().await.is_none(),
             "HTTP-only tasks should bypass the cargo verification gate"
         );
 
@@ -2336,7 +2344,7 @@ mod tests {
 
         // Gate should REJECT — mixed task with file_write still needs cargo verification
         // (we're running from the selfware project root which has a Cargo.toml)
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_some(),
             "Mixed Rust + browser tasks should still require cargo verification"
@@ -2346,7 +2354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_gate_bypassed_when_no_cargo_toml_in_cwd() {
+    async fn test_gate_accepts_non_rust_verification() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let mut config = test_config(format!("{}/v1", server.url()));
         config.agent.min_completion_steps = 0;
@@ -2367,9 +2375,8 @@ mod tests {
         }
         let _guard = CwdGuard(original_dir);
 
-        // Task with file_write in a non-Rust project — should bypass gate.
-        // The completion gate scans agent.messages for file_write tool calls,
-        // so we must add one there in addition to the checkpoint.
+        // Task with file_write in a non-Rust project — a successful test/build
+        // command (e.g. pytest) should satisfy the verification gate.
         agent.messages.push(fake_file_write_message());
 
         let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
@@ -2384,12 +2391,20 @@ mod tests {
             success: true,
             duration_ms: Some(50),
         });
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: r#"{"command":"pytest"}"#.to_string(),
+            result: Some("passed".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result.is_none(),
-            "Non-Rust project (no Cargo.toml) should bypass cargo verification, got: {:?}",
+            "Non-Rust verification (pytest) should satisfy the completion gate, got: {:?}",
             result,
         );
 
@@ -2419,7 +2434,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(result.is_some());
         let msg = result.unwrap();
         // Should NOT mention cargo for non-Rust tasks
@@ -2481,7 +2496,7 @@ mod tests {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        let result = agent.check_completion_gate();
+        let result = agent.check_completion_gate().await;
         assert!(
             result
                 .as_deref()
@@ -2813,7 +2828,15 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(false, "call_1", "test_tool", true, r#"{"output":"hello"}"#);
+        agent
+            .push_tool_result_message(
+                false,
+                "call_1",
+                "test_tool",
+                true,
+                r#"{"output":"hello"}"#,
+            )
+            .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -2832,7 +2855,15 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(false, "call_1", "test_tool", false, "Something went wrong");
+        agent
+            .push_tool_result_message(
+                false,
+                "call_1",
+                "test_tool",
+                false,
+                "Something went wrong",
+            )
+            .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -2850,13 +2881,15 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(
-            true,
-            "call_native_1",
-            "test_tool",
-            true,
-            r#"{"data":"ok"}"#,
-        );
+        agent
+            .push_tool_result_message(
+                true,
+                "call_native_1",
+                "test_tool",
+                true,
+                r#"{"data":"ok"}"#,
+            )
+            .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -2874,13 +2907,15 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(
-            true,
-            "call_native_2",
-            "test_tool",
-            false,
-            "Permission denied",
-        );
+        agent
+            .push_tool_result_message(
+                true,
+                "call_native_2",
+                "test_tool",
+                false,
+                "Permission denied",
+            )
+            .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -2903,7 +2938,9 @@ mod tests {
         let initial_len = agent.messages.len();
 
         let result = r#"{"base64_png":"iVBORw0KGgo=","width":100,"height":100}"#;
-        agent.push_tool_result_message(false, "call_img", "screen_capture", true, result);
+        agent
+            .push_tool_result_message(false, "call_img", "screen_capture", true, result)
+            .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -2925,7 +2962,9 @@ mod tests {
         let initial_len = agent.messages.len();
 
         let result = r#"{"base64_png":"abc123","note":"screenshot"}"#;
-        agent.push_tool_result_message(true, "call_img_native", "screen_capture", true, result);
+        agent
+            .push_tool_result_message(true, "call_img_native", "screen_capture", true, result)
+            .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -3165,8 +3204,9 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         let start = std::time::Instant::now();
-        let result =
-            agent.parse_tool_args("file_read", r#"{"path":"test.rs"}"#, "call_1", false, start);
+        let result = agent
+            .parse_tool_args("file_read", r#"{"path":"test.rs"}"#, "call_1", false, start)
+            .await;
 
         assert!(result.is_some());
         let args = result.unwrap();
@@ -3183,7 +3223,9 @@ mod tests {
         let initial_len = agent.messages.len();
 
         let start = std::time::Instant::now();
-        let result = agent.parse_tool_args("file_read", "this is not json", "call_1", false, start);
+        let result = agent
+            .parse_tool_args("file_read", "this is not json", "call_1", false, start)
+            .await;
 
         assert!(result.is_none());
         assert!(agent.messages.len() > initial_len);
@@ -3198,7 +3240,9 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         let start = std::time::Instant::now();
-        let result = agent.parse_tool_args("shell_exec", "{broken", "call_native_1", true, start);
+        let result = agent
+            .parse_tool_args("shell_exec", "{broken", "call_native_1", true, start)
+            .await;
 
         assert!(result.is_none());
         let last = agent.messages.last().unwrap();
@@ -3214,7 +3258,9 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         let start = std::time::Instant::now();
-        let result = agent.parse_tool_args("git_status", "{}", "call_1", false, start);
+        let result = agent
+            .parse_tool_args("git_status", "{}", "call_1", false, start)
+            .await;
 
         assert!(result.is_some());
         let args = result.unwrap();
@@ -3231,14 +3277,16 @@ mod tests {
         let initial_len = agent.messages.len();
 
         let start = std::time::Instant::now();
-        let ok = agent.validate_tool_args(
-            "shell_exec",
-            "{}",
-            &serde_json::json!({}),
-            "call_1",
-            false,
-            start,
-        );
+        let ok = agent
+            .validate_tool_args(
+                "shell_exec",
+                "{}",
+                &serde_json::json!({}),
+                "call_1",
+                false,
+                start,
+            )
+            .await;
 
         assert!(!ok);
         assert!(agent.messages.len() > initial_len);
@@ -3258,14 +3306,16 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         let start = std::time::Instant::now();
-        let ok = agent.validate_tool_args(
-            "shell_exec",
-            r#"{"command":"echo hi"}"#,
-            &serde_json::json!({"command":"echo hi"}),
-            "call_1",
-            false,
-            start,
-        );
+        let ok = agent
+            .validate_tool_args(
+                "shell_exec",
+                r#"{"command":"echo hi"}"#,
+                &serde_json::json!({"command":"echo hi"}),
+                "call_1",
+                false,
+                start,
+            )
+            .await;
 
         assert!(ok);
 
@@ -3279,17 +3329,21 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         let start = std::time::Instant::now();
-        let first = agent.parse_tool_args("shell_exec", "{broken", "call_1", false, start);
+        let first = agent
+            .parse_tool_args("shell_exec", "{broken", "call_1", false, start)
+            .await;
         assert!(first.is_none());
 
         let second_start = std::time::Instant::now();
-        let suppressed = agent.suppress_repeated_failed_tool_retry(
-            "shell_exec",
-            "{broken",
-            "call_2",
-            false,
-            second_start,
-        );
+        let suppressed = agent
+            .suppress_repeated_failed_tool_retry(
+                "shell_exec",
+                "{broken",
+                "call_2",
+                false,
+                second_start,
+            )
+            .await;
         assert!(suppressed);
 
         let recovery = agent.messages.last().expect("expected suppression result");
@@ -3310,24 +3364,28 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         let start = std::time::Instant::now();
-        let first = agent.validate_tool_args(
-            "shell_exec",
-            "{}",
-            &serde_json::json!({}),
-            "call_1",
-            false,
-            start,
-        );
+        let first = agent
+            .validate_tool_args(
+                "shell_exec",
+                "{}",
+                &serde_json::json!({}),
+                "call_1",
+                false,
+                start,
+            )
+            .await;
         assert!(!first);
 
         let second_start = std::time::Instant::now();
-        let suppressed = agent.suppress_repeated_failed_tool_retry(
-            "shell_exec",
-            "{}",
-            "call_2",
-            false,
-            second_start,
-        );
+        let suppressed = agent
+            .suppress_repeated_failed_tool_retry(
+                "shell_exec",
+                "{}",
+                "call_2",
+                false,
+                second_start,
+            )
+            .await;
         assert!(suppressed);
 
         let recovery = agent.messages.last().expect("expected suppression result");
@@ -3676,8 +3734,8 @@ mod tests {
         assert!(!is_observational_shell_batch(&mutating));
     }
 
-    #[test]
-    fn extract_code_and_path_rust_fallback_requires_cargo_toml() {
+    #[tokio::test]
+    async fn extract_code_and_path_rust_fallback_requires_cargo_toml() {
         let saved = std::env::current_dir().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
@@ -3692,10 +3750,10 @@ pub fn other() -> i32 {
 }
 ```"#;
 
-        assert!(extract_code_and_path(content).is_none());
+        assert!(extract_code_and_path(content).await.is_none());
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname='x'\n").unwrap();
 
-        let (path, _) = extract_code_and_path(content).unwrap();
+        let (path, _) = extract_code_and_path(content).await.unwrap();
         assert_eq!(path, "src/lib.rs");
         std::env::set_current_dir(saved).unwrap();
     }
@@ -4156,7 +4214,7 @@ pub fn other() -> i32 {
         });
         agent.current_checkpoint = Some(checkpoint);
 
-        assert!(agent.check_completion_gate().is_none());
+        assert!(agent.check_completion_gate().await.is_none());
 
         server.stop().await;
     }

@@ -86,7 +86,6 @@ fn init_permissive_safety() {
         ..Default::default()
     };
     selfware::tools::file::init_safety_config(&cfg);
-    selfware::tools::file_read::init_safety_config(&cfg);
 }
 
 /// Check whether the test LLM endpoint is reachable. Returns `false` (and

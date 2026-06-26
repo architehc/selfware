@@ -8,7 +8,6 @@
 //! - Mock LLM API server (test-only)
 
 pub mod api_testing;
-pub mod code_review;
 pub mod contract_testing;
 pub mod language_qa;
 #[cfg(test)]

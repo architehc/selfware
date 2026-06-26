@@ -1261,7 +1261,6 @@ fn run_one(
             let b_good = b.has_source_edit && !b.has_test_edit;
             a_good
                 .cmp(&b_good)
-                .then_with(|| b.patch_lines.cmp(&a.patch_lines))
                 .then_with(|| a.syntax_check_passed.cmp(&b.syntax_check_passed))
         })
         .unwrap();
@@ -1681,7 +1680,7 @@ fn median_f64(sorted: &[f64]) -> f64 {
         return 0.0;
     }
     let n = sorted.len();
-    if n.is_multiple_of(2) {
+    if n % 2 == 0 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -1696,7 +1695,9 @@ fn best_runs_by_quant_instance(runs: &[PerRunResult]) -> BTreeMap<(String, Strin
         }
         let key = (r.quant.clone(), r.instance_id.clone());
         match best.get(&key) {
-            Some(existing) if existing.patch_lines >= r.patch_lines => {}
+            // Prefer the first successful non-empty run; use earliest trial as a
+            // neutral tie-breaker instead of rewarding larger patches.
+            Some(existing) if existing.trial <= r.trial => {}
             _ => {
                 best.insert(key, r);
             }
@@ -1707,9 +1708,8 @@ fn best_runs_by_quant_instance(runs: &[PerRunResult]) -> BTreeMap<(String, Strin
 
 /// Write a `patches.json` ready to feed into `swe_bench_pro_eval.py`.
 ///
-/// Picks the patch with the most lines per (quant × instance) — a coarse "best
-/// trial" heuristic that matches what `gather_patches.py` does today (it just
-/// uses the latest patch; we improve on that by preferring non-empty diffs).
+/// Picks the first successful non-empty non-candidate patch per (quant ×
+/// instance), using the earliest completed trial as a neutral tie-breaker.
 fn write_patches_json(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<()> {
     #[derive(Serialize)]
     struct Pred {
@@ -2368,7 +2368,7 @@ diff --git a/tests/test_a.py b/tests/test_a.py
     }
 
     #[test]
-    fn best_runs_skips_candidates() {
+    fn best_runs_skips_candidates_and_prefers_earliest_trial() {
         let runs = vec![
             PerRunResult {
                 instance_id: "i1".into(),
@@ -2388,10 +2388,12 @@ diff --git a/tests/test_a.py b/tests/test_a.py
                 syntax_check_passed: true,
                 candidate_num: 0,
             },
+            // A later non-candidate run with a larger patch should not be
+            // selected just because it has more lines.
             PerRunResult {
                 instance_id: "i1".into(),
                 quant: "q1".into(),
-                trial: 1,
+                trial: 2,
                 exit_code: 0,
                 timed_out: false,
                 wall_secs: 1.0,
@@ -2404,13 +2406,32 @@ diff --git a/tests/test_a.py b/tests/test_a.py
                 has_source_edit: true,
                 has_test_edit: false,
                 syntax_check_passed: true,
+                candidate_num: 0,
+            },
+            PerRunResult {
+                instance_id: "i1".into(),
+                quant: "q1".into(),
+                trial: 1,
+                exit_code: 0,
+                timed_out: false,
+                wall_secs: 1.0,
+                patch_lines: 100,
+                patch_bytes: 1000,
+                pred_path: PathBuf::from("/tmp/c"),
+                error: String::new(),
+                empty_diff: false,
+                test_only_patch: false,
+                has_source_edit: true,
+                has_test_edit: false,
+                syntax_check_passed: true,
                 candidate_num: 2,
             },
         ];
         let best = best_runs_by_quant_instance(&runs);
         assert_eq!(best.len(), 1);
         let chosen = best.values().next().unwrap();
-        assert_eq!(chosen.patch_lines, 10); // candidate skipped
+        assert_eq!(chosen.trial, 1);
+        assert_eq!(chosen.patch_lines, 10); // earliest valid trial, not largest patch
     }
 
     #[test]

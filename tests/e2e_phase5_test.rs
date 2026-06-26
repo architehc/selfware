@@ -476,7 +476,7 @@ async fn test_multi_step_file_workflow() {
         ..Default::default()
     };
     selfware::tools::file::init_safety_config(&cfg);
-    selfware::tools::file_read::init_safety_config(&cfg);
+    selfware::tools::file::init_safety_config(&cfg);
 
     let dir = tempdir().unwrap();
     let registry = ToolRegistry::new();
@@ -613,7 +613,7 @@ async fn test_complete_coding_scenario() {
         ..Default::default()
     };
     selfware::tools::file::init_safety_config(&cfg);
-    selfware::tools::file_read::init_safety_config(&cfg);
+    selfware::tools::file::init_safety_config(&cfg);
 
     let dir = tempdir().unwrap();
     let src_dir = dir.path().join("src");
@@ -751,7 +751,7 @@ async fn test_tool_execution_timing() {
         ..Default::default()
     };
     selfware::tools::file::init_safety_config(&cfg);
-    selfware::tools::file_read::init_safety_config(&cfg);
+    selfware::tools::file::init_safety_config(&cfg);
 
     let dir = tempdir().unwrap();
     let registry = ToolRegistry::new();

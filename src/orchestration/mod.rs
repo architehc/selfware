@@ -13,7 +13,6 @@
 
 pub mod coordinator;
 pub mod multiagent;
-pub mod planning;
 pub mod scratchpad;
 pub mod swarm;
 pub mod visual_loop;

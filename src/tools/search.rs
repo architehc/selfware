@@ -61,31 +61,14 @@ fn cached_regex(pattern: &str) -> Result<Regex> {
     Ok(re)
 }
 
-/// Searches file contents for regex patterns, returning matching lines with context.
-pub struct GrepSearch;
+/// Re-export the canonical `grep_search` tool from `tools::grep_search` so
+/// there is only one `GrepSearch` implementation in the codebase.
+pub use crate::tools::grep_search::{GrepMatch, GrepSearch, GrepSearchResult};
+
 /// Finds files by glob pattern (e.g. `**/*.rs`), returning paths with metadata.
 pub struct GlobFind;
 /// Finds Rust symbol definitions (functions, structs, enums, traits, etc.) by name.
 pub struct SymbolSearch;
-
-/// A single match result from grep search
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GrepMatch {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub content: String,
-    pub context_before: Vec<String>,
-    pub context_after: Vec<String>,
-}
-
-/// Result of a grep search operation
-#[derive(Debug, Serialize, Deserialize)]
-pub struct GrepSearchResult {
-    pub matches: Vec<GrepMatch>,
-    pub total_matches: usize,
-    pub file_count: usize,
-}
 
 /// Result of a glob find operation
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,248 +86,6 @@ struct Symbol {
     file: String,
     line: u32,
     signature: String,
-}
-
-#[async_trait]
-impl Tool for GrepSearch {
-    fn name(&self) -> &str {
-        "grep_search"
-    }
-
-    fn description(&self) -> &str {
-        "Search for regex patterns in files. Returns matching lines with context. Use for finding code patterns, error messages, or specific text."
-    }
-
-    fn schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "required": ["pattern", "path"],
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "Regex pattern to search for"
-                },
-                "path": {
-                    "type": "string",
-                    "description": "File or directory to search in"
-                },
-                "recursive": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Search directories recursively"
-                },
-                "case_insensitive": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Ignore case when matching"
-                },
-                "context_lines": {
-                    "type": "integer",
-                    "default": 2,
-                    "description": "Lines of context before and after match"
-                },
-                "max_matches": {
-                    "type": "integer",
-                    "default": 100,
-                    "description": "Maximum matches to return"
-                },
-                "offset": {
-                    "type": "integer",
-                    "default": 0,
-                    "description": "Number of matches to skip (for pagination)"
-                },
-                "include": {
-                    "type": "string",
-                    "description": "Only search files matching this glob pattern (e.g., *.rs)"
-                },
-                "exclude": {
-                    "type": "string",
-                    "description": "Exclude files matching this glob pattern"
-                }
-            }
-        })
-    }
-
-    #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
-    async fn execute(&self, args: Value) -> Result<Value> {
-        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
-            let pattern_str = args
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .context("Missing required parameter: pattern")?;
-
-            let path_str = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .context("Missing required parameter: path")?;
-
-            let recursive = args
-                .get("recursive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let case_insensitive = args
-                .get("case_insensitive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let context_lines = args
-                .get("context_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(2) as usize;
-            let max_matches = args
-                .get("max_matches")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(100) as usize;
-            let skip_offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let include_pattern = args.get("include").and_then(|v| v.as_str());
-            let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
-
-            // Build regex (uses a bounded cache to avoid recompilation)
-            let full_pattern = if case_insensitive {
-                format!("(?i){}", pattern_str)
-            } else {
-                pattern_str.to_string()
-            };
-            let regex = cached_regex(&full_pattern)?;
-
-            // Build include/exclude globs
-            let include_glob = include_pattern
-                .map(glob::Pattern::new)
-                .transpose()
-                .context("Invalid include pattern")?;
-            let exclude_glob = exclude_pattern
-                .map(glob::Pattern::new)
-                .transpose()
-                .context("Invalid exclude pattern")?;
-
-            let path = Path::new(path_str);
-            let mut matches = Vec::new();
-            let mut total_matches = 0;
-
-            // Collect files to search
-            let files: Vec<_> = if path.is_file() {
-                vec![path.to_path_buf()]
-            } else {
-                let walker = if recursive {
-                    WalkDir::new(path)
-                } else {
-                    WalkDir::new(path).max_depth(1)
-                };
-
-                walker
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                    .filter(|e| {
-                        let file_name = e.file_name().to_string_lossy();
-                        // Skip hidden files and common binary/build directories
-                        if file_name.starts_with('.') {
-                            return false;
-                        }
-                        let path_str = e.path().to_string_lossy();
-                        if path_str.contains("/target/")
-                            || path_str.contains("/.git/")
-                            || path_str.contains("/node_modules/")
-                        {
-                            return false;
-                        }
-                        // Apply include/exclude patterns
-                        if let Some(ref glob) = include_glob {
-                            if !glob.matches(&file_name) {
-                                return false;
-                            }
-                        }
-                        if let Some(ref glob) = exclude_glob {
-                            if glob.matches(&file_name) {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .map(|e| e.path().to_path_buf())
-                    .collect()
-            };
-
-            // Search files
-            for file_path in files {
-                if matches.len() >= max_matches {
-                    break;
-                }
-
-                // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
-                let content =
-                    match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
-                        Ok(c) => c,
-                        Err(_) => continue, // Skip binary/unreadable files
-                    };
-
-                let lines: Vec<&str> = content.lines().collect();
-
-                for (line_num, line) in lines.iter().enumerate() {
-                    if matches.len() >= max_matches {
-                        break;
-                    }
-
-                    if let Some(m) = regex.find(line) {
-                        total_matches += 1;
-
-                        // Skip matches before the offset
-                        if total_matches <= skip_offset {
-                            continue;
-                        }
-
-                        // Get context
-                        let start = line_num.saturating_sub(context_lines);
-                        let end = (line_num + context_lines + 1).min(lines.len());
-
-                        let context_before: Vec<String> = lines[start..line_num]
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect();
-
-                        let context_after: Vec<String> = if line_num + 1 < lines.len() {
-                            lines[(line_num + 1)..end]
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect()
-                        } else {
-                            vec![]
-                        };
-
-                        matches.push(GrepMatch {
-                            file: file_path.to_string_lossy().to_string(),
-                            line: (line_num + 1) as u32,
-                            column: (m.start() + 1) as u32,
-                            content: line.to_string(),
-                            context_before,
-                            context_after,
-                        });
-                    }
-                }
-            }
-
-            let truncated = matches.len() >= max_matches;
-            let has_more = truncated || (total_matches > skip_offset + matches.len());
-
-            Ok(serde_json::json!({
-                "matches": matches,
-                "count": matches.len(),
-                "total_matches": total_matches,
-                "truncated": truncated,
-                "pagination": {
-                    "offset": skip_offset,
-                    "limit": max_matches,
-                    "total_matches": total_matches,
-                    "has_more": has_more
-                }
-            }))
-        })
-        .await??;
-        Ok(result)
-    }
-
-    fn metadata(&self) -> crate::safety::ToolMetadata {
-        crate::safety::ToolMetadata::read_only()
-    }
 }
 
 #[async_trait]
@@ -395,14 +136,34 @@ impl Tool for GlobFind {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
 
-            // Combine base path with pattern
-            let full_pattern = if pattern_str.starts_with('/') || pattern_str.starts_with("./") {
+            // Combine base path with pattern. Patterns that are absolute, already
+            // relative to the current directory, or recursive-from-root (`**`)
+            // are used as-is.
+            let full_pattern = if pattern_str.starts_with('/')
+                || pattern_str.starts_with("./")
+                || pattern_str.starts_with("**")
+            {
                 pattern_str.to_string()
             } else {
                 format!("{}/{}", base_path, pattern_str)
             };
 
-            let glob_pattern = glob::Pattern::new(&full_pattern).context("Invalid glob pattern")?;
+            // WalkDir may prefix paths with `./` when the base path is `.`.
+            // Strip that from both the pattern and the path so matching is
+            // independent of how the base path was expressed.
+            let match_pattern = full_pattern.strip_prefix("./").unwrap_or(&full_pattern);
+
+            let glob_pattern =
+                glob::Pattern::new(match_pattern).context("Invalid glob pattern")?;
+
+            // `*` should match within a single path component, while `**` should
+            // match across directory boundaries. The default `glob::Pattern`
+            // lets `*` cross `/`, so we require literal separators.
+            let glob_options = glob::MatchOptions {
+                case_sensitive: true,
+                require_literal_separator: true,
+                require_literal_leading_dot: false,
+            };
 
             let mut files = Vec::new();
 
@@ -427,7 +188,9 @@ impl Tool for GlobFind {
                     continue;
                 }
 
-                if glob_pattern.matches(&path_str) {
+                let match_path = path_str.strip_prefix("./").unwrap_or(&path_str);
+
+                if glob_pattern.matches_with(match_path, glob_options) {
                     let metadata = std::fs::metadata(path).ok();
                     let modified = metadata.as_ref().and_then(|m| {
                         m.modified().ok().map(|t| {
@@ -659,6 +422,7 @@ fn build_symbol_patterns(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     // =========================================================================
     // cached_regex tests
@@ -1013,6 +777,49 @@ mod tests {
         let meta = GlobFind.metadata();
         assert!(meta.read_only);
     }
+
+    #[tokio::test]
+    async fn test_glob_find_starstar_recursion() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("top.rs");
+        let nested = dir.path().join("src").join("nested.rs");
+        let deep = dir.path().join("src").join("deep").join("bottom.rs");
+
+        std::fs::create_dir_all(top.parent().unwrap()).unwrap();
+        std::fs::write(&top, "").unwrap();
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "").unwrap();
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&deep, "").unwrap();
+
+        let tool = GlobFind;
+
+        // `**/*.rs` must recurse arbitrarily deep.
+        let result = tool
+            .execute(json!({"pattern": "**/*.rs", "path": dir.path()}))
+            .await
+            .unwrap();
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 3, "expected all three .rs files");
+        let names: Vec<&str> = files
+            .iter()
+            .map(|v| v["path"].as_str().unwrap())
+            .collect();
+        assert!(names.iter().any(|p| p.ends_with("top.rs")));
+        assert!(names.iter().any(|p| p.ends_with("nested.rs")));
+        assert!(names.iter().any(|p| p.ends_with("bottom.rs")));
+
+        // `*.rs` must match only the top-level file.
+        let result = tool
+            .execute(json!({"pattern": "*.rs", "path": dir.path()}))
+            .await
+            .unwrap();
+        let files = result["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "expected only top-level .rs file");
+        assert!(files[0]["path"].as_str().unwrap().ends_with("top.rs"));
+    }
+
+
 
     #[test]
     fn test_symbol_search_metadata_read_only() {

@@ -150,13 +150,13 @@ pub fn artifact_dir(workdir: &Path) -> PathBuf {
     workdir.join(".selfware").join("turns")
 }
 
-/// Write a `TurnArtifact` synchronously to `<workdir>/.selfware/turns/turn_{step:04}.json`.
+/// Write a `TurnArtifact` to `<workdir>/.selfware/turns/turn_{step:04}.json`.
 ///
 /// Errors are logged but never propagated — debug capture must never break
 /// the agent loop.
-pub fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
+pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
     let dir = artifact_dir(workdir);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         tracing::warn!("Failed to create turn artifact dir {:?}: {}", dir, e);
         return;
     }
@@ -168,7 +168,7 @@ pub fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
             return;
         }
     };
-    if let Err(e) = std::fs::write(&path, json) {
+    if let Err(e) = tokio::fs::write(&path, json).await {
         tracing::warn!("Failed to write turn artifact {:?}: {}", path, e);
     }
 }
@@ -371,11 +371,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_artifact_creates_file() {
+    #[tokio::test]
+    async fn write_artifact_creates_file() {
         let dir = tempfile::tempdir().expect("create tempdir");
         let artifact = sample_artifact();
-        write_artifact(dir.path(), &artifact);
+        write_artifact(dir.path(), &artifact).await;
         let written = artifact_dir(dir.path()).join("turn_0001.json");
         assert!(
             written.exists(),

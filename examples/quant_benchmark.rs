@@ -127,12 +127,15 @@ enum BugSpec {
 
 const FIX_PROMPT: &str = "You are fixing a small Rust library in the current directory.\n\
      Task:\n\
-     1. Run tests and identify failing behavior.\n\
-     2. Fix the implementation so all tests pass.\n\
+     1. Run tests once to identify failing behavior.\n\
+     2. Use file_edit (or file_write) to fix the implementation so all tests pass.\n\
+        Do not just run tests repeatedly — you must edit the source code.\n\
      3. Keep all existing public function signatures unchanged.\n\
      4. Do not add dependencies.\n\
      5. Run cargo test before finishing.\n\
      \n\
+     Important: avoid long reasoning loops. After you see the failing test,\n\
+     make the smallest code change that fixes it, then verify.\n\
      When done, summarize exactly what you changed.";
 
 const SCENARIOS: &[Scenario] = &[
@@ -562,9 +565,11 @@ fn parse_step_count(stdout: &str) -> Option<u32> {
 }
 
 async fn run_speed_probe(args: &Args) -> Result<SpeedResult> {
+    let api_key = std::env::var("SELFWARE_API_KEY").ok().filter(|s| !s.is_empty());
     let cfg = Config {
         endpoint: args.endpoint.clone(),
         model: args.model.clone(),
+        api_key: api_key.map(|s| s.into()),
         max_tokens: 200,
         temperature: 0.0,
         context_length: 32768,

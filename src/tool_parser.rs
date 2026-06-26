@@ -60,6 +60,7 @@ static QWEN3_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
 static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static OPENAI_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static MALFORMED_CLOSE_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
+static JSON_STRING_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Cached regex for XML element parsing: `<tag>content</tag>`
 /// Previously this was compiled on every call to `parse_xml_arguments`.
@@ -194,15 +195,45 @@ fn decode_xml_entities(s: &str) -> String {
 /// dropping the `</` prefix on closing tags. This function detects known tag names
 /// that appear bare (not preceded by `<` or `/` or another word character) followed
 /// by `>`, and rewrites them as proper closing tags before the regex parsers run.
+///
+/// JSON string literals are temporarily protected so that valid JSON inside
+/// `<arguments>` blocks (e.g. `{"x": "name>"}`) is not corrupted by the rewrite.
 fn normalize_malformed_xml(content: &str) -> String {
+    let json_re = JSON_STRING_REGEX.get_or_init(|| {
+        // Match a JSON string literal, including escaped quotes.
+        Regex::new(r#""(?:[^"\\]|\\.)*""#).expect("Invalid JSON string regex")
+    });
     let re = MALFORMED_CLOSE_TAG_REGEX.get_or_init(|| {
-        // Match known closing-tag names followed by `>`, where the preceding character
-        // is NOT `<`, `/`, or a word character (i.e., not part of a valid opening/closing
-        // tag or a longer identifier).  `(?m)` enables multiline so `^` matches line starts.
-        Regex::new(r"(?m)(^|[^<\w/])(tool_call|arguments|parameter|function|tool|name)>")
+        // Match known closing-tag names followed by `>` only when the `>` is the last
+        // non-whitespace token on a line or is immediately followed by another tag.
+        // Require the tag name to be preceded by whitespace or line start so that `>`
+        // inside JSON strings (e.g. `{"op": "a > b"}`) is not mistaken for a malformed
+        // closing tag.
+        Regex::new(r"(?m)(^|\s)(tool_call|arguments|parameter|function|tool|name)>(\s*(?:$|<))")
             .expect("Invalid malformed close tag regex")
     });
-    re.replace_all(content, "$1</$2>").to_string()
+
+    // Protect JSON string literals so that valid JSON inside <arguments> blocks
+    // (e.g. `{"x": "name>"}`) is not corrupted by the malformed-XML closing-tag
+    // rewrite. The malformed tags we want to fix are XML envelope tags, not JSON
+    // string values.
+    let mut protected: Vec<String> = Vec::new();
+    const PLACEHOLDER: &str = "\x00__JSON_STRING__\x00";
+
+    let protected_content = json_re
+        .replace_all(content, |caps: &regex::Captures| {
+            protected.push(caps[0].to_string());
+            PLACEHOLDER
+        })
+        .to_string();
+
+    let normalized = re.replace_all(&protected_content, "$1</$2>$3").to_string();
+
+    let mut result = normalized;
+    for s in protected {
+        result = result.replacen(PLACEHOLDER, &s, 1);
+    }
+    result
 }
 
 /// Parse content for tool calls using multiple strategies
@@ -1770,6 +1801,36 @@ I'll check the output next."#;
         // Valid tags should be untouched
         assert_eq!(normalize_malformed_xml("</arguments>"), "</arguments>");
         assert_eq!(normalize_malformed_xml("<arguments>"), "<arguments>");
+        // `>` inside JSON arguments must not be corrupted
+        assert_eq!(
+            normalize_malformed_xml(r#"<arguments>{"op": "a > b"}</arguments>"#),
+            r#"<arguments>{"op": "a > b"}</arguments>"#
+        );
+    }
+
+    #[test]
+    fn test_normalize_malformed_xml_preserves_json_strings() {
+        // JSON string values ending in tag-like names (e.g. "tool>", "name>")
+        // must be preserved, even when the closing tag starts on the next line.
+        assert_eq!(
+            normalize_malformed_xml(r#"<arguments>{"x": "tool>"}
+</arguments>"#),
+            r#"<arguments>{"x": "tool>"}
+</arguments>"#
+        );
+        assert_eq!(
+            normalize_malformed_xml(r#"<arguments>{"x": "my name>"}
+</arguments>"#),
+            r#"<arguments>{"x": "my name>"}
+</arguments>"#
+        );
+        // Malformed closing tags outside JSON strings are still normalized.
+        assert_eq!(
+            normalize_malformed_xml(r#"<arguments>{"x": "ok"} arguments>
+</arguments>"#),
+            r#"<arguments>{"x": "ok"} </arguments>
+</arguments>"#
+        );
     }
 
     #[test]

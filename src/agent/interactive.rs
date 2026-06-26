@@ -868,7 +868,7 @@ impl Agent {
             }
 
             if input == "/stats" {
-                self.show_session_stats();
+                self.show_session_stats().await;
                 continue;
             }
 
@@ -1250,12 +1250,12 @@ impl Agent {
             }
 
             if input == "/debug-log" {
-                self.print_session_debug_log();
+                self.print_session_debug_log().await;
                 continue;
             }
 
             if input == "/debug-log full" {
-                self.print_session_debug_log_with_options(true);
+                self.print_session_debug_log_with_options(true).await;
                 continue;
             }
 
@@ -1358,7 +1358,7 @@ impl Agent {
             }
 
             if let Some(args) = input.strip_prefix("/explain ") {
-                self.handle_explain_command(args.trim());
+                self.handle_explain_command(args.trim()).await;
                 continue;
             }
 
@@ -2039,7 +2039,7 @@ impl Agent {
             }
 
             // Expand @file references in input (Qwen Code style)
-            let (expanded_input, included_files) = self.expand_file_references(input);
+            let (expanded_input, included_files) = self.expand_file_references(input).await;
             if !included_files.is_empty() {
                 println!(
                     "{} Included {} file(s):",
@@ -2213,7 +2213,7 @@ impl Agent {
     }
 
     // ── /explain implementation ──────────────────────────────────────
-    fn handle_explain_command(&mut self, args: &str) {
+    async fn handle_explain_command(&mut self, args: &str) {
         use crate::cognitive::learning::{CodeExplainer, ConceptExtractor, ExplainModeConfig};
 
         // /explain --level <level>
@@ -2276,7 +2276,7 @@ impl Agent {
             .or_else(|| args.strip_prefix("--curriculum="))
         {
             let dir_path = std::path::Path::new(dir_str.trim());
-            if !dir_path.exists() {
+            if !tokio::fs::try_exists(dir_path).await.unwrap_or(false) {
                 println!(
                     "{} Directory not found: {}",
                     "!!".bright_red(),
@@ -2284,7 +2284,11 @@ impl Agent {
                 );
                 return;
             }
-            if !dir_path.is_dir() {
+            if !tokio::fs::metadata(dir_path)
+                .await
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
                 println!("{} Not a directory: {}", "!!".bright_red(), dir_str.trim());
                 return;
             }
@@ -2292,16 +2296,19 @@ impl Agent {
             let extractor = ConceptExtractor::new();
             let mut all_concepts = Vec::new();
 
-            if let Ok(entries) = std::fs::read_dir(dir_path) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            let concepts = extractor.extract_from_code(&content, &path);
-                            all_concepts.extend(concepts);
+            match tokio::fs::read_dir(dir_path).await {
+                Ok(mut entries) => {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                                let concepts = extractor.extract_from_code(&content, &path);
+                                all_concepts.extend(concepts);
+                            }
                         }
                     }
                 }
+                Err(_) => {}
             }
 
             if all_concepts.is_empty() {
@@ -2362,12 +2369,12 @@ impl Agent {
 
         // /explain <path> — explain a file
         let file_path = std::path::Path::new(args);
-        if !file_path.exists() {
+        if !tokio::fs::try_exists(file_path).await.unwrap_or(false) {
             println!("{} File not found: {}", "!!".bright_red(), args);
             return;
         }
 
-        let content = match std::fs::read_to_string(file_path) {
+        let content = match tokio::fs::read_to_string(file_path).await {
             Ok(c) => c,
             Err(e) => {
                 println!("{} Cannot read file: {}", "!!".bright_red(), e);
@@ -3071,12 +3078,12 @@ impl Agent {
             }
 
             if input == "/debug-log" {
-                self.print_session_debug_log();
+                self.print_session_debug_log().await;
                 continue;
             }
 
             if input == "/debug-log full" {
-                self.print_session_debug_log_with_options(true);
+                self.print_session_debug_log_with_options(true).await;
                 continue;
             }
 
@@ -3118,7 +3125,7 @@ impl Agent {
                     .strip_prefix("/explain ")
                     .expect("checked by starts_with above")
                     .trim();
-                self.handle_explain_command(args);
+                self.handle_explain_command(args).await;
                 continue;
             }
 
@@ -3318,7 +3325,7 @@ impl Agent {
             scan_path.to_path_buf()
         };
 
-        if !scan_path.exists() {
+        if !tokio::fs::try_exists(&scan_path).await.unwrap_or(false) {
             println!(
                 "{} Path not found: {}",
                 "x".bright_red(),

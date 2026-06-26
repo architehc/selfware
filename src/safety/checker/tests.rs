@@ -789,3 +789,24 @@ fn test_container_run_blocks_sys_mount() {
     let result = checker.check_tool_call(&call);
     assert!(result.is_err(), "mounting /sys should be blocked");
 }
+
+#[test]
+fn test_tool_search_is_allowed() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("tool_search", r#"{"query": "cargo"}"#);
+    assert!(checker.check_tool_call(&call).is_ok(), "tool_search should be allowed");
+}
+
+#[test]
+fn test_whitespace_padded_file_write_still_validated() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    // Whitespace-padded tool names must still run path and content checks.
+    let call = create_test_call(
+        "  file_write  ",
+        r#"{"path": "/etc/passwd", "content": "hello"}"#,
+    );
+    let result = checker.check_tool_call(&call);
+    assert!(result.is_err(), "whitespace-padded file_write to /etc should be blocked");
+}

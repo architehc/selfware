@@ -68,32 +68,32 @@ impl RecoveryExecutor {
     }
 
     /// Execute a recovery strategy without external state access.
-    pub fn execute(&self, strategy: &RecoveryStrategy) -> RecoveryExecution {
-        self.execute_internal(strategy, None, None)
+    pub async fn execute(&self, strategy: &RecoveryStrategy) -> RecoveryExecution {
+        self.execute_internal(strategy, None, None).await
     }
 
     /// Execute a recovery strategy with state-manager integration for
     /// restore/clear/reset actions.
-    pub fn execute_with_state(
+    pub async fn execute_with_state(
         &self,
         strategy: &RecoveryStrategy,
         state_manager: &StateManager,
     ) -> RecoveryExecution {
-        self.execute_internal(strategy, Some(state_manager), None)
+        self.execute_internal(strategy, Some(state_manager), None).await
     }
 
     /// Execute a recovery strategy with state manager and an error pattern key
     /// used to track per-pattern retry state for exponential backoff.
-    pub fn execute_for_pattern(
+    pub async fn execute_for_pattern(
         &self,
         strategy: &RecoveryStrategy,
         state_manager: &StateManager,
         pattern_key: &str,
     ) -> RecoveryExecution {
-        self.execute_internal(strategy, Some(state_manager), Some(pattern_key))
+        self.execute_internal(strategy, Some(state_manager), Some(pattern_key)).await
     }
 
-    fn execute_internal(
+    async fn execute_internal(
         &self,
         strategy: &RecoveryStrategy,
         state_manager: Option<&StateManager>,
@@ -138,7 +138,7 @@ impl RecoveryExecutor {
 
             info!("Executing recovery action: {}", name);
 
-            if let Err(e) = self.execute_action(action, state_manager, pattern_key) {
+            if let Err(e) = self.execute_action(action, state_manager, pattern_key).await {
                 success = false;
                 error = Some(format!("Action '{}' failed: {}", name, e));
                 warn!("Recovery action '{}' failed: {}", name, e);
@@ -184,7 +184,7 @@ impl RecoveryExecutor {
         execution
     }
 
-    fn execute_action(
+    async fn execute_action(
         &self,
         action: &RecoveryAction,
         state_manager: Option<&StateManager>,
@@ -194,7 +194,7 @@ impl RecoveryExecutor {
             RecoveryAction::Retry {
                 delay_ms,
                 max_attempts,
-            } => self.execute_retry(*delay_ms, *max_attempts, pattern_key),
+            } => self.execute_retry(*delay_ms, *max_attempts, pattern_key).await,
 
             RecoveryAction::Restart { component } => {
                 if component.trim().is_empty() {
@@ -320,7 +320,7 @@ impl RecoveryExecutor {
     }
 
     /// Execute a retry with exponential backoff.
-    fn execute_retry(
+    async fn execute_retry(
         &self,
         base_delay_ms: u64,
         max_attempts: u32,
@@ -391,26 +391,11 @@ impl RecoveryExecutor {
             .total_backoff_ms
             .fetch_add(actual_delay_ms, Ordering::Relaxed);
 
-        // Actual sleep — this is the real recovery delay.
-        //
-        // SAFETY (async context): The entire execute chain (execute / execute_with_state /
-        // execute_for_pattern / execute_internal / execute_action / execute_retry) is
-        // synchronous, so we cannot use `tokio::time::sleep().await` without converting
-        // the full call-tree to async.  `block_in_place` tells tokio to temporarily move
-        // this worker's tasks to another thread, preventing executor starvation.
-        //
-        // NOTE: To convert this to async sleep, the following functions would need to be
-        // changed to async: execute, execute_with_state, execute_for_pattern, execute_internal,
-        // execute_action, and execute_retry. This would require updating all call sites
-        // throughout the codebase.
-        //
-        // The delay is capped at 30s (line above) and bounded by max_attempts,
-        // so total blocking time per recovery is predictable and limited.
+        // Actual async sleep — this is the real recovery delay. Using `tokio::time::sleep`
+        // keeps the Tokio worker free instead of blocking the thread.
         if actual_delay_ms > 0 {
             let capped_delay = actual_delay_ms.min(30_000);
-            tokio::task::block_in_place(|| {
-                std::thread::sleep(Duration::from_millis(capped_delay));
-            });
+            tokio::time::sleep(Duration::from_millis(capped_delay)).await;
         }
 
         debug!(
@@ -512,8 +497,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_executor_disabled_config() {
+    #[tokio::test]
+    async fn test_executor_disabled_config() {
         let config = SelfHealingConfig {
             enabled: false,
             ..SelfHealingConfig::default()
@@ -523,49 +508,49 @@ mod tests {
             target: "backup".to_string(),
         }]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("disabled"));
     }
 
-    #[test]
-    fn test_executor_fallback_success() {
+    #[tokio::test]
+    async fn test_executor_fallback_success() {
         let executor = RecoveryExecutor::new(test_config());
         let strategy = test_strategy(vec![RecoveryAction::Fallback {
             target: "backup".to_string(),
         }]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(result.success);
         assert_eq!(result.actions_executed, vec!["fallback"]);
     }
 
-    #[test]
-    fn test_executor_fallback_empty_target() {
+    #[tokio::test]
+    async fn test_executor_fallback_empty_target() {
         let executor = RecoveryExecutor::new(test_config());
         let strategy = test_strategy(vec![RecoveryAction::Fallback {
             target: "".to_string(),
         }]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("empty"));
     }
 
-    #[test]
-    fn test_executor_restart_empty_component() {
+    #[tokio::test]
+    async fn test_executor_restart_empty_component() {
         let executor = RecoveryExecutor::new(test_config());
         let strategy = test_strategy(vec![RecoveryAction::Restart {
             component: "  ".to_string(),
         }]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("empty"));
     }
 
-    #[test]
-    fn test_executor_restart_with_state() {
+    #[tokio::test]
+    async fn test_executor_restart_with_state() {
         let executor = RecoveryExecutor::new(test_config());
         let state_mgr = StateManager::new(SelfHealingConfig::default());
         // Create a checkpoint so restore can find it
@@ -575,12 +560,12 @@ mod tests {
             component: "agent".to_string(),
         }]);
 
-        let result = executor.execute_with_state(&strategy, &state_mgr);
+        let result = executor.execute_with_state(&strategy, &state_mgr).await;
         assert!(result.success);
     }
 
-    #[test]
-    fn test_executor_reset_state() {
+    #[tokio::test]
+    async fn test_executor_reset_state() {
         let executor = RecoveryExecutor::new(test_config());
         let state_mgr = StateManager::new(SelfHealingConfig::default());
 
@@ -588,37 +573,37 @@ mod tests {
             scope: "all".to_string(),
         }]);
 
-        let result = executor.execute_with_state(&strategy, &state_mgr);
+        let result = executor.execute_with_state(&strategy, &state_mgr).await;
         assert!(result.success);
     }
 
-    #[test]
-    fn test_executor_custom_action() {
+    #[tokio::test]
+    async fn test_executor_custom_action() {
         let executor = RecoveryExecutor::new(test_config());
         let strategy = test_strategy(vec![RecoveryAction::Custom {
             name: "compress_context".to_string(),
             params: HashMap::new(),
         }]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(result.success);
     }
 
-    #[test]
-    fn test_executor_custom_action_empty_name() {
+    #[tokio::test]
+    async fn test_executor_custom_action_empty_name() {
         let executor = RecoveryExecutor::new(test_config());
         let strategy = test_strategy(vec![RecoveryAction::Custom {
             name: "".to_string(),
             params: HashMap::new(),
         }]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("empty"));
     }
 
-    #[test]
-    fn test_executor_custom_unknown_action() {
+    #[tokio::test]
+    async fn test_executor_custom_unknown_action() {
         let executor = RecoveryExecutor::new(test_config());
         let strategy = test_strategy(vec![RecoveryAction::Custom {
             name: "totally_unknown".to_string(),
@@ -626,12 +611,12 @@ mod tests {
         }]);
 
         // Unknown custom actions are treated as no-op signals (success)
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(result.success);
     }
 
-    #[test]
-    fn test_executor_max_healing_attempts_abort() {
+    #[tokio::test]
+    async fn test_executor_max_healing_attempts_abort() {
         let config = SelfHealingConfig {
             enabled: true,
             max_healing_attempts: 1,
@@ -652,44 +637,44 @@ mod tests {
             },
         ]);
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("exceeded max"));
     }
 
-    #[test]
-    fn test_executor_success_rate() {
+    #[tokio::test]
+    async fn test_executor_success_rate() {
         let executor = RecoveryExecutor::new(test_config());
 
         // Execute a successful strategy
         let good_strategy = test_strategy(vec![RecoveryAction::Fallback {
             target: "ok".to_string(),
         }]);
-        executor.execute(&good_strategy);
+        executor.execute(&good_strategy).await;
 
         // Execute a failing strategy
         let bad_strategy = test_strategy(vec![RecoveryAction::Fallback {
             target: "".to_string(),
         }]);
-        executor.execute(&bad_strategy);
+        executor.execute(&bad_strategy).await;
 
         assert!((executor.success_rate() - 0.5).abs() < 0.01);
     }
 
-    #[test]
-    fn test_executor_history() {
+    #[tokio::test]
+    async fn test_executor_history() {
         let executor = RecoveryExecutor::new(test_config());
         assert_eq!(executor.history().len(), 0);
 
         let strategy = test_strategy(vec![RecoveryAction::Fallback {
             target: "ok".to_string(),
         }]);
-        executor.execute(&strategy);
+        executor.execute(&strategy).await;
         assert_eq!(executor.history().len(), 1);
     }
 
-    #[test]
-    fn test_execute_for_pattern_and_retry_count() {
+    #[tokio::test]
+    async fn test_execute_for_pattern_and_retry_count() {
         let config = SelfHealingConfig {
             enabled: true,
             max_healing_attempts: 5,
@@ -705,15 +690,19 @@ mod tests {
 
         assert_eq!(executor.retry_attempt_count("test-pattern"), 0);
 
-        executor.execute_for_pattern(&strategy, &state_mgr, "test-pattern");
+        executor
+            .execute_for_pattern(&strategy, &state_mgr, "test-pattern")
+            .await;
         assert_eq!(executor.retry_attempt_count("test-pattern"), 1);
 
-        executor.execute_for_pattern(&strategy, &state_mgr, "test-pattern");
+        executor
+            .execute_for_pattern(&strategy, &state_mgr, "test-pattern")
+            .await;
         assert_eq!(executor.retry_attempt_count("test-pattern"), 2);
     }
 
-    #[test]
-    fn test_reset_retry_state() {
+    #[tokio::test]
+    async fn test_reset_retry_state() {
         let executor = RecoveryExecutor::new(test_config());
         let state_mgr = StateManager::new(SelfHealingConfig::default());
 
@@ -722,7 +711,9 @@ mod tests {
             max_attempts: 5,
         }]);
 
-        executor.execute_for_pattern(&strategy, &state_mgr, "pattern-a");
+        executor
+            .execute_for_pattern(&strategy, &state_mgr, "pattern-a")
+            .await;
         assert_eq!(executor.retry_attempt_count("pattern-a"), 1);
 
         executor.reset_retry_state("pattern-a");

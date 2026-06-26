@@ -41,8 +41,238 @@ pub struct EvolutionResult {
     pub total_duration: std::time::Duration,
 }
 
+const DEFAULT_TOKEN_BUDGET: u64 = 500_000;
+const DEFAULT_TIMEOUT_SECS: f64 = 3600.0;
+const EVOLVE_FEATURES: &[&str] = &["self-improvement"];
+
+fn rating_from_score(score: f64) -> GenerationRating {
+    match score as u32 {
+        85..=100 => GenerationRating::Bloom,
+        60..=84 => GenerationRating::Grow,
+        30..=59 => GenerationRating::Wilt,
+        _ => GenerationRating::Frost,
+    }
+}
+
+fn first_usize(s: &str) -> usize {
+    s.split_whitespace()
+        .filter_map(|w| w.parse().ok())
+        .next()
+        .unwrap_or(0)
+}
+
+/// Parse the combined cargo test output and return `(passed, total)`.
+///
+/// Sums every `test result:` line so multi-crate / multi-target runs are
+/// handled correctly. Ignored tests are excluded from the total because they
+/// are not run.
+pub fn parse_test_summary(output: &str) -> (usize, usize) {
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+    for line in output.lines() {
+        if line.contains("test result:") {
+            for part in line.split(';') {
+                let part = part.trim();
+                if part.contains("passed") {
+                    passed += first_usize(part);
+                } else if part.contains("failed") {
+                    failed += first_usize(part);
+                }
+            }
+        }
+    }
+    (passed, passed + failed)
+}
+
+fn features_arg(features: &[&str]) -> String {
+    features.join(",")
+}
+
+/// Measure baseline fitness from real compile / test / fmt / clippy / build
+/// metrics. This replaces the previous synthetic baseline score of 50.
+fn measure_compile_test_baseline(
+    dir: &Path,
+    features: &[&str],
+    timeout_secs: f64,
+) -> Result<FitnessMetrics, String> {
+    let start = Instant::now();
+    let feat = features_arg(features);
+
+    let mut check_cmd = Command::new("cargo");
+    check_cmd.arg("check").current_dir(dir);
+    if !features.is_empty() {
+        check_cmd.arg("--features").arg(&feat);
+    }
+    let check = check_cmd
+        .output()
+        .map_err(|e| format!("cargo check failed to run: {e}"))?;
+    if !check.status.success() {
+        return Err(format!(
+            "cargo check failed:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        ));
+    }
+
+    let mut test_cmd = Command::new("cargo");
+    test_cmd.arg("test").current_dir(dir);
+    if !features.is_empty() {
+        test_cmd.arg("--features").arg(&feat);
+    }
+    let test = test_cmd
+        .output()
+        .map_err(|e| format!("cargo test failed to run: {e}"))?;
+    let test_stdout = String::from_utf8_lossy(&test.stdout);
+    let test_stderr = String::from_utf8_lossy(&test.stderr);
+    let full_output = format!("{}\n{}", test_stdout, test_stderr);
+    let (tests_passed, tests_total) = parse_test_summary(&full_output);
+
+    let mut fmt_cmd = Command::new("cargo");
+    fmt_cmd.args(["fmt", "--", "--check"]).current_dir(dir);
+    let fmt_ok = fmt_cmd.output().map(|o| o.status.success()).unwrap_or(false);
+
+    let mut clippy_cmd = Command::new("cargo");
+    clippy_cmd.arg("clippy").current_dir(dir);
+    if !features.is_empty() {
+        clippy_cmd.arg("--features").arg(&feat);
+    }
+    clippy_cmd.args(["--", "-D", "warnings"]);
+    let clippy_ok = clippy_cmd
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let mut build_cmd = Command::new("cargo");
+    build_cmd.args(["build", "--release"]).current_dir(dir);
+    if !features.is_empty() {
+        build_cmd.arg("--features").arg(&feat);
+    }
+    let build = build_cmd
+        .output()
+        .map_err(|e| format!("cargo build --release failed to run: {e}"))?;
+    if !build.status.success() {
+        return Err(format!(
+            "cargo build --release failed:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        ));
+    }
+    let binary_path = dir.join("target/release/selfware");
+    let binary_size_mb = std::fs::metadata(&binary_path)
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0);
+
+    let pass_ratio = if tests_total > 0 {
+        tests_passed as f64 / tests_total as f64
+    } else {
+        0.0
+    };
+    let fmt_factor = if fmt_ok { 1.0 } else { 0.95 };
+    let clippy_factor = if clippy_ok { 1.0 } else { 0.90 };
+    let sab_score = 100.0 * pass_ratio * fmt_factor * clippy_factor;
+
+    Ok(FitnessMetrics {
+        sab_score,
+        tokens_used: 0,
+        token_budget: DEFAULT_TOKEN_BUDGET,
+        wall_clock_secs: start.elapsed().as_secs_f64(),
+        timeout_secs,
+        test_coverage_pct: pass_ratio * 100.0,
+        binary_size_mb,
+        max_binary_size_mb: 50.0,
+        tests_passed,
+        tests_total,
+        visual_score: 0.0,
+    })
+}
+
+/// Build FitnessMetrics for a candidate that has already passed compile, test,
+/// fmt and clippy. Runs a release build to capture real binary size.
+fn build_candidate_metrics(
+    worktree: &Path,
+    test_output: &std::process::Output,
+    test_duration: std::time::Duration,
+    features: &[&str],
+    config: &EvolutionConfig,
+) -> Option<FitnessMetrics> {
+    let stdout = String::from_utf8_lossy(&test_output.stdout);
+    let stderr = String::from_utf8_lossy(&test_output.stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    let (tests_passed, tests_total) = parse_test_summary(&combined);
+
+    let feat = features_arg(features);
+    let mut build_cmd = Command::new("cargo");
+    build_cmd.args(["build", "--release"]).current_dir(worktree);
+    if !features.is_empty() {
+        build_cmd.arg("--features").arg(&feat);
+    }
+    let build = build_cmd.output().ok()?;
+    if !build.status.success() {
+        return None;
+    }
+    let binary_path = worktree.join("target/release/selfware");
+    let binary_size_mb = std::fs::metadata(&binary_path)
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0);
+
+    let pass_ratio = if tests_total > 0 {
+        tests_passed as f64 / tests_total as f64
+    } else {
+        0.0
+    };
+
+    Some(FitnessMetrics {
+        sab_score: pass_ratio * 100.0,
+        tokens_used: 0,
+        token_budget: DEFAULT_TOKEN_BUDGET,
+        wall_clock_secs: test_duration.as_secs_f64(),
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        test_coverage_pct: pass_ratio * 100.0,
+        binary_size_mb,
+        max_binary_size_mb: config.safety.max_binary_size_mb,
+        tests_passed,
+        tests_total,
+        visual_score: 0.0,
+    })
+}
+
+fn synthetic_baseline_metrics() -> FitnessMetrics {
+    FitnessMetrics {
+        sab_score: 50.0,
+        tokens_used: 0,
+        token_budget: DEFAULT_TOKEN_BUDGET,
+        wall_clock_secs: 0.0,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        test_coverage_pct: 50.0,
+        binary_size_mb: 15.0,
+        max_binary_size_mb: 50.0,
+        tests_passed: 0,
+        tests_total: 0,
+        visual_score: 0.0,
+    }
+}
+
+/// Convert a SAB result into FitnessMetrics, preserving the real SAB score.
+fn metrics_from_sab_result(
+    sab: &SabResult,
+    binary_path: &Path,
+    max_binary_size_mb: f64,
+) -> FitnessMetrics {
+    let tests_passed = sab.scenario_scores.iter().filter(|s| s.tests_passed).count();
+    let tests_total = sab.scenario_scores.len();
+    let mut metrics = fitness::build_fitness_metrics(
+        sab,
+        DEFAULT_TOKEN_BUDGET,
+        DEFAULT_TIMEOUT_SECS,
+        binary_path,
+        tests_passed,
+        tests_total,
+        max_binary_size_mb,
+    );
+    metrics.sab_score = sab.aggregate_score;
+    metrics
+}
+
 /// Run the evolution daemon
-pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
+pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
     let start = Instant::now();
     let mut hall_of_fame: Vec<GenerationWinner> = Vec::new();
     let mut generation: usize = 0;
@@ -67,42 +297,44 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 
     log_phase("Measuring baseline fitness...");
     let sab_config = SabConfig::default();
+    let sab_mode = std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
 
     // Only run SAB baseline if explicitly requested via env var
-    // (SAB runs all 12 scenarios and takes 30+ minutes)
-    let baseline_sab = if std::env::var("SELFWARE_EVOLVE_SAB").is_ok() {
+    // (SAB runs all 12 scenarios and takes 30+ minutes). Otherwise use real
+    // compile / test / fmt / clippy / binary-size metrics.
+    let baseline_metrics = if sab_mode {
         let selfware_binary = repo_root.join("target/release/selfware");
         match fitness::run_sab(&selfware_binary, &sab_config) {
-            Ok(r) => r,
+            Ok(r) => metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb),
             Err(e) => {
                 log_warning(&format!(
                     "SAB baseline failed ({}), using synthetic baseline",
                     e
                 ));
-                SabResult {
-                    aggregate_score: 50.0,
-                    scenario_scores: vec![],
-                    total_tokens_used: 0,
-                    wall_clock: std::time::Duration::from_secs(0),
-                    rating: GenerationRating::Grow,
-                }
+                synthetic_baseline_metrics()
             }
         }
     } else {
         log_phase("Using compile+test fitness (set SELFWARE_EVOLVE_SAB=1 for full SAB)");
-        SabResult {
-            aggregate_score: 50.0,
-            scenario_scores: vec![],
-            total_tokens_used: 0,
-            wall_clock: std::time::Duration::from_secs(0),
-            rating: GenerationRating::Grow,
+        match measure_compile_test_baseline(repo_root, EVOLVE_FEATURES, DEFAULT_TIMEOUT_SECS) {
+            Ok(mut m) => {
+                m.max_binary_size_mb = config.safety.max_binary_size_mb;
+                m
+            }
+            Err(e) => {
+                log_warning(&format!(
+                    "Compile/test baseline failed ({}), using synthetic baseline",
+                    e
+                ));
+                synthetic_baseline_metrics()
+            }
         }
     };
 
-    let initial_sab = baseline_sab.aggregate_score;
-    let mut current_baseline = baseline_sab;
+    let initial_sab = baseline_metrics.sab_score;
+    let mut current_baseline_metrics = baseline_metrics;
 
-    log_baseline(&current_baseline);
+    log_baseline(&current_baseline_metrics, sab_mode);
 
     // ═══════════════════════════════════════════════════════
     // MAIN EVOLUTIONARY LOOP
@@ -137,7 +369,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
         // ─── Step 2: Generate hypotheses via agent swarm ───
         let llm_start = Instant::now();
         let hypotheses =
-            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root);
+            generate_hypotheses(&config, &telemetry_prompt, &history_prompt, repo_root).await;
 
         log_event(
             repo_root,
@@ -181,7 +413,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
         // ─── Step 4: Evaluate each hypothesis (apply → check → test) ───
         let sab_available =
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
-        let mut generation_winner: Option<(Hypothesis, SabResult)> = None;
+        let mut generation_winner: Option<(Hypothesis, FitnessMetrics)> = None;
 
         for hypothesis in &valid {
             log_phase(&format!(
@@ -209,10 +441,13 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
             }
 
             // Compile check
-            let check = Command::new("cargo")
-                .args(["check", "--features", "self-improvement"])
-                .current_dir(&worktree)
-                .output();
+            let mut check_cmd = Command::new("cargo");
+            check_cmd
+                .arg("check")
+                .arg("--features")
+                .arg(features_arg(EVOLVE_FEATURES))
+                .current_dir(&worktree);
+            let check = check_cmd.output();
 
             if check.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
@@ -222,10 +457,13 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 
             // Run tests
             let test_start = Instant::now();
-            let test = Command::new("cargo")
-                .args(["test", "--features", "self-improvement"])
-                .current_dir(&worktree)
-                .output();
+            let mut test_cmd = Command::new("cargo");
+            test_cmd
+                .arg("test")
+                .arg("--features")
+                .arg(features_arg(EVOLVE_FEATURES))
+                .current_dir(&worktree);
+            let test = test_cmd.output();
 
             let test_output = match test {
                 Ok(o) => o,
@@ -272,17 +510,14 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
             }
 
             // Clippy lint gate — reject code with clippy warnings
-            let clippy = Command::new("cargo")
-                .args([
-                    "clippy",
-                    "--features",
-                    "self-improvement",
-                    "--",
-                    "-D",
-                    "warnings",
-                ])
-                .current_dir(&worktree)
-                .output();
+            let mut clippy_cmd = Command::new("cargo");
+            clippy_cmd
+                .arg("clippy")
+                .arg("--features")
+                .arg(features_arg(EVOLVE_FEATURES))
+                .current_dir(&worktree);
+            clippy_cmd.args(["--", "-D", "warnings"]);
+            let clippy = clippy_cmd.output();
 
             if clippy.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
@@ -290,8 +525,9 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                 continue;
             }
 
-            // If SAB is available, run it; otherwise use synthetic score
-            let winner_sab = if sab_available {
+            // Compute real fitness metrics. If SAB is available, run the full
+            // benchmark; otherwise derive compile/test/binary-size metrics.
+            let winner_metrics = if sab_available {
                 let build = Command::new("cargo")
                     .args(["build", "--release", "--features", "self-improvement"])
                     .current_dir(&worktree)
@@ -308,7 +544,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 
                 let mutated_binary = worktree.join("target/release/selfware");
                 match fitness::run_sab(&mutated_binary, &sab_config) {
-                    Ok(r) => r,
+                    Ok(r) => metrics_from_sab_result(&r, &mutated_binary, config.safety.max_binary_size_mb),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
                         let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
@@ -316,13 +552,22 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                     }
                 }
             } else {
-                // Synthetic fitness: tests passed + compiled = score 60 (above baseline 50)
-                SabResult {
-                    aggregate_score: 60.0,
-                    scenario_scores: vec![],
-                    total_tokens_used: 0,
-                    wall_clock: test_duration,
-                    rating: GenerationRating::Grow,
+                match build_candidate_metrics(
+                    &worktree,
+                    &test_output,
+                    test_duration,
+                    EVOLVE_FEATURES,
+                    &config,
+                ) {
+                    Some(m) => m,
+                    None => {
+                        log_frost(
+                            generation,
+                            &format!("Release build failed: {}", hypothesis.id),
+                        );
+                        let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
+                        continue;
+                    }
                 }
             };
 
@@ -331,18 +576,18 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
             log_phase(&format!(
                 "  ✓ '{}' passed (score: {:.0}, {:.1}s)",
                 hypothesis.description,
-                winner_sab.aggregate_score,
-                winner_sab.wall_clock.as_secs_f64()
+                winner_metrics.sab_score,
+                winner_metrics.wall_clock_secs
             ));
 
             // Keep the first passing hypothesis as winner
             if generation_winner.is_none() {
-                generation_winner = Some((hypothesis.clone(), winner_sab));
+                generation_winner = Some((hypothesis.clone(), winner_metrics));
             }
         }
 
         // ─── Step 5: EMERGE OR DIE ───
-        let (winner, winner_sab) = match generation_winner {
+        let (winner, winner_metrics) = match generation_winner {
             Some(w) => w,
             None => {
                 log_frost(generation, "No hypotheses survived evaluation");
@@ -363,25 +608,25 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 
         let baseline_composite = config
             .fitness_weights
-            .composite(&build_metrics(&current_baseline, &config));
+            .composite(&current_baseline_metrics);
         let winner_composite = config
             .fitness_weights
-            .composite(&build_metrics(&winner_sab, &config));
+            .composite(&winner_metrics);
 
         if winner_composite > baseline_composite {
             log_bloom(
                 generation,
                 &winner.description,
-                current_baseline.aggregate_score,
-                winner_sab.aggregate_score,
+                current_baseline_metrics.sab_score,
+                winner_metrics.sab_score,
             );
 
             if apply_patch_to_repo(repo_root, &winner.patch) {
                 let commit_msg = format!(
                     "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
                     generation,
-                    current_baseline.aggregate_score,
-                    winner_sab.aggregate_score,
+                    current_baseline_metrics.sab_score,
+                    winner_metrics.sab_score,
                     winner.description
                 );
                 let _ = Command::new("git")
@@ -393,7 +638,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                     .current_dir(repo_root)
                     .output();
 
-                let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
+                let git_tag = if generation % config.checkpoint_interval == 0 {
                     let tag = format!("evolve-gen-{}", generation);
                     let _ = Command::new("git")
                         .args(["tag", &tag])
@@ -408,9 +653,9 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                     generation,
                     description: winner.description.clone(),
                     composite_score: winner_composite,
-                    sab_delta: winner_sab.aggregate_score - current_baseline.aggregate_score,
-                    token_delta: winner_sab.total_tokens_used as f64
-                        - current_baseline.total_tokens_used as f64,
+                    sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
+                    token_delta: winner_metrics.tokens_used as f64
+                        - current_baseline_metrics.tokens_used as f64,
                     patch: winner.patch.clone(),
                     git_tag,
                 });
@@ -423,15 +668,15 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                         "generation": generation,
                         "outcome": "bloom",
                         "description": winner.description,
-                        "score_before": current_baseline.aggregate_score,
-                        "score_after": winner_sab.aggregate_score,
+                        "score_before": current_baseline_metrics.sab_score,
+                        "score_after": winner_metrics.sab_score,
                         "composite": winner_composite,
                         "duration_secs": gen_start.elapsed().as_secs_f64(),
                         "improvements_total": hall_of_fame.len(),
                     }),
                 );
 
-                current_baseline = winner_sab;
+                current_baseline_metrics = winner_metrics;
             }
         } else {
             let rating = if winner_composite < baseline_composite * 0.9 {
@@ -442,8 +687,8 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
             log_reject(
                 generation,
                 &rating,
-                winner_sab.aggregate_score,
-                current_baseline.aggregate_score,
+                winner_metrics.sab_score,
+                current_baseline_metrics.sab_score,
             );
             log_event(
                 repo_root,
@@ -453,8 +698,8 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                     "generation": generation,
                     "outcome": format!("{}", rating),
                     "description": winner.description,
-                    "winner_score": winner_sab.aggregate_score,
-                    "baseline_score": current_baseline.aggregate_score,
+                    "winner_score": winner_metrics.sab_score,
+                    "baseline_score": current_baseline_metrics.sab_score,
                     "duration_secs": gen_start.elapsed().as_secs_f64(),
                 }),
             );
@@ -464,7 +709,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
     EvolutionResult {
         generations_run: generation,
         improvements: hall_of_fame,
-        final_sab_score: current_baseline.aggregate_score,
+        final_sab_score: current_baseline_metrics.sab_score,
         initial_sab_score: initial_sab,
         total_duration: start.elapsed(),
     }
@@ -474,7 +719,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 // HELPER FUNCTIONS
 // ═══════════════════════════════════════════════════════
 
-fn generate_hypotheses(
+async fn generate_hypotheses(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
@@ -485,13 +730,13 @@ fn generate_hypotheses(
 
     if use_micro_mode {
         log_phase("Micro mode: Using simplified prompts for small model");
-        generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
+        generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root).await
     } else {
-        generate_standard_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
+        generate_standard_hypotheses(config, telemetry_prompt, history_prompt, repo_root).await
     }
 }
 
-fn generate_standard_hypotheses(
+async fn generate_standard_hypotheses(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
@@ -506,7 +751,7 @@ fn generate_standard_hypotheses(
     let system_prompt = build_system_prompt(config.population_size);
     let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
 
-    match call_llm(&config.llm, &system_prompt, &user_prompt) {
+    match call_llm(&config.llm, &system_prompt, &user_prompt).await {
         Ok(response) => {
             log_phase(&format!(
                 "LLM response ({} chars): {}",
@@ -522,7 +767,7 @@ fn generate_standard_hypotheses(
     }
 }
 
-fn generate_micro_hypotheses(
+async fn generate_micro_hypotheses(
     config: &EvolutionConfig,
     telemetry_prompt: &str,
     history_prompt: &str,
@@ -559,7 +804,7 @@ fn generate_micro_hypotheses(
     let system_prompt = micro_mode::build_micro_system_prompt(micro_population);
     let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
 
-    match call_llm(&config.llm, &system_prompt, &user_prompt) {
+    match call_llm(&config.llm, &system_prompt, &user_prompt).await {
         Ok(response) => {
             log_phase(&format!(
                 "Micro mode: LLM response ({} chars)",
@@ -865,7 +1110,7 @@ pub fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -
     prompt
 }
 
-fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+async fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
     let url = format!("{}/chat/completions", llm.endpoint.trim_end_matches('/'));
 
     let mut headers = reqwest::header::HeaderMap::new();
@@ -893,7 +1138,7 @@ fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<S
         "chat_template_kwargs": {"enable_thinking": false},
     });
 
-    let client = reqwest::blocking::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
@@ -903,16 +1148,18 @@ fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<S
         .headers(headers)
         .json(&body)
         .send()
+        .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().unwrap_or_default();
+        let body = resp.text().await.unwrap_or_default();
         return Err(format!("LLM API returned {}: {}", status, body));
     }
 
     let json: serde_json::Value = resp
         .json()
+        .await
         .map_err(|e| format!("Failed to parse LLM response JSON: {}", e))?;
 
     json["choices"][0]["message"]["content"]
@@ -1039,22 +1286,6 @@ pub fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
         ));
     }
     prompt
-}
-
-fn build_metrics(sab: &SabResult, config: &EvolutionConfig) -> FitnessMetrics {
-    FitnessMetrics {
-        sab_score: sab.aggregate_score,
-        tokens_used: sab.total_tokens_used,
-        token_budget: 500_000, // From config
-        wall_clock_secs: sab.wall_clock.as_secs_f64(),
-        timeout_secs: 3600.0,
-        test_coverage_pct: 82.0, // Would need real measurement
-        binary_size_mb: 15.0,    // Would need real measurement
-        max_binary_size_mb: config.safety.max_binary_size_mb,
-        tests_passed: 5200,
-        tests_total: 5200,
-        visual_score: 0.0,
-    }
 }
 
 /// Strip line-number prefixes the LLM may have left in the patch.
@@ -1389,13 +1620,15 @@ fn log_error(msg: &str) {
     eprintln!("  ❄️  {}", msg);
 }
 
-fn log_baseline(sab: &SabResult) {
+fn log_baseline(metrics: &FitnessMetrics, sab_mode: bool) {
+    let label = if sab_mode { "SAB" } else { "compile/test" };
     eprintln!(
-        "  📊 Baseline: SAB {:.0}/100 ({}) | {} tokens | {:.0}s",
-        sab.aggregate_score,
-        sab.rating,
-        sab.total_tokens_used,
-        sab.wall_clock.as_secs_f64()
+        "  📊 Baseline: {} {:.0}/100 ({}) | {} tokens | {:.0}s",
+        label,
+        metrics.sab_score,
+        rating_from_score(metrics.sab_score),
+        metrics.tokens_used,
+        metrics.wall_clock_secs
     );
 }
 
@@ -1516,7 +1749,25 @@ mod tests {
     }
 
     #[test]
-    fn test_build_metrics() {
+    fn test_parse_test_summary_sums_results() {
+        let output = "\n\
+            test result: ok. 10 passed; 0 failed; 0 ignored\n\
+            some other line\n\
+            test result: ok. 3 passed; 1 failed; 0 ignored\n";
+        let (passed, total) = parse_test_summary(output);
+        assert_eq!(passed, 13);
+        assert_eq!(total, 14);
+    }
+
+    #[test]
+    fn test_parse_test_summary_no_results() {
+        let (passed, total) = parse_test_summary("no test output here");
+        assert_eq!(passed, 0);
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_metrics_from_sab_result() {
         let sab = SabResult {
             aggregate_score: 88.5,
             scenario_scores: vec![],
@@ -1524,27 +1775,12 @@ mod tests {
             wall_clock: std::time::Duration::from_secs(1200),
             rating: GenerationRating::Bloom,
         };
-        let config = EvolutionConfig {
-            generations: 10,
-            population_size: 8,
-            parallel_eval: 4,
-            checkpoint_interval: 5,
-            fitness_weights: FitnessWeights::default(),
-            mutation_targets: super::super::MutationTargets {
-                config_keys: vec![],
-                prompt_logic: vec![],
-                tool_code: vec![],
-                cognitive: vec![],
-            },
-            safety: super::super::SafetyConfig::default(),
-            llm: LlmConfig::default(),
-        };
-        let metrics = build_metrics(&sab, &config);
+        let metrics = metrics_from_sab_result(&sab, Path::new("target/release/selfware"), 50.0);
         assert_eq!(metrics.sab_score, 88.5);
         assert_eq!(metrics.tokens_used, 250_000);
-        assert_eq!(metrics.token_budget, 500_000);
+        assert_eq!(metrics.token_budget, DEFAULT_TOKEN_BUDGET);
         assert!((metrics.wall_clock_secs - 1200.0).abs() < 0.01);
-        assert_eq!(metrics.max_binary_size_mb, config.safety.max_binary_size_mb);
+        assert_eq!(metrics.max_binary_size_mb, 50.0);
     }
 
     #[test]

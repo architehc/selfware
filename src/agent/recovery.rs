@@ -97,11 +97,14 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
     let content = strip_gemma_thinking(content);
 
     // Handle Qwen3.5 format: extensive thinking followed by </think> marker
-    // The model outputs thinking as regular text, then </think>, then the answer
-    if let Some(end_think) = content.find("</think>") {
-        // Return everything after </think>
-        let after_think = &content[end_think + 8..]; // 8 = len("</think>")
-        return after_think.trim().to_string();
+    // The model outputs thinking as regular text, then </think>, then the answer.
+    // Only strip if there is a matching <think> start tag; otherwise preserve
+    // the content so an unclosed think tag does not erase the actual answer.
+    if let Some(start_think) = content.find("<think>") {
+        if let Some(end_think) = content[start_think..].find("</think>") {
+            let after_think = &content[start_think + end_think + 8..];
+            return after_think.trim().to_string();
+        }
     }
 
     // Handle explicit <think>...</think> tags (for other models)
@@ -112,7 +115,9 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
         match rest[start..].find("</think>") {
             Some(end) => rest = &rest[start + end + 8..],
             None => {
-                rest = "";
+                // Unclosed opening tag — preserve the content after it rather
+                // than discarding the rest of the response.
+                rest = &rest[start + 7..];
                 break;
             }
         }
@@ -876,12 +881,15 @@ Try ONE of these strategies:\
 
 /// Extract a file path mentioned in model output (e.g., "src/main.rs", "./Cargo.toml").
 fn extract_mentioned_path(content: &str) -> Option<String> {
-    let path_re = regex::Regex::new(
-        r#"(?:^|[\s`"'(])((?:\./|/)?[a-zA-Z_][\w\-./]*\.(?:rs|toml|json|yaml|yml|md|txt|py|ts|js|go))"#,
-    )
-    .ok()?;
+    use std::sync::LazyLock;
+    static PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?:^|[\s`"'(])((?:\./|/)?[a-zA-Z_][\w\-./]*\.(?:rs|toml|json|yaml|yml|md|txt|py|ts|js|go))"#,
+        )
+        .expect("mentioned path regex must compile")
+    });
 
-    for cap in path_re.captures_iter(content) {
+    for cap in PATH_RE.captures_iter(content) {
         let full = cap.get(1)?.as_str().trim_matches(|c: char| {
             !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-'
         });
@@ -893,14 +901,14 @@ fn extract_mentioned_path(content: &str) -> Option<String> {
 }
 
 fn extract_mentioned_image_paths(content: &str) -> Vec<String> {
-    let Ok(path_re) =
+    use std::sync::LazyLock;
+    static IMAGE_PATH_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r#"(?i)(?:^|[\s`"'(])((?:\./|/)?[\w./-]+\.(?:png|jpe?g|webp|gif|bmp))"#)
-    else {
-        return Vec::new();
-    };
+            .expect("image path regex must compile")
+    });
 
     let mut paths = Vec::new();
-    for cap in path_re.captures_iter(content) {
+    for cap in IMAGE_PATH_RE.captures_iter(content) {
         let Some(path) = cap.get(1).map(|m| m.as_str().to_string()) else {
             continue;
         };
@@ -1021,5 +1029,30 @@ mod tests {
         )
         .expect("expected path");
         assert_eq!(path, "/home/ivo/radarcam/AGENTS.md");
+    }
+
+    #[test]
+    fn strip_think_blocks_removes_paired_tags() {
+        let content = "<think>inner thought</think>answer";
+        assert_eq!(strip_think_blocks(content), "answer");
+    }
+
+    #[test]
+    fn strip_think_blocks_preserves_unclosed_tag_content() {
+        // An unmatched </think> should not erase the preceding answer.
+        let content = "final answer text </think>";
+        assert_eq!(strip_think_blocks(content), "final answer text </think>");
+    }
+
+    #[test]
+    fn strip_think_blocks_extracts_after_paired_end_tag() {
+        let content = "<think>thinking</think>  the answer  ";
+        assert_eq!(strip_think_blocks(content), "the answer");
+    }
+
+    #[test]
+    fn strip_think_blocks_preserves_content_after_unclosed_open_tag() {
+        let content = "prefix <think> actual answer";
+        assert_eq!(strip_think_blocks(content), "prefix  actual answer");
     }
 }

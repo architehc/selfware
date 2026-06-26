@@ -30,6 +30,7 @@ Thumbs.db
 /test_runs/
 /system_tests/projecte2e/work/
 /system_tests/projecte2e/reports/
+/system_tests/swe_bench_pro/runs*/
 
 # Benchmark and test result directories
 /bench_results/

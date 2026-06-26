@@ -23,6 +23,9 @@ static SHOW_TOKENS: AtomicBool = AtomicBool::new(false);
 /// When true, all print functions become no-ops — the TUI owns rendering.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// When true, the user requested quiet mode and non-essential output is suppressed.
+static QUIET_MODE: AtomicBool = AtomicBool::new(false);
+
 /// Set the TUI active flag. Call with `true` when the TUI launches.
 pub fn set_tui_active(active: bool) {
     TUI_ACTIVE.store(active, Ordering::SeqCst);
@@ -31,6 +34,21 @@ pub fn set_tui_active(active: bool) {
 /// Returns true when the TUI is rendering — print functions should be suppressed.
 pub fn is_tui_active() -> bool {
     TUI_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// Set the global quiet flag. Call once from the CLI after parsing arguments.
+pub(crate) fn set_quiet(quiet: bool) {
+    QUIET_MODE.store(quiet, Ordering::SeqCst);
+}
+
+/// Returns true when quiet mode is enabled.
+pub(crate) fn is_quiet() -> bool {
+    QUIET_MODE.load(Ordering::Relaxed)
+}
+
+/// True when any output-suppressing mode is active.
+pub(crate) fn should_suppress_output() -> bool {
+    is_quiet() || is_tui_active()
 }
 
 /// Token counters for the session
@@ -90,6 +108,9 @@ pub(crate) fn reset_tokens() {
 
 /// Print token usage summary
 pub(crate) fn print_token_usage(prompt: u64, completion: u64) {
+    if is_quiet() {
+        return;
+    }
     if should_show_tokens() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let total = prompt + completion;
@@ -615,18 +636,21 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
     }
 }
 
-/// Print safety check failure (always shown)
+/// Print safety check failure
 pub(crate) fn safety_blocked(message: &str) {
+    if is_quiet() {
+        return;
+    }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     println!("{} {}", "🚫".bright_red(), message);
 }
 
 /// Print thinking/reasoning output
 pub(crate) fn thinking(text: &str, inline: bool) {
-    // In compact mode, skip thinking entirely
+    // In compact or quiet mode, skip thinking entirely
     // In normal mode, show thinking
     // In verbose mode, show full thinking with emphasis
-    if is_compact() {
+    if is_compact() || is_quiet() {
         return;
     }
 
@@ -656,7 +680,7 @@ pub(crate) fn thinking(text: &str, inline: bool) {
 
 /// Print thinking prefix (for streaming)
 pub(crate) fn thinking_prefix() {
-    if is_tui_active() {
+    if should_suppress_output() {
         return;
     }
     if !is_compact() {
@@ -669,7 +693,7 @@ pub(crate) fn thinking_prefix() {
 /// Print intent detection message
 #[cfg(test)]
 pub(crate) fn intent_without_action() {
-    if is_tui_active() {
+    if should_suppress_output() {
         return;
     }
     if !is_compact() {
@@ -689,7 +713,7 @@ pub(crate) fn intent_without_action_detail(
     attempt: usize,
     total: usize,
 ) {
-    if is_tui_active() || is_compact() {
+    if is_tui_active() || is_compact() || is_quiet() {
         return;
     }
     if !is_verbose() {
@@ -727,7 +751,7 @@ pub(crate) fn intent_without_action_detail(
 
 /// Show what the smart fallback decided to do.
 pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
-    if is_tui_active() || is_compact() {
+    if is_tui_active() || is_compact() || is_quiet() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -743,7 +767,7 @@ pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
 
 /// Print final answer
 pub(crate) fn final_answer(content: &str) {
-    if is_tui_active() {
+    if should_suppress_output() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -758,7 +782,7 @@ pub(crate) fn final_answer(content: &str) {
 /// Display a color-coded diff for file edits/writes.
 /// Shows deleted lines in red and added lines in green.
 pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str) {
-    if is_tui_active() || is_compact() {
+    if is_tui_active() || is_compact() || is_quiet() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -854,15 +878,16 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
 /// future entry points may still want a generic completion banner.
 #[allow(dead_code)]
 pub(crate) fn task_completed() {
-    if !is_compact() {
-        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        println!("{}", "✅ Task completed successfully!".bright_green());
+    if is_quiet() || is_compact() {
+        return;
     }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!("{}", "✅ Task completed successfully!".bright_green());
 }
 
 /// Print verification report
 pub(crate) fn verification_report(report: &str, passed: bool) {
-    if is_tui_active() {
+    if should_suppress_output() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -898,6 +923,9 @@ pub(crate) fn verification_report(report: &str, passed: bool) {
 /// `SELFWARE_DEBUG_TURNS` env vars) actually disable this output when not set.
 /// Verbose mode (`-v`) is preserved as a friendly opt-in for interactive use.
 pub(crate) fn debug_output(debug: &crate::config::DebugConfig, label: &str, content: &str) {
+    if is_quiet() {
+        return;
+    }
     if is_verbose() || debug.should_log_turns() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!("{}", format!("=== DEBUG: {} ===", label).bright_magenta());
@@ -1038,6 +1066,9 @@ impl TaskProgress {
 
     /// Print current progress state
     pub(crate) fn print_progress(&self) {
+        if is_quiet() {
+            return;
+        }
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if is_compact() {
             // Compact: single line with overall progress
@@ -1134,7 +1165,7 @@ impl TaskProgress {
 
 /// Print step announcement (used by agent)
 pub(crate) fn step_start(step: usize, name: &str) {
-    if is_tui_active() {
+    if should_suppress_output() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1152,7 +1183,7 @@ pub(crate) fn step_start(step: usize, name: &str) {
 
 /// Print phase transition
 pub(crate) fn phase_transition(from: &str, to: &str) {
-    if is_verbose() {
+    if !is_quiet() && is_verbose() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!(
             "{} {} → {}",

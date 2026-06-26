@@ -8,12 +8,19 @@ from pathlib import Path
 from typing import Any
 
 
-# Paths that are part of the harness or agent workspace and must never appear
-# in a submitted patch.
+# Paths that are part of the harness, agent workspace, or common build
+# artifacts and must never appear in a submitted patch.
 _DIFF_EXCLUDED_PREFIXES = (
     ".selfware_prompt.txt",
     ".selfware/",
     "agent_data/",
+    "target/",
+    "node_modules/",
+    ".pytest_cache/",
+    "__pycache__/",
+    ".mypy_cache/",
+    "*.orig",
+    "*.bak",
 )
 
 
@@ -33,7 +40,12 @@ def _is_excluded_diff_hunk(hunk_lines: list[str]) -> bool:
     if path is not None:
         if path.endswith("/"):
             path = path[:-1]
-        if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in _DIFF_EXCLUDED_PREFIXES):
+        if any(
+            path == prefix.rstrip("/")
+            or path.startswith(prefix)
+            or path.endswith(prefix.lstrip("*"))
+            for prefix in _DIFF_EXCLUDED_PREFIXES
+        ):
             return True
 
     hunk_text = "".join(hunk_lines)
@@ -78,7 +90,7 @@ def apply_patch(repo_dir: Path, diff_text: str, logger: Any) -> bool:
             logger.warning("git apply attempt %s failed: %s", attempt, proc.stderr.strip())
 
         proc = subprocess.run(
-            ["patch", "-p1", "-i", str(patch_path)],
+            ["patch", "-p1", "--no-backup-if-mismatch", "-i", str(patch_path)],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
@@ -123,18 +135,22 @@ def _normalize_blank_lines(lines: list[str]) -> list[str]:
 
 
 def _fuzzy_replace(text: str, old: str, new: str) -> str | None:
-    """Replace old block with multiple fuzzy strategies.
+    """Replace old block with fuzzy but indentation-safe strategies.
 
     Strategies, in order of precision:
-      1. Exact match.
-      2. Strip harness line-number gutters and retry exact.
-      3. Ignore per-line leading/trailing whitespace.
-      4. Ignore blank-line differences.
-      5. Ignore all whitespace differences.
+      1. Exact full-line match.
+      2. Strip harness line-number gutters and retry full-line match.
+      3. Ignore per-line trailing whitespace (preserve indentation).
+      4. Ignore blank-line differences (preserve indentation).
+
+    We intentionally avoid a "strip all whitespace" fallback because it
+    frequently matches blocks with mismatched indentation and then inserts the
+    replacement text verbatim, corrupting the file (e.g., indenting a whole
+    function body).
     """
     text_lines = text.splitlines()
-    old_lines = old.splitlines()
-    new_lines = new.splitlines()
+    old_lines = _strip_line_number_gutter(old).splitlines()
+    new_lines = _strip_line_number_gutter(new).splitlines()
     n = len(old_lines)
     if n == 0:
         return None
@@ -148,31 +164,23 @@ def _fuzzy_replace(text: str, old: str, new: str) -> str | None:
     ]
 
     def _try_match(oln: list[str], tln: list[str]) -> int | None:
+        """Full-line equality (trailing-whitespace tolerant)."""
         m = len(tln)
         if m < len(oln):
             return None
         for i in range(m - len(oln) + 1):
-            if all(oln[j].strip() == tln[i + j].strip() for j in range(len(oln))):
+            if all(oln[j].rstrip() == tln[i + j].rstrip() for j in range(len(oln))):
                 return i
         return None
 
     def _try_blank_match(oln: list[str], tln: list[str]) -> int | None:
+        """Ignore extra blank lines while preserving indentation."""
         norm_old = _normalize_blank_lines(oln)
         norm_text = _normalize_blank_lines(tln)
         if len(norm_text) < len(norm_old):
             return None
         for i in range(len(norm_text) - len(norm_old) + 1):
-            if all(norm_old[j].strip() == norm_text[i + j].strip() for j in range(len(norm_old))):
-                return i
-        return None
-
-    def _try_whitespace_match(oln: list[str], tln: list[str]) -> int | None:
-        old_norm = [re.sub(r"\s+", "", line) for line in oln]
-        text_norm = [re.sub(r"\s+", "", line) for line in tln]
-        if len(text_norm) < len(old_norm):
-            return None
-        for i in range(len(text_norm) - len(old_norm) + 1):
-            if all(old_norm[j] == text_norm[i + j] for j in range(len(old_norm))):
+            if all(norm_old[j].rstrip() == norm_text[i + j].rstrip() for j in range(len(norm_old))):
                 return i
         return None
 
@@ -183,11 +191,6 @@ def _fuzzy_replace(text: str, old: str, new: str) -> str | None:
 
     for oln, tln in strategies:
         idx = _try_blank_match(oln, tln)
-        if idx is not None:
-            return "\n".join(tln[:idx] + new_lines + tln[idx + len(oln):])
-
-    for oln, tln in strategies:
-        idx = _try_whitespace_match(oln, tln)
         if idx is not None:
             return "\n".join(tln[:idx] + new_lines + tln[idx + len(oln):])
 
@@ -207,28 +210,43 @@ def apply_edits_with_missing(
     cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
     cleaned = re.sub(r"\n```\s*$", "", cleaned)
 
+    # Allow empty SEARCH/REPLACE blocks even when the model omits the blank
+    # line between the marker and the next delimiter.  The optional \n? after
+    # the captured text lets the parser accept both:
+    #   <<<<<<< SEARCH\n=======\n  and  <<<<<<< SEARCH\n\n=======\n
     pattern = re.compile(
         r"###\s*FILE:\s*[`\"]?(?P<path>.+?)[`\"]?\s*\n"
         r"<<<<<<<\s*(?:SEARCH)?\s*\n"
-        r"(?P<old>.*?)\n"
+        r"(?P<old>.*?)\n?"
         r"=======\s*\n"
-        r"(?P<new>.*?)\n"
+        r"(?P<new>.*?)\n?"
         r">>>>>>>\s*(?:REPLACE)?",
         re.DOTALL,
     )
+    def _has_patch_markers(t: str) -> bool:
+        return any(
+            line.startswith(("<<<<<<<", "=======", ">>>>>>>")) for line in t.splitlines()
+        )
+
     applied = False
     missing: set[str] = set()
     for m in pattern.finditer(cleaned):
         rel_path = m.group("path").strip()
-        old = m.group("old")
-        new = m.group("new")
+        old = _strip_line_number_gutter(m.group("old"))
+        new = _strip_line_number_gutter(m.group("new"))
         path = repo_dir / rel_path
         if not path.exists():
             # Allow creation of new files when the SEARCH block is empty.
             if old.strip() == "":
+                new_text = new.replace("\r\n", "\n")
+                if _has_patch_markers(new_text):
+                    if logger is not None:
+                        logger.warning("Refusing to create %s: content contains patch markers", rel_path)
+                    missing.add(rel_path)
+                    continue
                 try:
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(new.replace("\r\n", "\n"), encoding="utf-8")
+                    path.write_text(new_text, encoding="utf-8")
                     applied = True
                     if logger is not None:
                         logger.info("Created new file %s", rel_path)
@@ -260,6 +278,14 @@ def apply_edits_with_missing(
                 text = fuzzy
             else:
                 text = text.replace(old, new, 1)
+            # Reject edits that leave patch markers behind; they are almost always
+            # malformed model output and would corrupt the file.
+            if _has_patch_markers(text) and not _has_patch_markers(
+                path.read_text(encoding="utf-8")
+            ):
+                if logger is not None:
+                    logger.warning("Refusing edit to %s: result contains patch markers", rel_path)
+                continue
             path.write_text(text, encoding="utf-8")
             applied = True
             if logger is not None:
@@ -287,15 +313,15 @@ def verify_edits_apply(repo_dir: Path, response: str, logger: Any) -> bool:
     pattern = re.compile(
         r"###\s*FILE:\s*[`<\"]?(?P<path>.+?)[`\"]?\s*\n"
         r"<<<<<<<\s*(?:SEARCH)?\s*\n"
-        r"(?P<old>.*?)\n"
+        r"(?P<old>.*?)\n?"
         r"=======\s*\n"
-        r"(?P<new>.*?)\n"
+        r"(?P<new>.*?)\n?"
         r">>>>>>>\s*(?:REPLACE)?",
         re.DOTALL,
     )
     for m in pattern.finditer(cleaned):
         rel_path = m.group("path").strip()
-        old = m.group("old").replace("\r\n", "\n")
+        old = _strip_line_number_gutter(m.group("old")).replace("\r\n", "\n")
         path = repo_dir / rel_path
         if not path.exists():
             # Empty SEARCH block means the model wants to create the file.
@@ -349,6 +375,7 @@ def is_truncated_diff(response: str) -> bool:
     This happens when the model runs out of output tokens inside a `` ```diff ``
     block.  A truncated response is not applyable as-is.
     """
+    original_ends_newline = response.endswith("\n")
     response = response.strip()
     if not response:
         return False
@@ -362,7 +389,7 @@ def is_truncated_diff(response: str) -> bool:
         # If the last line is a context/deletion/addition without a trailing
         # newline terminator, treat it as possibly truncated.
         lines = after_hunk.splitlines()
-        if lines and re.match(r"^[-+ ]", lines[-1]) and not lines[-1].endswith("\n"):
+        if lines and re.match(r"^[-+ ]", lines[-1]) and not original_ends_newline:
             return True
     return False
 
@@ -371,22 +398,36 @@ def extract_partial_diff(response: str) -> str | None:
     """Try to salvage a partial diff from a truncated response.
 
     If the response ends mid-hunk, this returns the diff up to the last complete
-    hunk.  Returns ``None`` if no usable diff is present.
+    hunk.  Complete hunks are kept; only a trailing hunk header with no body
+    lines is dropped.  Returns ``None`` if no usable diff is present.
     """
     diff = extract_diff(response)
     if not diff:
         return None
-    # Find the last complete hunk boundary and keep everything up to it.
     lines = diff.splitlines()
-    last_complete = -1
-    for i, line in enumerate(lines):
-        if line.startswith("@@"):
-            last_complete = i
-    if last_complete <= 0:
+    hunk_starts = [i for i, line in enumerate(lines) if line.startswith("@@")]
+    if not hunk_starts:
         return None
-    # Keep lines up to and including the last complete hunk header; drop any
-    # partial hunk lines after it.
-    return "\n".join(lines[:last_complete]) + "\n"
+
+    # Determine the last hunk that actually has body lines.
+    last_usable = -1
+    for idx, start in enumerate(hunk_starts):
+        end = hunk_starts[idx + 1] if idx + 1 < len(hunk_starts) else len(lines)
+        body_lines = [
+            line for line in lines[start + 1 : end] if line.startswith((" ", "-", "+"))
+        ]
+        if body_lines:
+            last_usable = idx
+
+    if last_usable < 0:
+        return None
+
+    keep_up_to = (
+        hunk_starts[last_usable + 1]
+        if last_usable + 1 < len(hunk_starts)
+        else len(lines)
+    )
+    return "\n".join(lines[:keep_up_to]) + "\n"
 
 
 def _apply_diff_with_check(repo_dir: Path, diff_text: str, logger: Any) -> bool:
@@ -466,6 +507,61 @@ def filter_patch_to_files(diff: str, allowed_files: set[str]) -> str:
     for hunk in hunks:
         path = _extract_diff_path(hunk[0]) if hunk else None
         if path is not None and path not in allowed_files:
+            continue
+        kept.extend(hunk)
+    return "".join(kept).rstrip("\n") + "\n" if kept else ""
+
+
+# File extensions and path patterns that are off-limits for a submitted patch.
+_NON_SOURCE_PATTERNS = (
+    "_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx",
+    "test_", "/tests/", "/test/",
+    ".md", ".mdx", ".json", ".yaml", ".yml", ".toml", ".lock",
+    "Dockerfile", ".dockerignore", ".gitignore", ".github/",
+    "docs/", "doc/", "documentation/",
+    "Makefile", "package-lock.json", "yarn.lock",
+)
+
+
+def _is_likely_source_file(path: str) -> bool:
+    """Return True when ``path`` looks like a source file the model may edit."""
+    lower = path.lower()
+    if any(lower.endswith(ext) for ext in _NON_SOURCE_PATTERNS):
+        return False
+    if any(pat in lower for pat in _NON_SOURCE_PATTERNS):
+        return False
+    return True
+
+
+def filter_patch_to_source_files(
+    diff: str,
+    extra_allowed: set[str] | None = None,
+) -> str:
+    """Drop diff hunks for tests, configs, docs, and build artifacts.
+
+    Keeps all source-file hunks plus any paths in ``extra_allowed`` (e.g.
+    new files created by the official test patch).  This is less restrictive
+    than ``filter_patch_to_files`` and avoids silently dropping valid
+    multi-file fixes that touch package siblings not in the top-k ranked list.
+    """
+    allowed = extra_allowed or set()
+    lines = diff.splitlines(keepends=True)
+    hunks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.startswith("diff --git"):
+            if current:
+                hunks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        hunks.append(current)
+
+    kept: list[str] = []
+    for hunk in hunks:
+        path = _extract_diff_path(hunk[0]) if hunk else None
+        if path is not None and path not in allowed and not _is_likely_source_file(path):
             continue
         kept.extend(hunk)
     return "".join(kept).rstrip("\n") + "\n" if kept else ""

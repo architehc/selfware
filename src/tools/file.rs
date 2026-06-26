@@ -4,7 +4,7 @@ use crate::errors::ToolError;
 use crate::safety::path_validator::PathValidator;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -33,6 +33,18 @@ pub fn init_safety_config(config: &SafetyConfig) {
     let lock = SAFETY_CONFIG.get_or_init(|| RwLock::new(config.clone()));
     if let Ok(mut guard) = lock.write() {
         *guard = config.clone();
+    }
+}
+
+/// Reset the process-global safety config to the default for tests.
+///
+/// This prevents tests that run after agent-initialization tests from
+/// inheriting a permissive config left behind in `SAFETY_CONFIG`.
+#[cfg(test)]
+pub(crate) fn reset_safety_config_for_tests() {
+    let lock = SAFETY_CONFIG.get_or_init(|| RwLock::new(SafetyConfig::default()));
+    if let Ok(mut guard) = lock.write() {
+        *guard = SafetyConfig::default();
     }
 }
 
@@ -515,6 +527,22 @@ impl Tool for FileEdit {
             );
         }
 
+        // Catastrophic whole-file replacement guard. Replacing the vast majority
+        // of a file is almost always an accidental loss of context; prefer
+        // smaller, targeted edits. Use file_write if a full rewrite is intended.
+        if !content.is_empty() {
+            let ratio = args.old_str.len() as f64 / content.len() as f64;
+            if ratio > 0.85 {
+                bail!(
+                    "file_edit rejected: old_str matches {:.0}% of {}. \
+                     Use a smaller, targeted edit with surrounding context, \
+                     or use file_write if you truly intend to replace the entire file.",
+                    ratio * 100.0,
+                    args.path
+                );
+            }
+        }
+
         let new_content = content.replace(&args.old_str, &args.new_str);
         let new_content = preserve_line_endings(&new_content, line_ending);
         validate_rust_source_if_needed(Path::new(&args.path), &new_content)?;
@@ -799,6 +827,101 @@ impl Tool for FileMultiEdit {
     }
 }
 
+/// Nested node returned by the `directory_tree` tool.
+#[derive(Serialize)]
+struct TreeNode {
+    name: String,
+    #[serde(rename = "type")]
+    type_: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    children: Vec<TreeNode>,
+}
+
+/// Insert a walked entry into the nested tree based on its relative path.
+fn insert_tree_entry(
+    root: &mut TreeNode,
+    relative: &Path,
+    type_: &str,
+    size: u64,
+) {
+    let mut components: Vec<String> = relative
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+    if components.is_empty() {
+        return;
+    }
+    let file_name = components.pop().unwrap();
+
+    let mut current = root;
+    for component in components {
+        let child_idx = current
+            .children
+            .iter()
+            .position(|c| c.name == component && c.type_ == "directory");
+        let idx = match child_idx {
+            Some(idx) => idx,
+            None => {
+                current.children.push(TreeNode {
+                    name: component,
+                    type_: "directory".to_string(),
+                    size: None,
+                    children: Vec::new(),
+                });
+                current.children.len() - 1
+            }
+        };
+        current = &mut current.children[idx];
+    }
+
+    // If this entry is a directory, it may already exist as a parent placeholder
+    // from a previously-inserted child. Reuse that node and just mark it.
+    if type_ == "directory" {
+        if let Some(existing) = current
+            .children
+            .iter_mut()
+            .find(|c| c.name == file_name && c.type_ == "directory")
+        {
+            existing.size = Some(size);
+            return;
+        }
+    }
+
+    current.children.push(TreeNode {
+        name: file_name,
+        type_: type_.to_string(),
+        size: Some(size),
+        children: Vec::new(),
+    });
+}
+
+/// Recursively sort a tree node: directories first, then files alphabetically.
+fn sort_tree_node(node: &mut TreeNode) {
+    node.children.sort_by(|a, b| {
+        let a_dir = a.type_ == "directory";
+        let b_dir = b.type_ == "directory";
+        match (a_dir, b_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        }
+    });
+    for child in &mut node.children {
+        sort_tree_node(child);
+    }
+}
+
+/// Count all nodes in the tree (including the root).
+fn count_tree_nodes(node: &TreeNode) -> usize {
+    1 + node
+        .children
+        .iter()
+        .map(count_tree_nodes)
+        .sum::<usize>()
+}
+
 #[async_trait]
 impl Tool for DirectoryTree {
     fn name(&self) -> &str {
@@ -806,7 +929,7 @@ impl Tool for DirectoryTree {
     }
 
     fn description(&self) -> &str {
-        "List directory structure. Use to understand project layout."
+        "Return a nested directory tree. Use to understand project layout and parent/child relationships."
     }
 
     fn schema(&self) -> Value {
@@ -839,7 +962,7 @@ impl Tool for DirectoryTree {
         let max_depth = args.max_depth;
         let include_hidden = args.include_hidden;
 
-        let entries: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+        let tree: TreeNode = tokio::task::spawn_blocking(move || {
             // Use filter_entry (not filter_map) so hidden directories are not descended into.
             // filter_map would skip the hidden entry from output but still walk its children.
             /// Directories to never descend into — build artifacts, caches, VCS internals.
@@ -854,12 +977,6 @@ impl Tool for DirectoryTree {
                 "pkg",
                 "out",
                 "cmake-build-debug",
-            ];
-
-            /// Source file extensions shown first in output for quick scanning.
-            const SOURCE_EXTS: &[&str] = &[
-                "rs", "toml", "md", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h",
-                "yaml", "yml", "json",
             ];
 
             let walker = walkdir::WalkDir::new(&walk_path)
@@ -877,9 +994,14 @@ impl Tool for DirectoryTree {
                     !name.starts_with('.') && !SKIP_DIRS.contains(&name)
                 });
 
-            let mut source_entries = vec![];
-            let mut other_entries = vec![];
+            #[derive(Serialize)]
+            struct EntryInfo {
+                path: PathBuf,
+                type_: &'static str,
+                size: u64,
+            }
 
+            let mut entries: Vec<EntryInfo> = Vec::new();
             for entry in walker.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 let metadata = match entry.metadata() {
@@ -887,35 +1009,45 @@ impl Tool for DirectoryTree {
                     Err(_) => continue,
                 };
 
-                let is_source = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(|ext| SOURCE_EXTS.contains(&ext))
-                    .unwrap_or(false);
-
-                let json = serde_json::json!({
-                    "path": path.display().to_string(),
-                    "type": if metadata.is_dir() { "directory" } else { "file" },
-                    "size": metadata.len()
+                entries.push(EntryInfo {
+                    path: path.to_path_buf(),
+                    type_: if metadata.is_dir() { "directory" } else { "file" },
+                    size: metadata.len(),
                 });
-
-                if metadata.is_dir() || is_source {
-                    source_entries.push(json);
-                } else {
-                    other_entries.push(json);
-                }
             }
 
-            // Source files first, then other files
-            source_entries.extend(other_entries);
-            source_entries
+            let root_name = Path::new(&walk_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| walk_path.clone());
+
+            let mut root = TreeNode {
+                name: root_name,
+                type_: "directory".to_string(),
+                size: None,
+                children: Vec::new(),
+            };
+
+            let walk_path_buf = PathBuf::from(&walk_path);
+            for entry in entries {
+                let relative = match entry.path.strip_prefix(&walk_path_buf) {
+                    Ok(r) if !r.as_os_str().is_empty() => r,
+                    _ => continue,
+                };
+                insert_tree_entry(&mut root, relative, entry.type_, entry.size);
+            }
+
+            sort_tree_node(&mut root);
+            root
         })
         .await?;
 
+        let total = count_tree_nodes(&tree);
+
         Ok(serde_json::json!({
             "root": args.path,
-            "entries": entries,
-            "total": entries.len()
+            "tree": tree,
+            "total": total
         }))
     }
 
@@ -1023,6 +1155,23 @@ mod tests {
             "expected a path-access rejection, got: {}",
             message
         );
+    }
+
+    /// Flatten the nested tree returned by `directory_tree` into a list of
+    /// `(name, type)` pairs for easy assertion.
+    fn flatten_tree(node: &Value) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        if let Some(children) = node["children"].as_array() {
+            for child in children {
+                if let (Some(name), Some(type_)) =
+                    (child["name"].as_str(), child["type"].as_str())
+                {
+                    out.push((name.to_string(), type_.to_string()));
+                    out.extend(flatten_tree(child));
+                }
+            }
+        }
+        out
     }
 
     /// Create a permissive `SafetyConfig` for tests that need to access temp dirs.
@@ -1233,6 +1382,29 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("3 times"));
     }
 
+    #[tokio::test]
+    async fn test_file_edit_rejects_whole_file_replacement() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("edit.txt");
+        fs::write(&file_path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "line1\nline2\nline3\nline4\nline5\n",
+            "new_str": "replaced\n"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("file_edit rejected"), "unexpected error: {err}");
+
+        // The file should be unchanged.
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "line1\nline2\nline3\nline4\nline5\n");
+    }
+
     #[test]
     fn test_directory_tree_name() {
         let tool = DirectoryTree::new();
@@ -1268,12 +1440,10 @@ mod tests {
         });
 
         let result = tool.execute(args).await.unwrap();
-        let entries = result["entries"].as_array().unwrap();
+        let entries = flatten_tree(&result["tree"]);
 
         // Should not contain .hidden
-        let has_hidden = entries
-            .iter()
-            .any(|e| e["path"].as_str().unwrap().contains(".hidden"));
+        let has_hidden = entries.iter().any(|(name, _)| name.contains(".hidden"));
         assert!(!has_hidden);
     }
 
@@ -1289,12 +1459,10 @@ mod tests {
         });
 
         let result = tool.execute(args).await.unwrap();
-        let entries = result["entries"].as_array().unwrap();
+        let entries = flatten_tree(&result["tree"]);
 
         // Should contain .hidden
-        let has_hidden = entries
-            .iter()
-            .any(|e| e["path"].as_str().unwrap().contains(".hidden"));
+        let has_hidden = entries.iter().any(|(name, _)| name.contains(".hidden"));
         assert!(has_hidden);
     }
 
@@ -1523,11 +1691,9 @@ mod tests {
         });
 
         let result = tool.execute(args).await.unwrap();
-        let entries = result["entries"].as_array().unwrap();
+        let entries = flatten_tree(&result["tree"]);
 
-        let has_deep = entries
-            .iter()
-            .any(|e| e["path"].as_str().unwrap().contains("deep_file"));
+        let has_deep = entries.iter().any(|(name, _)| name.contains("deep_file"));
         assert!(!has_deep);
     }
 
@@ -1671,10 +1837,10 @@ mod tests {
         });
 
         let result = tool.execute(args).await.unwrap();
-        let entries = result["entries"].as_array().unwrap();
+        let entries = flatten_tree(&result["tree"]);
 
-        let has_dir = entries.iter().any(|e| e["type"] == "directory");
-        let has_file = entries.iter().any(|e| e["type"] == "file");
+        let has_dir = entries.iter().any(|(_, type_)| type_ == "directory");
+        let has_file = entries.iter().any(|(_, type_)| type_ == "file");
         assert!(has_dir);
         assert!(has_file);
     }

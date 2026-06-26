@@ -38,6 +38,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "max_retries",
     "base_delay_ms",
     "max_delay_ms",
+    "post_edit_test_command",
     // safety sub-keys
     "allowed_paths",
     "denied_paths",
@@ -357,6 +358,15 @@ impl Config {
                 sources.set(
                     "agent.step_timeout_secs",
                     ConfigSource::EnvVar("SELFWARE_TIMEOUT".into()),
+                );
+            }
+        }
+        if let Ok(cmd) = std::env::var("SELFWARE_POST_EDIT_TEST_COMMAND") {
+            if !cmd.trim().is_empty() {
+                config.agent.post_edit_test_command = Some(cmd);
+                sources.set(
+                    "agent.post_edit_test_command",
+                    ConfigSource::EnvVar("SELFWARE_POST_EDIT_TEST_COMMAND".into()),
                 );
             }
         }

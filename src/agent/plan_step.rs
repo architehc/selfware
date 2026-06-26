@@ -117,6 +117,24 @@ impl Agent {
             warn!("Model returned empty planning content!");
         }
 
+        // When plan mode is active, try to parse a structured plan from the
+        // model's response and store it for UI review / execution tracking.
+        if self.plan_mode {
+            let plan_text = content.text();
+            if let Some(plan) = super::plan_mode::parse_plan_from_llm(plan_text) {
+                info!(
+                    "Parsed structured plan with {} step(s)",
+                    plan.steps.len()
+                );
+                self.store_plan(plan);
+                self.plan_mode_manager.store_plan_text(plan_text);
+            } else {
+                // Even if parsing fails, keep the raw text so the user can
+                // review the model's prose plan.
+                self.plan_mode_manager.store_plan_text(plan_text);
+            }
+        }
+
         if let Some(ref reasoning) = assistant_msg.reasoning_content {
             debug!(
                 "Planning reasoning ({} chars): {}",
@@ -202,7 +220,8 @@ impl Agent {
             plan_decision,
             content.text(),
             reasoning_for_artifact.as_deref(),
-        );
+        )
+        .await;
 
         self.log_turn_end_event(
             "planning",

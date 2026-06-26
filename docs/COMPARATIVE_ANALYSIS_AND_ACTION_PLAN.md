@@ -76,49 +76,49 @@ Acceptance:
 - Official score reports refuse to include leaky prompt runs.
 - Every aggregate records dataset source, manifest path/hash, and prompt mode.
 
-### 4. Fix Bench CLI Scheduling Wiring
+### 4. Fix Bench CLI Scheduling Wiring ✅
 
-`bench swebench-pro --ctx` and `--parallel` are parsed into `SwebenchProOpts`, but `LlamaServerOpts` currently only receives `port`, so llama-server keeps defaults.
+`bench swebench-pro --ctx` and `--parallel` are parsed into `SwebenchProArgs` and propagated to `LlamaServerOpts`, which passes them to llama-server as `-c <ctx>` and `--parallel <parallel>`.
 
 Implementation targets:
 
-- Populate `LlamaServerOpts { ctx: args.ctx, parallel: args.parallel, ... }`.
-- Add tests around `build_llama_server_args()`.
+- ✅ Populate `LlamaServerOpts { ctx: args.ctx, parallel: args.parallel, ... }`.
+- ✅ Add tests around `build_llama_server_args()`.
 - Record exact llama-server argv in `plan.json`.
 
 Acceptance:
 
-- `selfware bench swebench-pro --ctx 65536 --parallel 1` starts llama-server with `-c 65536 --parallel 1`.
+- ✅ `selfware bench swebench-pro --ctx 65536 --parallel 1` starts llama-server with `-c 65536 --parallel 1`.
 - `plan.json` records resolved context, parallel, KV cache, tensor split, model file hash, llama-server path, and version.
 
-### 5. Remove Or Fence Fake SWE-bench Paths
+### 5. Remove Or Fence Fake SWE-bench Paths ✅
 
-`src/swebench/mod.rs` is a mock/stub path and must not coexist with production benchmark commands without clear naming.
+`src/swebench/mod.rs` is deprecated legacy surface. It is now gated behind the `legacy-swebench` Cargo feature and its doc header explicitly warns against using it for official scoring. The orphaned sibling files (`agent_runner.rs`, `analysis.rs`, `checkpoint.rs`, `evaluator.rs`) were deleted. Production benchmark commands route through `src/bench_harness/swebench_pro` and `system_tests/swe_bench_pro/`.
 
 Implementation targets:
 
-- Rename to `swebench_demo_stub` or delete.
-- Update docs and CLI to route Pro runs through `src/bench_harness/swebench_pro`.
+- ✅ Gate `src/swebench` behind `legacy-swebench` feature.
+- ✅ Delete orphaned non-compiling sibling files.
+- ✅ Update docs and integration tests to route Pro runs through `bench_harness::swebench_pro` and `system_tests/swe_bench_pro/`.
 
 Acceptance:
 
-- No command path can report fabricated SWE-bench success.
+- ✅ No command path can report fabricated SWE-bench success.
 
 ## P0: Agent Loop Fixes For Qwen
 
 These directly target the 60% read-loop and 0-byte patch failures.
 
-### 6. Replace Read Blocking With Forced Mutation
+### 6. Replace Read Blocking With Forced Mutation ✅
 
-The current guard blocks read-only tools and hopes Qwen pivots. The logs show it usually does not.
+`ReadLoopPolicy::ForceMutation` is the default. The `force_mutation_directive` now lists all accepted mutation tools (`file_edit`, `file_multi_edit`, `file_write`, `patch_apply`) and allows one targeted verification command after an edit. The existing two-strike abort guard still fails fast with `READ_LOOP_NO_EDIT` when the model refuses to mutate.
 
 Implementation targets:
 
-- Add SWE mode `ReadLoopPolicy::ForceMutation`.
-- Warn at 4 read-only turns.
-- At 7-8 read-only turns, the next accepted action must be `file_edit`, `file_multi_edit`, `patch_apply`, `file_write`, or a targeted test command.
-- If Qwen emits another read, do not just block; inject a concrete tool-call template using the most recently read file and a candidate edit location.
-- If it refuses twice, fail with `READ_LOOP_NO_EDIT` and evidence.
+- ✅ `ReadLoopPolicy::ForceMutation` active by default.
+- ✅ At read-loop threshold, the next accepted action must be `file_edit`, `file_multi_edit`, `patch_apply`, `file_write`, or a targeted test command after an edit.
+- ✅ Inject concrete tool-call templates using the most recently read file.
+- ✅ Fail with `READ_LOOP_NO_EDIT` after two refusals.
 
 Acceptance:
 

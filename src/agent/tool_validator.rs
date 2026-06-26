@@ -66,17 +66,31 @@ pub fn validate_tool_call(call: &ToolCall, definitions: &[ToolDefinition]) -> Re
         }
     }
 
-    // Basic type validation for known scalar types
+    // Basic type validation for known scalar types (including JSON Schema unions).
     if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
         for (prop_name, prop_schema) in properties {
             if let Some(arg_val) = args_obj.get(prop_name) {
-                if let Some(prop_type) = prop_schema.get("type").and_then(|t| t.as_str()) {
-                    if !value_matches_type(arg_val, prop_type) {
+                if let Some(prop_type) = prop_schema.get("type") {
+                    if !value_matches_schema_type(arg_val, prop_type) {
                         return Err(ToolError::InvalidArguments {
                             name: tool_name.to_string(),
                             message: format!(
                                 "Argument '{}' expected type '{}' but got incompatible value",
                                 prop_name, prop_type
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
+                // Enum validation
+                if let Some(enum_values) = prop_schema.get("enum").and_then(|e| e.as_array()) {
+                    if !enum_values.iter().any(|allowed| allowed == arg_val) {
+                        return Err(ToolError::InvalidArguments {
+                            name: tool_name.to_string(),
+                            message: format!(
+                                "Argument '{}' must be one of {:?}",
+                                prop_name, enum_values
                             ),
                         }
                         .into());
@@ -89,8 +103,24 @@ pub fn validate_tool_call(call: &ToolCall, definitions: &[ToolDefinition]) -> Re
     Ok(())
 }
 
-/// Best-effort type check for JSON schema types.
-fn value_matches_type(value: &Value, schema_type: &str) -> bool {
+/// Best-effort type check for JSON schema types. `schema_type` may be a single
+/// type string or an array of type strings (a union such as `["string", "null"]`).
+fn value_matches_schema_type(value: &Value, schema_type: &Value) -> bool {
+    if let Some(type_str) = schema_type.as_str() {
+        return value_matches_single_type(value, type_str);
+    }
+
+    if let Some(types) = schema_type.as_array() {
+        return types
+            .iter()
+            .any(|t| value_matches_schema_type(value, t));
+    }
+
+    // Unknown `type` shapes pass through.
+    true
+}
+
+fn value_matches_single_type(value: &Value, schema_type: &str) -> bool {
     match schema_type {
         "string" => value.is_string(),
         "integer" => value.is_i64() || value.is_u64(),
@@ -205,7 +235,93 @@ mod tests {
             },
         };
         let err = validate_tool_call(&call, &defs).unwrap_err().to_string();
-        assert!(err.contains("expected type 'string'"));
+        assert!(err.contains("expected type"));
+        assert!(err.contains("string"));
+    }
+
+    #[test]
+    fn test_validate_union_type_accepts_any_member() {
+        let defs = vec![ToolDefinition {
+            def_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "example".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": ["string", "null"] }
+                    }
+                }),
+            },
+        }];
+
+        let string_call = ToolCall {
+            id: "1".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "example".to_string(),
+                arguments: r#"{"value": "hello"}"#.to_string(),
+            },
+        };
+        assert!(validate_tool_call(&string_call, &defs).is_ok());
+
+        let null_call = ToolCall {
+            id: "2".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "example".to_string(),
+                arguments: r#"{"value": null}"#.to_string(),
+            },
+        };
+        assert!(validate_tool_call(&null_call, &defs).is_ok());
+
+        let bad_call = ToolCall {
+            id: "3".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "example".to_string(),
+                arguments: r#"{"value": 42}"#.to_string(),
+            },
+        };
+        assert!(validate_tool_call(&bad_call, &defs).is_err());
+    }
+
+    #[test]
+    fn test_validate_enum_rejects_invalid_value() {
+        let defs = vec![ToolDefinition {
+            def_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "example".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "mode": { "type": "string", "enum": ["fast", "slow"] }
+                    }
+                }),
+            },
+        }];
+
+        let ok_call = ToolCall {
+            id: "1".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "example".to_string(),
+                arguments: r#"{"mode": "fast"}"#.to_string(),
+            },
+        };
+        assert!(validate_tool_call(&ok_call, &defs).is_ok());
+
+        let bad_call = ToolCall {
+            id: "2".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "example".to_string(),
+                arguments: r#"{"mode": "turbo"}"#.to_string(),
+            },
+        };
+        let err = validate_tool_call(&bad_call, &defs).unwrap_err().to_string();
+        assert!(err.contains("must be one of"));
     }
 
     #[test]

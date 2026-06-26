@@ -356,7 +356,7 @@ impl Agent {
     }
 
     /// Show detailed session statistics (Qwen Code /stats style)
-    pub(super) fn show_session_stats(&self) {
+    pub(super) async fn show_session_stats(&self) {
         let tokens = self.memory.total_tokens();
         let window = self.memory.context_window();
         let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
@@ -465,7 +465,7 @@ impl Agent {
             patina, reset, patina, reset
         );
         // Tool cache stats
-        let tc_stats = self.cache_manager.tool_cache.stats();
+        let tc_stats = self.cache_manager.tool_cache.stats().await;
         println!(
             "  {}│{}  {bold}{}◇ TOOL CACHE{}{:<44}    {}│{}",
             patina, reset, sand, reset, "", patina, reset

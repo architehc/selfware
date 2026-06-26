@@ -16,6 +16,9 @@ pub enum SelfwareError {
     #[error("Tool error: {0}")]
     Tool(#[from] ToolError),
 
+    #[error("Shell error: {0}")]
+    Shell(#[from] ShellError),
+
     #[error("Safety error: {0}")]
     Safety(#[from] SafetyError),
 
@@ -190,6 +193,12 @@ pub enum ToolError {
 }
 
 #[derive(Error, Debug)]
+pub enum ShellError {
+    #[error("Invalid working directory '{path}': {reason}")]
+    InvalidCwd { path: String, reason: String },
+}
+
+#[derive(Error, Debug)]
 pub enum SafetyError {
     // Path validation errors
     #[error("Path blocked by safety policy: {path}")]
@@ -214,6 +223,9 @@ pub enum SafetyError {
 
     #[error("Path '{path}' is outside working directory and no allowed_paths configured")]
     PathOutsideWorkspace { path: String },
+
+    #[error("Failed to canonicalize path safely: {path}")]
+    PathCanonicalizationFailed { path: String },
 
     #[error("Path matches denied pattern: {pattern}")]
     PathDeniedPattern { pattern: String },

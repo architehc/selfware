@@ -15,6 +15,9 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::token_count::estimate_content_tokens;
+use crate::tools::codemap::{
+    update_context_map_tokens, update_files_in_context, update_total_budget,
+};
 
 // ─── Context Levels ─────────────────────────────────────────────────────────
 
@@ -397,6 +400,10 @@ impl ContextMap {
             (thinking_ratio * 100.0) as u32,
         );
 
+        update_total_budget(token_budget);
+        update_context_map_tokens(0);
+        update_files_in_context(0);
+
         Self {
             entries: HashMap::new(),
             total_tokens: 0,
@@ -406,6 +413,13 @@ impl ContextMap {
             modality: None,
             project_root: super::current_project_root(),
         }
+    }
+
+    /// Publish the context-map portion of the shared `ContextBudget` so tools
+    /// like `context_budget` see a single, combined view of memory + map usage.
+    fn sync_budget(&self) {
+        update_context_map_tokens(self.total_tokens);
+        update_files_in_context(self.entries.len());
     }
 
     // ── Budget queries ──────────────────────────────────────────────────
@@ -470,8 +484,8 @@ impl ContextMap {
     // ── Pre-load estimation ─────────────────────────────────────────────
 
     /// Check if loading a file at the given level fits in budget.
-    pub fn can_load(&self, path: &Path, level: ContextLevel) -> LoadEstimate {
-        let estimated = self.estimate_level_tokens(path, level);
+    pub async fn can_load(&self, path: &Path, level: ContextLevel) -> LoadEstimate {
+        let estimated = self.estimate_level_tokens(path, level).await;
         // Subtract current cost if already loaded (upgrade scenario).
         let current_cost = self
             .entries
@@ -493,7 +507,7 @@ impl ContextMap {
     }
 
     /// Estimate token cost for a file at a given level without loading it.
-    fn estimate_level_tokens(&self, path: &Path, level: ContextLevel) -> usize {
+    async fn estimate_level_tokens(&self, path: &Path, level: ContextLevel) -> usize {
         // If we already have cached costs, use them.
         if let Some(entry) = self.entries.get(path) {
             match level {
@@ -511,7 +525,10 @@ impl ContextMap {
             self.project_root.join(path)
         };
 
-        let file_size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
+        let file_size = tokio::fs::metadata(&full_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         match level {
             ContextLevel::Tree => 10, // single line entry
@@ -554,10 +571,11 @@ impl ContextMap {
             },
         );
         self.total_tokens += l1_cost;
+        self.sync_budget();
     }
 
-    /// Load or upgrade a file to L2 (skeleton). Returns the skeleton for injection.
-    pub fn load_skeleton(&mut self, path: &Path, skeleton: FileSkeleton) -> &FileSkeleton {
+    /// Load or upgrade a file to L2 (skeleton).
+    pub fn load_skeleton(&mut self, path: &Path, skeleton: FileSkeleton) {
         let token_cost = skeleton.token_count;
         let path_buf = path.to_path_buf();
 
@@ -586,8 +604,7 @@ impl ContextMap {
         entry.full_content = None;
         self.total_tokens += token_cost;
 
-        // Store skeleton and return reference to it.
-        // This is safe because we just set it to Some above.
+        // Store skeleton.
         entry.skeleton = Some(skeleton);
 
         debug!(
@@ -597,12 +614,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
-
-        // Return reference to skeleton - we know it's Some because we just set it.
-        match entry.skeleton.as_ref() {
-            Some(s) => s,
-            None => unreachable!("skeleton was just set to Some above"),
-        }
+        self.sync_budget();
     }
 
     /// Load or upgrade a file to L3 (full content).
@@ -640,6 +652,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
+        self.sync_budget();
     }
 
     /// Downgrade a file from L3 to L2 (skeleton), freeing tokens.
@@ -670,6 +683,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
+        self.sync_budget();
 
         freed
     }
@@ -689,6 +703,7 @@ impl ContextMap {
         entry.full_content = None;
         let freed = old_cost.saturating_sub(tree_cost);
         self.total_tokens = self.total_tokens.saturating_sub(freed);
+        self.sync_budget();
         freed
     }
 
@@ -741,6 +756,7 @@ impl ContextMap {
             );
         }
 
+        self.sync_budget();
         freed
     }
 
@@ -928,6 +944,7 @@ impl ContextMap {
                 stale_l2.len()
             );
         }
+        self.sync_budget();
         freed
     }
 
@@ -982,6 +999,7 @@ impl ContextMap {
             "Added external context '{}' from {}: {} tokens",
             key, source, token_cost
         );
+        self.sync_budget();
     }
 
     /// Remove a specific context entry entirely.
@@ -990,6 +1008,7 @@ impl ContextMap {
             let freed = entry.current_tokens;
             self.total_tokens = self.total_tokens.saturating_sub(freed);
             debug!("Removed context {}: freed {} tokens", path.display(), freed);
+            self.sync_budget();
             freed
         } else {
             0
@@ -1053,7 +1072,7 @@ impl ContextMap {
     /// Promote the most relevant files to L3 based on a query,
     /// automatically managing budget by downgrading less relevant files.
     /// Returns which files were promoted.
-    pub fn focus_on_query(&mut self, query: &str, max_promote: usize) -> Vec<PathBuf> {
+    pub async fn focus_on_query(&mut self, query: &str, max_promote: usize) -> Vec<PathBuf> {
         let relevant = self.find_relevant_files(query);
         let mut promoted = Vec::new();
 
@@ -1066,7 +1085,7 @@ impl ContextMap {
             }
 
             // Estimate cost and ensure headroom.
-            let estimate = self.can_load(&path, ContextLevel::Full);
+            let estimate = self.can_load(&path, ContextLevel::Full).await;
             if !estimate.fits {
                 let needed = estimate.estimated_tokens.saturating_sub(self.remaining());
                 self.compress_to_fit(needed);
@@ -1085,7 +1104,7 @@ impl ContextMap {
     /// - files that should be promoted (loaded at higher detail)
     /// - files that are irrelevant and should be evicted
     /// - estimated token savings
-    pub fn recommend_context(&self, task: &str) -> ContextRecommendation {
+    pub async fn recommend_context(&self, task: &str) -> ContextRecommendation {
         let modality = ContextModality::from_task(task);
         let plan = modality.loading_plan();
 
@@ -1144,7 +1163,7 @@ impl ContextMap {
                         estimated_tokens: entry
                             .costs
                             .l3
-                            .max(self.estimate_level_tokens(&entry.path, ContextLevel::Full)),
+                            .max(self.estimate_level_tokens(&entry.path, ContextLevel::Full).await),
                     });
                 } else {
                     keep.push(entry.path.clone());
@@ -1725,8 +1744,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_can_load_estimate() {
+    #[tokio::test]
+    async fn test_can_load_estimate() {
         let mut map = ContextMap::new(1_000, 0.75, 0.20, 0.05);
         // Budget is 750 tokens.
 
@@ -1737,7 +1756,7 @@ mod tests {
 
         // Now try to load another file — should not fit.
         map.register_tree_entry("new.rs".into(), 9000);
-        let estimate = map.can_load(Path::new("new.rs"), ContextLevel::Full);
+        let estimate = map.can_load(Path::new("new.rs"), ContextLevel::Full).await;
         assert!(estimate.estimated_tokens > 0);
         // Budget mostly consumed + new file estimate → should not fit.
         assert!(estimate.usage_pct > 0.5, "should show significant usage");

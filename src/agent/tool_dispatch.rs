@@ -29,7 +29,7 @@ const TOOL_RESULTS_DIR: &str = ".selfware/tool_results";
 /// - Key statistics extracted from the result
 /// - A reference path to the raw data on disk
 /// - Enough context for the agent to decide whether to drill down
-fn summarize_and_spill(
+async fn summarize_and_spill(
     tool_name: &str,
     call_id: &str,
     raw: &str,
@@ -37,14 +37,14 @@ fn summarize_and_spill(
 ) -> String {
     // Save raw result to disk
     let spill_dir = std::path::Path::new(TOOL_RESULTS_DIR);
-    let _ = std::fs::create_dir_all(spill_dir);
+    let _ = tokio::fs::create_dir_all(spill_dir).await;
     let spill_file = spill_dir.join(format!(
         "{}_{}.json",
         tool_name,
         &call_id[..call_id.len().min(12)]
     ));
     let spill_path = spill_file.display().to_string();
-    if let Err(e) = std::fs::write(&spill_file, raw) {
+    if let Err(e) = tokio::fs::write(&spill_file, raw).await {
         warn!("Failed to spill tool result to {}: {}", spill_path, e);
         // Fall back to aggressive truncation if disk write fails
         let truncated: String = raw.chars().take(20_000).collect();
@@ -504,6 +504,13 @@ pub(super) fn extract_explicit_requested_tools<'a, I>(
 where
     I: IntoIterator<Item = &'a str>,
 {
+    use parking_lot::Mutex;
+    use std::collections::HashMap;
+    use std::sync::LazyLock;
+
+    static CACHE: LazyLock<Mutex<HashMap<String, Vec<regex::Regex>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
     let mut required = std::collections::BTreeSet::new();
 
     for tool_name in tool_names {
@@ -516,11 +523,15 @@ where
             format!(r"(?i)\busing\s+`?{}`?(?:\s+tool)?\b", escaped),
         ];
 
-        if patterns
-            .iter()
-            .filter_map(|pattern| regex::Regex::new(pattern).ok())
-            .any(|re| re.is_match(task_context))
-        {
+        let mut cache = CACHE.lock();
+        let regexes = cache.entry(tool_name.to_string()).or_insert_with(|| {
+            patterns
+                .iter()
+                .filter_map(|pattern| regex::Regex::new(pattern).ok())
+                .collect()
+        });
+
+        if regexes.iter().any(|re| re.is_match(task_context)) {
             required.insert(tool_name.to_string());
         }
     }
@@ -648,8 +659,9 @@ pub(super) fn shell_command_is_observational(command: &str) -> bool {
 
     read_only_prefixes.iter().any(|prefix| {
         normalized == *prefix
-            || normalized.starts_with(&format!("{} ", prefix))
-            || normalized.starts_with(&format!("{} --", prefix))
+            || (normalized.starts_with(prefix)
+                && (normalized[prefix.len()..].starts_with(' ')
+                    || normalized[prefix.len()..].starts_with("--")))
     })
 }
 
@@ -859,7 +871,7 @@ impl Agent {
         ))
     }
 
-    fn reject_tool_call_before_execution(
+    async fn reject_tool_call_before_execution(
         &mut self,
         tool_name: &str,
         args_str: &str,
@@ -871,14 +883,15 @@ impl Agent {
     ) {
         cli_println!("{} {}", "✗".bright_red(), error_msg);
         self.pending_failure_hint = Some(error_msg.to_string());
-        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, error_msg);
+        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, error_msg)
+            .await;
         self.log_tool_call(tool_name, args_str, error_msg, false, start_time, false);
         self.remember_failed_tool(tool_name, error_msg);
         self.record_failed_tool_attempt(tool_name, args_str, failure_kind, error_msg);
         self.consecutive_suppressions += 1;
     }
 
-    fn maybe_block_progressless_batch(
+    async fn maybe_block_progressless_batch(
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<Option<Vec<super::execution::CollectedToolCall>>> {
@@ -925,7 +938,8 @@ impl Agent {
                 start_time,
                 "progress_guard",
                 &error_msg,
-            );
+            )
+            .await;
         }
 
         if guard_count >= 2 && self.mutating_tool_call_count() == 0 {
@@ -978,15 +992,29 @@ impl Agent {
              READ-LOOP FORCE-MUTATION MODE is active.\n\
              Your previous read-only or verification tool calls were suppressed. \
              The next accepted action must mutate code or project state.\n\n\
-             Use this exact tool shape on the most relevant existing file you already inspected:\n\
+             Choose ONE of these exact tool shapes on the most relevant existing file you already inspected:\n\n\
              <tool>\n\
              <name>file_edit</name>\n\
              <arguments>{{\"path\":{target_json},\"old_str\":\"EXACT ORIGINAL TEXT FROM THE FILE\",\"new_str\":\"REPLACEMENT TEXT\"}}</arguments>\n\
              </tool>\n\n\
+             <tool>\n\
+             <name>file_multi_edit</name>\n\
+             <arguments>{{\"path\":{target_json},\"edits\":[{{\"old_str\":\"...\",\"new_str\":\"...\"}}]}}</arguments>\n\
+             </tool>\n\n\
+             <tool>\n\
+             <name>file_write</name>\n\
+             <arguments>{{\"path\":{target_json},\"content\":\"FULL NEW FILE CONTENT\"}}</arguments>\n\
+             </tool>\n\n\
+             <tool>\n\
+             <name>patch_apply</name>\n\
+             <arguments>{{\"patch\":\"--- a/file\\n+++ b/file\\n@@ -1 +1 @@\\n-old\\n+new\\n\"}}</arguments>\n\
+             </tool>\n\n\
+             If you already know the exact change, you may also output the replacement code as plain text with the target path; Selfware will write it automatically.\n\n\
              Rules:\n\
-             - Do NOT call file_read, directory_tree, glob_find, grep_search, git_diff, cargo_check, cargo_test, pytest, npm test, or go test first.\n\
+             - Do NOT call file_read, directory_tree, glob_find, grep_search, git_diff, cargo_check, cargo_test, pytest, npm test, or go test BEFORE making an edit.\n\
+             - After you edit, you MAY run one targeted test command to verify the change.\n\
              - Do NOT create src/lib.rs unless this repository already has Cargo.toml and src/lib.rs is the real target.\n\
-             - If you cannot identify a safe edit from the file context already present, stop with READ_LOOP_NO_EDIT instead of guessing.\n\
+             - You MUST make an edit now. If uncertain, edit the highest-ranked source file with the smallest plausible fix; do not stop without editing.\n\
              </selfware_system_directive>"
         )
     }
@@ -1108,7 +1136,14 @@ impl Agent {
         self.consecutive_suppressions = 0;
     }
 
-    pub(super) fn maybe_block_redundant_reread(
+    /// Clear recorded failed attempts for a single tool name.
+    /// Used when that tool succeeds so that unrelated failures are not forgiven.
+    pub(super) fn clear_failed_tool_attempts_for_tool(&mut self, tool_name: &str) {
+        self.recent_failed_tool_attempts
+            .retain(|existing| existing.tool_name != tool_name);
+    }
+
+    pub(super) async fn maybe_block_redundant_reread(
         &mut self,
         name: &str,
         args_str: &str,
@@ -1134,7 +1169,8 @@ impl Agent {
             return false;
         }
 
-        let current_mtime = std::fs::metadata(path)
+        let current_mtime = tokio::fs::metadata(path)
+            .await
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
@@ -1144,6 +1180,8 @@ impl Agent {
             return false;
         }
 
+        // The threshold is 3 unchanged rereads; this call is the one that exceeds
+        // it, so the ordinal is one greater than the threshold.
         let read_count = state.unchanged_read_count + 1;
         // Increment the counter so repeated suppressions eventually trigger
         // the forced text response (at count >= 3).
@@ -1151,15 +1189,16 @@ impl Agent {
             state_mut.unchanged_read_count = read_count;
         }
         let err = format!(
-            "Repeated unchanged reread blocked: `{}` has already been read unchanged {} times in this task. Use the content already in context or make the edit now instead of reading it again.",
-            path, read_count
+            "Repeated unchanged reread blocked: `{}` has already been read unchanged 3 times in this task. Use the content already in context or make the edit now instead of reading it again.",
+            path
         );
         self.push_task_state_note(format!(
-            "Blocked redundant reread of `{}` after {} unchanged reads",
+            "Blocked redundant reread of `{}` on the {}th unchanged read",
             path, read_count
         ));
         self.pending_failure_hint = Some(err.clone());
-        self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
+        self.push_tool_result_message(use_native_fc, call_id, name, false, &err)
+            .await;
         self.log_tool_call(name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(name, &err);
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
@@ -1185,7 +1224,7 @@ impl Agent {
         true
     }
 
-    pub(super) fn track_task_state_after_tool(
+    pub(super) async fn track_task_state_after_tool(
         &mut self,
         name: &str,
         args: &Value,
@@ -1214,7 +1253,8 @@ impl Agent {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
                 let content_hash = super::recovery::hash_text_signature(content);
-                let last_modified = std::fs::metadata(&path_str)
+                let last_modified = tokio::fs::metadata(&path_str)
+                    .await
                     .ok()
                     .and_then(|metadata| metadata.modified().ok())
                     .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
@@ -1280,7 +1320,7 @@ impl Agent {
         }
     }
 
-    pub(super) fn suppress_repeated_failed_tool_retry(
+    pub(super) async fn suppress_repeated_failed_tool_retry(
         &mut self,
         tool_name: &str,
         args_str: &str,
@@ -1304,7 +1344,7 @@ impl Agent {
         if tool_name == "file_read" {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    if std::path::Path::new(path).exists() {
+                    if tokio::fs::try_exists(path).await.unwrap_or(false) {
                         info!(
                             "file_read('{}') was previously suppressed but file now exists — allowing retry",
                             path
@@ -1338,8 +1378,8 @@ impl Agent {
                     );
 
                     // Force-read the file so the model sees current content
-                    let read_result = if std::path::Path::new(path).exists() {
-                        match std::fs::read_to_string(path) {
+                    let read_result = if tokio::fs::try_exists(path).await.unwrap_or(false) {
+                        match tokio::fs::read_to_string(path).await {
                             Ok(content) => {
                                 let lines = content.lines().count();
                                 format!(
@@ -1370,7 +1410,8 @@ impl Agent {
                         tool_name,
                         false,
                         &escalation,
-                    );
+                    )
+                    .await;
                     self.log_tool_call(
                         tool_name,
                         args_str,
@@ -1391,7 +1432,8 @@ impl Agent {
             tool_name, failure.failure_kind
         );
         cli_println!("{} {}", "✗".bright_red(), err);
-        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &err);
+        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &err)
+            .await;
         self.log_tool_call(tool_name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(tool_name, &err);
         // Surface this as a permanently-blocked tool call for FailureMode.
@@ -1440,7 +1482,7 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
-        let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls)? else {
+        let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls).await? else {
             return Ok(());
         };
 
@@ -1554,13 +1596,16 @@ impl Agent {
             let (call_id, use_native_fc, fake_call) =
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
 
-            if self.suppress_repeated_failed_tool_retry(
-                &name,
-                &args_str,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
+            if self
+                .suppress_repeated_failed_tool_retry(
+                    &name,
+                    &args_str,
+                    &call_id,
+                    use_native_fc,
+                    start_time,
+                )
+                .await
+            {
                 self.emit_event(AgentEvent::ToolCompleted {
                     name: name.clone(),
                     success: false,
@@ -1578,7 +1623,8 @@ impl Agent {
                     start_time,
                     "task_policy",
                     &error_msg,
-                );
+                )
+                .await;
                 self.emit_event(AgentEvent::ToolCompleted {
                     name: name.clone(),
                     success: false,
@@ -1593,7 +1639,8 @@ impl Agent {
                 if let Some(ref logger) = self.audit_logger {
                     logger.log_safety_block(&name, &error_msg);
                 }
-                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
+                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg)
+                    .await;
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                 self.remember_failed_tool(&name, &error_msg);
                 self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
@@ -1613,7 +1660,8 @@ impl Agent {
                         &name,
                         false,
                         &error_msg,
-                    );
+                    )
+                    .await;
                     self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                     self.remember_failed_tool(&name, &error_msg);
                     self.record_failed_tool_attempt(&name, &args_str, "validation", &error_msg);
@@ -1626,31 +1674,39 @@ impl Agent {
                 }
             }
 
-            let args =
-                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
-                    Some(args) => args,
-                    None => continue,
-                };
+            let args = match self
+                .parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time)
+                .await
+            {
+                Some(args) => args,
+                None => continue,
+            };
 
-            if !self.validate_tool_args(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
+            if !self
+                .validate_tool_args(
+                    &name,
+                    &args_str,
+                    &args,
+                    &call_id,
+                    use_native_fc,
+                    start_time,
+                )
+                .await
+            {
                 continue;
             }
 
-            if self.maybe_block_redundant_reread(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
+            if self
+                .maybe_block_redundant_reread(
+                    &name,
+                    &args_str,
+                    &args,
+                    &call_id,
+                    use_native_fc,
+                    start_time,
+                )
+                .await
+            {
                 continue;
             }
 
@@ -1659,7 +1715,8 @@ impl Agent {
             if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
                 let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
                 info!("{}", skip_msg);
-                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg);
+                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg)
+                    .await;
                 continue;
             }
 
@@ -1811,12 +1868,16 @@ impl Agent {
                 );
             }
             if success {
-                self.clear_failed_tool_attempts();
+                // Only forgive failures for the tool that actually succeeded.
+                // Clearing the entire history on any success would mask unrelated
+                // failures in the same parallel batch.
+                self.clear_failed_tool_attempts_for_tool(&vt.name);
             } else {
                 self.record_failed_tool_attempt(&vt.name, &vt.args_str, "execution", &result_str);
             }
 
-            self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success);
+            self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
+                .await;
 
             let is_mutating_shell = vt.name == "shell_exec"
                 && vt
@@ -1870,7 +1931,7 @@ impl Agent {
                                     v.get("content").and_then(|c| c.as_str()).map(String::from)
                                 })
                         {
-                            self.track_file_read_in_context_map(&path_str, &content);
+                            self.track_file_read_in_context_map(&path_str, &content).await;
                         }
                     }
                 }
@@ -1882,7 +1943,8 @@ impl Agent {
                 &vt.name,
                 success,
                 &result_str,
-            );
+            )
+            .await;
             if !success {
                 self.remember_failed_tool(&vt.name, &result_str);
             }
@@ -1950,13 +2012,16 @@ impl Agent {
         let (call_id, use_native_fc, fake_call) =
             self.build_tool_call_context(&name, &args_str, tool_call_id);
 
-        if self.suppress_repeated_failed_tool_retry(
-            &name,
-            &args_str,
-            &call_id,
-            use_native_fc,
-            start_time,
-        ) {
+        if self
+            .suppress_repeated_failed_tool_retry(
+                &name,
+                &args_str,
+                &call_id,
+                use_native_fc,
+                start_time,
+            )
+            .await
+        {
             self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success: false,
@@ -1974,7 +2039,8 @@ impl Agent {
                 start_time,
                 "task_policy",
                 &error_msg,
-            );
+            )
+            .await;
             self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success: false,
@@ -1991,7 +2057,8 @@ impl Agent {
             if let Some(ref logger) = self.audit_logger {
                 logger.log_safety_block(&name, &error_msg);
             }
-            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
+            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg)
+                .await;
             self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
             self.remember_failed_tool(&name, &error_msg);
             let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -2013,7 +2080,9 @@ impl Agent {
             return Ok(());
         }
 
-        let args = match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time)
+        let args = match self
+            .parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time)
+            .await
         {
             Some(args) => args,
             None => {
@@ -2026,7 +2095,17 @@ impl Agent {
             }
         };
 
-        if !self.validate_tool_args(&name, &args_str, &args, &call_id, use_native_fc, start_time) {
+        if !self
+            .validate_tool_args(
+                &name,
+                &args_str,
+                &args,
+                &call_id,
+                use_native_fc,
+                start_time,
+            )
+            .await
+        {
             self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success: false,
@@ -2035,14 +2114,17 @@ impl Agent {
             return Ok(());
         }
 
-        if self.maybe_block_redundant_reread(
-            &name,
-            &args_str,
-            &args,
-            &call_id,
-            use_native_fc,
-            start_time,
-        ) {
+        if self
+            .maybe_block_redundant_reread(
+                &name,
+                &args_str,
+                &args,
+                &call_id,
+                use_native_fc,
+                start_time,
+            )
+            .await
+        {
             self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success: false,
@@ -2063,7 +2145,8 @@ impl Agent {
         if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
             let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
             info!("{}", skip_msg);
-            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg);
+            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg)
+                .await;
             return Ok(());
         }
 
@@ -2132,7 +2215,8 @@ impl Agent {
             self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
         }
 
-        self.track_task_state_after_tool(&name, &args, &result, success);
+        self.track_task_state_after_tool(&name, &args, &result, success)
+            .await;
 
         // Track file operations for context management
         if success {
@@ -2152,7 +2236,7 @@ impl Agent {
                                 v.get("content").and_then(|c| c.as_str()).map(String::from)
                             })
                         {
-                            self.track_file_read_in_context_map(&path_str, &content);
+                            self.track_file_read_in_context_map(&path_str, &content).await;
                         }
                     }
                     "file_delete" => {
@@ -2166,7 +2250,8 @@ impl Agent {
             }
         }
 
-        self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
+        self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result)
+            .await;
         if !success {
             self.remember_failed_tool(&name, &result);
         }
@@ -2267,14 +2352,14 @@ impl Agent {
                 let max_files =
                     args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
-                let to_promote = self.context_map.focus_on_query(query, max_files);
+                let to_promote = self.context_map.focus_on_query(query, max_files).await;
 
                 // Actually load the files that need promoting.
                 let root = super::current_project_root();
                 let mut loaded = Vec::new();
                 for path in &to_promote {
                     let full_path = root.join(path);
-                    if let Ok(content) = std::fs::read_to_string(&full_path) {
+                    if let Ok(content) = tokio::fs::read_to_string(&full_path).await {
                         self.context_map.load_full(path, content);
                         loaded.push(path.to_string_lossy().to_string());
                     }
@@ -2299,7 +2384,7 @@ impl Agent {
             }
             CONTEXT_RECOMMEND => {
                 let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-                let rec = self.context_map.recommend_context(task);
+                let rec = self.context_map.recommend_context(task).await;
                 serde_json::json!({
                     "modality": rec.modality_description,
                     "potential_savings": rec.potential_token_savings,
@@ -2324,7 +2409,7 @@ impl Agent {
                 let root = super::current_project_root();
                 let full_path = root.join(path);
 
-                match std::fs::read_to_string(&full_path) {
+                match tokio::fs::read_to_string(&full_path).await {
                     Ok(content) => {
                         let skeleton = super::context_map::extract_rust_skeleton(path, &content);
                         let rendered = skeleton.render();
@@ -2511,7 +2596,7 @@ impl Agent {
         Ok(false)
     }
 
-    pub(super) fn parse_tool_args(
+    pub(super) async fn parse_tool_args(
         &mut self,
         name: &str,
         args_str: &str,
@@ -2527,7 +2612,8 @@ impl Agent {
             Err(e) => {
                 let err = format!("Invalid JSON arguments: {}", e);
                 cli_println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
+                self.push_tool_result_message(use_native_fc, call_id, name, false, &err)
+                    .await;
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
                 self.log_tool_validation_failure_event(
                     name,
@@ -2558,7 +2644,7 @@ impl Agent {
         }
     }
 
-    pub(super) fn validate_tool_args(
+    pub(super) async fn validate_tool_args(
         &mut self,
         name: &str,
         args_str: &str,
@@ -2576,7 +2662,8 @@ impl Agent {
             Err(e) => {
                 let err = e.to_string();
                 cli_println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
+                self.push_tool_result_message(use_native_fc, call_id, name, false, &err)
+                    .await;
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
                 self.log_tool_validation_failure_event(
                     name,
@@ -2680,7 +2767,7 @@ impl Agent {
         // Check ToolCache for cacheable (read-only) tools
         let is_cacheable = crate::session::cache::is_cacheable(name);
         if is_cacheable {
-            if let Some(cached_value) = self.cache_manager.tool_cache.get(name, args) {
+            if let Some(cached_value) = self.cache_manager.tool_cache.get(name, args).await {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let result_str = serde_json::to_string(&cached_value)?;
                 let summary =
@@ -2694,11 +2781,11 @@ impl Agent {
         // Invalidate cache entries when a mutating tool targets a specific path
         if crate::session::cache::invalidates_cache(name) {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                self.cache_manager.invalidate_path(path);
+                self.cache_manager.invalidate_path(path).await;
             }
             // shell_exec and git operations can affect any file — clear all read caches
             if matches!(name, "shell_exec" | "git_commit" | "git_checkout") {
-                self.cache_manager.tool_cache.clear();
+                self.cache_manager.tool_cache.clear().await;
             }
         }
 
@@ -2801,7 +2888,8 @@ impl Agent {
                 if is_cacheable && tool_success {
                     self.cache_manager
                         .tool_cache
-                        .set(name, args, result.clone());
+                        .set(name, args, result.clone())
+                        .await;
                 }
 
                 // Cache tool results in LocalFirstCoordinator
@@ -2819,7 +2907,7 @@ impl Agent {
                     if tool_success && matches!(name, "file_edit" | "file_write") {
                         self.has_written_any_file = true;
                         self.terminal_guard_hits = 0;
-                        if let Ok(new_content) = std::fs::read_to_string(path) {
+                        if let Ok(new_content) = tokio::fs::read_to_string(path).await {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }
                     }
@@ -2982,7 +3070,7 @@ impl Agent {
         }
     }
 
-    pub(super) fn push_tool_result_message(
+    pub(super) async fn push_tool_result_message(
         &mut self,
         use_native_fc: bool,
         call_id: &str,
@@ -3021,7 +3109,7 @@ impl Agent {
                     "Tool result from '{}' is {} tokens (budget {}), summarizing with disk reference",
                     tool_name, estimated_tokens, MAX_TOOL_RESULT_TOKENS
                 );
-                summarize_and_spill(tool_name, call_id, result, estimated_tokens)
+                summarize_and_spill(tool_name, call_id, result, estimated_tokens).await
             } else {
                 result.to_string()
             }

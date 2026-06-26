@@ -1,0 +1,154 @@
+{
+  "quant": "gemini-3.5-flash-nitro",
+  "endpoint": "https://openrouter.ai/api/v1",
+  "model": "google/gemini-3.5-flash:nitro",
+  "started_at": "2026-06-24T22:56:57.856969238+00:00",
+  "total_duration_secs": 113.731780506,
+  "speed": {
+    "samples_tok_per_sec": [
+      118.62248740776904,
+      144.95951618335545,
+      159.3563648458607
+    ],
+    "median_tok_per_sec": 144.95951618335545
+  },
+  "scenarios": [
+    {
+      "name": "easy_calculator",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 5.501956944,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "easy_string_ops",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 7.002075736,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "medium_bitset",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 7.502565289,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "medium_json_merge",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 4.502321925,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "actor_pdvr",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 10.003474705,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 5 passed; 14 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "hard_event_bus",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 5.002166487,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 2 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "hard_scheduler",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 4.001909442,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "unsafe_scanner",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 9.503201143,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 17 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "viz_ascii_table",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 24.506331342,
+      "agent_steps": 16,
+      "validator_summary": "test result: FAILED. 7 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "viz_maze_gen",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 6.502321667,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 9 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "name": "viz_svg_chart",
+      "pre_validator_failed": true,
+      "agent_exit": {
+        "kind": "nonzero",
+        "code": 5
+      },
+      "post_validator_passed": false,
+      "wall_time_secs": 9.0031123,
+      "agent_steps": 11,
+      "validator_summary": "test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    }
+  ],
+  "summary": {
+    "scenarios_passed": 0,
+    "scenarios_total": 11,
+    "speed_tok_per_sec_median": 144.95951618335545
+  }
+}

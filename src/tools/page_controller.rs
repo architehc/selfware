@@ -766,6 +766,7 @@ mod tests {
 
     #[test]
     fn test_page_control_rejects_unsafe_output_path() {
+        crate::tools::file::reset_safety_config_for_tests();
         let err = validate_page_output_path("/etc/selfware-page.png", "page_control")
             .expect_err("absolute output outside allowed paths must be rejected");
         assert!(err.to_string().contains("output path validation failed"));

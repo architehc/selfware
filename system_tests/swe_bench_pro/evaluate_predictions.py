@@ -88,6 +88,13 @@ def _load_list_field(value: Any) -> list[str]:
     return []
 
 
+def _is_patch_empty(patch: str) -> bool:
+    """Return True if the predicted patch is empty or whitespace only."""
+    if not patch:
+        return True
+    return not any(line.strip() for line in patch.splitlines())
+
+
 def load_predictions(path: Path) -> list[dict[str, Any]]:
     """Load predictions from a JSON array or JSONL file."""
     if not path.exists():
@@ -130,19 +137,81 @@ def load_instances(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def _build_entryscript(instance: dict[str, Any]) -> str:
-    """Build the container entry script that applies the patch and runs tests."""
+    """Build the container entry script that applies the patch and runs tests.
+
+    The script is strict: if the patch is empty or cannot be applied, it writes
+    an output.json marking the instance as failed instead of silently running
+    tests on the unpatched base commit.
+    """
     selected = _load_list_field(instance.get("selected_test_files_to_run", []))
     test_arg = ",".join(selected)
     before_cmd = instance.get("before_repo_set_cmd", "") or ""
     return (
         "#!/bin/bash\n"
+        "set -uo pipefail\n"
         "cd /app\n"
-        f"git reset --hard {instance['base_commit']}\n"
-        f"git checkout {instance['base_commit']}\n"
+        #
+        # Reset the repo defensively.  We check exit codes explicitly; the
+        # container image is expected to be clean, but a failed reset must not
+        # kill the script before we can write output.json.
+        #
+        f"git reset --hard {instance['base_commit']} > /workspace/git_reset.log 2>&1\n"
+        f"git checkout {instance['base_commit']} > /workspace/git_checkout.log 2>&1 || true\n"
+        #
+        # Optional repo setup command supplied by the benchmark instance.
+        # Capture its status but do not abort, so the harness can report a
+        # clear failure mode instead of an opaque missing-output error.
+        #
         f"{before_cmd}\n"
-        "git apply -v /workspace/patch.diff\n"
+        "before_status=$?\n"
+        "echo \"before_repo_set_cmd exit code: $before_status\" >> /workspace/patch_apply.log\n"
+        #
+        # Empty-patch short-circuit.
+        #
+        "if [ ! -s /workspace/patch.diff ] || [ \"$(grep -v '^[[:space:]]*$' /workspace/patch.diff | wc -l)\" -eq 0 ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  echo 'PATCH_EMPTY' > /workspace/patch_apply_status.txt\n"
+        "  exit 0\n"
+        "fi\n"
+        #
+        # Try to apply the predicted patch.  Each attempt is allowed to fail;
+        # we move on to the next fallback and keep the final status.
+        #
+        "git apply -v /workspace/patch.diff > /workspace/patch_apply.log 2>&1\n"
+        "apply_status=$?\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  git apply --3way -v /workspace/patch.diff >> /workspace/patch_apply.log 2>&1\n"
+        "  apply_status=$?\n"
+        "fi\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  patch -p1 --no-backup-if-mismatch -i /workspace/patch.diff >> /workspace/patch_apply.log 2>&1\n"
+        "  apply_status=$?\n"
+        "fi\n"
+        "echo \"git apply exit code: $apply_status\" >> /workspace/patch_apply.log\n"
+        "echo $apply_status > /workspace/patch_apply_status.txt\n"
+        "if [ $apply_status -ne 0 ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  exit 0\n"
+        "fi\n"
+        #
+        # No-op patch detection: the patch applied but changed no files.
+        # Running tests on the unpatched base commit would give false metrics.
+        #
+        "changed_files=$(git diff --name-only HEAD)\n"
+        "if [ -z \"$changed_files\" ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  echo 'PATCH_NO_OP' > /workspace/patch_apply_status.txt\n"
+        "  exit 0\n"
+        "fi\n"
+        #
+        # Run the official test script and parse the results.
+        #
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
+        "run_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
+        "if [ ! -f /workspace/output.json ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "fi\n"
     )
 
 
@@ -248,6 +317,12 @@ def evaluate_instance(
         "error": None,
     }
 
+    # Short-circuit empty patches on the host so we do not waste time pulling
+    # images and starting containers for predictions that cannot possibly pass.
+    if _is_patch_empty(prediction.get("patch", "")):
+        result["error"] = "empty patch"
+        return result
+
     if not pull_image(image, logger):
         result["error"] = "failed to pull image"
         return result
@@ -314,16 +389,35 @@ def evaluate_instance(
             timeout=test_timeout,
             logger=logger,
         )
+        entryscript_stderr_file = output_dir / f"{instance_id}.entryscript.stderr.log"
+        entryscript_stderr_file.write_text(proc.stderr or "", encoding="utf-8")
         if proc.returncode != 0:
             logger.warning("Evaluation entryscript for %s exited with code %s", instance_id, proc.returncode)
 
         output_file = output_dir / f"{instance_id}.output.json"
         stdout_file = output_dir / f"{instance_id}.stdout.log"
         stderr_file = output_dir / f"{instance_id}.stderr.log"
+        patch_apply_log = output_dir / f"{instance_id}.patch_apply.log"
+        patch_apply_status = output_dir / f"{instance_id}.patch_apply_status.txt"
 
         _copy_artifact_out(name, "/workspace/output.json", output_file, logger)
         _copy_artifact_out(name, "/workspace/stdout.log", stdout_file, logger)
         _copy_artifact_out(name, "/workspace/stderr.log", stderr_file, logger)
+        _copy_artifact_out(name, "/workspace/patch_apply.log", patch_apply_log, logger)
+        _copy_artifact_out(name, "/workspace/patch_apply_status.txt", patch_apply_status, logger)
+
+        if patch_apply_status.exists():
+            status_text = patch_apply_status.read_text(encoding="utf-8").strip()
+            result["patch_apply_status"] = status_text
+            if status_text == "PATCH_EMPTY":
+                result["error"] = "empty patch"
+                return result
+            if status_text == "PATCH_NO_OP":
+                result["error"] = "patch applied but changed no files"
+                return result
+            if status_text != "0":
+                result["error"] = "patch apply failed"
+                return result
 
         if not output_file.exists():
             result["error"] = "no output.json produced"

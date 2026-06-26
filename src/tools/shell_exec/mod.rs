@@ -490,8 +490,11 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     async fn test_shell_exec_intercepts_sed() {
         let tool = ShellExec;
-        let temp_dir =
-            std::env::temp_dir().join(format!("selfware-sed-test-{}", std::process::id()));
+        // Keep the temp directory under the current working dir so the default
+        // safety config (`./**`) allows the intercepted path validation.
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-{}", std::process::id()));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
         let file_path = temp_dir.join("test.txt");
         tokio::fs::write(&file_path, "hello world\nfoo bar\n")

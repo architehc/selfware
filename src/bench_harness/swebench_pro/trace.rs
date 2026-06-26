@@ -437,7 +437,7 @@ fn median_f64(sorted: &[f64]) -> f64 {
         return 0.0;
     }
     let n = sorted.len();
-    if n.is_multiple_of(2) {
+    if n % 2 == 0 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]

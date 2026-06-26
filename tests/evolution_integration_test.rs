@@ -542,8 +542,8 @@ fn test_e2e_pipeline_multifile_edit() {
     cleanup_test_repo(&repo);
 }
 
-#[test]
-fn test_e2e_evolve_with_unreachable_endpoint() {
+#[tokio::test]
+async fn test_e2e_evolve_with_unreachable_endpoint() {
     // Run evolve() with an unreachable endpoint — should complete gracefully
     // with 0 improvements (LLM call fails, but no panic)
     let repo = setup_test_repo("evolve-nollm");
@@ -570,7 +570,7 @@ fn test_e2e_evolve_with_unreachable_endpoint() {
         },
     };
 
-    let result = daemon::evolve(config, &repo);
+    let result = daemon::evolve(config, &repo).await;
     // Should complete without panicking
     assert_eq!(result.improvements.len(), 0);
     assert_eq!(result.initial_sab_score, 50.0); // synthetic baseline

@@ -105,7 +105,7 @@ impl Agent {
         let embedding = self.cache_manager.llm_embedding.embed(&prompt).await?;
 
         // Look up in cache (context_hash=0 for now)
-        let cached = self.cache_manager.llm_cache.lookup(&prompt, &embedding, 0);
+        let cached = self.cache_manager.llm_cache.lookup(&prompt, &embedding, 0).await;
 
         Ok(cached)
     }
@@ -169,7 +169,7 @@ impl Agent {
             file_paths: vec![],
         };
 
-        self.cache_manager.llm_cache.store(entry);
+        self.cache_manager.llm_cache.store(entry).await;
     }
 
     /// Chat with streaming, displaying output as it arrives

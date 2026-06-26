@@ -132,14 +132,20 @@ impl HeadlessEvent {
 #[allow(dead_code)]
 pub fn emit_event(event: &HeadlessEvent) {
     if let Ok(json) = serde_json::to_string(event) {
-        println!("{}", json);
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        let _ = writeln!(lock, "{}", json);
     }
 }
 
 /// Emit the final session result as JSON to stdout.
 pub fn emit_result(result: &SessionResult) {
     if let Ok(json) = serde_json::to_string(result) {
-        println!("{}", json);
+        use std::io::Write;
+        let stdout = std::io::stdout();
+        let mut lock = stdout.lock();
+        let _ = writeln!(lock, "{}", json);
     }
 }
 

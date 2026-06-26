@@ -105,6 +105,10 @@ def estimate_speed(log_path: Path):
 def collect_results(base_dir: Path, pricing: dict):
     rows = []
     for run_dir in sorted(base_dir.glob("runs*_*")):
+        if not run_dir.is_dir():
+            continue
+        if run_dir.name.endswith(".agent.log"):
+            continue
         m = re.match(r"runs(\d+)_(.+)", run_dir.name)
         if not m:
             continue

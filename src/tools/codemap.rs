@@ -16,24 +16,52 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::Tool;
 
 // ---------------------------------------------------------------------------
-// Global context budget tracker (simple atomic counters)
+// Global shared context budget tracker
 // ---------------------------------------------------------------------------
+//
+// ContextMap and AgentMemory both track token usage independently. To avoid
+// duplicate accounting and give tools like `context_budget` a single source of
+// truth, the two subsystems publish their running totals into the atomic
+// counters below. `read_budget` returns the combined view.
 
-static USED_TOKENS: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_USED_TOKENS: AtomicUsize = AtomicUsize::new(0);
+static CONTEXT_MAP_USED_TOKENS: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_BUDGET: AtomicUsize = AtomicUsize::new(1_000_000); // 1M default
 static FILES_IN_CONTEXT: AtomicUsize = AtomicUsize::new(0);
 
-/// Update the global context budget counters.
+/// Publish the current conversation-memory token total.
+pub fn update_memory_tokens(tokens: usize) {
+    MEMORY_USED_TOKENS.store(tokens, Ordering::Relaxed);
+}
+
+/// Publish the current context-map (loaded files) token total.
+pub fn update_context_map_tokens(tokens: usize) {
+    CONTEXT_MAP_USED_TOKENS.store(tokens, Ordering::Relaxed);
+}
+
+/// Set the overall context token budget.
+pub fn update_total_budget(budget: usize) {
+    TOTAL_BUDGET.store(budget, Ordering::Relaxed);
+}
+
+/// Set the number of files currently loaded in context.
+pub fn update_files_in_context(files: usize) {
+    FILES_IN_CONTEXT.store(files, Ordering::Relaxed);
+}
+
+/// Update all budget counters at once (convenience for tests and diagnostics).
 pub fn update_budget(used: usize, total: usize, files: usize) {
-    USED_TOKENS.store(used, Ordering::Relaxed);
+    CONTEXT_MAP_USED_TOKENS.store(used, Ordering::Relaxed);
+    MEMORY_USED_TOKENS.store(0, Ordering::Relaxed);
     TOTAL_BUDGET.store(total, Ordering::Relaxed);
     FILES_IN_CONTEXT.store(files, Ordering::Relaxed);
 }
 
-/// Read the current budget snapshot.
+/// Read the current combined budget snapshot.
 fn read_budget() -> (usize, usize, usize) {
     (
-        USED_TOKENS.load(Ordering::Relaxed),
+        MEMORY_USED_TOKENS.load(Ordering::Relaxed)
+            + CONTEXT_MAP_USED_TOKENS.load(Ordering::Relaxed),
         TOTAL_BUDGET.load(Ordering::Relaxed),
         FILES_IN_CONTEXT.load(Ordering::Relaxed),
     )

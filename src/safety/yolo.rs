@@ -307,6 +307,19 @@ impl YoloManager {
             }
         }
 
+        // Check container_run volume mounts for dangerous host paths
+        if tool_name == "container_run" {
+            if let Some(volumes) = args.get("volumes").and_then(|v| v.as_array()) {
+                for vol in volumes {
+                    if let Some(mount) = vol.as_str() {
+                        if let Some(reason) = check_volume_mount(mount) {
+                            return YoloDecision::Block(reason);
+                        }
+                    }
+                }
+            }
+        }
+
         // Check git push
         if tool_name == "git_push" && !self.config.allow_git_push {
             return YoloDecision::RequireConfirmation("Git push requires confirmation".to_string());
@@ -321,6 +334,14 @@ impl YoloManager {
                     );
                 }
             }
+        }
+
+        // Check any tool classified as destructive (file_delete, container_remove, etc.)
+        let metadata = crate::safety::default_tool_metadata(tool_name);
+        if metadata.destructive && !self.config.allow_destructive_shell {
+            return YoloDecision::RequireConfirmation(
+                "Destructive operation requires confirmation".to_string(),
+            );
         }
 
         YoloDecision::AutoApprove
@@ -367,7 +388,7 @@ impl YoloManager {
         // Print status update at intervals
         if self.config.status_interval > 0
             && op_id > 0
-            && op_id.is_multiple_of(self.config.status_interval)
+            && op_id % self.config.status_interval == 0
         {
             self.print_status();
         }
@@ -533,6 +554,38 @@ fn extract_path(args: &serde_json::Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Check a container volume mount for dangerous host paths.
+///
+/// Mirrors `SafetyChecker::check_volume_mount` from `src/safety/checker/validation.rs`.
+/// Returns `Some(reason)` if the mount should be blocked.
+fn check_volume_mount(mount: &str) -> Option<String> {
+    let host_path = mount.split(':').next().unwrap_or("");
+    let expanded = expand_home(host_path);
+
+    // Block SSH directory mounts (including ~/.ssh and relative .ssh)
+    if expanded.contains("/.ssh")
+        || expanded == ".ssh"
+        || expanded.starts_with(".ssh/")
+    {
+        return Some(format!("Volume mount '{}' is not allowed", mount));
+    }
+
+    // Block dangerous system mounts
+    let dangerous_mounts = [
+        "/", "/etc", "/boot", "/usr", "/var", "/root", "/sys", "/proc", "/lib", "/lib64",
+        "/opt", "/run",
+    ];
+    for dm in &dangerous_mounts {
+        if expanded == *dm
+            || (expanded.starts_with(dm) && expanded.as_bytes().get(dm.len()) == Some(&b'/'))
+        {
+            return Some(format!("Volume mount '{}' is not allowed", mount));
+        }
+    }
+
+    None
 }
 
 /// Pre-compiled regexes for destructive command detection.
@@ -1013,5 +1066,54 @@ mod tests {
         let path = "/absolute/path";
         let expanded = expand_home(path);
         assert_eq!(expanded, path);
+    }
+
+    #[test]
+    fn test_container_run_volume_mount_etc_blocked() {
+        let config = YoloConfig::fully_autonomous();
+        let manager = YoloManager::new(config);
+
+        let args = serde_json::json!({
+            "image": "ubuntu",
+            "volumes": ["/etc:/etc"]
+        });
+        let decision = manager.should_auto_approve("container_run", &args);
+
+        assert!(matches!(decision, YoloDecision::Block(_)));
+        if let YoloDecision::Block(msg) = decision {
+            assert!(msg.contains("/etc:/etc"));
+        }
+    }
+
+    #[test]
+    fn test_container_run_volume_mount_ssh_blocked() {
+        let config = YoloConfig::fully_autonomous();
+        let manager = YoloManager::new(config);
+
+        let args = serde_json::json!({
+            "image": "ubuntu",
+            "volumes": ["~/.ssh:/root/.ssh"]
+        });
+        let decision = manager.should_auto_approve("container_run", &args);
+
+        assert!(matches!(decision, YoloDecision::Block(_)));
+        if let YoloDecision::Block(msg) = decision {
+            assert!(msg.contains("~/.ssh:/root/.ssh"));
+        }
+    }
+
+    #[test]
+    fn test_container_run_volume_mount_tmp_allowed() {
+        // Enable destructive shell so the test isolates the volume-mount validator.
+        let config = YoloConfig::fully_autonomous().with_destructive_shell(true);
+        let manager = YoloManager::new(config);
+
+        let args = serde_json::json!({
+            "image": "ubuntu",
+            "volumes": ["/tmp/data:/data"]
+        });
+        let decision = manager.should_auto_approve("container_run", &args);
+
+        assert_eq!(decision, YoloDecision::AutoApprove);
     }
 }
