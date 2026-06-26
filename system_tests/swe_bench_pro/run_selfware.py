@@ -1137,6 +1137,33 @@ def _reset_repo(host_repo_dir: Path, base_commit: str, logger: logging.Logger) -
     return True
 
 
+def _apply_test_patch(host_repo_dir: Path, test_patch: str, logger: logging.Logger) -> bool:
+    """Apply the official test patch to the host repo so the agent can run failing tests."""
+    if not test_patch or not test_patch.strip():
+        return True
+    patch_path = host_repo_dir / ".selfware_test_patch.diff"
+    patch_path.write_text(test_patch, encoding="utf-8")
+    try:
+        proc = run_cmd(
+            ["git", "-C", str(host_repo_dir), "apply", str(patch_path)],
+            logger=logger,
+        )
+        if proc.returncode != 0:
+            logger.warning("git apply test_patch failed: %s", proc.stderr.strip())
+            # Fallback to patch -p1 --no-backup-if-mismatch
+            proc = run_cmd(
+                ["patch", "-p1", "--no-backup-if-mismatch", "-i", str(patch_path)],
+                cwd=host_repo_dir,
+                logger=logger,
+            )
+            if proc.returncode != 0:
+                logger.error("patch fallback for test_patch failed: %s", proc.stderr.strip())
+                return False
+        return True
+    finally:
+        patch_path.unlink(missing_ok=True)
+
+
 def _agentless_needs_package_expansion(
     instance: dict[str, Any],
     host_repo_dir: Path,
@@ -1924,6 +1951,7 @@ def run_selfware_on_host(
     output_dir: Path,
     logger: logging.Logger,
     few_shot_examples: str | None = None,
+    post_edit_test_command: str | None = None,
 ) -> bool:
     """Run selfware directly on the host against the extracted repo."""
     logger.info("Running selfware on host repo %s", repo_dir)
@@ -1969,6 +1997,8 @@ def run_selfware_on_host(
     env["XDG_DATA_HOME"] = str(agent_data_dir / ".local" / "share")
     env["XDG_CONFIG_HOME"] = str(agent_data_dir / ".config")
     env["XDG_CACHE_HOME"] = str(agent_data_dir / ".cache")
+    if post_edit_test_command is not None:
+        env["SELFWARE_POST_EDIT_TEST_COMMAND"] = post_edit_test_command
 
     cmd = [
         str(binary),
@@ -2320,6 +2350,22 @@ def process_instance(
                 clean_proc.stderr.strip(),
             )
 
+        if not _apply_test_patch(
+            host_repo_dir,
+            instance.get("test_patch", "") or "",
+            logger,
+        ):
+            logger.error("Failed to apply test_patch; aborting instance %s", instance_id)
+            return False
+
+        language = instance.get("repo_language", "")
+        selected_tests = (
+            instance.get("selected_test_files_to_run", [])
+            or instance.get("fail_to_pass", [])
+            or []
+        )
+        test_cmd = _format_test_command(language, selected_tests)
+
         # Allow absolute /app/... paths in selfware's safety check when running
         # on the extracted host repo (the binary maps /app to the host repo).
         config_path = add_host_repo_to_safety_allowed_paths(
@@ -2457,6 +2503,7 @@ def process_instance(
             output_dir,
             logger,
             few_shot_examples=few_shot_examples,
+            post_edit_test_command=test_cmd,
         )
 
         # Capture patch regardless of success, so we record partial work.
@@ -2501,6 +2548,7 @@ def process_instance(
                     output_dir,
                     logger,
                     few_shot_examples=few_shot_examples,
+                    post_edit_test_command=test_cmd,
                 )
                 patch = capture_patch_on_host(
                     host_repo_dir, logger, base_commit=instance.get("base_commit")
@@ -2601,6 +2649,19 @@ def process_instance(
                     )
                     break
 
+                # Re-apply the official test patch so recovery attempts can run
+                # the failing tests against the fresh base commit.
+                if not _apply_test_patch(
+                    host_repo_dir,
+                    instance.get("test_patch", "") or "",
+                    logger,
+                ):
+                    logger.error(
+                        "Failed to apply test_patch for recovery attempt %s",
+                        attempt,
+                    )
+                    break
+
                 recovery_result = escalation_config(patch_config, failure_class)
                 recovery_path, system_message, prompt_suffix = write_recovery_config(
                     recovery_result,
@@ -2633,6 +2694,7 @@ def process_instance(
                     output_dir,
                     logger,
                     few_shot_examples=few_shot_examples,
+                    post_edit_test_command=test_cmd,
                 )
                 patch = capture_patch_on_host(
                     host_repo_dir, logger, base_commit=instance.get("base_commit")

@@ -537,6 +537,7 @@ fn test_execution_mode_normal_needs_confirmation() {
         "glob_find",
         "grep_search",
         "symbol_search",
+        "tool_search",
         "git_status",
         "git_diff",
     ];
@@ -559,6 +560,12 @@ fn test_execution_mode_normal_needs_confirmation() {
             tool
         );
     }
+
+    // tool_search is read-only and should not need confirmation
+    assert!(
+        !needs_confirmation_for_tool(&config, "tool_search"),
+        "tool_search should not need confirmation"
+    );
 }
 
 #[test]
@@ -627,6 +634,7 @@ fn needs_confirmation_for_tool(config: &Config, tool_name: &str) -> bool {
         "glob_find",
         "grep_search",
         "symbol_search",
+        "tool_search",
         "git_status",
         "git_diff",
     ];

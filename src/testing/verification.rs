@@ -238,6 +238,10 @@ pub struct VerificationConfig {
     pub exclude_patterns: Vec<String>,
     /// Custom verification commands
     pub custom_checks: Vec<CustomCheck>,
+    /// Optional SWE-bench official test command. When set, it is run after every
+    /// file edit/write in addition to the normal per-language checks.
+    #[serde(default)]
+    pub post_edit_test_command: Option<String>,
     /// Per-language verification settings. When a language is absent,
     /// all checks default to enabled.
     #[serde(default)]
@@ -269,6 +273,7 @@ impl Default for VerificationConfig {
                 "*.toml".to_string(),
             ],
             custom_checks: vec![],
+            post_edit_test_command: None,
             language_settings: std::collections::HashMap::new(),
         }
     }
@@ -333,6 +338,11 @@ impl VerificationGate {
         self.inferred_language_cache = None;
     }
 
+    /// Set the optional command to run automatically after every file edit/write.
+    pub fn set_post_edit_test_command(&mut self, command: Option<String>) {
+        self.config.post_edit_test_command = command;
+    }
+
     /// Compute hash for a file's content
     fn compute_file_hash(&self, path: &str) -> Option<u64> {
         use std::collections::hash_map::DefaultHasher;
@@ -395,6 +405,7 @@ impl VerificationGate {
         let start = Instant::now();
         let mut checks = Vec::new();
         let mut suggested_next_steps = Vec::new();
+        let mut overall_passed = true;
 
         // Filter out excluded files
         let files_to_check: Vec<_> = changed_files
@@ -464,6 +475,78 @@ impl VerificationGate {
                     checks.push(result);
                 }
             }
+        }
+
+        // Run optional post-edit test command (e.g., SWE-bench official tests)
+        if let Some(ref cmd) = self.config.post_edit_test_command {
+            let check_start = Instant::now();
+            let timeout_secs = self.config.check_timeout_secs.max(60);
+            let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+
+            let mut parsed = shlex::split(cmd).unwrap_or_default();
+            let (passed, output, duration_ms) = if parsed.is_empty() {
+                (
+                    false,
+                    format!("Empty or unparseable post-edit test command: {}", cmd),
+                    check_start.elapsed().as_millis() as u64,
+                )
+            } else {
+                let program = parsed.remove(0);
+                let command_future = Command::new(&program)
+                    .args(&parsed)
+                    .current_dir(&self.project_root)
+                    .output();
+
+                match tokio::time::timeout(timeout_duration, command_future).await {
+                    Ok(Ok(output)) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let combined = if stderr.is_empty() {
+                            stdout.to_string()
+                        } else {
+                            format!("{}\n{}", stdout, stderr)
+                        };
+                        (
+                            output.status.success(),
+                            truncate_str(&combined, 4000),
+                            check_start.elapsed().as_millis() as u64,
+                        )
+                    }
+                    Ok(Err(e)) => (
+                        false,
+                        format!(
+                            "Failed to run post-edit test command '{}': {}",
+                            cmd, e
+                        ),
+                        check_start.elapsed().as_millis() as u64,
+                    ),
+                    Err(_) => (
+                        false,
+                        format!(
+                            "Post-edit test command '{}' timed out after {} seconds",
+                            cmd, timeout_secs
+                        ),
+                        timeout_duration.as_millis() as u64,
+                    ),
+                }
+            };
+
+            if !passed {
+                overall_passed = false;
+                suggested_next_steps.push(format!(
+                    "The post-edit test command failed: {}. Fix the failing test before completing.",
+                    cmd
+                ));
+            }
+            checks.push(CheckResult {
+                check_type: CheckType::Test,
+                passed,
+                duration_ms,
+                output,
+                errors: vec![],
+                warnings: vec![],
+                suggestions: vec![],
+            });
         }
 
         // Early exit if syntax checks failed and continue_on_failure is false
@@ -588,7 +671,7 @@ impl VerificationGate {
             }
         }
 
-        let overall_passed = checks.iter().all(|c| c.passed);
+        overall_passed = overall_passed && checks.iter().all(|c| c.passed);
         let total_duration = start.elapsed().as_millis() as u64;
 
         // Detect side effects
@@ -3789,5 +3872,60 @@ mod tests {
         assert!(!py.format);
         assert!(!py.lint);
         assert!(py.test);
+    }
+
+    #[tokio::test]
+    async fn test_post_edit_test_command_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = VerificationConfig {
+            check_on_edit: false,
+            test_on_edit: false,
+            lint_on_edit: false,
+            format_on_edit: false,
+            post_edit_test_command: Some("echo post_edit_ok".to_string()),
+            ..Default::default()
+        };
+        let mut gate = VerificationGate::new(tmp.path(), config);
+        let report = gate
+            .verify_change(&["script.py".to_string()], "post_edit_pass_trigger")
+            .await
+            .unwrap();
+        let post_check = report
+            .checks
+            .iter()
+            .find(|c| c.check_type == CheckType::Test);
+        assert!(post_check.is_some(), "post-edit test check should run");
+        assert!(post_check.unwrap().passed);
+        assert!(post_check.unwrap().output.contains("post_edit_ok"));
+        assert!(report.overall_passed);
+    }
+
+    #[tokio::test]
+    async fn test_post_edit_test_command_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = VerificationConfig {
+            check_on_edit: false,
+            test_on_edit: false,
+            lint_on_edit: false,
+            format_on_edit: false,
+            post_edit_test_command: Some("false".to_string()),
+            ..Default::default()
+        };
+        let mut gate = VerificationGate::new(tmp.path(), config);
+        let report = gate
+            .verify_change(&["script.py".to_string()], "post_edit_fail_trigger")
+            .await
+            .unwrap();
+        let post_check = report
+            .checks
+            .iter()
+            .find(|c| c.check_type == CheckType::Test)
+            .expect("post-edit test check should be present");
+        assert!(!post_check.passed);
+        assert!(!report.overall_passed);
+        assert!(report
+            .suggested_next_steps
+            .iter()
+            .any(|s| s.contains("post-edit test command failed")));
     }
 }

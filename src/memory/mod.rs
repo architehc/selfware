@@ -8,7 +8,7 @@
 //! - Memory statistics for monitoring
 
 use crate::api::types::Message;
-use crate::config::Config;
+use crate::config::{Config, ConfigSource};
 use crate::token_count::estimate_tokens_with_overhead;
 use crate::tools::codemap::update_memory_tokens;
 use anyhow::Result;
@@ -56,10 +56,21 @@ fn estimate_tokens(content: &str) -> usize {
 
 impl AgentMemory {
     pub fn new(config: &Config) -> Result<Self> {
-        // Use the model's advertised context length as the source of truth for
-        // the memory token cap. Reserve 5 % for tool definitions, formatting,
-        // and estimation variance.
-        let max_memory_tokens = config.context_length.saturating_mul(95) / 100;
+        // When the user has not explicitly configured a context_length, the
+        // conservative default (131072) should not silently cap the agent's
+        // memory below the advertised ResourceQuotas budget (1M). Fall back to
+        // the quota so the full advertised context budget is available.
+        let context_length_is_explicit =
+            config.context_length != crate::config::default_context_length()
+                || config.source_of("context_length") != ConfigSource::Default;
+        let memory_token_cap = if context_length_is_explicit {
+            config.context_length
+        } else {
+            config.resources.quotas.max_context_tokens
+        };
+
+        // Reserve 5 % for tool definitions, formatting, and estimation variance.
+        let max_memory_tokens = memory_token_cap.saturating_mul(95) / 100;
         Ok(Self {
             context_window: config.context_length,
             max_memory_tokens,
@@ -174,7 +185,13 @@ mod tests {
         let config = Config::default();
         let memory = AgentMemory::new(&config).unwrap();
         assert_eq!(memory.context_window(), config.context_length);
-        assert_eq!(memory.max_memory_tokens(), config.context_length * 95 / 100);
+        // When context_length is left at its default, the memory cap should
+        // fall back to the advertised ResourceQuotas budget (1M), not the
+        // smaller conservative default.
+        assert_eq!(
+            memory.max_memory_tokens(),
+            config.resources.quotas.max_context_tokens * 95 / 100
+        );
     }
 
     #[test]
@@ -720,12 +737,15 @@ mod tests {
 
     #[test]
     fn test_token_budget_eviction() {
-        let config = Config::default();
+        // Use an explicit, smaller context length so the test exercises
+        // eviction rather than relying on the (now larger) default quota fallback.
+        let mut config = Config::default();
+        config.context_length = 100_000;
         let mut memory = AgentMemory::new(&config).unwrap();
 
         // Add many large messages to exceed the memory token budget.
         // Each message is ~5000 chars which is roughly 1250-1666 tokens.
-        // With the default context length, ~300-400 of these should trigger eviction.
+        // With a 100k context length, ~80 of these should trigger eviction.
         let big_content = "a".repeat(5000);
         for _ in 0..500 {
             memory.add_message(&Message::user(&big_content));

@@ -95,6 +95,11 @@ pub struct AgentConfig {
     #[serde(default = "default_prompt_profile")]
     pub prompt_profile: String,
 
+    /// Optional command to run automatically after every file_edit/file_write.
+    /// Used by SWE-bench Pro to run the official fail_to_pass tests.
+    #[serde(default)]
+    pub post_edit_test_command: Option<String>,
+
     /// Hard limit: stop when total prompt+completion tokens exceed this.
     /// CLI-only; not persisted in config files.
     #[serde(skip)]
@@ -125,6 +130,7 @@ impl Default for AgentConfig {
             compression_detail: default_compression_detail(),
             disable_turn_artifacts: false,
             prompt_profile: default_prompt_profile(),
+            post_edit_test_command: None,
             max_budget_tokens: None,
             max_wall_secs: None,
         }

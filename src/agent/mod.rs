@@ -887,7 +887,10 @@ To call a tool, use this EXACT XML structure:
 
         // Initialize verification gate with project root
         let project_root = current_project_root();
-        let verification_gate = VerificationGate::new(&project_root, VerificationConfig::fast());
+        let mut verification_gate = VerificationGate::new(&project_root, VerificationConfig::fast());
+        if let Some(ref cmd) = config.agent.post_edit_test_command {
+            verification_gate.set_post_edit_test_command(Some(cmd.clone()));
+        }
 
         // Initialize error analyzer
         let error_analyzer = ErrorAnalyzer::new();
@@ -1512,6 +1515,7 @@ To call a tool, use this EXACT XML structure:
             "glob_find",
             "grep_search",
             "symbol_search",
+            "tool_search",
             "git_status",
             "git_diff",
         ];
