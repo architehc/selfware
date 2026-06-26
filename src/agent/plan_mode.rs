@@ -393,6 +393,91 @@ pub fn is_readonly_tool(tool_name: &str) -> bool {
     READONLY_TOOLS.contains(&tool_name)
 }
 
+/// Parse a structured [`Plan`] from LLM output.
+///
+/// Accepts both raw JSON and JSON embedded inside markdown code fences. The
+/// expected shape is:
+///
+/// ```json
+/// {
+///   "summary": "...",
+///   "estimated_tokens": 1234,
+///   "files_to_read": ["src/foo.rs"],
+///   "steps": [
+///     { "description": "...", "tool_hint": "file_read", "file_path": "...", "context": "..." }
+///   ]
+/// }
+/// ```
+pub fn parse_plan_from_llm(content: &str) -> Option<Plan> {
+    let trimmed = content.trim();
+
+    // Extract JSON from a markdown fence if present.
+    let json_str = if trimmed.starts_with("```") {
+        let after_open = trimmed
+            .find('\n')
+            .map(|i| &trimmed[i + 1..])
+            .unwrap_or("");
+        let end = after_open.rfind("```").unwrap_or(after_open.len());
+        after_open[..end].trim()
+    } else {
+        trimmed
+    };
+
+    // Locate the outermost JSON object.
+    let start = json_str.find('{')?;
+    let end = json_str.rfind('}')?;
+    let object_str = &json_str[start..=end];
+
+    let value: serde_json::Value = serde_json::from_str(object_str).ok()?;
+
+    let mut plan = Plan::with_summary(
+        value
+            .get("summary")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    );
+
+    if let Some(et) = value.get("estimated_tokens").and_then(|v| v.as_u64()) {
+        plan.estimated_tokens = et as usize;
+    }
+
+    if let Some(files) = value.get("files_to_read").and_then(|v| v.as_array()) {
+        for file in files {
+            if let Some(s) = file.as_str() {
+                plan.add_file_to_read(s.to_string());
+            }
+        }
+    }
+
+    if let Some(steps) = value.get("steps").and_then(|v| v.as_array()) {
+        for (idx, step_val) in steps.iter().enumerate() {
+            let description = step_val
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if description.is_empty() {
+                continue;
+            }
+
+            let mut step = PlanStep::new(idx + 1, description);
+            if let Some(hint) = step_val.get("tool_hint").and_then(|v| v.as_str()) {
+                step.tool_hint = Some(hint.to_string());
+            }
+            if let Some(path) = step_val.get("file_path").and_then(|v| v.as_str()) {
+                step.file_path = Some(path.to_string());
+            }
+            if let Some(ctx) = step_val.get("context").and_then(|v| v.as_str()) {
+                step.context = Some(ctx.to_string());
+            }
+            plan.steps.push(step);
+        }
+    }
+
+    Some(plan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -607,5 +692,51 @@ mod tests {
         assert!(!manager.is_in_plan_mode());
         assert!(!manager.is_approved());
         assert!(manager.get_plan().is_none());
+    }
+
+    #[test]
+    fn test_parse_plan_from_llm_raw_json() {
+        let content = r#"{
+            "summary": "Fix the bug",
+            "estimated_tokens": 1500,
+            "files_to_read": ["src/lib.rs", "src/main.rs"],
+            "steps": [
+                {"description": "Read lib.rs", "tool_hint": "file_read", "file_path": "src/lib.rs"},
+                {"description": "Edit main.rs", "tool_hint": "file_edit", "file_path": "src/main.rs", "context": "add logging"}
+            ]
+        }"#;
+        let plan = parse_plan_from_llm(content).expect("should parse");
+        assert_eq!(plan.summary, "Fix the bug");
+        assert_eq!(plan.estimated_tokens, 1500);
+        assert_eq!(plan.files_to_read, vec!["src/lib.rs", "src/main.rs"]);
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(plan.steps[0].description, "Read lib.rs");
+        assert_eq!(plan.steps[0].tool_hint, Some("file_read".to_string()));
+        assert_eq!(plan.steps[1].file_path, Some("src/main.rs".to_string()));
+        assert_eq!(plan.steps[1].context, Some("add logging".to_string()));
+    }
+
+    #[test]
+    fn test_parse_plan_from_llm_markdown_fence() {
+        let content = "Here is the plan:\n```json\n{\n  \"summary\": \"Plan in fence\",\n  \"steps\": [\n    {\"description\": \"Step one\"}\n  ]\n}\n```\nLet me know.";
+        let plan = parse_plan_from_llm(content).expect("should parse fenced json");
+        assert_eq!(plan.summary, "Plan in fence");
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].description, "Step one");
+    }
+
+    #[test]
+    fn test_parse_plan_from_llm_missing_fields() {
+        let content = r#"{"steps": [{"description": "Only a step"}]}"#;
+        let plan = parse_plan_from_llm(content).expect("should parse partial plan");
+        assert!(plan.summary.is_empty());
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(plan.steps[0].description, "Only a step");
+    }
+
+    #[test]
+    fn test_parse_plan_from_llm_invalid_content() {
+        let content = "This is just plain text with no JSON.";
+        assert!(parse_plan_from_llm(content).is_none());
     }
 }

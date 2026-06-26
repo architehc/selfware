@@ -881,7 +881,7 @@ impl WorkerAgent {
         ))?;
 
         let result = if let Some(config) = agent_config {
-            Self::execute_task_real(&id, &task, &role, config).await
+            Self::execute_task_real(&id, &task, &role, config, &scratchpad).await
         } else {
             Self::execute_task_stub(&id, &task, &role, &scratchpad).await
         };
@@ -938,7 +938,13 @@ impl WorkerAgent {
     }
 
     /// Execute the actual task using a real [`Agent`] in an isolated worktree.
-    async fn execute_task_real(id: &str, task: &str, role: &str, config: Config) -> Result<String> {
+    async fn execute_task_real(
+        id: &str,
+        task: &str,
+        role: &str,
+        config: Config,
+        scratchpad: &Scratchpad,
+    ) -> Result<String> {
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let git_root = WorktreeManager::find_git_root(&current_dir).await?;
         let worktree_base = git_root.join(".selfware/coordinator-worktrees");
@@ -964,7 +970,29 @@ impl WorkerAgent {
         match subagent_result {
             Ok(result) => {
                 if result.success {
-                    Ok(result.patch.unwrap_or_else(|| result.artifacts.join("\n")))
+                    let output = result
+                        .patch
+                        .clone()
+                        .unwrap_or_else(|| result.artifacts.join("\n"));
+
+                    // Write a structured finding back to the scratchpad so the
+                    // coordinator's synthesis phase can reason over real worker
+                    // output instead of simulated placeholders.
+                    let finding = format!(
+                        "Worker {} (role: {}) completed task.\n\nOutput:\n{}\n\nArtifacts: {:?}",
+                        id, role, output, result.artifacts
+                    );
+                    let finding_key =
+                        format!("finding:{}:{}", id, chrono::Utc::now().timestamp_millis());
+                    if let Err(e) = scratchpad.write(ScratchpadEntry::new(
+                        finding_key,
+                        finding,
+                        id,
+                    )) {
+                        warn!(worker_id = %id, error = %e, "Failed to write finding to scratchpad");
+                    }
+
+                    Ok(output)
                 } else {
                     Err(anyhow::anyhow!(
                         "Subagent failed: {}",
@@ -1004,11 +1032,15 @@ impl WorkerAgent {
         Ok(output)
     }
 
-    /// Spawn a sub-worker (hierarchical worker spawning)
+    /// Spawn a sub-worker (hierarchical worker spawning).
+    ///
+    /// When `agent_config` is provided, the sub-worker runs a real [`Agent`] in
+    /// an isolated worktree; otherwise it falls back to the simulated stub.
     pub async fn spawn_subworker(
         &self,
         task: impl Into<String>,
         role: impl Into<String>,
+        agent_config: Option<Config>,
     ) -> Result<String> {
         let task = task.into();
         let role = role.into();
@@ -1032,7 +1064,7 @@ impl WorkerAgent {
                 role,
                 scratchpad,
                 Some(parent_id),
-                None,
+                agent_config,
                 None,
             )
             .await
