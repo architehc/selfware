@@ -1179,6 +1179,8 @@ impl Agent {
             return false;
         }
 
+        // The threshold is 3 unchanged rereads; this call is the one that exceeds
+        // it, so the ordinal is one greater than the threshold.
         let read_count = state.unchanged_read_count + 1;
         // Increment the counter so repeated suppressions eventually trigger
         // the forced text response (at count >= 3).
@@ -1186,11 +1188,11 @@ impl Agent {
             state_mut.unchanged_read_count = read_count;
         }
         let err = format!(
-            "Repeated unchanged reread blocked: `{}` has already been read unchanged {} times in this task. Use the content already in context or make the edit now instead of reading it again.",
-            path, read_count
+            "Repeated unchanged reread blocked: `{}` has already been read unchanged 3 times in this task. Use the content already in context or make the edit now instead of reading it again.",
+            path
         );
         self.push_task_state_note(format!(
-            "Blocked redundant reread of `{}` after {} unchanged reads",
+            "Blocked redundant reread of `{}` on the {}th unchanged read",
             path, read_count
         ));
         self.pending_failure_hint = Some(err.clone());

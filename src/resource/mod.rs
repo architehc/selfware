@@ -85,12 +85,27 @@ impl ResourceManager {
         })
     }
 
-    /// Start resource monitoring loop
-    pub async fn monitor_loop(&self) {
+    /// Start resource monitoring loop.
+    ///
+    /// The loop ticks every 5 seconds and can be cleanly shut down via the
+    /// `shutdown` watch receiver.
+    pub async fn monitor_loop(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
 
+        if *shutdown.borrow() {
+            return;
+        }
+
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() {
+                        info!("Resource monitor loop shutting down");
+                        return;
+                    }
+                }
+            }
 
             // Update resource usage
             self.update_usage().await;

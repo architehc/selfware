@@ -1261,7 +1261,7 @@ impl SelfHealingEngine {
 
     /// Handle an error with classification, learned strategy selection,
     /// and automatic escalation if the primary strategy fails.
-    pub fn handle_error(&self, error: ErrorOccurrence) -> Option<RecoveryExecution> {
+    pub async fn handle_error(&self, error: ErrorOccurrence) -> Option<RecoveryExecution> {
         if !self.config.enabled {
             return None;
         }
@@ -1283,7 +1283,8 @@ impl SelfHealingEngine {
         // Execute recovery with pattern tracking for exponential backoff
         let execution = self
             .executor
-            .execute_for_pattern(&strategy, &self.state, &pattern_key);
+            .execute_for_pattern(&strategy, &self.state, &pattern_key)
+            .await;
 
         if execution.success {
             // Record successful outcome for learning
@@ -1307,9 +1308,10 @@ impl SelfHealingEngine {
         // Escalate: try the next strategy in the chain
         if let Some(escalation) = error_class.escalation_strategy() {
             let escalation_key = format!("{}_escalated", pattern_key);
-            let escalated_execution =
-                self.executor
-                    .execute_for_pattern(&escalation, &self.state, &escalation_key);
+            let escalated_execution = self
+                .executor
+                .execute_for_pattern(&escalation, &self.state, &escalation_key)
+                .await;
 
             self.learner.record_recovery(
                 &pattern_key,
@@ -1514,8 +1516,8 @@ mod tests {
         assert_ne!(PredictedHealth::Healthy, PredictedHealth::Degrading);
     }
 
-    #[test]
-    fn test_recovery_executor_execute() {
+    #[tokio::test]
+    async fn test_recovery_executor_execute() {
         let executor = RecoveryExecutor::default();
         // Use zero-delay retry so the test is fast
         let strategy = RecoveryStrategy {
@@ -1529,36 +1531,38 @@ mod tests {
             estimated_duration_ms: 0,
         };
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert_eq!(result.strategy, "retry");
         assert!(result.completed_at.is_some());
         assert!(result.success);
     }
 
-    #[test]
-    fn test_recovery_executor_restore_requires_state_manager() {
+    #[tokio::test]
+    async fn test_recovery_executor_restore_requires_state_manager() {
         let executor = RecoveryExecutor::default();
         let strategy = RecoveryStrategy::restore();
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert_eq!(result.strategy, "restore");
         assert!(!result.success);
         assert!(result.error.is_some());
     }
 
-    #[test]
-    fn test_recovery_executor_restore_with_state_manager() {
+    #[tokio::test]
+    async fn test_recovery_executor_restore_with_state_manager() {
         let config = SelfHealingConfig::default();
         let executor = RecoveryExecutor::new(config.clone());
         let state = StateManager::new(config);
         state.checkpoint("before_restore", serde_json::json!({"ok": true}));
 
-        let result = executor.execute_with_state(&RecoveryStrategy::restore(), &state);
+        let result = executor
+            .execute_with_state(&RecoveryStrategy::restore(), &state)
+            .await;
         assert!(result.success);
     }
 
-    #[test]
-    fn test_recovery_executor_clear_cache_clears_checkpoints() {
+    #[tokio::test]
+    async fn test_recovery_executor_clear_cache_clears_checkpoints() {
         let config = SelfHealingConfig::default();
         let executor = RecoveryExecutor::new(config.clone());
         let state = StateManager::new(config);
@@ -1574,13 +1578,13 @@ mod tests {
             estimated_duration_ms: 1,
         };
 
-        let result = executor.execute_with_state(&strategy, &state);
+        let result = executor.execute_with_state(&strategy, &state).await;
         assert!(result.success);
         assert!(state.restore(None).is_none());
     }
 
-    #[test]
-    fn test_recovery_executor_summary() {
+    #[tokio::test]
+    async fn test_recovery_executor_summary() {
         let executor = RecoveryExecutor::default();
         // Use zero-delay retry
         let strategy = RecoveryStrategy {
@@ -1593,7 +1597,7 @@ mod tests {
             success_probability: 0.7,
             estimated_duration_ms: 0,
         };
-        executor.execute(&strategy);
+        executor.execute(&strategy).await;
 
         let summary = executor.summary();
         assert_eq!(summary.executions, 1);
@@ -1850,13 +1854,13 @@ mod tests {
         assert_eq!(summary.executions, 0);
     }
 
-    #[test]
-    fn test_self_healing_engine_handle_error() {
+    #[tokio::test]
+    async fn test_self_healing_engine_handle_error() {
         let engine = SelfHealingEngine::default();
 
         // Handle an error — uses zero-delay default retry
         let error = ErrorOccurrence::new("test", "msg", "ctx");
-        let result = engine.handle_error(error);
+        let result = engine.handle_error(error).await;
 
         // Should return a recovery execution
         assert!(result.is_some());
@@ -2130,8 +2134,8 @@ mod tests {
     // Retry with exponential backoff tests
     // ================================================================
 
-    #[test]
-    fn test_retry_with_zero_delay() {
+    #[tokio::test]
+    async fn test_retry_with_zero_delay() {
         let config = SelfHealingConfig::default();
         let executor = RecoveryExecutor::new(config.clone());
         let state = StateManager::new(config);
@@ -2148,28 +2152,36 @@ mod tests {
         };
 
         // First call succeeds
-        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        let result = executor
+            .execute_for_pattern(&strategy, &state, "test_pattern")
+            .await;
         assert!(result.success);
         assert_eq!(executor.retry_attempt_count("test_pattern"), 1);
 
         // Second call succeeds (attempt 2)
-        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        let result = executor
+            .execute_for_pattern(&strategy, &state, "test_pattern")
+            .await;
         assert!(result.success);
         assert_eq!(executor.retry_attempt_count("test_pattern"), 2);
 
         // Third call succeeds (attempt 3)
-        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        let result = executor
+            .execute_for_pattern(&strategy, &state, "test_pattern")
+            .await;
         assert!(result.success);
         assert_eq!(executor.retry_attempt_count("test_pattern"), 3);
 
         // Fourth call exhausts max_attempts
-        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        let result = executor
+            .execute_for_pattern(&strategy, &state, "test_pattern")
+            .await;
         assert!(!result.success);
         assert!(result.error.unwrap().contains("Max retry attempts"));
     }
 
-    #[test]
-    fn test_retry_state_reset() {
+    #[tokio::test]
+    async fn test_retry_state_reset() {
         let executor = RecoveryExecutor::default();
         let strategy = RecoveryStrategy {
             name: "retry".to_string(),
@@ -2182,7 +2194,9 @@ mod tests {
             estimated_duration_ms: 0,
         };
 
-        executor.execute_for_pattern(&strategy, &StateManager::default(), "reset_test");
+        executor
+            .execute_for_pattern(&strategy, &StateManager::default(), "reset_test")
+            .await;
         assert_eq!(executor.retry_attempt_count("reset_test"), 1);
 
         // Reset clears the count
@@ -2190,12 +2204,14 @@ mod tests {
         assert_eq!(executor.retry_attempt_count("reset_test"), 0);
 
         // Can retry again from scratch
-        executor.execute_for_pattern(&strategy, &StateManager::default(), "reset_test");
+        executor
+            .execute_for_pattern(&strategy, &StateManager::default(), "reset_test")
+            .await;
         assert_eq!(executor.retry_attempt_count("reset_test"), 1);
     }
 
-    #[test]
-    fn test_retry_zero_max_attempts_fails() {
+    #[tokio::test]
+    async fn test_retry_zero_max_attempts_fails() {
         let executor = RecoveryExecutor::default();
         let strategy = RecoveryStrategy {
             name: "bad_retry".to_string(),
@@ -2208,7 +2224,7 @@ mod tests {
             estimated_duration_ms: 0,
         };
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(!result.success);
         assert!(result
             .error
@@ -2220,12 +2236,12 @@ mod tests {
     // Escalation tests
     // ================================================================
 
-    #[test]
-    fn test_engine_handles_network_error_with_classification() {
+    #[tokio::test]
+    async fn test_engine_handles_network_error_with_classification() {
         let engine = SelfHealingEngine::default();
 
         let error = ErrorOccurrence::new("network", "connection refused", "api_call");
-        let result = engine.handle_error(error);
+        let result = engine.handle_error(error).await;
 
         assert!(result.is_some());
         let execution = result.unwrap();
@@ -2233,8 +2249,8 @@ mod tests {
         assert!(execution.success);
     }
 
-    #[test]
-    fn test_engine_escalates_on_retry_exhaustion() {
+    #[tokio::test]
+    async fn test_engine_escalates_on_retry_exhaustion() {
         let config = SelfHealingConfig {
             enabled: true,
             max_healing_attempts: 3,
@@ -2248,7 +2264,7 @@ mod tests {
         // Exhaust retries for the same pattern by sending multiple errors
         for i in 0..5 {
             let error = ErrorOccurrence::new("timeout", "request timed out", "api");
-            let result = engine.handle_error(error);
+            let result = engine.handle_error(error).await;
             assert!(
                 result.is_some(),
                 "handle_error should always return Some when enabled (iteration {})",
@@ -2257,13 +2273,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_engine_reset_retry_after_success() {
+    #[tokio::test]
+    async fn test_engine_reset_retry_after_success() {
         let engine = SelfHealingEngine::default();
 
         // Record an error to start retry tracking
         let error = ErrorOccurrence::new("network", "connection refused", "api");
-        engine.handle_error(error);
+        engine.handle_error(error).await;
 
         // After a successful operation, reset the retry state
         engine.reset_retry("network", "api");
@@ -2276,15 +2292,15 @@ mod tests {
     // Multi-action strategy tests
     // ================================================================
 
-    #[test]
-    fn test_resource_exhaustion_strategy_clears_then_retries() {
+    #[tokio::test]
+    async fn test_resource_exhaustion_strategy_clears_then_retries() {
         let config = SelfHealingConfig::default();
         let executor = RecoveryExecutor::new(config.clone());
         let state = StateManager::new(config);
         state.checkpoint("data", serde_json::json!({"big": "object"}));
 
         let strategy = ErrorClass::ResourceExhaustion.default_strategy();
-        let result = executor.execute_with_state(&strategy, &state);
+        let result = executor.execute_with_state(&strategy, &state).await;
 
         assert!(result.success);
         assert_eq!(result.actions_executed.len(), 2);
@@ -2295,22 +2311,22 @@ mod tests {
         assert!(state.restore(None).is_none());
     }
 
-    #[test]
-    fn test_restart_restores_checkpoint() {
+    #[tokio::test]
+    async fn test_restart_restores_checkpoint() {
         let config = SelfHealingConfig::default();
         let executor = RecoveryExecutor::new(config.clone());
         let state = StateManager::new(config);
         state.checkpoint("before_restart", serde_json::json!({"step": 5}));
 
         let strategy = RecoveryStrategy::restart();
-        let result = executor.execute_with_state(&strategy, &state);
+        let result = executor.execute_with_state(&strategy, &state).await;
 
         assert!(result.success);
         assert!(result.actions_executed.contains(&"restart".to_string()));
     }
 
-    #[test]
-    fn test_custom_action_compress_context() {
+    #[tokio::test]
+    async fn test_custom_action_compress_context() {
         let executor = RecoveryExecutor::default();
         let strategy = RecoveryStrategy {
             name: "compress".to_string(),
@@ -2323,12 +2339,12 @@ mod tests {
             estimated_duration_ms: 0,
         };
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(result.success);
     }
 
-    #[test]
-    fn test_custom_action_switch_parsing_mode() {
+    #[tokio::test]
+    async fn test_custom_action_switch_parsing_mode() {
         let executor = RecoveryExecutor::default();
         let mut params = HashMap::new();
         params.insert("mode".to_string(), "xml".to_string());
@@ -2344,7 +2360,7 @@ mod tests {
             estimated_duration_ms: 0,
         };
 
-        let result = executor.execute(&strategy);
+        let result = executor.execute(&strategy).await;
         assert!(result.success);
     }
 

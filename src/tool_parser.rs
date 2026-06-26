@@ -196,13 +196,15 @@ fn decode_xml_entities(s: &str) -> String {
 /// by `>`, and rewrites them as proper closing tags before the regex parsers run.
 fn normalize_malformed_xml(content: &str) -> String {
     let re = MALFORMED_CLOSE_TAG_REGEX.get_or_init(|| {
-        // Match known closing-tag names followed by `>`, where the preceding character
-        // is NOT `<`, `/`, or a word character (i.e., not part of a valid opening/closing
-        // tag or a longer identifier).  `(?m)` enables multiline so `^` matches line starts.
-        Regex::new(r"(?m)(^|[^<\w/])(tool_call|arguments|parameter|function|tool|name)>")
+        // Match known closing-tag names followed by `>` only when the `>` is the last
+        // non-whitespace token on a line or is immediately followed by another tag.
+        // Require the tag name to be preceded by whitespace or line start so that `>`
+        // inside JSON strings (e.g. `{"op": "a > b"}`) is not mistaken for a malformed
+        // closing tag.
+        Regex::new(r"(?m)(^|\s)(tool_call|arguments|parameter|function|tool|name)>(\s*(?:$|<))")
             .expect("Invalid malformed close tag regex")
     });
-    re.replace_all(content, "$1</$2>").to_string()
+    re.replace_all(content, "$1</$2>$3").to_string()
 }
 
 /// Parse content for tool calls using multiple strategies
@@ -1770,6 +1772,11 @@ I'll check the output next."#;
         // Valid tags should be untouched
         assert_eq!(normalize_malformed_xml("</arguments>"), "</arguments>");
         assert_eq!(normalize_malformed_xml("<arguments>"), "<arguments>");
+        // `>` inside JSON arguments must not be corrupted
+        assert_eq!(
+            normalize_malformed_xml(r#"<arguments>{"op": "a > b"}</arguments>"#),
+            r#"<arguments>{"op": "a > b"}</arguments>"#
+        );
     }
 
     #[test]

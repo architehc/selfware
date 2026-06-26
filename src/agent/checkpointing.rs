@@ -515,13 +515,17 @@ impl Agent {
     }
 
     #[cfg(feature = "resilience")]
-    pub(super) fn try_self_healing_recovery(&mut self, error: &str, context: &str) -> bool {
+    pub(super) async fn try_self_healing_recovery(
+        &mut self,
+        error: &str,
+        context: &str,
+    ) -> bool {
         if !self.config.continuous_work.auto_recovery {
             return false;
         }
 
         let occurrence = ErrorOccurrence::new("agent_execution_error", error, context);
-        let Some(execution) = self.self_healing.handle_error(occurrence) else {
+        let Some(execution) = self.self_healing.handle_error(occurrence).await else {
             return false;
         };
 

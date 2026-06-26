@@ -456,6 +456,8 @@ async fn read_lsp_message<R: tokio::io::AsyncRead + Unpin>(
 pub struct LspClient {
     connections: Arc<Mutex<HashMap<Language, Arc<LspServerConnection>>>>,
     project_root: PathBuf,
+    /// Per-document version counters for `textDocument/didChange`.
+    document_versions: Arc<Mutex<HashMap<String, u32>>>,
 }
 
 impl LspClient {
@@ -464,6 +466,7 @@ impl LspClient {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
             project_root: project_root.to_path_buf(),
+            document_versions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -573,12 +576,18 @@ impl LspClient {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
 
+        let uri = Self::file_uri(file);
+        {
+            let mut versions = self.document_versions.lock().await;
+            versions.insert(uri.clone(), 1);
+        }
+
         let conn = self.connection_for(lang).await?;
         conn.notify(
             "textDocument/didOpen",
             serde_json::json!({
                 "textDocument": {
-                    "uri": Self::file_uri(file),
+                    "uri": uri,
                     "languageId": lang.id(),
                     "version": 1,
                     "text": content,
@@ -593,13 +602,21 @@ impl LspClient {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
 
+        let uri = Self::file_uri(file);
+        let version = {
+            let mut versions = self.document_versions.lock().await;
+            let next = versions.get(&uri).copied().unwrap_or(1) + 1;
+            versions.insert(uri.clone(), next);
+            next
+        };
+
         let conn = self.connection_for(lang).await?;
         conn.notify(
             "textDocument/didChange",
             serde_json::json!({
                 "textDocument": {
-                    "uri": Self::file_uri(file),
-                    "version": 2,
+                    "uri": uri,
+                    "version": version,
                 },
                 "contentChanges": [{
                     "text": content,

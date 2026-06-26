@@ -406,6 +406,7 @@ impl LlmCache {
     }
 
     /// Clear all entries
+    #[allow(dead_code)]
     pub async fn clear(&self) {
         {
             let mut entries = self.entries.write().await;
@@ -418,6 +419,7 @@ impl LlmCache {
     }
 
     /// Get cache statistics
+    #[allow(dead_code)]
     pub async fn stats(&self) -> CacheStats {
         let entries = self.entries.read().await;
         CacheStats {

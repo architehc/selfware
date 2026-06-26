@@ -408,17 +408,17 @@ impl Tool for CargoClippy {
             cmd.arg("--fix").arg("--allow-staged").arg("--allow-dirty");
         }
 
+        let mut lint_args: Vec<&str> = Vec::new();
         if args
             .get("deny_warnings")
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
         {
-            cmd.arg("--").arg("-D").arg("warnings");
-        } else {
-            cmd.arg("--");
+            lint_args.extend(["-D", "warnings"]);
         }
+        lint_args.extend(["-D", "clippy::unwrap_used", "-D", "clippy::expect_used"]);
 
-        cmd.args(["-D", "clippy::unwrap_used", "-D", "clippy::expect_used"]);
+        cmd.arg("--").args(lint_args);
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
         let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;

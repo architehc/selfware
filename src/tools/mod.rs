@@ -822,6 +822,35 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_tool_search_index_populated_by_registry() {
+        let registry = ToolRegistry::new();
+        let tool = registry
+            .get("tool_search")
+            .expect("tool_search should be registered");
+        let result = tool
+            .execute(serde_json::json!({"query": "cargo", "limit": 10}))
+            .await
+            .expect("tool_search should execute");
+        let found = result
+            .get("found_tools")
+            .and_then(|v| v.as_array())
+            .expect("found_tools should be an array");
+        assert!(
+            !found.is_empty(),
+            "tool_search should return real registry results, not an empty placeholder"
+        );
+        let names: Vec<&str> = found
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            names.iter().any(|n| n.starts_with("cargo_")),
+            "tool_search should discover cargo tools; got {:?}",
+            names
+        );
+    }
+
     #[test]
     fn test_file_read_tool_properties() {
         let registry = ToolRegistry::new();

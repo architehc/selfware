@@ -934,8 +934,9 @@ impl Agent {
                     {
                         if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
                             recovery_attempts += 1;
-                            recovered =
-                                self.try_self_healing_recovery(&error, "run_execution_loop");
+                            recovered = self
+                                .try_self_healing_recovery(&error, "run_execution_loop")
+                                .await;
                         } else {
                             warn!(
                                 "Auto-recovery attempts exhausted ({})",

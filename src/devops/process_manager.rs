@@ -244,24 +244,27 @@ impl ProcessManager {
     }
 
     pub async fn reserve_port(&self, port: u16) -> Result<u16> {
-        self.cleanup_stale_port_reservations().await;
-
-        {
-            let reservations = self.port_reservations.lock().await;
-            if reservations.contains_key(&port) {
-                anyhow::bail!("Port {} is already reserved by selfware", port);
+        // Hold the reservation lock for the whole check+bind+insert sequence so
+        // two tasks cannot reserve the same port concurrently.
+        let mut reservations = self.port_reservations.lock().await;
+        reservations.retain(|port, reservation| {
+            let keep = reservation.reserved_at.elapsed() <= PORT_RESERVATION_TTL;
+            if !keep {
+                warn!(
+                    "Dropping stale reserved port {} after {:?}",
+                    port, PORT_RESERVATION_TTL
+                );
             }
+            keep
+        });
+
+        if reservations.contains_key(&port) {
+            anyhow::bail!("Port {} is already reserved by selfware", port);
         }
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .with_context(|| format!("Port {} is already in use", port))?;
-
-        let mut reservations = self.port_reservations.lock().await;
-        if reservations.contains_key(&port) {
-            drop(listener);
-            anyhow::bail!("Port {} is already reserved by selfware", port);
-        }
 
         reservations.insert(
             port,
@@ -274,34 +277,35 @@ impl ProcessManager {
     }
 
     pub async fn reserve_available_port(&self, start: u16, end: u16) -> Result<u16> {
-        self.cleanup_stale_port_reservations().await;
+        // Hold the reservation lock while scanning and binding so another task
+        // cannot slip in and reserve a port we are about to claim.
+        let mut reservations = self.port_reservations.lock().await;
+        reservations.retain(|port, reservation| {
+            let keep = reservation.reserved_at.elapsed() <= PORT_RESERVATION_TTL;
+            if !keep {
+                warn!(
+                    "Dropping stale reserved port {} after {:?}",
+                    port, PORT_RESERVATION_TTL
+                );
+            }
+            keep
+        });
 
         for port in start..=end {
-            {
-                let reservations = self.port_reservations.lock().await;
-                if reservations.contains_key(&port) {
-                    continue;
-                }
-            }
-
-            let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await else {
-                continue;
-            };
-
-            let mut reservations = self.port_reservations.lock().await;
             if reservations.contains_key(&port) {
-                drop(listener);
                 continue;
             }
 
-            reservations.insert(
-                port,
-                PortReservation {
-                    listener,
-                    reserved_at: Instant::now(),
-                },
-            );
-            return Ok(port);
+            if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                reservations.insert(
+                    port,
+                    PortReservation {
+                        listener,
+                        reserved_at: Instant::now(),
+                    },
+                );
+                return Ok(port);
+            }
         }
 
         anyhow::bail!("No available ports found in range {}-{}", start, end)
