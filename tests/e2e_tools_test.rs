@@ -185,7 +185,7 @@ async fn test_e2e_file_tools() {
         ..Default::default()
     };
     selfware::tools::file::init_safety_config(&cfg);
-    selfware::tools::file_read::init_safety_config(&cfg);
+    selfware::tools::file::init_safety_config(&cfg);
     let dir = tempdir().unwrap();
     let test_file = dir.path().join("test.rs");
 

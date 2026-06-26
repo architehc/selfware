@@ -39,6 +39,8 @@ pub struct AutoDreamConfig {
     pub model: String,
     /// API endpoint for LLM calls
     pub endpoint: String,
+    /// API key for the endpoint (falls back to OPENROUTER_API_KEY or LLM_API_KEY env vars)
+    pub api_key: Option<String>,
     /// Timeout for the entire dream process
     pub timeout_secs: u64,
     /// Timeout for individual LLM calls
@@ -52,6 +54,7 @@ impl Default for AutoDreamConfig {
         Self {
             model: "qwen3.5-9b".to_string(), // Cheapest reasonable model
             endpoint: "http://localhost:8000/v1".to_string(),
+            api_key: None,
             timeout_secs: 300, // 5 minutes total
             llm_timeout_secs: 60,
             prefer_local: true,
@@ -80,6 +83,12 @@ impl AutoDreamConfig {
     /// Set prefer local flag
     pub fn with_prefer_local(mut self, prefer: bool) -> Self {
         self.prefer_local = prefer;
+        self
+    }
+
+    /// Set the API key
+    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
+        self.api_key = Some(key.into());
         self
     }
 }
@@ -388,29 +397,76 @@ async fn gather_phase(session_files: &[PathBuf], max_sessions: usize) -> Result<
 /// to consolidate memories. It simply returns the input count without any
 /// deduplication or merging.
 /// TODO: Implement actual LLM call for memory consolidation
-async fn consolidate_phase(_memories: &[MemoryEntry], config: &AutoDreamConfig) -> Result<usize> {
-    if _memories.is_empty() {
+async fn consolidate_phase(memories: &[MemoryEntry], config: &AutoDreamConfig) -> Result<usize> {
+    if memories.is_empty() {
         return Ok(0);
     }
 
-    // STUB: Would generate consolidation prompt
-    let _prompt = crate::cognitive::dream::generate_consolidation_prompt(_memories);
+    let prompt = crate::cognitive::dream::generate_consolidation_prompt(memories);
+    let api_key = config
+        .api_key
+        .clone()
+        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+        .or_else(|| std::env::var("LLM_API_KEY").ok())
+        .unwrap_or_default();
 
-    // STUB: Would call LLM for consolidation
-    warn!(
-        "STUB: consolidate_phase NOT calling LLM at {} with model {}",
-        config.endpoint, config.model
+    let client = reqwest::Client::new();
+    let body = serde_json::json!({
+        "model": config.model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    });
+
+    let mut request = client
+        .post(&config.endpoint)
+        .header("Content-Type", "application/json")
+        .timeout(Duration::from_secs(config.llm_timeout_secs))
+        .json(&body);
+    if !api_key.is_empty() {
+        request = request.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    let response = request.send().await?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("consolidation LLM request failed: {status} {text}"));
+    }
+
+    let json: serde_json::Value = response.json().await?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
+
+    if content.is_empty() {
+        warn!("consolidation LLM returned empty content");
+        return Ok(memories.len());
+    }
+
+    // Count consolidated bullets under each section.
+    let mut in_section = false;
+    let mut count = 0usize;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            in_section = true;
+            continue;
+        }
+        if in_section && trimmed.starts_with("- ") {
+            count += 1;
+        }
+    }
+
+    info!(
+        "consolidated {} memories into {} entries via {}",
+        memories.len(),
+        count,
+        config.model
     );
-
-    // STUB: Just returns count without actual consolidation
-    let unique_count = _memories.len();
-
-    warn!(
-        "STUB: Memory consolidation is no-op - returned {} without consolidation",
-        unique_count
-    );
-
-    Ok(unique_count)
+    Ok(count.max(1))
 }
 
 /// Phase 4: Prune & Index - Cap size and remove stale memories

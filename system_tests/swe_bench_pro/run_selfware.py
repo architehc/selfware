@@ -42,10 +42,10 @@ from harness_recovery import (
 )
 
 from small_model_adapter import (
+    _build_focused_test_oracle,
     _context_budgets,
-    _extract_failing_test_snippets,
     _extract_source_paths_from_text,
-    _extract_test_hints,
+    _format_target_api_section,
     _format_test_command,
     _is_strong_identifier,
     _new_files_from_patch,
@@ -742,8 +742,8 @@ def build_prompt(
     pass_to_pass = load_list_field(instance.get("pass_to_pass", []))
     language = (instance.get("repo_language") or "").lower()
     test_cmd = _format_test_command(language, tests)
-    test_hints = _extract_test_hints(instance.get("test_patch", "") or "")
-    test_snippets = _extract_failing_test_snippets(instance.get("test_patch", "") or "")
+    target_api = _format_target_api_section(instance.get("interface", "") or "")
+    test_oracle = _build_focused_test_oracle(instance.get("test_patch", "") or "")
 
     if compact:
         requirements_text = (
@@ -784,6 +784,8 @@ def build_prompt(
         "Requirements:",
         requirements_text,
         "",
+        target_api or "Target API: (none identified from the task interface)",
+        "",
         "Test files:",
         "\n".join(f"- {t}" for t in tests) or "- (none specified)",
         "",
@@ -794,17 +796,14 @@ def build_prompt(
         sections.extend([
             "",
             "Pass-to-pass:",
-            "\n".join(f"- {t}" for t in pass_to_pass) or "- (none specified)",
+            "\n".join(f"- {t}" for t in _cap_pass_to_pass(pass_to_pass)) or "- (none specified)",
         ])
     sections.extend([
         "",
         f"Run tests: {test_cmd}",
         "",
-        "Test-patch hints (the evaluator applies the full test patch; do NOT edit tests):",
-        test_hints or "- (none extracted)",
-        "",
-        "Failing test code snippets (added by the test patch; these are the tests you must make pass):",
-        test_snippets or "- (none extracted)",
+        "Focused test oracle (concrete failing tests and key assertions; do NOT edit tests):",
+        test_oracle or "- (none extracted from test patch)",
         "",
         "Relevant source excerpts (line numbers are for reference only):",
         snippets,
@@ -874,6 +873,16 @@ def build_prompt(
             repair_feedback,
         ])
     return "\n".join(sections)
+
+
+def _cap_pass_to_pass(pass_to_pass: list[str], max_count: int = 5) -> list[str]:
+    """Cap the number of pass-to-pass tests shown in the prompt.
+
+    A long list of already-passing tests drowns out the failing tests the
+    model actually needs to focus on.  Show only the first ``max_count`` and
+    let the evaluator run the full set.
+    """
+    return pass_to_pass[:max_count]
 
 
 # ---------------------------------------------------------------------------

@@ -161,6 +161,8 @@ async fn main() -> anyhow::Result<()> {
         max_tokens: 8192,
         temperature: 0.2,
         timeout_secs: 300,
+        max_retries: 3,
+        retry_delay_ms: 500,
         output_dir: "bench_results/swebench".into(),
         extra_body: serde_json::json!({
             "chat_template_kwargs": {"enable_thinking": false}

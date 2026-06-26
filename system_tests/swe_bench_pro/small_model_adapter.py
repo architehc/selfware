@@ -1280,11 +1280,13 @@ def _extract_failing_test_snippets(patch_text: str, max_chars: int = 3000) -> st
 
     snippets: list[str] = []
     for path, lines in added_by_file.items():
+        basename = os.path.basename(path)
         if not any(
             path.endswith(ext)
             for ext in ("_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx")
-        ) and not path.startswith("test_"):
+        ) and not basename.startswith("test_"):
             continue
+        is_python_test = path.endswith("_test.py") or basename.startswith("test_")
         funcs: list[tuple[str, str]] = []
         i = 0
         while i < len(lines):
@@ -1294,7 +1296,7 @@ def _extract_failing_test_snippets(patch_text: str, max_chars: int = 3000) -> st
                 m = re.search(r"func\s+(Test[A-Za-z0-9_]+)", l)
                 if m:
                     name = m.group(1)
-            elif path.endswith(".py") and l.strip().startswith("def test_"):
+            elif is_python_test and l.strip().startswith("def test_"):
                 name = l.strip().split("(")[0].replace("def ", "")
             elif path.endswith((".js", ".ts", ".tsx")):
                 m = re.search(r"\b(it|test|describe)\s*\(\s*[\"']([^\"']+)", l)
@@ -1319,6 +1321,123 @@ def _extract_failing_test_snippets(patch_text: str, max_chars: int = 3000) -> st
     if len(text) > max_chars:
         text = text[:max_chars].rsplit("\n", 1)[0] + "\n... (truncated) ..."
     return text
+
+
+def _parse_interface(interface_text: str | None) -> list[dict[str, str]]:
+    """Parse the structured ``interface`` field into API entries.
+
+    The field is a free-text block with repeated blocks like::
+
+        Type: Function
+
+        Name: hide_qt_warning
+
+        Path: qutebrowser/utils/qtlog.py
+
+        Input: pattern: str, logger: str = 'qt'
+
+        Output: context manager (Iterator[None])
+
+        Description: Temporarily suppresses Qt log warnings.
+
+    Returns a list of dicts with keys: type, name, path, input, output,
+    description, public_api.
+    """
+    if not interface_text:
+        return []
+
+    known_keys = {"type", "name", "path", "input", "output", "description", "public_api"}
+
+    def _normalize_key(key: str) -> str:
+        return key.strip().lower().replace(" ", "_")
+
+    entries: list[dict[str, str]] = []
+    current_entry: dict[str, str] | None = None
+    current_key: str | None = None
+
+    for line in interface_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            current_key = None
+            continue
+
+        if ": " in stripped:
+            maybe_key, _, value = stripped.partition(": ")
+            maybe_key = _normalize_key(maybe_key)
+            if maybe_key in known_keys:
+                if maybe_key == "type" and current_entry:
+                    entries.append(current_entry)
+                    current_entry = None
+                if current_entry is None:
+                    current_entry = {}
+                current_entry[maybe_key] = value.strip()
+                current_key = maybe_key
+                continue
+
+        # Continuation line for the current key.
+        if current_key and current_entry is not None:
+            current_entry[current_key] = f"{current_entry[current_key]}\n{stripped}"
+
+    if current_entry:
+        entries.append(current_entry)
+    return entries
+
+
+def _format_target_api_section(interface_text: str | None) -> str:
+    """Format the parsed ``interface`` field for inclusion in the prompt."""
+    entries = _parse_interface(interface_text)
+    if not entries:
+        return ""
+
+    lines = ["Target API (functions/classes you may need to modify):"]
+    for entry in entries:
+        api_type = entry.get("type", "API")
+        name = entry["name"]
+        path = entry.get("path", "(unknown path)")
+        input_sig = entry.get("input", "")
+        output_sig = entry.get("output", "")
+        description = entry.get("description", "")
+        public_api = entry.get("public_api", "")
+
+        lines.append(f"- {api_type}: `{name}` — {path}")
+        if input_sig:
+            lines.append(f"  Input: {input_sig}")
+        if output_sig:
+            lines.append(f"  Output: {output_sig}")
+        if public_api:
+            lines.append(f"  Public API: {public_api}")
+        if description:
+            lines.append(f"  Description: {description}")
+
+    return "\n".join(lines)
+
+
+def _build_focused_test_oracle(patch_text: str | None, max_chars: int = 4000) -> str:
+    """Build a compact but concrete oracle from the official test patch.
+
+    Combines concrete failing test code snippets with a short list of key
+    assertion hints. This gives the model the exact assertions it must satisfy
+    without dumping the entire test patch into the prompt.
+    """
+    if not patch_text:
+        return ""
+
+    snippets = _extract_failing_test_snippets(patch_text, max_chars=max_chars)
+    if not snippets:
+        return ""
+
+    # Reserve most of the budget for the snippets; hints get the remainder.
+    hints_budget = max(0, max_chars - len(snippets) - 200)
+    hints = _extract_test_hints(patch_text, max_chars=hints_budget)
+
+    if hints:
+        return (
+            "Key assertion hints (from the failing tests):\n"
+            f"{hints}\n\n"
+            "Failing test code snippets (do NOT edit tests):\n"
+            f"{snippets}"
+        )
+    return "Failing test code snippets (do NOT edit tests):\n" + snippets
 
 
 def _expand_to_package(

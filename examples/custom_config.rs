@@ -91,6 +91,7 @@ fn build_custom_config() -> Config {
             prompt_profile: "default".to_string(),
             max_budget_tokens: None,
             max_wall_secs: None,
+            post_edit_test_command: None,
         },
 
         // Resource limits

@@ -324,6 +324,8 @@ async fn main() -> Result<()> {
         max_tokens: 4096,
         temperature: 0.2,
         timeout_secs: 300,
+        max_retries: 3,
+        retry_delay_ms: 500,
         output_dir: "bench_results/swebench/two_phase".into(),
         extra_body: serde_json::json!({
             "chat_template_kwargs": {"enable_thinking": false}
@@ -453,6 +455,8 @@ async fn main() -> Result<()> {
                 max_tokens: 4096,
                 temperature: 0.1,
                 timeout_secs: 120,
+                max_retries: 3,
+                retry_delay_ms: 500,
                 output_dir: "bench_results/swebench/two_phase".into(),
                 extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
             };

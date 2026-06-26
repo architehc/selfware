@@ -19,6 +19,8 @@ async fn main() -> anyhow::Result<()> {
         max_tokens: 512,
         temperature: 0.7,
         timeout_secs: 300,
+        max_retries: 3,
+        retry_delay_ms: 500,
         output_dir: "bench_results".into(),
         extra_body: serde_json::json!({
             "chat_template_kwargs": {"enable_thinking": false}

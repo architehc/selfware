@@ -527,6 +527,22 @@ impl Tool for FileEdit {
             );
         }
 
+        // Catastrophic whole-file replacement guard. Replacing the vast majority
+        // of a file is almost always an accidental loss of context; prefer
+        // smaller, targeted edits. Use file_write if a full rewrite is intended.
+        if !content.is_empty() {
+            let ratio = args.old_str.len() as f64 / content.len() as f64;
+            if ratio > 0.85 {
+                bail!(
+                    "file_edit rejected: old_str matches {:.0}% of {}. \
+                     Use a smaller, targeted edit with surrounding context, \
+                     or use file_write if you truly intend to replace the entire file.",
+                    ratio * 100.0,
+                    args.path
+                );
+            }
+        }
+
         let new_content = content.replace(&args.old_str, &args.new_str);
         let new_content = preserve_line_endings(&new_content, line_ending);
         validate_rust_source_if_needed(Path::new(&args.path), &new_content)?;
@@ -1364,6 +1380,29 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("3 times"));
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_rejects_whole_file_replacement() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("edit.txt");
+        fs::write(&file_path, "line1\nline2\nline3\nline4\nline5\n").unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "line1\nline2\nline3\nline4\nline5\n",
+            "new_str": "replaced\n"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("file_edit rejected"), "unexpected error: {err}");
+
+        // The file should be unchanged.
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "line1\nline2\nline3\nline4\nline5\n");
     }
 
     #[test]

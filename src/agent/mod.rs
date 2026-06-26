@@ -553,6 +553,10 @@ pub struct Agent {
     /// Set to true once any file_write or file_edit has been successfully executed
     /// (including synthetic/auto-writes). Used by progress guard to relax thresholds.
     has_written_any_file: bool,
+    /// Set to true once the assistant has emitted a FILES: checklist naming the
+    /// files it intends to change. Prevents premature edits before the model has
+    /// identified the relevant source files.
+    files_checklist_seen: bool,
     /// Monotonic sequence incremented after every successful state-changing tool.
     mutation_sequence: usize,
     /// Mutation sequence number covered by the most recent successful verification.
@@ -1090,6 +1094,7 @@ To call a tool, use this EXACT XML structure:
             terminal_guard_hits: 0,
             last_read_file: None,
             has_written_any_file: false,
+            files_checklist_seen: false,
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,

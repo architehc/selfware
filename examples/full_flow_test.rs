@@ -164,7 +164,7 @@ where
 {
     let (error_type, message) = classify_flow_errors(errors);
     let context = format!("{step}@{endpoint}");
-    let recovery = engine.handle_error(ErrorOccurrence::new(error_type, &message, &context))?;
+    let recovery = engine.handle_error(ErrorOccurrence::new(error_type, &message, &context)).await?;
 
     if recovery.success {
         Some(run().await)
@@ -268,6 +268,8 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
         max_tokens: 256,
         temperature: 0.2,
         timeout_secs: if concurrent > 32 { 180 } else { 120 },
+        max_retries: 3,
+        retry_delay_ms: 500,
         output_dir: "bench_results/flow_test".into(),
         extra_body: json!({"chat_template_kwargs": {"enable_thinking": false}}),
     };

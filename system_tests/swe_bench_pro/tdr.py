@@ -128,17 +128,27 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
     before_cmd = instance.get("before_repo_set_cmd", "") or ""
     return (
         "#!/bin/bash\n"
-        "set -euo pipefail\n"
+        "set -uo pipefail\n"
         "cd /app\n"
-        f"git reset --hard {instance['base_commit']}\n"
-        f"git checkout {instance['base_commit']}\n"
+        #
+        # Reset defensively and capture the optional setup command status.
+        #
+        f"git reset --hard {instance['base_commit']} > /workspace/git_reset.log 2>&1\n"
+        f"git checkout {instance['base_commit']} > /workspace/git_checkout.log 2>&1 || true\n"
         f"{before_cmd}\n"
+        "before_status=$?\n"
+        "echo \"before_repo_set_cmd exit code: $before_status\" >> /workspace/patch_apply.log\n"
+        #
+        # Empty-patch short-circuit.
+        #
         "if [ ! -s /workspace/patch.diff ] || [ \"$(grep -v '^[[:space:]]*$' /workspace/patch.diff | wc -l)\" -eq 0 ]; then\n"
         "  echo '{\"tests\": []}' > /workspace/output.json\n"
         "  echo 'PATCH_EMPTY' > /workspace/patch_apply_status.txt\n"
         "  exit 0\n"
         "fi\n"
-        "set +e\n"
+        #
+        # Patch application with git apply, 3-way, and patch fallback.
+        #
         "git apply -v /workspace/patch.diff > /workspace/patch_apply.log 2>&1\n"
         "apply_status=$?\n"
         "if [ $apply_status -ne 0 ]; then\n"
@@ -155,6 +165,18 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         "  echo '{\"tests\": []}' > /workspace/output.json\n"
         "  exit 0\n"
         "fi\n"
+        #
+        # No-op patch detection: applied but changed no files.
+        #
+        "changed_files=$(git diff --name-only HEAD)\n"
+        "if [ -z \"$changed_files\" ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "  echo 'PATCH_NO_OP' > /workspace/patch_apply_status.txt\n"
+        "  exit 0\n"
+        "fi\n"
+        #
+        # Run tests and parse results.
+        #
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
         "test_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"

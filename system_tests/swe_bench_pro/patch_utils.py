@@ -398,7 +398,8 @@ def extract_partial_diff(response: str) -> str | None:
     """Try to salvage a partial diff from a truncated response.
 
     If the response ends mid-hunk, this returns the diff up to the last complete
-    hunk.  Returns ``None`` if no usable diff is present.
+    hunk.  Complete hunks are kept; only a trailing hunk header with no body
+    lines is dropped.  Returns ``None`` if no usable diff is present.
     """
     diff = extract_diff(response)
     if not diff:
@@ -408,21 +409,24 @@ def extract_partial_diff(response: str) -> str | None:
     if not hunk_starts:
         return None
 
-    # A hunk is complete only if its header is followed by at least one body
-    # line and the response is not otherwise truncated.
-    last_hunk_start = hunk_starts[-1]
-    last_hunk_complete = not is_truncated_diff(response) and last_hunk_start < len(lines) - 1
+    # Determine the last hunk that actually has body lines.
+    last_usable = -1
+    for idx, start in enumerate(hunk_starts):
+        end = hunk_starts[idx + 1] if idx + 1 < len(hunk_starts) else len(lines)
+        body_lines = [
+            line for line in lines[start + 1 : end] if line.startswith((" ", "-", "+"))
+        ]
+        if body_lines:
+            last_usable = idx
 
-    if last_hunk_complete:
-        keep_up_to = len(lines)
-    else:
-        keep_up_to = last_hunk_start
+    if last_usable < 0:
+        return None
 
-    # Ensure we are keeping at least one complete hunk (header + body line).
-    if not any(i < keep_up_to - 1 for i in hunk_starts):
-        return None
-    if keep_up_to <= 0:
-        return None
+    keep_up_to = (
+        hunk_starts[last_usable + 1]
+        if last_usable + 1 < len(hunk_starts)
+        else len(lines)
+    )
     return "\n".join(lines[:keep_up_to]) + "\n"
 
 

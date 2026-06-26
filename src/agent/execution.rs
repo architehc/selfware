@@ -298,6 +298,17 @@ impl Agent {
             response.reasoning_content.as_deref(),
             response.native_tool_calls.as_ref(),
         );
+
+        // Detect a FILES: checklist in the assistant response. Small models often
+        // jump straight to editing; requiring them to name the files first
+        // reduces catastrophic edits on the wrong files.
+        if super::recovery::strip_think_blocks(&content)
+            .lines()
+            .any(|line| line.trim_start().starts_with("FILES:"))
+        {
+            self.files_checklist_seen = true;
+        }
+
         // Convert XML-extracted CollectedToolCall back to the structured
         // ToolCall shape that goes into the artifact.  Use a deterministic
         // synthetic id when the XML branch produced none.
@@ -690,6 +701,21 @@ impl Agent {
             self.consecutive_read_only_steps = 0;
         } else {
             self.consecutive_read_only_steps += 1;
+        }
+
+        // P2.1: require a FILES: checklist before the first mutating edit.
+        if has_write_tool
+            && !self.has_written_any_file
+            && !self.files_checklist_seen
+        {
+            info!("Blocked premature edit: no FILES: checklist yet");
+            self.messages.push(crate::api::types::Message::user(
+                "Before editing, identify which files need to change. \
+                 Read or search the relevant source files, then list them in a FILES: line. \
+                 After that, perform the edits."
+                    .to_string(),
+            ));
+            return Ok(false);
         }
 
         self.execute_tool_batch(tool_calls).await?;
