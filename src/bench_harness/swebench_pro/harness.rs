@@ -237,39 +237,42 @@ fn probe_endpoint(port: u16) -> bool {
 /// `"sglang"`, `"vllm"`, or `"unknown"`.
 pub fn detect_backend(port: u16) -> Result<String> {
     let url = format!("http://127.0.0.1:{}/v1/models", port);
-    let output = Command::new("curl")
-        .args(["-sf", "-m", "3", "-i", &url])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .context("spawning curl for backend detection")?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .context("building backend detection client")?;
+    let response = client
+        .get(&url)
+        .send()
+        .with_context(|| format!("backend detection request failed for {}", url))?;
 
-    if !output.status.success() {
-        bail!("curl probe failed for {}", url);
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let lower = text.to_lowercase();
+    let server_header = response
+        .headers()
+        .get("server")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
 
     // Header hints
-    if lower.contains("server: llama.cpp") || lower.contains("server: llamacpp") {
+    if server_header.contains("llama.cpp") || server_header.contains("llamacpp") {
         return Ok("llama.cpp".into());
     }
-    if lower.contains("server: sglang") {
+    if server_header.contains("sglang") {
         return Ok("sglang".into());
     }
-    if lower.contains("server: vllm") {
+    if server_header.contains("vllm") {
         return Ok("vllm".into());
     }
 
     // Body hints
-    if lower.contains("llama.cpp") || lower.contains("llamacpp") {
+    let body = response.text().unwrap_or_default().to_lowercase();
+    if body.contains("llama.cpp") || body.contains("llamacpp") {
         return Ok("llama.cpp".into());
     }
-    if lower.contains("sglang") {
+    if body.contains("sglang") {
         return Ok("sglang".into());
     }
-    if lower.contains("vllm") {
+    if body.contains("vllm") {
         return Ok("vllm".into());
     }
 

@@ -106,8 +106,8 @@ pub(crate) struct Cli {
     pub(crate) debug: Option<String>,
 
     /// Output format for headless mode: text, json, or stream-json
-    #[arg(long, default_value = "text")]
-    pub(crate) output_format: String,
+    #[arg(long, value_enum, default_value = "text")]
+    pub(crate) output_format: HeadlessOutputFormat,
 
     /// Maximum number of agent loop iterations (hard limit)
     #[arg(long)]
@@ -134,6 +134,19 @@ pub enum Theme {
     Minimal,
     /// High contrast for accessibility
     HighContrast,
+}
+
+/// Output format for headless (`-p` / `--run`) mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum HeadlessOutputFormat {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// Single JSON object emitted at task completion
+    Json,
+    /// Line-delimited JSON stream emitted during the run
+    #[value(name = "stream-json")]
+    StreamJson,
 }
 
 /// Output format for CLI (currently only affects `status` command)

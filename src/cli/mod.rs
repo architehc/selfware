@@ -20,6 +20,7 @@ use tracing::warn;
 // This avoids duplicate compilation and maintains consistency
 use crate::agent::Agent;
 use crate::checkpoint;
+use crate::cli::args::HeadlessOutputFormat;
 use crate::config::{Config, ExecutionMode};
 use crate::multiagent;
 use crate::output;
@@ -543,6 +544,7 @@ pub async fn run() -> Result<()> {
 
     // Initialize output control with merged settings
     output::init(compact, verbose, show_tokens);
+    output::set_quiet(cli.quiet);
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 
@@ -562,8 +564,8 @@ pub async fn run() -> Result<()> {
             anyhow::bail!("Empty prompt provided");
         }
 
-        let is_json = cli.output_format == "json";
-        let is_stream_json = cli.output_format == "stream-json";
+        let is_json = cli.output_format == HeadlessOutputFormat::Json;
+        let is_stream_json = cli.output_format == HeadlessOutputFormat::StreamJson;
         let is_structured = is_json || is_stream_json;
 
         if !cli.quiet && !is_structured {
@@ -619,7 +621,7 @@ pub async fn run() -> Result<()> {
     // Handle TUI dashboard mode
     #[cfg(feature = "tui")]
     {
-        let should_use_tui = cli.tui || (cli.command.is_none() && !cli.no_tui);
+        let should_use_tui = !cli.quiet && (cli.tui || (cli.command.is_none() && !cli.no_tui));
         if should_use_tui {
             let (event_tx, event_rx) = mpsc::channel();
             let (user_input_tx, user_input_rx) = mpsc::channel();
@@ -686,7 +688,7 @@ pub async fn run() -> Result<()> {
         &ctx,
         exec_mode,
         cli.resume_session,
-        &cli.output_format,
+        cli.output_format,
     )
     .await
 }
@@ -752,7 +754,7 @@ async fn handle_command(
     ctx: &WorkshopContext,
     exec_mode: ExecutionMode,
     resume_session: Option<String>,
-    output_format: &str,
+    output_format: HeadlessOutputFormat,
 ) -> Result<()> {
     match command {
         Commands::Chat { yolo } => {
@@ -806,8 +808,8 @@ async fn handle_command(
             if yolo {
                 config.execution_mode = ExecutionMode::Yolo;
             }
-            let is_json = output_format == "json";
-            let is_stream_json = output_format == "stream-json";
+            let is_json = output_format == HeadlessOutputFormat::Json;
+            let is_stream_json = output_format == HeadlessOutputFormat::StreamJson;
             let is_structured = is_json || is_stream_json;
 
             if !quiet && !is_structured {

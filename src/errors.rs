@@ -224,6 +224,9 @@ pub enum SafetyError {
     #[error("Path '{path}' is outside working directory and no allowed_paths configured")]
     PathOutsideWorkspace { path: String },
 
+    #[error("Failed to canonicalize path safely: {path}")]
+    PathCanonicalizationFailed { path: String },
+
     #[error("Path matches denied pattern: {pattern}")]
     PathDeniedPattern { pattern: String },
 

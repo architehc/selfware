@@ -72,6 +72,15 @@ fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
     path.canonicalize()
 }
 
+/// Canonicalize a path and fail closed if the filesystem cannot resolve it.
+fn canonicalize_or_fail(path: &Path) -> Result<PathBuf> {
+    path.canonicalize().map_err(|_| {
+        SelfwareError::Safety(SafetyError::PathCanonicalizationFailed {
+            path: path.display().to_string(),
+        })
+    })
+}
+
 #[derive(Clone)]
 pub struct PathValidator {
     config: SafetyConfig,
@@ -152,9 +161,7 @@ impl PathValidator {
             Err(e) if e.raw_os_error() == Some(ELOOP) => {
                 // O_NOFOLLOW returns ELOOP for symlinks
                 let safe_target = self.check_symlink_safety(&resolved)?;
-                safe_target
-                    .canonicalize()
-                    .unwrap_or_else(|_| lexical_normalize_path(&safe_target))
+                canonicalize_or_fail(&safe_target)?
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // If it doesn't exist, check parent atomically
@@ -165,20 +172,26 @@ impl PathValidator {
                         }
                         Err(e) if e.raw_os_error() == Some(ELOOP) => {
                             let safe_parent = self.check_symlink_safety(parent)?;
-                            safe_parent
-                                .canonicalize()
-                                .unwrap_or_else(|_| lexical_normalize_path(&safe_parent))
+                            canonicalize_or_fail(&safe_parent)?
                                 .join(resolved.file_name().unwrap_or_default())
                         }
-                        Err(_) => lexical_normalize_path(&resolved),
+                        Err(_) => {
+                            return Err(SelfwareError::Safety(
+                                SafetyError::PathCanonicalizationFailed {
+                                    path: resolved.display().to_string(),
+                                },
+                            ))
+                        }
                     }
                 } else {
-                    lexical_normalize_path(&resolved)
+                    return Err(SelfwareError::Safety(
+                        SafetyError::PathCanonicalizationFailed {
+                            path: resolved.display().to_string(),
+                        },
+                    ));
                 }
             }
-            Err(_) => resolved
-                .canonicalize()
-                .unwrap_or_else(|_| lexical_normalize_path(&resolved)),
+            Err(_) => canonicalize_or_fail(&resolved)?,
         };
         let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
@@ -659,10 +672,12 @@ mod tests {
         let validator = PathValidator::new(&config, cwd);
         let result = validator.validate("/not-allowed/file.txt");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not in allowed list"));
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not in allowed list") || err.contains("Failed to canonicalize"),
+            "Expected not-in-allowed-list or canonicalization error, got: {}",
+            err
+        );
     }
 
     #[test]
