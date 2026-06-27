@@ -31,6 +31,7 @@ Thumbs.db
 /system_tests/projecte2e/work/
 /system_tests/projecte2e/reports/
 /system_tests/swe_bench_pro/runs*/
+.venv_eval/
 
 # Benchmark and test result directories
 /bench_results/
