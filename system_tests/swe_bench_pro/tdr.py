@@ -169,7 +169,8 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         # No-op patch detection: applied but changed no files.
         #
         "changed_files=$(git diff --name-only HEAD)\n"
-        "if [ -z \"$changed_files\" ]; then\n"
+        "untracked_files=$(git ls-files --others --exclude-standard)\n"
+        "if [ -z \"$changed_files\" ] && [ -z \"$untracked_files\" ]; then\n"
         "  echo '{\"tests\": []}' > /workspace/output.json\n"
         "  echo 'PATCH_NO_OP' > /workspace/patch_apply_status.txt\n"
         "  exit 0\n"

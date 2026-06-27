@@ -512,6 +512,43 @@ def filter_patch_to_files(diff: str, allowed_files: set[str]) -> str:
     return "".join(kept).rstrip("\n") + "\n" if kept else ""
 
 
+def paths_from_patch(patch_text: str) -> set[str]:
+    """Return all repo-relative target paths mentioned in a unified diff."""
+    paths: set[str] = set()
+    for line in patch_text.splitlines():
+        if line.startswith("diff --git a/"):
+            match = re.match(r"^diff --git a/(.+?) b/(.+?)(?:\s|$)", line)
+            if match:
+                paths.add(match.group(2))
+    return paths
+
+
+def filter_patch_excluding_paths(diff: str, excluded_paths: set[str]) -> str:
+    """Drop diff hunks whose target path is in ``excluded_paths``."""
+    if not excluded_paths:
+        return diff
+    lines = diff.splitlines(keepends=True)
+    hunks: list[list[str]] = []
+    current: list[str] = []
+    for line in lines:
+        if line.startswith("diff --git"):
+            if current:
+                hunks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+    if current:
+        hunks.append(current)
+
+    kept: list[str] = []
+    for hunk in hunks:
+        path = _extract_diff_path(hunk[0]) if hunk else None
+        if path is not None and path in excluded_paths:
+            continue
+        kept.extend(hunk)
+    return "".join(kept).rstrip("\n") + "\n" if kept else ""
+
+
 # File extensions and path patterns that are off-limits for a submitted patch.
 _NON_SOURCE_PATTERNS = (
     "_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx",
@@ -536,15 +573,17 @@ def _is_likely_source_file(path: str) -> bool:
 def filter_patch_to_source_files(
     diff: str,
     extra_allowed: set[str] | None = None,
+    test_patch_paths: set[str] | None = None,
 ) -> str:
     """Drop diff hunks for tests, configs, docs, and build artifacts.
 
     Keeps all source-file hunks plus any paths in ``extra_allowed`` (e.g.
-    new files created by the official test patch).  This is less restrictive
-    than ``filter_patch_to_files`` and avoids silently dropping valid
-    multi-file fixes that touch package siblings not in the top-k ranked list.
+    new files created by the official test patch).  Hunks whose target path
+    appears in ``test_patch_paths`` are always dropped so the official
+    benchmark test patch is never re-submitted as part of the prediction.
     """
     allowed = extra_allowed or set()
+    test_patch_paths = test_patch_paths or set()
     lines = diff.splitlines(keepends=True)
     hunks: list[list[str]] = []
     current: list[str] = []
@@ -561,6 +600,8 @@ def filter_patch_to_source_files(
     kept: list[str] = []
     for hunk in hunks:
         path = _extract_diff_path(hunk[0]) if hunk else None
+        if path is not None and path in test_patch_paths:
+            continue
         if path is not None and path not in allowed and not _is_likely_source_file(path):
             continue
         kept.extend(hunk)

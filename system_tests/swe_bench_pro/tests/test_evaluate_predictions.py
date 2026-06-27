@@ -36,7 +36,14 @@ def test_entryscript_always_writes_artifacts():
 def test_entryscript_detects_no_op_patch():
     script = _build_entryscript(_minimal_instance())
     assert "git diff --name-only HEAD" in script
+    assert "git ls-files --others --exclude-standard" in script
     assert "PATCH_NO_OP" in script
+
+
+def test_entryscript_no_op_requires_both_empty():
+    script = _build_entryscript(_minimal_instance())
+    # The no-op branch must only fire when both changed and untracked files are empty.
+    assert "[ -z \"$changed_files\" ] && [ -z \"$untracked_files\" ]" in script
 
 
 def test_entryscript_patch_fallback_uses_no_backup():

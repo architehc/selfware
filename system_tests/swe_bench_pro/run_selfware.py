@@ -66,9 +66,11 @@ from patch_utils import (
     clean_captured_diff,
     extract_diff,
     extract_partial_diff,
+    filter_patch_excluding_paths,
     filter_patch_to_files,
     filter_patch_to_source_files,
     is_truncated_diff,
+    paths_from_patch,
     verify_edits_apply,
     _apply_diff_with_check,
 )
@@ -1103,7 +1105,10 @@ def run_diff_fallback(
         logger.info("Diff fallback applied SEARCH/REPLACE edits for %s", instance_id)
 
     patch = capture_patch_on_host(
-        host_repo_dir, logger, base_commit=instance.get("base_commit")
+        host_repo_dir,
+        logger,
+        base_commit=instance.get("base_commit"),
+        test_patch_paths=paths_from_patch(instance.get("test_patch", "") or ""),
     )
     if patch.strip():
         logger.info("Diff fallback produced a non-empty patch for %s", instance_id)
@@ -1303,8 +1308,12 @@ def run_agentless(
         applied, missing_files = apply_model_response_with_missing(
             host_repo_dir, response, logger
         )
+        test_patch_paths = paths_from_patch(instance.get("test_patch", "") or "")
         patch = capture_patch_on_host(
-            host_repo_dir, logger, base_commit=base_commit
+            host_repo_dir,
+            logger,
+            base_commit=base_commit,
+            test_patch_paths=test_patch_paths,
         )
         if patch.strip():
             search_text = instance.get("problem_statement", "") or ""
@@ -1325,7 +1334,11 @@ def run_agentless(
             extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or "")) | set(
                 _changed_files_from_patch(instance.get("patch", "") or "")
             )
-            patch = filter_patch_to_source_files(patch, extra_allowed=extra_allowed)
+            patch = filter_patch_to_source_files(
+                patch,
+                extra_allowed=extra_allowed,
+                test_patch_paths=test_patch_paths,
+            )
             if patch.strip():
                 logger.info(
                     "Agentless path produced a non-empty patch for %s%s",
@@ -1484,7 +1497,12 @@ def run_plan_then_patch(
     (log_dir / f"{name}.patch.response.md").write_text(patch_response, encoding="utf-8")
 
     apply_model_response(host_repo_dir, patch_response, logger)
-    return capture_patch_on_host(host_repo_dir, logger, base_commit=instance.get("base_commit"))
+    return capture_patch_on_host(
+        host_repo_dir,
+        logger,
+        base_commit=instance.get("base_commit"),
+        test_patch_paths=paths_from_patch(instance.get("test_patch", "") or ""),
+    )
 
 
 def run_cmd(
@@ -2196,6 +2214,7 @@ def capture_patch_on_host(
     repo_dir: Path,
     logger: logging.Logger,
     base_commit: str | None = None,
+    test_patch_paths: set[str] | None = None,
 ) -> str:
     """Capture the git diff on the host repo.
 
@@ -2203,8 +2222,10 @@ def capture_patch_on_host(
     new files so that created files (e.g., test fixtures) are included in the
     captured patch.  Build artifacts are limited because the repo is reset and
     cleaned before each instance run, and ``clean_captured_diff`` strips harness
-    files and excluded prefixes.
+    files and excluded prefixes.  Any path in ``test_patch_paths`` (the official
+    benchmark test patch) is excluded from the captured diff.
     """
+    excluded = test_patch_paths or set()
     if base_commit:
         # Stage tracked modifications and any new untracked files so the diff
         # against base_commit includes both edits and new-file creations.
@@ -2216,7 +2237,7 @@ def capture_patch_on_host(
             logger=logger,
         )
         if proc.returncode == 0:
-            return clean_captured_diff(proc.stdout)
+            return filter_patch_excluding_paths(clean_captured_diff(proc.stdout), excluded)
         logger.warning(
             "git diff --cached against %s failed, falling back to unstaged diff: %s",
             base_commit,
@@ -2231,7 +2252,7 @@ def capture_patch_on_host(
     if proc.returncode != 0:
         logger.error("Failed to capture patch: %s", proc.stderr.strip())
         return ""
-    return clean_captured_diff(proc.stdout)
+    return filter_patch_excluding_paths(clean_captured_diff(proc.stdout), excluded)
 
 
 def _run_tdr_block(
@@ -2516,8 +2537,12 @@ def process_instance(
         )
 
         # Capture patch regardless of success, so we record partial work.
+        test_patch_paths = paths_from_patch(instance.get("test_patch", "") or "")
         patch = capture_patch_on_host(
-            host_repo_dir, logger, base_commit=instance.get("base_commit")
+            host_repo_dir,
+            logger,
+            base_commit=instance.get("base_commit"),
+            test_patch_paths=test_patch_paths,
         )
 
         # Verify the captured patch applies cleanly on the base commit.  A
@@ -2560,7 +2585,10 @@ def process_instance(
                     post_edit_test_command=test_cmd,
                 )
                 patch = capture_patch_on_host(
-                    host_repo_dir, logger, base_commit=instance.get("base_commit")
+                    host_repo_dir,
+                    logger,
+                    base_commit=instance.get("base_commit"),
+                    test_patch_paths=test_patch_paths,
                 )
                 save_prediction(output_dir, instance_id, patch, logger)
 
@@ -2706,7 +2734,10 @@ def process_instance(
                     post_edit_test_command=test_cmd,
                 )
                 patch = capture_patch_on_host(
-                    host_repo_dir, logger, base_commit=instance.get("base_commit")
+                    host_repo_dir,
+                    logger,
+                    base_commit=instance.get("base_commit"),
+                    test_patch_paths=test_patch_paths,
                 )
                 save_prediction(output_dir, instance_id, patch, logger)
 
