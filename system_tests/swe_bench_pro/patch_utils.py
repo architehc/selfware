@@ -109,16 +109,77 @@ def _strip_line_number_gutter(text: str) -> str:
 
     Small models often copy the gutter back into SEARCH blocks; stripping it
     makes those blocks apply without requiring a second API call.
+
+    Recognizes gutters like ``123 |``, ``123:``, ``123.`` and ``123 ``.
     """
     lines = text.splitlines()
     stripped: list[str] = []
     for line in lines:
         # Match a left gutter of the form "  123 | " (leading spaces, digits,
-        # optional colon, then a pipe/space separator).
-        if re.match(r"^\s*\d+[:\.]?\s*[│|]\s", line):
-            line = re.sub(r"^\s*\d+[:\.]?\s*[│|]\s", "", line, count=1)
+        # optional colon/dot, optional pipe, then a space separator).
+        if re.match(r"^\s*\d+[:\.]?\s*[│|]?\s", line):
+            line = re.sub(r"^\s*\d+[:\.]?\s*[│|]?\s", "", line, count=1)
         stripped.append(line)
     return "\n".join(stripped)
+
+
+def _normalize_edit_response(text: str) -> str:
+    """Canonicalize sloppy SEARCH/REPLACE edit blocks before parsing.
+
+    Normalization rules:
+
+    * Convert CRLF to LF and trim trailing whitespace on every line.
+    * Canonicalize file headers (``### file:``, ``### Path:``,
+      ``### FILE``, ...) to ``### FILE:``.
+    * Canonicalize markers to ``<<<<<<< SEARCH``, ``=======`` and
+      ``>>>>>>> REPLACE`` (case-insensitive).
+    * Strip line-number gutters from lines inside SEARCH/REPLACE blocks.
+    """
+    text = text.replace("\r\n", "\n")
+    lines = text.splitlines()
+    out: list[str] = []
+    in_block = False
+
+    for raw_line in lines:
+        line = raw_line.rstrip()
+
+        # Canonicalize file headers before entering a block.
+        if not in_block and re.match(r"^###\s*(?:FILE|PATH)\b", line, re.IGNORECASE):
+            line = re.sub(
+                r"^###\s*(?:FILE|PATH)\b\s*:?",
+                "### FILE:",
+                line,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            out.append(line)
+            continue
+
+        # Start of a SEARCH/REPLACE block.
+        if re.match(r"^<<<<<<<\s*(?:SEARCH)?\s*$", line, re.IGNORECASE):
+            in_block = True
+            out.append("<<<<<<< SEARCH")
+            continue
+
+        if not in_block:
+            out.append(line)
+            continue
+
+        # Inside a SEARCH/REPLACE block.
+        if re.match(r"^=======\s*$", line):
+            out.append("=======")
+            continue
+
+        if re.match(r"^>>>>>>>\s*(?:REPLACE)?\s*$", line, re.IGNORECASE):
+            in_block = False
+            out.append(">>>>>>> REPLACE")
+            continue
+
+        # Strip common line-number gutters from code lines.
+        line = _strip_line_number_gutter(line)
+        out.append(line)
+
+    return "\n".join(out)
 
 
 def _normalize_blank_lines(lines: list[str]) -> list[str]:
@@ -209,6 +270,9 @@ def apply_edits_with_missing(
     # Strip markdown code fences so wrapped blocks still parse.
     cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
     cleaned = re.sub(r"\n```\s*$", "", cleaned)
+
+    # Tolerate sloppy formatting from small models before parsing the blocks.
+    cleaned = _normalize_edit_response(cleaned)
 
     # Allow empty SEARCH/REPLACE blocks even when the model omits the blank
     # line between the marker and the next delimiter.  The optional \n? after
@@ -310,6 +374,7 @@ def verify_edits_apply(repo_dir: Path, response: str, logger: Any) -> bool:
     """
     cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
     cleaned = re.sub(r"\n```\s*$", "", cleaned)
+    cleaned = _normalize_edit_response(cleaned)
     pattern = re.compile(
         r"###\s*FILE:\s*[`<\"]?(?P<path>.+?)[`\"]?\s*\n"
         r"<<<<<<<\s*(?:SEARCH)?\s*\n"
@@ -321,7 +386,7 @@ def verify_edits_apply(repo_dir: Path, response: str, logger: Any) -> bool:
     )
     for m in pattern.finditer(cleaned):
         rel_path = m.group("path").strip()
-        old = _strip_line_number_gutter(m.group("old")).replace("\r\n", "\n")
+        old = m.group("old").replace("\r\n", "\n")
         path = repo_dir / rel_path
         if not path.exists():
             # Empty SEARCH block means the model wants to create the file.

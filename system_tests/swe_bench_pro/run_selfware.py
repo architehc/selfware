@@ -102,6 +102,25 @@ PREDICTIONS_LOCK = threading.Lock()
 _PODMAN_GLOBAL_OPTS: list[str] = ["--storage-opt", "ignore_chown_errors=true"]
 
 
+class TristateAction(argparse.Action):
+    """Action that supports --flag, --no-flag, --flag=true and --flag=false.
+
+    The default remains ``None`` so the caller can distinguish "not specified"
+    from an explicit ``True`` or ``False``.
+    """
+
+    def __init__(self, option_strings, dest, default=None, **kwargs):
+        super().__init__(option_strings, dest, default=default, nargs="?", const=True, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if option_string is not None and option_string.startswith("--no-"):
+            setattr(namespace, self.dest, False)
+        elif values is None:
+            setattr(namespace, self.dest, True)
+        else:
+            setattr(namespace, self.dest, str(values).lower() in ("true", "1", "yes", "on"))
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run Selfware on SWE-bench Pro instances and produce predictions."
@@ -223,13 +242,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--agentless",
-        action="store_true",
-        help="Skip the Selfware agent loop and ask the model directly for a patch. Useful for cheap/fragile models.",
+        "--no-agentless",
+        action=TristateAction,
+        default=None,
+        help="Skip the Selfware agent loop and ask the model directly for a patch. Useful for cheap/fragile models. "
+             "Use --no-agentless or --agentless=false to force the multi-turn tool loop even when the model would otherwise default to agentless.",
     )
     parser.add_argument(
         "--auto-agentless",
-        action="store_true",
-        help="Automatically enable --agentless for small models that are marked not recommended in the config registry.",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Automatically enable --agentless for small models that are marked not recommended in the config registry. "
+             "This is now the default behavior; use --no-agentless to override it for a specific run.",
     )
     parser.add_argument(
         "--adaptive",
@@ -1118,25 +1142,42 @@ def run_diff_fallback(
 
 
 def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bool:
-    """Return True when the agent loop should be skipped entirely."""
-    if args.agentless:
+    """Return True when the agent loop should be skipped entirely.
+
+    Default routing sends small/fragile and not-explicitly-recommended models
+    down the direct SEARCH/REPLACE patch path.  A model is considered strong
+    enough for the multi-turn XML tool loop only when its config metadata
+    explicitly sets ``recommended=True`` and it is not a small-tier model.
+
+    Explicit flags always win:
+      * ``--agentless`` / ``--agentless=true`` forces agentless on.
+      * ``--no-agentless`` / ``--agentless=false`` forces the tool loop on.
+    """
+    # Explicit opt-in / opt-out always wins.
+    if args.agentless is True:
         return True
+    if args.agentless is False:
+        return False
 
     metadata = config.get("metadata", {}) or {}
     if metadata.get("agentless_default"):
         return True
 
-    if args.auto_agentless:
-        # Infer capability from the model id and config metadata so cheap
-        # small-parameter models default to the direct patch path.
-        model_id = config.get("model", "")
-        if infer_capability_tier(model_id, config) == "small":
-            return True
-        # Treat explicitly not-recommended models as fragile and bypass the
-        # multi-turn agent loop.
-        if metadata.get("recommended") is False:
-            return True
-    return False
+    model_id = config.get("model", "")
+    tier = infer_capability_tier(model_id, config)
+    recommended = metadata.get("recommended")
+
+    # Small runs (<=10 instances) with small/fragile models should not waste
+    # iterations on the multi-turn tool loop.
+    sample_size = getattr(args, "sample_size", None)
+    if sample_size is not None and sample_size <= 10 and tier == "small":
+        return True
+
+    # Treat anything not explicitly recommended-and-strong as fragile.
+    if recommended is True and tier != "small":
+        return False
+
+    return True
 
 
 def _reset_repo(host_repo_dir: Path, base_commit: str, logger: logging.Logger) -> bool:
@@ -1889,6 +1930,10 @@ def select_instances(
 
     if args.resume:
         rows = [r for r in rows if r["instance_id"] not in existing]
+
+    # Stash the selected sample size so process_instance can decide whether to
+    # default fragile models to the agentless path.
+    args.sample_size = len(rows)
 
     logger.info(
         "Selected %s instance(s) to process (sample_file=%s, max_tasks=%s, resume=%s)",

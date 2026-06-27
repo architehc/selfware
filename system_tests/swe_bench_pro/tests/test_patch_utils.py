@@ -227,3 +227,137 @@ def test_filter_patch_drops_docs_and_tests_even_when_in_official_fix_paths():
     assert "src/widget.py" in result
     assert "README.md" not in result
     assert "test_widget.py" not in result
+
+
+# -----------------------------------------------------------------------------
+# SEARCH/REPLACE edit-block normalization tests
+# -----------------------------------------------------------------------------
+
+from patch_utils import (
+    _normalize_edit_response,
+    _strip_line_number_gutter,
+    apply_edits,
+)
+
+
+def test_strip_line_number_gutter_strips_space_only_gutter():
+    assert _strip_line_number_gutter("  1  hello") == "hello"
+    assert _strip_line_number_gutter("12 hello") == "hello"
+    assert _strip_line_number_gutter("123 | still here") == "still here"
+    assert _strip_line_number_gutter("4: content") == "content"
+    assert _strip_line_number_gutter("5. content") == "content"
+
+
+def test_normalize_edit_response_canonicalizes_headers_and_markers():
+    raw = (
+        "### file: foo.py\n"
+        "<<<<<<< search\n"
+        "old\n"
+        "=======\n"
+        "new\n"
+        ">>>>>>> replace\n"
+    )
+    normalized = _normalize_edit_response(raw)
+    assert "### FILE: foo.py" in normalized
+    assert "<<<<<<< SEARCH" in normalized
+    assert "=======\n" in normalized
+    assert ">>>>>>> REPLACE" in normalized
+    assert "<<<<<<< search" not in normalized
+    assert ">>>>>>> replace" not in normalized
+
+
+def test_normalize_edit_response_handles_path_header_variants():
+    for header, path in (
+        ("### Path: bar.py", "bar.py"),
+        ("### PATH bar.py", "bar.py"),
+        ("### file baz.py", "baz.py"),
+    ):
+        normalized = _normalize_edit_response(f"{header}\n<<<<<<< SEARCH\n\n=======\n\n>>>>>>> REPLACE\n")
+        assert normalized.startswith("### FILE:") and path in normalized, header
+
+
+def test_normalize_edit_response_strips_gutters_inside_blocks_only():
+    raw = (
+        "### FILE: x.py\n"
+        "<<<<<<< SEARCH\n"
+        " 1 | keep\n"
+        "2: indent\n"
+        "3. stuff\n"
+        "=======\n"
+        " 1 | new\n"
+        ">>>>>>> REPLACE\n"
+    )
+    normalized = _normalize_edit_response(raw)
+    assert " 1 | keep" not in normalized
+    assert "keep" in normalized
+    assert "indent" in normalized
+    assert "stuff" in normalized
+    assert "new" in normalized
+
+
+def test_apply_edits_lowercase_search_replace_markers(tmp_path):
+    target = tmp_path / "file.py"
+    target.write_text("def foo():\n    return 1\n")
+    response = (
+        "### file: file.py\n"
+        "<<<<<<< search\n"
+        "def foo():\n"
+        "    return 1\n"
+        "=======\n"
+        "def foo():\n"
+        "    return 2\n"
+        ">>>>>>> replace\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text() == "def foo():\n    return 2\n"
+
+
+def test_apply_edits_numbered_line_gutters(tmp_path):
+    target = tmp_path / "file.py"
+    target.write_text("def foo():\n    return 1\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        " 1 | def foo():\n"
+        " 2 |     return 1\n"
+        "=======\n"
+        " 1 | def foo():\n"
+        " 2 |     return 2\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text() == "def foo():\n    return 2\n"
+
+
+def test_apply_edits_mixed_file_header_variants(tmp_path):
+    target = tmp_path / "file.py"
+    for header in ("### file: file.py", "### FILE file.py", "### Path: file.py", "### path file.py"):
+        target.write_text("x = 1\n")
+        response = (
+            f"{header}\n"
+            "<<<<<<< SEARCH\n"
+            "x = 1\n"
+            "=======\n"
+            "x = 2\n"
+            ">>>>>>> REPLACE\n"
+        )
+        assert apply_edits(tmp_path, response, None) is True, header
+        assert target.read_text() == "x = 2\n", header
+
+
+def test_apply_edits_only_applies_after_normalization(tmp_path):
+    """A block with non-canonical headers, gutters, trailing spaces and CRLF."""
+    target = tmp_path / "file.py"
+    target.write_text("def foo():\n    return 1\n")
+    response = (
+        "### Path: file.py\r\n"
+        "<<<<<<< search\r\n"
+        " 1 | def foo():   \r\n"
+        " 2 |     return 1\r\n"
+        "=======\r\n"
+        " 1 | def foo():\r\n"
+        " 2 |     return 2\r\n"
+        ">>>>>>> replace\r\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text() == "def foo():\n    return 2\n"
