@@ -40,7 +40,6 @@ def parse_summary(summary_path: Path):
         m = re.search(r"Overall passed instances:\s*\*\*(\d+)/(\d+)\*\*", line)
         if m:
             result["passed"] = int(m.group(1))
-            result["pass_rate"] = result["passed"] / int(m.group(2)) if int(m.group(2)) else 0.0
         m = re.search(r"Fail-to-pass:\s*\*\*(\d+)/(\d+)\*\*", line)
         if m:
             result["fail_to_pass"] = (int(m.group(1)), int(m.group(2)))
@@ -48,6 +47,14 @@ def parse_summary(summary_path: Path):
         if m:
             result["pass_to_pass"] = (int(m.group(1)), int(m.group(2)))
     return result
+
+
+def compute_conservative_pass_rate(result: dict) -> float:
+    """Compute pass rate over total instances, counting errors as failed."""
+    total = result.get("total", 0)
+    if total == 0:
+        return 0.0
+    return result.get("passed", 0) / total
 
 
 def load_pricing(registry_path: Path):
@@ -134,6 +141,7 @@ def collect_results(base_dir: Path, pricing: dict):
         }
         if summary.exists():
             s = parse_summary(summary)
+            s["pass_rate"] = compute_conservative_pass_rate(s)
             row.update({
                 "completed": s["completed"],
                 "passed": s["passed"],
@@ -141,7 +149,7 @@ def collect_results(base_dir: Path, pricing: dict):
                 "fail_to_pass": s["fail_to_pass"],
                 "pass_to_pass": s["pass_to_pass"],
             })
-            row["estimated_cost_usd"] = estimate_cost(model, s["completed"], pricing)
+            row["estimated_cost_usd"] = estimate_cost(model, s["total"], pricing)
         rows.append(row)
     return rows
 
@@ -177,8 +185,8 @@ def main():
     md_path = base_dir / "benchmark_leaderboard.md"
     lines = ["# Selfware SWE-bench Pro Benchmark Leaderboard\n\n"]
     lines.append(f"*Generated: {timestamp}*\n\n")
-    lines.append("| Rank | Model | Sample | Pass | Completed | Pass Rate | $/instance | Speed (inst/hr) |\n")
-    lines.append("|------|-------|--------|------|-----------|------------|------------|------------------|\n")
+    lines.append("| Rank | Model | Sample | Pass | Completed | Pass Rate (total) | $/instance | Speed (inst/hr) |\n")
+    lines.append("|------|-------|--------|------|-----------|-------------------|------------|------------------|\n")
     for i, r in enumerate(rows, 1):
         rate = f"{r['pass_rate']:.1%}" if r["pass_rate"] is not None else "N/A"
         comp = r["completed"] if r["completed"] is not None else r["predictions"]

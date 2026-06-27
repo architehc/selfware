@@ -318,6 +318,16 @@ def evaluate_instance(
         "error": None,
     }
 
+    # Always record the expected test counts so errored instances can be counted
+    # as failed in headline metrics instead of disappearing from denominators.
+    fail_to_pass = _load_list_field(instance.get("fail_to_pass", []))
+    pass_to_pass = _load_list_field(instance.get("pass_to_pass", []))
+    result["fail_to_pass_total"] = len(fail_to_pass)
+    result["fail_to_pass_passed"] = 0
+    result["pass_to_pass_total"] = len(pass_to_pass)
+    result["pass_to_pass_passed"] = 0
+    result["overall_pass"] = False
+
     # Short-circuit empty patches on the host so we do not waste time pulling
     # images and starting containers for predictions that cannot possibly pass.
     if _is_patch_empty(prediction.get("patch", "")):
@@ -456,23 +466,34 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
     completed = [r for r in results if r.get("error") is None]
     overall_passed = sum(1 for r in completed if r.get("overall_pass"))
 
-    fail_tp_passed = sum(r.get("fail_to_pass_passed", 0) for r in completed)
-    fail_tp_total = sum(r.get("fail_to_pass_total", 0) for r in completed)
-    pass_tp_passed = sum(r.get("pass_to_pass_passed", 0) for r in completed)
-    pass_tp_total = sum(r.get("pass_to_pass_total", 0) for r in completed)
+    fail_tp_passed = sum(r.get("fail_to_pass_passed", 0) for r in results)
+    fail_tp_total = sum(r.get("fail_to_pass_total", 0) for r in results)
+    pass_tp_passed = sum(r.get("pass_to_pass_passed", 0) for r in results)
+    pass_tp_total = sum(r.get("pass_to_pass_total", 0) for r in results)
+
+    overall_pass_rate_completed = overall_passed / len(completed) if completed else 0.0
+    fail_tp_rate_completed = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
+    pass_tp_rate_completed = pass_tp_passed / pass_tp_total if pass_tp_total else 0.0
+
+    overall_pass_rate_total = overall_passed / total if total else 0.0
+    fail_tp_rate_total = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
+    pass_tp_rate_total = pass_tp_passed / pass_tp_total if pass_tp_total else 0.0
 
     report = {
         "total_instances": total,
         "completed_instances": len(completed),
         "errored_instances": total - len(completed),
         "overall_passed_instances": overall_passed,
-        "overall_pass_rate": overall_passed / len(completed) if completed else 0.0,
+        "overall_pass_rate": overall_pass_rate_completed,
+        "overall_pass_rate_total": overall_pass_rate_total,
         "fail_to_pass_passed": fail_tp_passed,
         "fail_to_pass_total": fail_tp_total,
-        "fail_to_pass_rate": fail_tp_passed / fail_tp_total if fail_tp_total else 0.0,
+        "fail_to_pass_rate": fail_tp_rate_completed,
+        "fail_to_pass_rate_total": fail_tp_rate_total,
         "pass_to_pass_passed": pass_tp_passed,
         "pass_to_pass_total": pass_tp_total,
-        "pass_to_pass_rate": pass_tp_passed / pass_tp_total if pass_tp_total else 0.0,
+        "pass_to_pass_rate": pass_tp_rate_completed,
+        "pass_to_pass_rate_total": pass_tp_rate_total,
         "per_instance": results,
     }
 
@@ -486,12 +507,18 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"- Total instances: **{total}**",
         f"- Completed: **{len(completed)}**",
         f"- Errored: **{total - len(completed)}**",
-        f"- Overall passed instances: **{overall_passed}/{len(completed)}** "
+        f"- Overall passed instances (completed only): **{overall_passed}/{len(completed)}** "
         f"({report['overall_pass_rate']:.2%})",
-        f"- Fail-to-pass: **{fail_tp_passed}/{fail_tp_total}** "
+        f"- Overall passed instances (total, errors counted as failed): **{overall_passed}/{total}** "
+        f"({report['overall_pass_rate_total']:.2%})",
+        f"- Fail-to-pass (completed only): **{fail_tp_passed}/{fail_tp_total}** "
         f"({report['fail_to_pass_rate']:.2%})",
-        f"- Pass-to-pass: **{pass_tp_passed}/{pass_tp_total}** "
+        f"- Fail-to-pass (total): **{fail_tp_passed}/{fail_tp_total}** "
+        f"({report['fail_to_pass_rate_total']:.2%})",
+        f"- Pass-to-pass (completed only): **{pass_tp_passed}/{pass_tp_total}** "
         f"({report['pass_to_pass_rate']:.2%})",
+        f"- Pass-to-pass (total): **{pass_tp_passed}/{pass_tp_total}** "
+        f"({report['pass_to_pass_rate_total']:.2%})",
         "",
         "| Instance | Fail-to-pass | Pass-to-pass | Overall |",
         "|----------|--------------|--------------|---------|",
