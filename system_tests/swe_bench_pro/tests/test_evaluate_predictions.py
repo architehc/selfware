@@ -68,3 +68,19 @@ def test_is_patch_empty():
 def test_entryscript_redirects_run_stderr():
     script = _build_entryscript(_minimal_instance())
     assert "2> /workspace/stderr.log" in script
+
+
+def test_entryscript_passes_tests_as_separate_args():
+    instance = _minimal_instance()
+    instance["selected_test_files_to_run"] = ["tests/test_foo.py", "tests/test_bar.py"]
+    script = _build_entryscript(instance)
+    # Selected targets must be separate shell arguments, not a single comma-joined blob.
+    assert "tests/test_foo.py,tests/test_bar.py" not in script
+    assert "bash /workspace/run_script.sh tests/test_foo.py tests/test_bar.py" in script
+
+
+def test_entryscript_quotes_test_args_with_spaces():
+    instance = _minimal_instance()
+    instance["selected_test_files_to_run"] = ["test file.py"]
+    script = _build_entryscript(instance)
+    assert "bash /workspace/run_script.sh 'test file.py'" in script

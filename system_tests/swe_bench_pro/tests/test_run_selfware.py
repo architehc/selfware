@@ -1,15 +1,17 @@
 """Tests for run_selfware harness routing decisions."""
 
 import argparse
+import json
 import os
 import sys
+from pathlib import Path
 
 # Make sibling harness modules importable when running pytest directly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import pytest
 
-from run_selfware import should_use_agentless
+from run_selfware import load_existing_predictions, should_use_agentless
 
 
 def _args(agentless=None, sample_size=1, auto_agentless=None):
@@ -99,3 +101,19 @@ def test_should_use_agentless_agentless_default_metadata():
         "metadata": {"agentless_default": True, "recommended": True},
     }
     assert should_use_agentless(_args(sample_size=50), config) is True
+
+
+def test_load_existing_predictions_skips_empty_patches():
+    """Empty predictions are not treated as completed runs on --resume."""
+    output_dir = Path(__file__).parent / "_tmp_predictions"
+    output_dir.mkdir(exist_ok=True)
+    predictions = output_dir / "predictions.jsonl"
+    try:
+        with open(predictions, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"instance_id": "has_patch", "patch": "diff --git"}) + "\n")
+            f.write(json.dumps({"instance_id": "empty_patch", "patch": ""}) + "\n")
+            f.write(json.dumps({"instance_id": "whitespace_patch", "patch": "   \n"}) + "\n")
+        assert load_existing_predictions(output_dir) == {"has_patch"}
+    finally:
+        predictions.unlink(missing_ok=True)
+        output_dir.rmdir()

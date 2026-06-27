@@ -69,13 +69,41 @@ NON_SOURCE_EXTENSIONS: frozenset[str] = frozenset({
     ".sum",
 })
 
-def _format_test_command(language: str, tests: list[str]) -> str:
+def _repo_is(repo: str, target: str) -> bool:
+    """Return True when ``repo`` matches ``owner/name`` or ``owner__name``."""
+    if not repo:
+        return False
+    normalized = repo.replace("__", "/").lower()
+    return normalized == target.lower() or normalized.endswith(f"/{target.lower()}")
+
+
+def _format_test_command(
+    language: str,
+    tests: list[str],
+    repo: str = "",
+) -> str:
     """Return a sensible test command for the given language and test targets.
 
     ``tests`` comes from ``selected_test_files_to_run``.  For Go it contains
     test function names, so we build a ``-run`` regex.  For Python/JS it
     usually contains file paths.
+
+    Some repos in SWE-bench Pro need repo-specific invocations, so ``repo``
+    is used to special-case those.
     """
+    language = (language or "").lower()
+
+    if _repo_is(repo, "NodeBB/NodeBB"):
+        if not tests:
+            return "npx mocha --timeout 30000"
+        return f"npx mocha --timeout 30000 {' '.join(tests)}"
+
+    if _repo_is(repo, "qutebrowser/qutebrowser"):
+        base = "QT_QPA_PLATFORM=offscreen dbus-run-session -- python -m pytest"
+        if not tests:
+            return base
+        return f"{base} {' '.join(tests)}"
+
     if not tests:
         if language == "python":
             return "python -m pytest"
@@ -90,7 +118,8 @@ def _format_test_command(language: str, tests: list[str]) -> str:
 
     if language == "go":
         # ``tests`` are test names; collapse to top-level test roots so the
-        # regex does not become enormous.
+        # regex does not become enormous, then join with ``|`` to build a
+        # proper ``-run`` regex.  Never comma-join the selectors.
         roots: list[str] = []
         seen_roots: set[str] = set()
         for t in tests:
@@ -1580,7 +1609,7 @@ def build_agentless_prompt(
     tests = _load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = _load_list_field(instance.get("fail_to_pass", []))
 
-    test_cmd = _format_test_command(language, tests)
+    test_cmd = _format_test_command(language, tests, repo=repo)
 
     search_text = problem
     if requirements:
@@ -1924,7 +1953,7 @@ def build_small_model_prompt(
     tests = _load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = _load_list_field(instance.get("fail_to_pass", []))
 
-    test_cmd = _format_test_command(language, tests)
+    test_cmd = _format_test_command(language, tests, repo=repo)
 
     tree = compact_directory_tree(
         repo_path,

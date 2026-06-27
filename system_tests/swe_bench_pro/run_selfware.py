@@ -31,8 +31,11 @@ from pathlib import Path
 from typing import Any
 
 from harness_recovery import (
+    AGENTLESS_MODE_KEY,
+    EMPTY_PATCH,
     JSON_PARSE_ERROR,
     MAX_ITERATIONS,
+    _is_patch_empty,
     build_diff_fallback_prompt,
     build_recovery_prompt,
     classify_failure,
@@ -767,7 +770,8 @@ def build_prompt(
     fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
     pass_to_pass = load_list_field(instance.get("pass_to_pass", []))
     language = (instance.get("repo_language") or "").lower()
-    test_cmd = _format_test_command(language, tests)
+    repo = instance.get("repo", "")
+    test_cmd = _format_test_command(language, tests, repo=repo)
     target_api = _format_target_api_section(instance.get("interface", "") or "")
     test_oracle = _build_focused_test_oracle(instance.get("test_patch", "") or "")
 
@@ -1302,6 +1306,8 @@ def run_agentless(
     logger: logging.Logger,
     name: str,
     few_shot_examples: str | None = None,
+    system_message: str | None = None,
+    prompt_suffix: str | None = None,
 ) -> str:
     """Run the direct one-shot patch path and return the captured git diff.
 
@@ -1309,6 +1315,10 @@ def run_agentless(
     a stricter prompt that includes exact file contents. If the retry also fails
     and ``args.diff_fallback`` is set, reset the repo again and try a one-shot
     unified-diff fallback.
+
+    Recovery directives (``system_message`` / ``prompt_suffix``) are applied to
+    each agentless prompt so that SEARCH/REPLACE recovery mode can be reused
+    from the main harness recovery loop.
     """
     instance_id = instance["instance_id"]
     base_commit = instance.get("base_commit", "")
@@ -1319,6 +1329,12 @@ def run_agentless(
         suffix: str,
         allow_retry: bool,
     ) -> tuple[str, bool, set[str]]:
+        if system_message or prompt_suffix:
+            prompt = build_recovery_prompt(
+                prompt,
+                system_message or "",
+                prompt_suffix or "",
+            )
         (log_dir / f"{name}.agentless{suffix}.prompt.txt").write_text(
             prompt, encoding="utf-8"
         )
@@ -1889,7 +1905,10 @@ def load_existing_predictions(output_dir: Path) -> set[str]:
             if not line:
                 continue
             try:
-                done.add(json.loads(line)["instance_id"])
+                rec = json.loads(line)
+                # Empty predictions are not real results; resume should retry them.
+                if rec.get("patch", "").strip():
+                    done.add(rec["instance_id"])
             except (json.JSONDecodeError, KeyError):
                 continue
     return done
@@ -2436,12 +2455,13 @@ def process_instance(
             return False
 
         language = instance.get("repo_language", "")
+        repo = instance.get("repo", "")
         selected_tests = (
             instance.get("selected_test_files_to_run", [])
             or instance.get("fail_to_pass", [])
             or []
         )
-        test_cmd = _format_test_command(language, selected_tests)
+        test_cmd = _format_test_command(language, selected_tests, repo=repo)
 
         # Allow absolute /app/... paths in selfware's safety check when running
         # on the extracted host repo (the binary maps /app to the host repo).
@@ -2689,6 +2709,8 @@ def process_instance(
         if (not success or not patch.strip()) and args.retry_failures:
             stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
             failure_class = classify_failure(stderr_path)
+            if _is_patch_empty(patch):
+                failure_class = EMPTY_PATCH
             logger.warning(
                 "Classified failure for %s as '%s'",
                 instance_id,
@@ -2752,40 +2774,62 @@ def process_instance(
                     log_dir,
                     f"{name}_attempt{attempt}",
                 )
-                recovery_prompt = build_recovery_prompt(
-                    prompt_text,
-                    system_message,
-                    prompt_suffix,
-                )
-                (log_dir / f"{name}_attempt{attempt}.prompt.txt").write_text(
-                    recovery_prompt, encoding="utf-8"
-                )
-                logger.info(
-                    "Wrote recovery config for %s attempt %s: %s",
-                    instance_id,
-                    attempt,
-                    recovery_path,
-                )
 
-                success = run_selfware_on_host(
-                    instance_id,
-                    host_repo_dir,
-                    recovery_path,
-                    recovery_prompt,
-                    args.timeout,
-                    binary_path,
-                    log_dir,
-                    output_dir,
-                    logger,
-                    few_shot_examples=few_shot_examples,
-                    post_edit_test_command=test_cmd,
-                )
-                patch = capture_patch_on_host(
-                    host_repo_dir,
-                    logger,
-                    base_commit=instance.get("base_commit"),
-                    test_patch_paths=test_patch_paths,
-                )
+                if recovery_result.get(AGENTLESS_MODE_KEY):
+                    logger.info(
+                        "Switching to agentless SEARCH/REPLACE recovery for %s attempt %s",
+                        instance_id,
+                        attempt,
+                    )
+                    recovery_patch_config = load_config(recovery_path)
+                    patch = run_agentless(
+                        host_repo_dir,
+                        instance,
+                        recovery_patch_config,
+                        args,
+                        log_dir,
+                        logger,
+                        f"{name}_attempt{attempt}",
+                        few_shot_examples=few_shot_examples,
+                        system_message=system_message,
+                        prompt_suffix=prompt_suffix,
+                    )
+                    success = bool(patch.strip())
+                else:
+                    recovery_prompt = build_recovery_prompt(
+                        prompt_text,
+                        system_message,
+                        prompt_suffix,
+                    )
+                    (log_dir / f"{name}_attempt{attempt}.prompt.txt").write_text(
+                        recovery_prompt, encoding="utf-8"
+                    )
+                    logger.info(
+                        "Wrote recovery config for %s attempt %s: %s",
+                        instance_id,
+                        attempt,
+                        recovery_path,
+                    )
+
+                    success = run_selfware_on_host(
+                        instance_id,
+                        host_repo_dir,
+                        recovery_path,
+                        recovery_prompt,
+                        args.timeout,
+                        binary_path,
+                        log_dir,
+                        output_dir,
+                        logger,
+                        few_shot_examples=few_shot_examples,
+                        post_edit_test_command=test_cmd,
+                    )
+                    patch = capture_patch_on_host(
+                        host_repo_dir,
+                        logger,
+                        base_commit=instance.get("base_commit"),
+                        test_patch_paths=test_patch_paths,
+                    )
                 save_prediction(output_dir, instance_id, patch, logger)
 
                 if success and patch.strip():
@@ -2794,9 +2838,13 @@ def process_instance(
                     )
                     break
 
-                # Re-classify from the latest stderr log for the next attempt.
-                stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
-                failure_class = classify_failure(stderr_path)
+                # Re-classify for the next attempt. If the patch is still empty,
+                # keep EMPTY_PATCH so we keep trying the agentless recovery path.
+                if _is_patch_empty(patch):
+                    failure_class = EMPTY_PATCH
+                else:
+                    stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
+                    failure_class = classify_failure(stderr_path)
                 logger.warning(
                     "Re-classified failure for %s as '%s' after attempt %s",
                     instance_id,

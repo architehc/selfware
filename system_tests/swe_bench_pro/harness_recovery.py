@@ -29,6 +29,7 @@ REPETITION_LOOP = "repetition_loop"
 HALLUCINATED_TOOL = "hallucinated_tool"
 TIMEOUT = "timeout"
 UNKNOWN = "unknown"
+EMPTY_PATCH = "empty_patch"
 
 # Recovery mode label used by the harness after retries are exhausted.
 DIFF_FALLBACK = "diff_fallback"
@@ -38,13 +39,19 @@ DIFF_FALLBACK = "diff_fallback"
 # not understand them.
 SYSTEM_MESSAGE_KEY = "__recovery_system_message"
 PROMPT_SUFFIX_KEY = "__recovery_prompt_suffix"
+AGENTLESS_MODE_KEY = "__recovery_agentless"
+
+
+def _is_patch_empty(patch: str | None) -> bool:
+    """Return True when a captured patch contains no actual diff content."""
+    return not (patch or "").strip()
 
 
 def classify_failure(stderr_path: str | Path) -> str:
     """Classify the terminal failure mode from a selfware stderr log.
 
     Returns one of:
-      max_iterations, no_edit, json_parse_error, repetition_loop,
+      max_iterations, no_edit, empty_patch, json_parse_error, repetition_loop,
       hallucinated_tool, timeout, unknown.
     """
     text = _read_log(stderr_path)
@@ -56,6 +63,8 @@ def classify_failure(stderr_path: str | Path) -> str:
     # Order matters: terminal / unambiguous patterns first.
     if _has(text, r"Agent failed:\s*Max iterations exceeded"):
         return MAX_ITERATIONS
+    if _has(text, r"empty patch|no source changes|produced no patch"):
+        return EMPTY_PATCH
     if _has(text, r"Agent reached step \d+ without editing any file"):
         return NO_EDIT
     if _has(text, r"Failed to parse response JSON") or _has(
@@ -177,6 +186,31 @@ def escalation_config(
             "Do not use computer_window or any window-related tool. "
             "Only use the tools listed in the prompt: file_read, file_edit/file_write, "
             "shell_exec, cargo_check, directory_tree, and think."
+        )
+
+    elif failure_class == EMPTY_PATCH:
+        # The previous attempt produced no diff. Bypass the multi-turn agent
+        # loop and force a direct SEARCH/REPLACE response.
+        config["temperature"] = max(0.0, config.get("temperature", 0.1) - 0.05)
+        agent["native_function_calling"] = False
+        agent["minimal_tool_catalog"] = True
+        agent["streaming"] = False
+        extras[AGENTLESS_MODE_KEY] = True
+        extras[SYSTEM_MESSAGE_KEY] = (
+            "The previous attempt produced an empty patch. "
+            "You must emit a concrete SEARCH/REPLACE block that changes at least one source file. "
+            "Do not finish until `git diff` shows a non-empty patch."
+        )
+        extras[PROMPT_SUFFIX_KEY] = (
+            "\n\nRECOVERY MODE (empty patch): the previous run produced no source changes. "
+            "Reply with one or more SEARCH/REPLACE blocks using this exact format:\n"
+            "### FILE: path/to/file.py\n"
+            "<<<<<<< SEARCH\n"
+            "old lines\n"
+            "=======\n"
+            "new lines\n"
+            ">>>>>>> REPLACE\n\n"
+            "At least one source file must change. Do not add explanations outside the block."
         )
 
     elif failure_class == TIMEOUT:

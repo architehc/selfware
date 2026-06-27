@@ -14,6 +14,7 @@ import argparse
 import ast
 import json
 import logging
+import shlex
 import sys
 import threading
 import time
@@ -144,7 +145,10 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
     tests on the unpatched base commit.
     """
     selected = _load_list_field(instance.get("selected_test_files_to_run", []))
-    test_arg = ",".join(selected)
+    # Pass selected test targets as separate shell arguments so repo-specific
+    # runners (e.g. ``go test -run``, ``npx mocha``) receive them individually
+    # instead of a single comma-joined blob.
+    test_args = " ".join(shlex.quote(t) for t in selected)
     before_cmd = instance.get("before_repo_set_cmd", "") or ""
     return (
         "#!/bin/bash\n"
@@ -207,7 +211,7 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         #
         # Run the official test script and parse the results.
         #
-        f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
+        f"bash /workspace/run_script.sh {test_args} > /workspace/stdout.log 2> /workspace/stderr.log\n"
         "run_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
         "if [ ! -f /workspace/output.json ]; then\n"
