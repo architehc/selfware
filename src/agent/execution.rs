@@ -169,6 +169,21 @@ impl Agent {
         Ok(())
     }
 
+    /// P2.1 FILES: checklist guard. Returns true when a write tool should be
+    /// blocked because no files checklist has been seen and no prior write has
+    /// succeeded. When force-mutation recovery is pending, the guard is bypassed
+    /// once and the pending flag is consumed.
+    fn check_files_guard(&mut self, has_write_tool: bool) -> bool {
+        let blocked = has_write_tool
+            && !self.has_written_any_file
+            && !self.files_checklist_seen
+            && !self.force_mutation_pending;
+        if !blocked && has_write_tool && self.force_mutation_pending {
+            self.force_mutation_pending = false;
+        }
+        blocked
+    }
+
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
     /// instead of making a new API call (used after planning phase)
@@ -704,10 +719,10 @@ impl Agent {
         }
 
         // P2.1: require a FILES: checklist before the first mutating edit.
-        if has_write_tool
-            && !self.has_written_any_file
-            && !self.files_checklist_seen
-        {
+        // Force-mutation recovery bypasses this once: after the progress guard
+        // has explicitly demanded an immediate edit, do not block the edit for
+        // lacking a FILES: line.
+        if self.check_files_guard(has_write_tool) {
             info!("Blocked premature edit: no FILES: checklist yet");
             self.messages.push(crate::api::types::Message::user(
                 "Before editing, identify which files need to change. \
@@ -1694,6 +1709,56 @@ mod tests {
             execution_mode: crate::config::ExecutionMode::Yolo,
             ..Default::default()
         }
+    }
+
+    // =========================================================================
+    // FILES: checklist guard tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_force_mutation_bypasses_files_guard() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Normal first edit without a FILES: checklist is blocked.
+        assert!(
+            agent.check_files_guard(true),
+            "first edit without checklist should be blocked"
+        );
+        // Read-only tools are never blocked by the FILES guard.
+        assert!(
+            !agent.check_files_guard(false),
+            "read-only tool should not be blocked"
+        );
+
+        // When force-mutation recovery is pending, the edit passes through.
+        agent.force_mutation_pending = true;
+        assert!(
+            !agent.check_files_guard(true),
+            "force-mutation edit should bypass FILES guard"
+        );
+        // The bypass is consumed once the edit is accepted.
+        assert!(
+            !agent.force_mutation_pending,
+            "force-mutation pending flag should be consumed"
+        );
+        // After consumption, another edit without a checklist is blocked again.
+        assert!(
+            agent.check_files_guard(true),
+            "subsequent edit should be blocked again after bypass consumed"
+        );
+
+        // A seen FILES: checklist disables the guard entirely.
+        agent.files_checklist_seen = true;
+        assert!(!agent.check_files_guard(true));
+
+        // A prior successful write also disables the guard.
+        agent.files_checklist_seen = false;
+        agent.has_written_any_file = true;
+        assert!(!agent.check_files_guard(true));
+
+        server.stop().await;
     }
 
     // =========================================================================

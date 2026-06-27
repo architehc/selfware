@@ -557,6 +557,10 @@ pub struct Agent {
     /// files it intends to change. Prevents premature edits before the model has
     /// identified the relevant source files.
     files_checklist_seen: bool,
+    /// Set to true when the progress guard has just issued a force-mutation
+    /// directive. The very next mutating edit is allowed to bypass the FILES:
+    /// checklist guard so the model can recover from a read-only loop.
+    force_mutation_pending: bool,
     /// Monotonic sequence incremented after every successful state-changing tool.
     mutation_sequence: usize,
     /// Mutation sequence number covered by the most recent successful verification.
@@ -1095,6 +1099,7 @@ To call a tool, use this EXACT XML structure:
             last_read_file: None,
             has_written_any_file: false,
             files_checklist_seen: false,
+            force_mutation_pending: false,
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,

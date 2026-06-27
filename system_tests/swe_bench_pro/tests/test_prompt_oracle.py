@@ -163,3 +163,69 @@ def test_build_prompt_includes_focused_test_oracle():
     assert "Focused test oracle" in prompt
     assert "tests/test_widget.py" in prompt
     assert "def test_widget_returns_ok" in prompt
+
+
+NODEBB_TEST_PATCH = """\
+diff --git a/test/database/keys.js b/test/database/keys.js
+--- a/test/database/keys.js
++++ b/test/database/keys.js
+@@ -10,6 +10,10 @@ describe('database keys', () => {
++
++    it('should return a key when requested', (done) => {
++        db.getObject('someKey', (err, data) => {
++            assert.strictEqual(data.foo, 'bar');
++            done();
++        });
++    });
++
+ });
+"""
+
+INTERFACE_PATHFILE_TEXT = """\
+Type: Function
+
+Name: open_url
+
+Pathfile: qutebrowser/browser/commands.py
+
+Input: url: str
+
+Description: Open the given URL.
+"""
+
+INTERFACE_LOCATION_TEXT = """\
+Type: Function
+
+Name: close_tab
+
+Location: qutebrowser/browser/commands.py
+
+Description: Close the current tab.
+"""
+
+
+def test_build_focused_test_oracle_extracts_nodebb_js_test():
+    oracle = _build_focused_test_oracle(NODEBB_TEST_PATCH)
+    assert "test/database/keys.js" in oracle
+    assert "it('should return a key when requested')" in oracle
+    assert "assert.strictEqual(data.foo, 'bar')" in oracle
+
+
+def test_parse_interface_accepts_pathfile_alias():
+    entries = _parse_interface(INTERFACE_PATHFILE_TEXT)
+    assert len(entries) == 1
+    assert entries[0]["name"] == "open_url"
+    assert entries[0]["path"] == "qutebrowser/browser/commands.py"
+
+
+def test_parse_interface_accepts_location_alias():
+    entries = _parse_interface(INTERFACE_LOCATION_TEXT)
+    assert len(entries) == 1
+    assert entries[0]["name"] == "close_tab"
+    assert entries[0]["path"] == "qutebrowser/browser/commands.py"
+
+
+def test_format_target_api_section_includes_pathfile_path():
+    section = _format_target_api_section(INTERFACE_PATHFILE_TEXT)
+    assert "open_url" in section
+    assert "qutebrowser/browser/commands.py" in section

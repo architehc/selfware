@@ -1203,6 +1203,27 @@ def _extract_source_paths_from_text(text: str, repo_path: Path) -> list[str]:
     return found
 
 
+def _is_test_file(path: str) -> bool:
+    """Return True if *path* looks like a test file.
+
+    Covers language-specific conventions (``_test.go``, ``_test.py``,
+    ``test_*.py``) as well as directory layouts such as NodeBB's
+    ``test/**/*.js`` or ``tests/**/*.js``.
+    """
+    if not path:
+        return False
+    basename = os.path.basename(path)
+    if basename.startswith("test_"):
+        return True
+    if any(
+        path.endswith(ext)
+        for ext in ("_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx")
+    ):
+        return True
+    parts = path.replace("\\", "/").split("/")
+    return "test" in parts or "tests" in parts
+
+
 def _extract_test_hints(patch_text: str, max_chars: int = 2000) -> str:
     """Extract a concise, model-readable hint block from the official test patch.
 
@@ -1226,16 +1247,24 @@ def _extract_test_hints(patch_text: str, max_chars: int = 2000) -> str:
         # Skip diff metadata lines so we do not surface index modes as hints.
         if line.startswith(("index ", "--- ", "+++ ", "@@")):
             continue
-        if current_path and current_path.endswith("_test.go"):
-            # Go test functions: func TestXxx(t *testing.T) or subtests t.Run("name").
-            m = re.search(r"func\s+(Test[A-Za-z0-9_]+)", line)
-            if m and m.group(1) not in seen_funcs:
-                seen_funcs.add(m.group(1))
-                hints.append(f"- New test: {m.group(1)} in {current_path}")
-            m = re.search(r't\.Run\("([^"]+)"', line)
-            if m and m.group(1) not in seen_funcs:
-                seen_funcs.add(m.group(1))
-                hints.append(f'- Subtest: "{m.group(1)}"')
+        if current_path and _is_test_file(current_path):
+            if current_path.endswith("_test.go"):
+                # Go test functions: func TestXxx(t *testing.T) or subtests t.Run("name").
+                m = re.search(r"func\s+(Test[A-Za-z0-9_]+)", line)
+                if m and m.group(1) not in seen_funcs:
+                    seen_funcs.add(m.group(1))
+                    hints.append(f"- New test: {m.group(1)} in {current_path}")
+                m = re.search(r't\.Run\("([^"]+)"', line)
+                if m and m.group(1) not in seen_funcs:
+                    seen_funcs.add(m.group(1))
+                    hints.append(f'- Subtest: "{m.group(1)}"')
+            elif current_path.endswith((".js", ".ts", ".tsx")):
+                # JavaScript/TypeScript test blocks: it/describe/test('name').
+                for m in re.finditer(r"\b(it|test|describe)\s*\(\s*[\"']([^\"']+)", line):
+                    name = f"{m.group(1)}('{m.group(2)}')"
+                    if name not in seen_funcs:
+                        seen_funcs.add(name)
+                        hints.append(f"- New test: {name} in {current_path}")
         # Look for quoted strings that look like error messages or assertions.
         for quote in re.findall(r'"([^"]{5,80})"', line):
             if quote not in seen_strings and any(
@@ -1280,13 +1309,9 @@ def _extract_failing_test_snippets(patch_text: str, max_chars: int = 3000) -> st
 
     snippets: list[str] = []
     for path, lines in added_by_file.items():
-        basename = os.path.basename(path)
-        if not any(
-            path.endswith(ext)
-            for ext in ("_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx")
-        ) and not basename.startswith("test_"):
+        if not _is_test_file(path):
             continue
-        is_python_test = path.endswith("_test.py") or basename.startswith("test_")
+        is_python_test = path.endswith(".py")
         funcs: list[tuple[str, str]] = []
         i = 0
         while i < len(lines):
@@ -1347,6 +1372,8 @@ def _parse_interface(interface_text: str | None) -> list[dict[str, str]]:
         return []
 
     known_keys = {"type", "name", "path", "input", "output", "description", "public_api"}
+    # Alternative labels that some instances use for the target file/path.
+    key_aliases = {"pathfile": "path", "location": "path"}
 
     def _normalize_key(key: str) -> str:
         return key.strip().lower().replace(" ", "_")
@@ -1364,14 +1391,16 @@ def _parse_interface(interface_text: str | None) -> list[dict[str, str]]:
         if ": " in stripped:
             maybe_key, _, value = stripped.partition(": ")
             maybe_key = _normalize_key(maybe_key)
-            if maybe_key in known_keys:
+            canonical_key = key_aliases.get(maybe_key)
+            if maybe_key in known_keys or canonical_key:
                 if maybe_key == "type" and current_entry:
                     entries.append(current_entry)
                     current_entry = None
                 if current_entry is None:
                     current_entry = {}
-                current_entry[maybe_key] = value.strip()
-                current_key = maybe_key
+                store_key = canonical_key or maybe_key
+                current_entry[store_key] = value.strip()
+                current_key = store_key
                 continue
 
         # Continuation line for the current key.

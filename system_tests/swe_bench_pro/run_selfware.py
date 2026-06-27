@@ -1331,12 +1331,14 @@ def run_agentless(
             # Keep any new files the model created (e.g., test fixtures) and any
             # paths touched by the official fix patch, rather than filtering them
             # out because they were not in the ranked set.
-            extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or "")) | set(
-                _changed_files_from_patch(instance.get("patch", "") or "")
+            official_fix_paths = set(_changed_files_from_patch(instance.get("patch", "") or "")) | set(
+                _new_files_from_patch(instance.get("patch", "") or "")
             )
+            extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or ""))
             patch = filter_patch_to_source_files(
                 patch,
                 extra_allowed=extra_allowed,
+                official_fix_paths=official_fix_paths,
                 test_patch_paths=test_patch_paths,
             )
             if patch.strip():

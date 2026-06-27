@@ -951,6 +951,7 @@ impl Agent {
         }
 
         if self.config.agent.read_loop_policy == crate::config::ReadLoopPolicy::ForceMutation {
+            self.force_mutation_pending = true;
             self.messages
                 .push(Message::user(self.force_mutation_directive()));
         } else {

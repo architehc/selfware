@@ -179,9 +179,12 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         # Run tests and parse results.
         #
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
-        "test_status=$?\n"
+        "run_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
-        "exit $test_status\n"
+        "if [ ! -f /workspace/output.json ]; then\n"
+        "  echo '{\"tests\": []}' > /workspace/output.json\n"
+        "fi\n"
+        "exit $run_status\n"
     )
 
 
@@ -346,19 +349,7 @@ def _run_tests_once(
         result["error"] = "failed to copy artifacts into container"
         return result
 
-    # Compile check: catch signature/cross-file errors before the full test run.
-    compile_error = _run_compile_check(
-        container, instance, logger, timeout=getattr(args, "tdr_compile_timeout", 180)
-    )
-    if compile_error:
-        logger.warning("Compile check failed for %s iteration %s", instance_id, iteration)
-        result["compile_error"] = compile_error
-        result["stderr"] = compile_error
-        result["error"] = "compile check failed"
-        # Still run the official evaluator so the parser output is available,
-        # but the compile error is already recorded for the repair prompt.
-
-    # Run the official evaluator entry script.
+    # Run the official evaluator entry script (applies the patch and runs tests).
     logger.info(
         "Running TDR test iteration %s for %s in %s (timeout=%ss)",
         iteration,
@@ -402,6 +393,28 @@ def _run_tests_once(
     stderr_text = stderr_file.read_text(encoding="utf-8", errors="ignore") if stderr_file.exists() else ""
     result["stdout"] = stdout_text
     result["stderr"] = stderr_text
+
+    # Compile check: only run when the patch was applied successfully so we
+    # validate the patched code, not the base commit.
+    patch_status_text = ""
+    if patch_apply_status.exists():
+        patch_status_text = patch_apply_status.read_text(encoding="utf-8").strip()
+    if patch_status_text == "0":
+        compile_error = _run_compile_check(
+            container, instance, logger, timeout=getattr(args, "tdr_compile_timeout", 180)
+        )
+        if compile_error:
+            logger.warning("Compile check failed for %s iteration %s", instance_id, iteration)
+            result["compile_error"] = compile_error
+            if result["error"] is None:
+                result["error"] = "compile check failed"
+    else:
+        logger.info(
+            "Skipping compile check for %s iteration %s because patch was not applied (status=%r)",
+            instance_id,
+            iteration,
+            patch_status_text,
+        )
 
     if not output_file.exists():
         logger.error("No output.json produced for %s iteration %s", instance_id, iteration)

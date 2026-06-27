@@ -110,8 +110,6 @@ pub fn build_llama_server_args(
         "--parallel".into(),
         opts.parallel.to_string(),
         "--cont-batching".into(),
-        "--chat-template-kwargs".into(),
-        r#"{"enable_thinking": false}"#.into(),
         "--host".into(),
         opts.host.clone(),
         "--port".into(),
@@ -413,7 +411,7 @@ fn write_bench_selfware_config(path: &Path, endpoint: &str, alias: &str) -> Resu
          temperature = 0.7\n\
          max_tokens = 32768\n\n\
          [agent]\n\
-         native_function_calling = true\n\
+         native_function_calling = false\n\
          streaming = true\n\
          read_loop_policy = \"force_mutation\"\n\
          disable_turn_artifacts = false\n",
@@ -681,6 +679,16 @@ mod tests {
     }
 
     #[test]
+    fn build_args_omits_chat_template_kwargs() {
+        let opts = LlamaServerOpts::default();
+        let args = build_llama_server_args(&dummy_spec(), &opts, Path::new("/tmp/test.gguf"), None);
+        assert!(
+            !args.iter().any(|a| a == "--chat-template-kwargs"),
+            "should not hard-code --chat-template-kwargs; let the model profile / extra_body decide"
+        );
+    }
+
+    #[test]
     fn build_args_includes_mmproj_when_supplied() {
         let opts = LlamaServerOpts::default();
         let args = build_llama_server_args(
@@ -697,13 +705,16 @@ mod tests {
     }
 
     #[test]
-    fn bench_selfware_config_forces_native_fc() {
+    fn bench_selfware_config_uses_xml_tool_calls() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("selfware_bench.toml");
         write_bench_selfware_config(&path, "http://127.0.0.1:8000/v1", "qwen3.6-27b-q4kp").unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("model = \"qwen3.6-27b-q4kp\""));
-        assert!(content.contains("native_function_calling = true"));
+        assert!(
+            content.contains("native_function_calling = false"),
+            "SWE-bench Pro prompts expect XML tool calls, so native FC must be disabled"
+        );
         assert!(content.contains("read_loop_policy = \"force_mutation\""));
     }
 

@@ -139,3 +139,91 @@ def test_filter_patch_to_source_files_drops_test_files_by_default():
     result = filter_patch_to_source_files(MIXED_SOURCE_AND_TEST_DIFF)
     # Without test_patch_paths, the generic test-file filter still drops it.
     assert "test_widget.py" not in result
+
+
+CONFIG_AND_SOURCE_DIFF = """\
+diff --git a/src/widget.py b/src/widget.py
+--- a/src/widget.py
++++ b/src/widget.py
+@@ -1,3 +1,3 @@
+ def widget():
+-    return 1
++    return 2
+
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -1,3 +1,3 @@
+ {
+-  "version": "1.0.0"
++  "version": "1.0.1"
+ }
+
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,2 +1,2 @@
+ [project]
+-name = "old"
++name = "new"
+
+diff --git a/config/settings.yaml b/config/settings.yaml
+--- a/config/settings.yaml
++++ b/config/settings.yaml
+@@ -1,2 +1,2 @@
+-old: value
++new: value
+
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,2 @@
+-Old
++New
+
+diff --git a/test_widget.py b/test_widget.py
+--- /dev/null
++++ b/test_widget.py
+@@ -0,0 +1,3 @@
++def test_widget():
++    assert widget() == 2
+"""
+
+
+def test_filter_patch_keeps_config_files_in_official_fix_paths():
+    result = filter_patch_to_source_files(
+        CONFIG_AND_SOURCE_DIFF,
+        official_fix_paths={"package.json", "pyproject.toml", "config/settings.yaml"},
+    )
+    assert "src/widget.py" in result
+    assert "package.json" in result
+    assert "pyproject.toml" in result
+    assert "config/settings.yaml" in result
+    assert "README.md" not in result
+    assert "test_widget.py" not in result
+
+
+def test_filter_patch_drops_config_files_not_in_official_fix_paths():
+    result = filter_patch_to_source_files(
+        CONFIG_AND_SOURCE_DIFF,
+        official_fix_paths={"package.json"},
+    )
+    assert "src/widget.py" in result
+    assert "package.json" in result
+    assert "pyproject.toml" not in result
+    assert "config/settings.yaml" not in result
+    assert "README.md" not in result
+    assert "test_widget.py" not in result
+
+
+def test_filter_patch_drops_docs_and_tests_even_when_in_official_fix_paths():
+    # Docs and tests should never be allowed, even if the official patch touches
+    # them (official docs/test changes are not part of the fix the model should
+    # reproduce).
+    result = filter_patch_to_source_files(
+        CONFIG_AND_SOURCE_DIFF,
+        official_fix_paths={"README.md", "test_widget.py"},
+    )
+    assert "src/widget.py" in result
+    assert "README.md" not in result
+    assert "test_widget.py" not in result

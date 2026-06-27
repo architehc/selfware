@@ -549,40 +549,66 @@ def filter_patch_excluding_paths(diff: str, excluded_paths: set[str]) -> str:
     return "".join(kept).rstrip("\n") + "\n" if kept else ""
 
 
-# File extensions and path patterns that are off-limits for a submitted patch.
-_NON_SOURCE_PATTERNS = (
+# Path patterns that are never source files we want in a prediction.
+_REJECTED_PATH_PATTERNS = (
     "_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx",
     "test_", "/tests/", "/test/",
-    ".md", ".mdx", ".json", ".yaml", ".yml", ".toml", ".lock",
+    ".md", ".mdx",
     "Dockerfile", ".dockerignore", ".gitignore", ".github/",
     "docs/", "doc/", "documentation/",
-    "Makefile", "package-lock.json", "yarn.lock",
+    "Makefile",
+    ".bak", ".orig", "~",
 )
+
+# Config / metadata files that are legitimate only when the official fix patch
+# also edits them (passed via ``extra_allowed`` / ``official_fix_paths``).
+_CONFIG_PATH_PATTERNS = (
+    ".json", ".yaml", ".yml", ".toml", ".lock",
+    "setup.py", "setup.cfg", "pyproject.toml", "package.json",
+    "package-lock.json", "yarn.lock", "requirements.txt", "Pipfile",
+)
+
+
+def _path_matches_any(path: str, patterns: tuple[str, ...]) -> bool:
+    """Return True when ``path`` matches any substring or suffix pattern."""
+    lower = path.lower()
+    return any(lower.endswith(pat) for pat in patterns) or any(pat in lower for pat in patterns)
+
+
+def _is_rejected_file(path: str) -> bool:
+    """Return True for tests, docs, and build artifacts that are never allowed."""
+    return _path_matches_any(path, _REJECTED_PATH_PATTERNS)
+
+
+def _is_config_or_metadata(path: str) -> bool:
+    """Return True for package metadata and config files."""
+    return _path_matches_any(path, _CONFIG_PATH_PATTERNS)
 
 
 def _is_likely_source_file(path: str) -> bool:
     """Return True when ``path`` looks like a source file the model may edit."""
-    lower = path.lower()
-    if any(lower.endswith(ext) for ext in _NON_SOURCE_PATTERNS):
-        return False
-    if any(pat in lower for pat in _NON_SOURCE_PATTERNS):
-        return False
-    return True
+    return not _is_rejected_file(path) and not _is_config_or_metadata(path)
 
 
 def filter_patch_to_source_files(
     diff: str,
     extra_allowed: set[str] | None = None,
     test_patch_paths: set[str] | None = None,
+    official_fix_paths: set[str] | None = None,
 ) -> str:
-    """Drop diff hunks for tests, configs, docs, and build artifacts.
+    """Drop diff hunks for tests, docs, build artifacts, and unrelated configs.
 
-    Keeps all source-file hunks plus any paths in ``extra_allowed`` (e.g.
-    new files created by the official test patch).  Hunks whose target path
-    appears in ``test_patch_paths`` are always dropped so the official
-    benchmark test patch is never re-submitted as part of the prediction.
+    Keeps all source-file hunks plus any paths in ``extra_allowed`` or
+    ``official_fix_paths``.  ``official_fix_paths`` is the set of paths touched
+    by the official fix patch; if the official fix edits package metadata or
+    config files (e.g. ``package.json``, ``pyproject.toml``, ``*.yaml``) the
+    model is allowed to edit those same paths.
+
+    Hunks whose target path appears in ``test_patch_paths`` are always dropped
+    so the official benchmark test patch is never re-submitted as part of the
+    prediction.
     """
-    allowed = extra_allowed or set()
+    allowed = (extra_allowed or set()) | (official_fix_paths or set())
     test_patch_paths = test_patch_paths or set()
     lines = diff.splitlines(keepends=True)
     hunks: list[list[str]] = []
@@ -600,9 +626,12 @@ def filter_patch_to_source_files(
     kept: list[str] = []
     for hunk in hunks:
         path = _extract_diff_path(hunk[0]) if hunk else None
-        if path is not None and path in test_patch_paths:
-            continue
-        if path is not None and path not in allowed and not _is_likely_source_file(path):
-            continue
+        if path is not None:
+            if path in test_patch_paths:
+                continue
+            if _is_rejected_file(path):
+                continue
+            if path not in allowed and not _is_likely_source_file(path):
+                continue
         kept.extend(hunk)
     return "".join(kept).rstrip("\n") + "\n" if kept else ""
