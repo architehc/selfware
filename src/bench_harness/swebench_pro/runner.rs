@@ -2,7 +2,7 @@
 //! lifecycle, selfware subprocess invocation, patch capture, trial aggregation,
 //! and `patches.json` collation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -1253,17 +1253,41 @@ fn run_one(
         return Ok((synthetic, candidate_results));
     }
 
-    // Honest selection: pick the best candidate using proxy metrics.
-    let best = candidate_results
-        .iter()
-        .max_by(|a, b| {
-            let a_good = a.has_source_edit && !a.has_test_edit;
-            let b_good = b.has_source_edit && !b.has_test_edit;
-            a_good
-                .cmp(&b_good)
-                .then_with(|| a.syntax_check_passed.cmp(&b.syntax_check_passed))
-        })
-        .unwrap();
+    // When official eval is enabled with multiple candidates, run the Docker
+    // evaluator against every candidate patch so selection is based on actual
+    // pass rates instead of proxy metrics.
+    let mut official_metrics: BTreeMap<u32, OfficialEvalMetrics> = BTreeMap::new();
+    if opts.official_eval && opts.candidates > 1 {
+        for c in &candidate_results {
+            let eval_dir = trial_dir
+                .join(format!("candidate_{}", c.candidate_num))
+                .join("eval");
+            match evaluate_single_pred(opts, &c.pred_path, inst, &eval_dir) {
+                Ok(m) => {
+                    eprintln!(
+                        "    candidate {} official: f2p {}/{}, p2p {}/{}, overall={}",
+                        c.candidate_num,
+                        m.fail_to_pass_passed,
+                        m.fail_to_pass_total,
+                        m.pass_to_pass_passed,
+                        m.pass_to_pass_total,
+                        m.overall_pass
+                    );
+                    official_metrics.insert(c.candidate_num, m);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "    candidate {} official eval failed: {}",
+                        c.candidate_num, e
+                    );
+                }
+            }
+        }
+    }
+
+    // Honest selection: prefer official metrics when available, else proxy metrics.
+    let best = select_best_candidate(&candidate_results, &official_metrics);
+    let best_metrics = official_metrics.get(&best.candidate_num).cloned();
 
     // Promote best candidate patch to trial-level pred.
     std::fs::copy(&best.pred_path, &trial_pred)?;
@@ -1290,6 +1314,9 @@ fn run_one(
         trial_dir.join("result.json"),
         serde_json::to_vec_pretty(&synthetic)?,
     )?;
+    if let Some(metrics) = best_metrics {
+        merge_official_metrics_into_result(&trial_dir.join("result.json"), &metrics)?;
+    }
     eprintln!(
         "    selected candidate {} → {} ({} lines)",
         best.candidate_num,
@@ -1301,6 +1328,357 @@ fn run_one(
     );
 
     Ok((synthetic, candidate_results))
+}
+
+/// Metrics extracted from an official SWE-bench Pro Docker evaluation.
+#[derive(Clone, Debug, Default)]
+struct OfficialEvalMetrics {
+    fail_to_pass_passed: usize,
+    fail_to_pass_total: usize,
+    pass_to_pass_passed: usize,
+    pass_to_pass_total: usize,
+    overall_pass: bool,
+}
+
+/// Compare two metric sets for candidate selection.
+///
+/// Ordering: higher fail-to-pass rate wins, then higher pass-to-pass rate,
+/// then whether the candidate has an overall pass.
+fn cmp_official_metrics(a: &OfficialEvalMetrics, b: &OfficialEvalMetrics) -> std::cmp::Ordering {
+    // Avoid floating point: compare a.passed/a.total vs b.passed/b.total by
+    // cross multiplication.  Treat 0/0 as equal (no information).
+    let f2p_order = if a.fail_to_pass_total == 0 && b.fail_to_pass_total == 0 {
+        std::cmp::Ordering::Equal
+    } else if a.fail_to_pass_total == 0 {
+        std::cmp::Ordering::Less
+    } else if b.fail_to_pass_total == 0 {
+        std::cmp::Ordering::Greater
+    } else {
+        (a.fail_to_pass_passed * b.fail_to_pass_total)
+            .cmp(&(b.fail_to_pass_passed * a.fail_to_pass_total))
+    };
+
+    f2p_order
+        .then_with(|| {
+            if a.pass_to_pass_total == 0 && b.pass_to_pass_total == 0 {
+                std::cmp::Ordering::Equal
+            } else if a.pass_to_pass_total == 0 {
+                std::cmp::Ordering::Less
+            } else if b.pass_to_pass_total == 0 {
+                std::cmp::Ordering::Greater
+            } else {
+                (a.pass_to_pass_passed * b.pass_to_pass_total)
+                    .cmp(&(b.pass_to_pass_passed * a.pass_to_pass_total))
+            }
+        })
+        .then_with(|| a.overall_pass.cmp(&b.overall_pass))
+}
+
+/// Pick the best candidate.
+///
+/// When at least one candidate has official-eval data and at least one
+/// fail-to-pass test was passed, use those real metrics.  Otherwise fall back
+/// to the existing proxy-metric ordering.
+fn select_best_candidate<'a>(
+    candidates: &'a [PerRunResult],
+    metrics: &BTreeMap<u32, OfficialEvalMetrics>,
+) -> &'a PerRunResult {
+    let any_f2p_passed = candidates.iter().any(|c| {
+        metrics
+            .get(&c.candidate_num)
+            .map(|m| m.fail_to_pass_passed > 0)
+            .unwrap_or(false)
+    });
+
+    if any_f2p_passed {
+        candidates
+            .iter()
+            .max_by(|a, b| {
+                let ma = metrics.get(&a.candidate_num).cloned().unwrap_or_default();
+                let mb = metrics.get(&b.candidate_num).cloned().unwrap_or_default();
+                cmp_official_metrics(&ma, &mb)
+            })
+            .unwrap()
+    } else {
+        candidates
+            .iter()
+            .max_by(|a, b| {
+                let a_good = a.has_source_edit && !a.has_test_edit;
+                let b_good = b.has_source_edit && !b.has_test_edit;
+                a_good
+                    .cmp(&b_good)
+                    .then_with(|| a.syntax_check_passed.cmp(&b.syntax_check_passed))
+            })
+            .unwrap()
+    }
+}
+
+/// Parse the per-instance output file produced by the official evaluator.
+///
+/// Handles both the raw `{"tests": [...]}` format and an already-scored
+/// format that contains `fail_to_pass_passed` / `pass_to_pass_passed` keys.
+fn parse_official_eval_output(output_path: &Path, inst: &Instance) -> OfficialEvalMetrics {
+    let mut metrics = OfficialEvalMetrics::default();
+
+    let content = match std::fs::read_to_string(output_path) {
+        Ok(c) => c,
+        Err(_) => return metrics,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return metrics,
+    };
+
+    // If the evaluator already produced scored keys, use them directly.
+    if let Some(f2p_p) = value.get("fail_to_pass_passed").and_then(|v| v.as_u64()) {
+        if let Some(f2p_t) = value.get("fail_to_pass_total").and_then(|v| v.as_u64()) {
+            if let Some(p2p_p) = value.get("pass_to_pass_passed").and_then(|v| v.as_u64()) {
+                if let Some(p2p_t) = value.get("pass_to_pass_total").and_then(|v| v.as_u64()) {
+                    metrics.fail_to_pass_passed = f2p_p as usize;
+                    metrics.fail_to_pass_total = f2p_t as usize;
+                    metrics.pass_to_pass_passed = p2p_p as usize;
+                    metrics.pass_to_pass_total = p2p_t as usize;
+                    metrics.overall_pass = value
+                        .get("overall_pass")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    return metrics;
+                }
+            }
+        }
+    }
+
+    // Otherwise compute from the raw test list.
+    let status_map: HashMap<String, String> = value
+        .get("tests")
+        .and_then(|v| v.as_array())
+        .map(|tests| {
+            tests
+                .iter()
+                .filter_map(|t| {
+                    let name = t.get("name")?.as_str()?.to_string();
+                    let status = t.get("status")?.as_str()?.trim().to_ascii_uppercase();
+                    Some((name, status))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let fail_to_pass = super::dataset::coerce_string_list(&inst.fail_to_pass);
+    let pass_to_pass_value = inst
+        .extra
+        .get("pass_to_pass")
+        .or_else(|| inst.extra.get("PASS_TO_PASS"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let pass_to_pass = super::dataset::coerce_string_list(&pass_to_pass_value);
+
+    for t in &fail_to_pass {
+        metrics.fail_to_pass_total += 1;
+        if status_map.get(t).map(|s| s.as_str()) == Some("PASSED") {
+            metrics.fail_to_pass_passed += 1;
+        }
+    }
+    for t in &pass_to_pass {
+        metrics.pass_to_pass_total += 1;
+        if let Some(status) = status_map.get(t) {
+            if status == "PASSED" || status == "SKIPPED" {
+                metrics.pass_to_pass_passed += 1;
+            }
+        }
+    }
+    let total_tests = fail_to_pass.len() + pass_to_pass.len();
+    metrics.overall_pass = total_tests > 0
+        && metrics.fail_to_pass_passed == metrics.fail_to_pass_total
+        && metrics.pass_to_pass_passed == metrics.pass_to_pass_total;
+
+    metrics
+}
+
+/// Run the official evaluator against a single `.pred` file.
+///
+/// Writes a one-entry `patches.json`, invokes the configured
+/// `official_eval_script`, and parses the resulting per-instance output file.
+fn evaluate_single_pred(
+    opts: &SwebenchProOpts,
+    pred_path: &Path,
+    inst: &Instance,
+    output_dir: &Path,
+) -> Result<OfficialEvalMetrics> {
+    if !opts.official_eval_script.exists() {
+        eprintln!(
+            "    official eval script not found: {}",
+            opts.official_eval_script.display()
+        );
+        return Ok(OfficialEvalMetrics::default());
+    }
+    if !opts.official_eval_raw_sample_path.exists() {
+        eprintln!(
+            "    official eval raw sample not found: {}",
+            opts.official_eval_raw_sample_path.display()
+        );
+        return Ok(OfficialEvalMetrics::default());
+    }
+    if !opts.official_eval_scripts_dir.exists() {
+        eprintln!(
+            "    official eval scripts dir not found: {}",
+            opts.official_eval_scripts_dir.display()
+        );
+        return Ok(OfficialEvalMetrics::default());
+    }
+
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("creating {}", output_dir.display()))?;
+
+    let eval_script = opts
+        .official_eval_script
+        .canonicalize()
+        .with_context(|| format!("resolving {}", opts.official_eval_script.display()))?;
+    let raw_sample_path = opts
+        .official_eval_raw_sample_path
+        .canonicalize()
+        .with_context(|| format!("resolving {}", opts.official_eval_raw_sample_path.display()))?;
+    let scripts_dir = opts
+        .official_eval_scripts_dir
+        .canonicalize()
+        .with_context(|| format!("resolving {}", opts.official_eval_scripts_dir.display()))?;
+
+    // Build a minimal raw sample containing only this instance when possible.
+    let raw_sample_for_eval: PathBuf =
+        if raw_sample_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            let filtered_path = output_dir.join("raw_sample.jsonl");
+            let normalized_path = output_dir.join("raw_sample.normalized.jsonl");
+            let data = std::fs::read_to_string(&raw_sample_path)
+                .with_context(|| format!("reading {}", raw_sample_path.display()))?;
+            let mut kept = String::new();
+            for line in data.lines() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if let Ok(row) = serde_json::from_str::<serde_json::Value>(line) {
+                    if row.get("instance_id").and_then(|v| v.as_str())
+                        == Some(inst.instance_id.as_str())
+                    {
+                        kept.push_str(line);
+                        kept.push('\n');
+                    }
+                }
+            }
+            let source = if kept.is_empty() {
+                &raw_sample_path
+            } else {
+                std::fs::write(&filtered_path, kept)?;
+                &filtered_path
+            };
+            prepare_official_eval_sample(source, &normalized_path)?
+        } else {
+            raw_sample_path
+        };
+
+    let patch = std::fs::read_to_string(pred_path).unwrap_or_default();
+    if patch.trim().is_empty() {
+        // An empty patch cannot pass; skip the expensive container run.
+        return Ok(OfficialEvalMetrics::default());
+    }
+
+    #[derive(Serialize)]
+    struct SinglePred {
+        instance_id: String,
+        patch: String,
+        prefix: String,
+    }
+    let patch_path = output_dir.join("patches.json");
+    std::fs::write(
+        &patch_path,
+        serde_json::to_vec_pretty(&vec![SinglePred {
+            instance_id: inst.instance_id.clone(),
+            patch,
+            prefix: "candidate".into(),
+        }])?,
+    )?;
+    let patch_path = patch_path
+        .canonicalize()
+        .with_context(|| format!("resolving {}", patch_path.display()))?;
+    let output_dir = output_dir
+        .canonicalize()
+        .with_context(|| format!("resolving {}", output_dir.display()))?;
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&eval_script)
+        .arg("--raw_sample_path")
+        .arg(&raw_sample_for_eval)
+        .arg("--patch_path")
+        .arg(&patch_path)
+        .arg("--output_dir")
+        .arg(&output_dir)
+        .arg("--scripts_dir")
+        .arg(&scripts_dir)
+        .arg("--dockerhub_username")
+        .arg(&opts.official_eval_dockerhub_username)
+        .arg("--num_workers")
+        .arg(opts.official_eval_num_workers.max(1).to_string());
+    if opts.official_eval_use_local_docker {
+        cmd.arg("--use_local_docker");
+    }
+    if opts.official_eval_redo {
+        cmd.arg("--redo");
+    }
+    if opts.official_eval_block_network {
+        cmd.arg("--block_network");
+    }
+    if let Some(parent) = eval_script.parent() {
+        cmd.current_dir(parent);
+    }
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("spawning {}", eval_script.display()))?;
+    if !output.status.success() {
+        eprintln!(
+            "    official eval script failed (exit={:?}): {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let output_file = output_dir.join(format!("{}/candidate_output.json", inst.instance_id));
+    Ok(parse_official_eval_output(&output_file, inst))
+}
+
+/// Merge the official-eval metrics into an existing `result.json` on disk.
+fn merge_official_metrics_into_result(
+    result_path: &Path,
+    metrics: &OfficialEvalMetrics,
+) -> Result<()> {
+    let content = std::fs::read_to_string(result_path)
+        .with_context(|| format!("reading {}", result_path.display()))?;
+    let mut value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("parsing {}", result_path.display()))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "fail_to_pass_passed".into(),
+            serde_json::Value::from(metrics.fail_to_pass_passed),
+        );
+        obj.insert(
+            "fail_to_pass_total".into(),
+            serde_json::Value::from(metrics.fail_to_pass_total),
+        );
+        obj.insert(
+            "pass_to_pass_passed".into(),
+            serde_json::Value::from(metrics.pass_to_pass_passed),
+        );
+        obj.insert(
+            "pass_to_pass_total".into(),
+            serde_json::Value::from(metrics.pass_to_pass_total),
+        );
+        obj.insert(
+            "overall_pass".into(),
+            serde_json::Value::from(metrics.overall_pass),
+        );
+    }
+    std::fs::write(result_path, serde_json::to_vec_pretty(&value)?)
+        .with_context(|| format!("writing {}", result_path.display()))?;
+    Ok(())
 }
 
 fn diff_path_from_line(line: &str) -> Option<&str> {
@@ -2620,5 +2998,211 @@ diff --git a/tests/test_a.py b/tests/test_a.py
         assert_ne!(result.exit_code, 0);
         assert!(result.error.contains("without result.json"));
         assert_eq!(result.patch_bytes, 6);
+    }
+
+    fn make_candidate_result(candidate_num: u32, has_test_edit: bool) -> PerRunResult {
+        PerRunResult {
+            instance_id: "i1".into(),
+            quant: "q1".into(),
+            trial: 1,
+            exit_code: 0,
+            timed_out: false,
+            wall_secs: 1.0,
+            patch_lines: 10,
+            patch_bytes: 100,
+            pred_path: PathBuf::from(format!("/tmp/c{}", candidate_num)),
+            error: String::new(),
+            empty_diff: false,
+            test_only_patch: false,
+            has_source_edit: true,
+            has_test_edit,
+            syntax_check_passed: true,
+            candidate_num,
+        }
+    }
+
+    #[test]
+    fn select_best_candidate_prefers_higher_f2p_rate() {
+        let c1 = make_candidate_result(1, false);
+        let c2 = make_candidate_result(2, false);
+        let candidates = vec![c1, c2];
+        let mut metrics = BTreeMap::new();
+        metrics.insert(
+            1,
+            OfficialEvalMetrics {
+                fail_to_pass_passed: 1,
+                fail_to_pass_total: 2,
+                pass_to_pass_passed: 0,
+                pass_to_pass_total: 0,
+                overall_pass: false,
+            },
+        );
+        metrics.insert(
+            2,
+            OfficialEvalMetrics {
+                fail_to_pass_passed: 2,
+                fail_to_pass_total: 2,
+                pass_to_pass_passed: 0,
+                pass_to_pass_total: 0,
+                overall_pass: true,
+            },
+        );
+        let best = select_best_candidate(&candidates, &metrics);
+        assert_eq!(best.candidate_num, 2);
+    }
+
+    #[test]
+    fn select_best_candidate_tiebreaks_p2p_then_overall() {
+        let c1 = make_candidate_result(1, false);
+        let c2 = make_candidate_result(2, false);
+        let candidates = vec![c1, c2];
+        let mut metrics = BTreeMap::new();
+        // Same f2p rate, but c2 has better p2p rate.
+        metrics.insert(
+            1,
+            OfficialEvalMetrics {
+                fail_to_pass_passed: 1,
+                fail_to_pass_total: 1,
+                pass_to_pass_passed: 0,
+                pass_to_pass_total: 1,
+                overall_pass: false,
+            },
+        );
+        metrics.insert(
+            2,
+            OfficialEvalMetrics {
+                fail_to_pass_passed: 1,
+                fail_to_pass_total: 1,
+                pass_to_pass_passed: 1,
+                pass_to_pass_total: 1,
+                overall_pass: true,
+            },
+        );
+        let best = select_best_candidate(&candidates, &metrics);
+        assert_eq!(best.candidate_num, 2);
+    }
+
+    #[test]
+    fn select_best_candidate_falls_back_to_proxy_when_no_f2p_passed() {
+        let mut c1 = make_candidate_result(1, false);
+        c1.syntax_check_passed = false;
+        let c2 = make_candidate_result(2, true); // has test edit -> worse proxy
+        let candidates = vec![c1, c2];
+        let mut metrics = BTreeMap::new();
+        // No candidate passes any fail-to-pass test.
+        metrics.insert(
+            1,
+            OfficialEvalMetrics {
+                fail_to_pass_passed: 0,
+                fail_to_pass_total: 2,
+                pass_to_pass_passed: 0,
+                pass_to_pass_total: 0,
+                overall_pass: false,
+            },
+        );
+        metrics.insert(
+            2,
+            OfficialEvalMetrics {
+                fail_to_pass_passed: 0,
+                fail_to_pass_total: 2,
+                pass_to_pass_passed: 1,
+                pass_to_pass_total: 1,
+                overall_pass: false,
+            },
+        );
+        let best = select_best_candidate(&candidates, &metrics);
+        // Proxy ordering picks c1 because it has no test edit, even though c2
+        // has a better pass-to-pass rate.
+        assert_eq!(best.candidate_num, 1);
+    }
+
+    #[test]
+    fn parse_official_eval_output_computes_from_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("output.json");
+        std::fs::write(
+            &output_path,
+            r#"{"tests": [
+                {"name": "tests/test_a.py::test_x", "status": "PASSED"},
+                {"name": "tests/test_b.py::test_y", "status": "passed"},
+                {"name": "tests/test_c.py::test_z", "status": "FAILED"}
+            ]}"#,
+        )
+        .unwrap();
+
+        let mut inst = dummy_instance();
+        inst.fail_to_pass = serde_json::json!(["tests/test_a.py::test_x"]);
+        inst.extra.insert(
+            "pass_to_pass".into(),
+            serde_json::json!(["tests/test_b.py::test_y", "tests/test_c.py::test_z"]),
+        );
+
+        let m = parse_official_eval_output(&output_path, &inst);
+        assert_eq!(m.fail_to_pass_passed, 1);
+        assert_eq!(m.fail_to_pass_total, 1);
+        assert_eq!(m.pass_to_pass_passed, 1); // b passes, c fails
+        assert_eq!(m.pass_to_pass_total, 2);
+        assert!(!m.overall_pass);
+    }
+
+    #[test]
+    fn parse_official_eval_output_uses_direct_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("output.json");
+        std::fs::write(
+            &output_path,
+            r#"{
+                "fail_to_pass_passed": 2,
+                "fail_to_pass_total": 3,
+                "pass_to_pass_passed": 4,
+                "pass_to_pass_total": 5,
+                "overall_pass": true
+            }"#,
+        )
+        .unwrap();
+
+        let m = parse_official_eval_output(&output_path, &dummy_instance());
+        assert_eq!(m.fail_to_pass_passed, 2);
+        assert_eq!(m.fail_to_pass_total, 3);
+        assert_eq!(m.pass_to_pass_passed, 4);
+        assert_eq!(m.pass_to_pass_total, 5);
+        assert!(m.overall_pass);
+    }
+
+    #[test]
+    fn parse_official_eval_output_missing_file_returns_zeros() {
+        let output_path = PathBuf::from("/does/not/exist/output.json");
+        let m = parse_official_eval_output(&output_path, &dummy_instance());
+        assert_eq!(m.fail_to_pass_passed, 0);
+        assert_eq!(m.fail_to_pass_total, 0);
+        assert!(!m.overall_pass);
+    }
+
+    #[test]
+    fn merge_official_metrics_into_result_adds_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let result_path = dir.path().join("result.json");
+        std::fs::write(
+            &result_path,
+            r#"{"instance_id": "i1", "quant": "q1", "trial": 1}"#,
+        )
+        .unwrap();
+
+        let metrics = OfficialEvalMetrics {
+            fail_to_pass_passed: 1,
+            fail_to_pass_total: 2,
+            pass_to_pass_passed: 3,
+            pass_to_pass_total: 4,
+            overall_pass: true,
+        };
+        merge_official_metrics_into_result(&result_path, &metrics).unwrap();
+
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&result_path).unwrap()).unwrap();
+        assert_eq!(value["fail_to_pass_passed"], 1);
+        assert_eq!(value["fail_to_pass_total"], 2);
+        assert_eq!(value["pass_to_pass_passed"], 3);
+        assert_eq!(value["pass_to_pass_total"], 4);
+        assert_eq!(value["overall_pass"], true);
     }
 }
