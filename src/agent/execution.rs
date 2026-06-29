@@ -4209,7 +4209,7 @@ pub fn other() -> i32 {
         let mut agent = Agent::new(config).await.unwrap();
 
         let temp = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
-        fs::write(temp.path(), "hello world\n").unwrap();
+        fs::write(temp.path(), "line one\nhello world\nline three\n").unwrap();
         let path = temp.path().display().to_string();
 
         let batch: Vec<CollectedToolCall> = vec![

@@ -31,6 +31,8 @@ disabled = true
 allowed_paths = [
     "./**",
     "/app/**",
+    "/app",
+    "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_poolside_sweep/llama-3.1-8b_poolside/repos/repo",
 ]
 
 [metadata]
