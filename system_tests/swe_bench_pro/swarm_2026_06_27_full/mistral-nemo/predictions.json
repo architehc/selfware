@@ -1,0 +1,42 @@
+[
+  {
+    "instance_id": "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan",
+    "patch": "diff --git a/src/user/email.js b/src/user/email.js\nindex 9b51b43ddd..5e19b4b4d2 100644\n--- a/src/user/email.js\n+++ b/src/user/email.js\n@@ -49,6 +49,9 @@ UserEmail.isValidationPending = async (uid, email) => {\n \n \tif (email) {\n \t\tconst confirmObj = await db.getObject(`confirm:${code}`);\n+\t\tif (!confirmObj || !confirmObj.uid || !confirmObj.email) {\n+\t\t\tthrow new Error('[[error:invalid-data]]');\n+\t\t}\n \t\treturn !!(confirmObj && email === confirmObj.email);\n \t}\n \ndiff --git a/src/user/profile.js b/src/user/profile.js\nindex fc238ff87c..caee3bb63e 100644\n--- a/src/user/profile.js\n+++ b/src/user/profile.js\n@@ -93,6 +93,10 @@ module.exports = function (User) {\n \t\tif (!utils.isEmailValid(data.email)) {\n \t\t\tthrow new Error('[[error:invalid-email]]');\n \t\t}\n+\n+\t\tif (data.uid && data.email !== await User.getUserField(data.uid, 'email')) {\n+\t\t\tthrow new Error('[[error:email-change-not-allowed]]');\n+\t\t}\n \t}\n \n \tasync function isUsernameAvailable(data, uid) {\n"
+  },
+  {
+    "instance_id": "instance_qutebrowser__qutebrowser-f91ace96223cac8161c16dd061907e138fe85111-v059c6fdc75567943479b23ebca7c07b5e9a7f34c",
+    "patch": ""
+  },
+  {
+    "instance_id": "instance_NodeBB__NodeBB-51d8f3b195bddb13a13ddc0de110722774d9bb1b-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e",
+    "patch": "diff --git a/src/controllers/well-known.js b/src/controllers/well-known.js\nnew file mode 100644\nindex 0000000000..f4a15f9a96\n--- /dev/null\n+++ b/src/controllers/well-known.js\n@@ -0,0 +1,45 @@\n+\"use strict\";\n+\n+const { parse } = require('url');\n+\n+module.exports = function (router) {\n+\trouter.get(\"/.well-known/webfinger\", async (req, res, next) => {\n+\t\tconst { resource } = req.query;\n+\t\tif (!resource || !resource.startsWith('acct:')) {\n+\t\t\treturn res.status(400).send('Bad Request');\n+\t\t}\n+\n+\t\tconst [, username, domain] = resource.match(/^acct:([^@]+)@(.+)$/);\n+\t\tif (!username || !domain) {\n+\t\t\treturn res.status(400).send('Bad Request');\n+\t\t}\n+\n+\t\tif (domain !== nconf.get('url_parsed').hostname) {\n+\t\t\treturn res.status(404).send('Not Found');\n+\t\t}\n+\n+\t\tconst user = await user.getUserByUsername(username);\n+\t\tif (!user) {\n+\t\t\treturn res.status(404).send('Not Found');\n+\t\t}\n+\n+\t\tconst links = [\n+\t\t\t{\n+\t\t\t\trel: 'http://schema.org/ProfilePage',\n+\t\t\t\ttype: 'text/html',\n+\t\t\t\thref: `${nconf.get('url')}/user/${username}`,\n+\t\t\t},\n+\t\t];\n+\n+\t\tconst response = {\n+\t\t\tsubject: `acct:${username}@${domain}`,\n+\t\t\taliases: [\n+\t\t\t\t`https://${domain}/user/${username}`,\n+\t\t\t\t`acct:${username}@${domain}`,\n+\t\t\t],\n+\t\t\tlinks,\n+\t\t};\n+\n+\t\tres.json(response);\n+\t});\n+};\n\\ No newline at end of file\n"
+  },
+  {
+    "instance_id": "instance_qutebrowser__qutebrowser-c580ebf0801e5a3ecabc54f327498bb753c6d5f2-v2ef375ac784985212b1805e1d0431dc8f1b3c171",
+    "patch": "diff --git a/qutebrowser/commands/command.py b/qutebrowser/commands/command.py\nindex 653f551ff..3bc0670be 100644\n--- a/qutebrowser/commands/command.py\n+++ b/qutebrowser/commands/command.py\n@@ -145,11 +145,10 @@ class Command:\n \n         if self.backend is not None and objects.backend != self.backend:\n             raise cmdexc.PrerequisitesError(\n-                \"{}: Only available with {} \"\n-                \"backend.\".format(self.name, self.backend.name))\n+                f\"{self.name}: Only available with {self.backend.name} backend.\")\n \n         if self.deprecated:\n-            message.warning(f'{self.name} is deprecated - {self.deprecated}')\n+            message.warning(f\"{self.name} is deprecated - {self.deprecated}\")\n \n     def _check_func(self):\n         \"\"\"Make sure the function parameters don't violate any rules.\"\"\"\n"
+  },
+  {
+    "instance_id": "instance_ansible__ansible-f327e65d11bb905ed9f15996024f857a95592629-vba6da65a0f3baefda7a058ebbd0a8dcafb8512f5",
+    "patch": ""
+  },
+  {
+    "instance_id": "instance_ansible__ansible-a26c325bd8f6e2822d9d7e62f77a424c1db4fbf6-v0f01c69f1e2528b935359cfe578530722bca2c59",
+    "patch": ""
+  },
+  {
+    "instance_id": "instance_internetarchive__openlibrary-4a5d2a7d24c9e4c11d3069220c0685b736d5ecde-v13642507b4fc1f8d234172bf8129942da2c2ca26",
+    "patch": ""
+  },
+  {
+    "instance_id": "instance_qutebrowser__qutebrowser-f631cd4422744160d9dcf7a0455da532ce973315-v35616345bb8052ea303186706cec663146f0f184",
+    "patch": ""
+  },
+  {
+    "instance_id": "instance_gravitational__teleport-3fa6904377c006497169945428e8197158667910-v626ec2a48416b10a88641359a169d99e935ff037",
+    "patch": ""
+  },
+  {
+    "instance_id": "instance_navidrome__navidrome-7073d18b54da7e53274d11c9e2baef1242e8769e",
+    "patch": "diff --git a/core/agents/lastfm/client.go b/core/agents/lastfm/client.go\nindex 42df84a8..778c4cec 100644\n--- a/core/agents/lastfm/client.go\n+++ b/core/agents/lastfm/client.go\n@@ -38,13 +38,17 @@ func NewClient(apiKey string, secret string, lang string, hc httpDoer) *Client {\n \treturn &Client{apiKey, secret, lang, hc}\n }\n \n-type Client struct {\n+type lastFMClient struct {\n \tapiKey string\n \tsecret string\n \tlang   string\n \thc     httpDoer\n }\n \n+func NewLastFMClient(apiKey string, secret string, lang string, hc httpDoer) *lastFMClient {\n+\treturn &lastFMClient{apiKey, secret, lang, hc}\n+}\n+\n func (c *Client) AlbumGetInfo(ctx context.Context, name string, artist string, mbid string) (*Album, error) {\n \tparams := url.Values{}\n \tparams.Add(\"method\", \"album.getInfo\")\n"
+  }
+]

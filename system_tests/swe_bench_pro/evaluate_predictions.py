@@ -153,6 +153,7 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
     return (
         "#!/bin/bash\n"
         "set -uo pipefail\n"
+        """trap 'if [ ! -f /workspace/output.json ]; then echo '"'"'{"tests": []}'"'"' > /workspace/output.json; fi' EXIT\n"""
         "cd /app\n"
         #
         # Reset the repo defensively.  We check exit codes explicitly; the
@@ -268,6 +269,28 @@ def _score_output(output: dict[str, Any], instance: dict[str, Any]) -> dict[str,
     }
 
 
+def _no_tests_were_executed(score: dict[str, Any], output: dict[str, Any]) -> bool:
+    """Return True when the test run produced no usable results.
+
+    This catches empty outputs, parser-level sentinel failures, and cases
+    where every expected test is missing from the parsed output.
+    """
+    tests = output.get("tests", [])
+    if not tests:
+        return True
+    if all(test.get("name") == "NO_TESTS_FOUND_OR_PARSING_ERROR" for test in tests):
+        return True
+    fail_details = score.get("fail_to_pass_details", [])
+    pass_details = score.get("pass_to_pass_details", [])
+    if fail_details or pass_details:
+        all_missing = all(d.get("status") == "MISSING" for d in fail_details) and all(
+            d.get("status") == "MISSING" for d in pass_details
+        )
+        if all_missing:
+            return True
+    return False
+
+
 def _copy_artifact_out(
     container: str,
     src: str,
@@ -320,6 +343,8 @@ def evaluate_instance(
     result: dict[str, Any] = {
         "instance_id": instance_id,
         "error": None,
+        "patch": prediction.get("patch", ""),
+        "metadata": prediction.get("metadata", {}),
     }
 
     # Always record the expected test counts so errored instances can be counted
@@ -446,6 +471,17 @@ def evaluate_instance(
 
         score = _score_output(output, instance)
         result.update(score)
+        if _no_tests_were_executed(score, output):
+            result["error"] = "no tests executed"
+            result["overall_pass"] = False
+            # Keep the expected test totals so errored instances still count
+            # in the headline fail-to-pass / pass-to-pass denominators.
+            result["fail_to_pass_passed"] = 0
+            result["pass_to_pass_passed"] = 0
+            logger.warning(
+                "Evaluation for %s produced no usable test results; marking as errored",
+                instance_id,
+            )
         logger.info(
             "Evaluation for %s: fail %s/%s, pass %s/%s, overall=%s",
             instance_id,
@@ -483,6 +519,45 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
     fail_tp_rate_total = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
     pass_tp_rate_total = pass_tp_passed / pass_tp_total if pass_tp_total else 0.0
 
+    counters = {
+        "empty_patch_count": sum(
+            1
+            for r in results
+            if r.get("error") == "empty patch" or _is_patch_empty(r.get("patch", ""))
+        ),
+        "compile_gate_rejected_count": sum(
+            1
+            for r in results
+            if r.get("metadata", {}).get("compile_gate_rejected") is True
+        ),
+        "recovery_fired_count": sum(
+            1
+            for r in results
+            if r.get("metadata", {}).get("recovery_attempts", 0) > 0
+        ),
+        "recovery_succeeded_count": sum(
+            1
+            for r in results
+            if r.get("metadata", {}).get("recovery_succeeded") is True
+        ),
+        "applied_no_op_count": sum(
+            1 for r in results if r.get("error") == "patch applied but changed no files"
+        ),
+        "applied_compile_failed_count": sum(
+            1 for r in results if r.get("error") == "no tests executed"
+        ),
+        "applied_f2p_failed_count": sum(
+            1
+            for r in completed
+            if r.get("fail_to_pass_passed", 0) < r.get("fail_to_pass_total", 0)
+        ),
+        "applied_p2p_regressed_count": sum(
+            1
+            for r in completed
+            if r.get("pass_to_pass_passed", 0) < r.get("pass_to_pass_total", 0)
+        ),
+    }
+
     report = {
         "total_instances": total,
         "completed_instances": len(completed),
@@ -498,6 +573,7 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "pass_to_pass_total": pass_tp_total,
         "pass_to_pass_rate": pass_tp_rate_completed,
         "pass_to_pass_rate_total": pass_tp_rate_total,
+        **counters,
         "per_instance": results,
     }
 
@@ -523,6 +599,17 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"({report['pass_to_pass_rate']:.2%})",
         f"- Pass-to-pass (total): **{pass_tp_passed}/{pass_tp_total}** "
         f"({report['pass_to_pass_rate_total']:.2%})",
+        "",
+        "## Diagnostic counters",
+        "",
+        f"- Empty patch: **{counters['empty_patch_count']}**",
+        f"- Compile gate rejected: **{counters['compile_gate_rejected_count']}**",
+        f"- Recovery fired: **{counters['recovery_fired_count']}**",
+        f"- Recovery succeeded: **{counters['recovery_succeeded_count']}**",
+        f"- Patch applied but changed no files: **{counters['applied_no_op_count']}**",
+        f"- Patch applied but no tests executed: **{counters['applied_compile_failed_count']}**",
+        f"- Fail-to-pass failed: **{counters['applied_f2p_failed_count']}**",
+        f"- Pass-to-pass regressed: **{counters['applied_p2p_regressed_count']}**",
         "",
         "| Instance | Fail-to-pass | Pass-to-pass | Overall |",
         "|----------|--------------|--------------|---------|",

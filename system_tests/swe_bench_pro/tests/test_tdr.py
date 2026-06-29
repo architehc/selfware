@@ -30,10 +30,18 @@ def test_entryscript_has_parser_fallback():
     assert "python /workspace/parser.py" in script
     assert "if [ ! -f /workspace/output.json ]; then" in script
     assert "echo '{\"tests\": []}' > /workspace/output.json" in script
-    # Fallback must come after the parser invocation.
+    # Fallback must come after the parser invocation (the trap has a similar
+    # guard earlier, so search from the parser invocation).
     parser_idx = script.index("python /workspace/parser.py")
-    fallback_idx = script.index("if [ ! -f /workspace/output.json ]; then")
+    fallback_idx = script.index("if [ ! -f /workspace/output.json ]; then", parser_idx)
     assert fallback_idx > parser_idx
+
+
+def test_entryscript_has_exit_trap_for_output_json():
+    """A container crash must still leave an output.json for the harness."""
+    script = tdr._build_entryscript(_minimal_instance())
+    assert "trap " in script and "/workspace/output.json" in script
+    assert "EXIT" in script
 
 
 def test_entryscript_detects_no_op_patch():

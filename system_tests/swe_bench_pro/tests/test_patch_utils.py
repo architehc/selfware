@@ -361,3 +361,51 @@ def test_apply_edits_only_applies_after_normalization(tmp_path):
     )
     assert apply_edits(tmp_path, response, None) is True
     assert target.read_text() == "def foo():\n    return 2\n"
+
+
+def test_apply_edits_reports_failed_search_block(tmp_path):
+    """A SEARCH block that does not match must fail loudly, not silently succeed."""
+    target = tmp_path / "file.py"
+    target.write_text("def foo():\n    return 1\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "def not_present():\n"
+        "    return 1\n"
+        "=======\n"
+        "def not_present():\n"
+        "    return 2\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is False
+    assert target.read_text() == "def foo():\n    return 1\n"
+
+
+def test_strip_line_number_gutter_handles_blank_content():
+    """A guttered blank line is reduced to an empty string."""
+    from patch_utils import _strip_line_number_gutter
+
+    assert _strip_line_number_gutter("  1 | ") == ""
+    assert _strip_line_number_gutter("42:  ") == ""
+    assert _strip_line_number_gutter("  5 |") == ""
+    assert _strip_line_number_gutter("7.") == ""
+
+
+def test_apply_edits_strips_blank_line_gutters(tmp_path):
+    """SEARCH/REPLACE blocks may include guttered blank lines."""
+    target = tmp_path / "file.py"
+    target.write_text("a\n\nb\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "a\n"
+        "  2 |\n"
+        "b\n"
+        "=======\n"
+        "a\n"
+        "  2 |\n"
+        "changed\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text() == "a\n\nchanged\n"

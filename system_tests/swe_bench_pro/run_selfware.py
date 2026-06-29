@@ -137,8 +137,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-tasks",
         type=int,
-        default=1,
-        help="Maximum number of dataset instances to process (default: 1).",
+        default=None,
+        help="Maximum number of dataset instances to process. "
+             "When omitted, only the first instance is processed unless "
+             "--sample-file or --instance-ids is given, in which case all "
+             "requested instances are run.",
     )
     parser.add_argument(
         "--instance-ids",
@@ -1148,10 +1151,9 @@ def run_diff_fallback(
 def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bool:
     """Return True when the agent loop should be skipped entirely.
 
-    Default routing sends small/fragile and not-explicitly-recommended models
-    down the direct SEARCH/REPLACE patch path.  A model is considered strong
-    enough for the multi-turn XML tool loop only when its config metadata
-    explicitly sets ``recommended=True`` and it is not a small-tier model.
+    Default routing uses the multi-turn XML tool loop for all capable models.
+    Direct SEARCH/REPLACE patch generation is reserved for small/fragile
+    models and configs that explicitly request it.
 
     Explicit flags always win:
       * ``--agentless`` / ``--agentless=true`` forces agentless on.
@@ -1169,19 +1171,14 @@ def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bo
 
     model_id = config.get("model", "")
     tier = infer_capability_tier(model_id, config)
-    recommended = metadata.get("recommended")
 
-    # Small runs (<=10 instances) with small/fragile models should not waste
-    # iterations on the multi-turn tool loop.
-    sample_size = getattr(args, "sample_size", None)
-    if sample_size is not None and sample_size <= 10 and tier == "small":
+    # Small/fragile models default to direct patch generation because the
+    # multi-turn tool loop wastes iterations on models that cannot use it.
+    if tier == "small":
         return True
 
-    # Treat anything not explicitly recommended-and-strong as fragile.
-    if recommended is True and tier != "small":
-        return False
-
-    return True
+    # Everything else defaults to the multi-turn agent loop.
+    return False
 
 
 def _reset_repo(host_repo_dir: Path, base_commit: str, logger: logging.Logger) -> bool:
@@ -1858,10 +1855,13 @@ def save_prediction(
     instance_id: str,
     patch: str,
     logger: logging.Logger,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = output_dir / "predictions.jsonl"
-    record = {"instance_id": instance_id, "patch": patch}
+    record: dict[str, Any] = {"instance_id": instance_id, "patch": patch}
+    if metadata:
+        record["metadata"] = metadata
     with PREDICTIONS_LOCK:
         records = _read_predictions_jsonl(predictions_path)
         # Keep the latest record per instance_id so recovery attempts overwrite
@@ -1942,10 +1942,16 @@ def select_instances(
         rows = [row_by_id[iid] for iid in wanted if iid in row_by_id]
     elif args.sample_file:
         rows = load_sample_file(Path(args.sample_file), logger)
-        rows = rows[: args.max_tasks]
     else:
         rows = [dict(row) for row in dataset]
+
+    # Apply the explicit cap if one was provided.  The historical default is
+    # a single-instance smoke run, but --sample-file and --instance-ids should
+    # run everything they specify unless an explicit cap is given.
+    if args.max_tasks is not None:
         rows = rows[: args.max_tasks]
+    elif not args.sample_file and not args.instance_ids:
+        rows = rows[:1]
 
     if args.resume:
         rows = [r for r in rows if r["instance_id"] not in existing]
@@ -2203,15 +2209,19 @@ def _check_patch_builds(
     language: str,
     logger: logging.Logger,
 ) -> bool:
-    """Run a lightweight advisory compile/type-check gate on the current working tree.
+    """Run a lightweight pre-submission compile/type-check gate.
 
-    The patch is assumed to have already been applied.  If the source no longer
-    compiles or fails a syntax check, we log a warning but still return True so
-    the patch is submitted to the evaluator.  Host environments may lack
-    dependencies or proper test setup, so these gates must not drop valid
-    patches.
+    The patch is assumed to have already been applied.  A failing gate now
+    rejects the patch (returns ``False``) so broken predictions are not
+    submitted to the evaluator.  Set ``SELFWARE_BYPASS_COMPILE_GATE=1`` to
+    keep the old advisory behaviour for host environments with missing
+    dependencies.
     """
     if not patch.strip():
+        return True
+
+    if os.environ.get("SELFWARE_BYPASS_COMPILE_GATE"):
+        logger.info("Compile gate bypassed via SELFWARE_BYPASS_COMPILE_GATE")
         return True
 
     language = (language or "").lower()
@@ -2229,9 +2239,10 @@ def _check_patch_builds(
         )
         if proc.returncode != 0:
             logger.warning(
-                "Build gate failed (go build): %s. Keeping patch for evaluator.",
+                "Build gate failed (go build): %s. Rejecting patch.",
                 proc.stderr.strip()[:500],
             )
+            return False
         return True
 
     if language == "python":
@@ -2247,29 +2258,73 @@ def _check_patch_builds(
         )
         if proc.returncode != 0:
             logger.warning(
-                "Build gate failed (py_compile): %s. Keeping patch for evaluator.",
+                "Build gate failed (py_compile): %s. Rejecting patch.",
                 proc.stderr.strip()[:500],
             )
+            return False
         return True
 
-    if language in ("javascript", "typescript"):
-        tsconfig = repo_dir / "tsconfig.json"
-        if not tsconfig.is_file():
-            return True
-        if shutil.which("npx") is None:
-            logger.info("Build gate skipped: npx not available on host")
+    if language == "rust":
+        if shutil.which("cargo") is None:
+            logger.info("Build gate skipped: cargo not available on host")
             return True
         proc = run_cmd(
-            ["npx", "tsc", "--noEmit"],
+            ["cargo", "check"],
             cwd=repo_dir,
-            timeout=180,
+            timeout=300,
             logger=logger,
         )
         if proc.returncode != 0:
             logger.warning(
-                "Build gate failed (tsc --noEmit): %s. Keeping patch for evaluator.",
+                "Build gate failed (cargo check): %s. Rejecting patch.",
                 proc.stderr.strip()[:500],
             )
+            return False
+        return True
+
+    if language in ("javascript", "typescript"):
+        files = _changed_files_from_patch(patch)
+        tsconfig = repo_dir / "tsconfig.json"
+        if tsconfig.is_file() and language == "typescript":
+            if shutil.which("npx") is None:
+                logger.info("Build gate skipped: npx not available on host")
+                return True
+            proc = run_cmd(
+                ["npx", "tsc", "--noEmit"],
+                cwd=repo_dir,
+                timeout=180,
+                logger=logger,
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    "Build gate failed (tsc --noEmit): %s. Rejecting patch.",
+                    proc.stderr.strip()[:500],
+                )
+                return False
+            return True
+
+        # JavaScript gate (also used for TypeScript without a tsconfig).
+        js_files = [f for f in files if f.endswith(".js")]
+        if not js_files:
+            return True
+        node_bin = shutil.which("node")
+        if node_bin is None:
+            logger.info("Build gate skipped: node not available on host")
+            return True
+        for js_file in js_files:
+            proc = run_cmd(
+                [node_bin, "--check", js_file],
+                cwd=repo_dir,
+                timeout=60,
+                logger=logger,
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    "Build gate failed (node --check %s): %s. Rejecting patch.",
+                    js_file,
+                    proc.stderr.strip()[:500],
+                )
+                return False
         return True
 
     # No gate for other languages.
@@ -2330,6 +2385,7 @@ def _run_tdr_block(
     logger: logging.Logger,
     output_dir: Path,
     instance_id: str,
+    metadata: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """Run optional ensemble seed generation and/or TDR and return the best patch + success flag."""
     from tdr import run_test_driven_repair, run_ensemble_seed_generation
@@ -2370,7 +2426,7 @@ def _run_tdr_block(
         )
         if ensemble_patch.strip():
             patch = ensemble_patch
-            save_prediction(output_dir, instance_id, patch, logger)
+            save_prediction(output_dir, instance_id, patch, logger, metadata)
             logger.info("Ensemble selected best seed for %s", instance_id)
 
     if not args.tdr:
@@ -2388,7 +2444,7 @@ def _run_tdr_block(
         logger,
         ranked_files=ranked_files,
     )
-    save_prediction(output_dir, instance_id, patch, logger)
+    save_prediction(output_dir, instance_id, patch, logger, metadata)
     return patch, bool(patch.strip())
 
 
@@ -2481,6 +2537,8 @@ def process_instance(
             else:
                 logger.warning("Few-shot examples file not found: %s", few_shot_path)
 
+        metadata: dict[str, Any] = {}
+
         if should_use_agentless(args, patch_config):
             patch = run_agentless(
                 host_repo_dir,
@@ -2499,8 +2557,14 @@ def process_instance(
                 patch = ""
             if patch.strip():
                 language = (instance.get("repo_language") or "").lower()
-                _check_patch_builds(host_repo_dir, patch, language, logger)
-            save_prediction(output_dir, instance_id, patch, logger)
+                if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                    logger.warning(
+                        "Agentless patch for %s failed compile gate; treating as empty",
+                        instance_id,
+                    )
+                    patch = ""
+                    metadata["compile_gate_rejected"] = True
+            save_prediction(output_dir, instance_id, patch, logger, metadata)
             if (args.tdr and patch.strip()) or args.ensemble_models:
                 patch, success = _run_tdr_block(
                     host_repo_dir,
@@ -2511,9 +2575,12 @@ def process_instance(
                     logger,
                     output_dir,
                     instance_id,
+                    metadata=metadata,
                 )
                 return success and bool(patch.strip())
             if not patch.strip():
+                metadata["empty_patch"] = True
+                save_prediction(output_dir, instance_id, patch, logger, metadata)
                 logger.warning("Empty patch for %s", instance_id)
                 return False
             return True
@@ -2529,7 +2596,16 @@ def process_instance(
                 logger,
                 name,
             )
-            save_prediction(output_dir, instance_id, patch, logger)
+            if patch.strip():
+                language = (instance.get("repo_language") or "").lower()
+                if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                    logger.warning(
+                        "Plan-then-patch patch for %s failed compile gate; treating as empty",
+                        instance_id,
+                    )
+                    patch = ""
+                    metadata["compile_gate_rejected"] = True
+            save_prediction(output_dir, instance_id, patch, logger, metadata)
             if (args.tdr and patch.strip()) or args.ensemble_models:
                 patch, success = _run_tdr_block(
                     host_repo_dir,
@@ -2540,9 +2616,12 @@ def process_instance(
                     logger,
                     output_dir,
                     instance_id,
+                    metadata=metadata,
                 )
                 return success and bool(patch.strip())
             if not patch.strip():
+                metadata["empty_patch"] = True
+                save_prediction(output_dir, instance_id, patch, logger, metadata)
                 logger.warning("Empty patch for %s", instance_id)
                 return False
             return True
@@ -2621,13 +2700,18 @@ def process_instance(
             logger.warning("Captured patch for %s does not apply; treating as empty", instance_id)
             patch = ""
 
-        # Compile / type-check gate: advisory only. Host environments may lack
-        # dependencies, so do not drop patches that fail the gate.
+        # Compile / type-check gate: hard reject broken patches before submission.
         if patch.strip():
             language = (instance.get("repo_language") or "").lower()
-            _check_patch_builds(host_repo_dir, patch, language, logger)
+            if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                logger.warning(
+                    "Captured patch for %s failed compile gate; treating as empty",
+                    instance_id,
+                )
+                patch = ""
+                metadata["compile_gate_rejected"] = True
 
-        save_prediction(output_dir, instance_id, patch, logger)
+        save_prediction(output_dir, instance_id, patch, logger, metadata)
 
         if not patch.strip():
             logger.warning("Empty patch for %s", instance_id)
@@ -2657,7 +2741,16 @@ def process_instance(
                     base_commit=instance.get("base_commit"),
                     test_patch_paths=test_patch_paths,
                 )
-                save_prediction(output_dir, instance_id, patch, logger)
+                if patch.strip():
+                    language = (instance.get("repo_language") or "").lower()
+                    if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                        logger.warning(
+                            "Force-edit patch for %s failed compile gate; treating as empty",
+                            instance_id,
+                        )
+                        patch = ""
+                        metadata["compile_gate_rejected"] = True
+                save_prediction(output_dir, instance_id, patch, logger, metadata)
 
         # ------------------------------------------------------------------
         # Early diff fallback: fragile models often fail on the first agent
@@ -2698,8 +2791,16 @@ def process_instance(
                     )
                     if early_patch.strip():
                         patch = early_patch
-                        save_prediction(output_dir, instance_id, patch, logger)
-                        success = True
+                        language = (instance.get("repo_language") or "").lower()
+                        if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                            logger.warning(
+                                "Early diff fallback patch for %s failed compile gate; treating as empty",
+                                instance_id,
+                            )
+                            patch = ""
+                            metadata["compile_gate_rejected"] = True
+                        save_prediction(output_dir, instance_id, patch, logger, metadata)
+                        success = bool(patch.strip())
                         logger.info("Early diff fallback succeeded for %s", instance_id)
 
         # ------------------------------------------------------------------
@@ -2718,6 +2819,7 @@ def process_instance(
             )
 
             for attempt in range(1, args.max_retries + 1):
+                metadata["recovery_attempts"] = metadata.get("recovery_attempts", 0) + 1
                 if not should_retry(failure_class, attempt, args.max_retries):
                     logger.info(
                         "No further recovery retries for %s (class=%s)",
@@ -2781,6 +2883,13 @@ def process_instance(
                         instance_id,
                         attempt,
                     )
+                    logger.info(
+                        "RECOVERY_ESCALATION instance=%s attempt=%s agentless_mode=%s",
+                        instance_id,
+                        attempt,
+                        AGENTLESS_MODE_KEY,
+                    )
+                    metadata["agentless_recovery_fired"] = True
                     recovery_patch_config = load_config(recovery_path)
                     patch = run_agentless(
                         host_repo_dir,
@@ -2830,12 +2939,13 @@ def process_instance(
                         base_commit=instance.get("base_commit"),
                         test_patch_paths=test_patch_paths,
                     )
-                save_prediction(output_dir, instance_id, patch, logger)
+                save_prediction(output_dir, instance_id, patch, logger, metadata)
 
                 if success and patch.strip():
                     logger.info(
                         "Recovery attempt %s succeeded for %s", attempt, instance_id
                     )
+                    metadata["recovery_succeeded"] = True
                     break
 
                 # Re-classify for the next attempt. If the patch is still empty,
@@ -2890,9 +3000,21 @@ def process_instance(
                 )
                 if fallback_patch.strip():
                     patch = fallback_patch
-                    save_prediction(output_dir, instance_id, patch, logger)
-                    success = True
+                    language = (instance.get("repo_language") or "").lower()
+                    if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                        logger.warning(
+                            "Diff fallback patch for %s failed compile gate; treating as empty",
+                            instance_id,
+                        )
+                        patch = ""
+                        metadata["compile_gate_rejected"] = True
+                    save_prediction(output_dir, instance_id, patch, logger, metadata)
+                    success = bool(patch.strip())
                     logger.info("Diff fallback succeeded for %s", instance_id)
+
+        if not patch.strip():
+            metadata["empty_patch"] = True
+            save_prediction(output_dir, instance_id, patch, logger, metadata)
 
         if not success:
             logger.warning("selfware did not succeed for %s; empty/short patch likely", instance_id)
@@ -2911,6 +3033,7 @@ def process_instance(
                 logger,
                 output_dir,
                 instance_id,
+                metadata=metadata,
             )
 
         # A "successful" run that produced no diff is not a real fix for SWE-bench Pro.
@@ -2919,7 +3042,7 @@ def process_instance(
         logger.error("Unexpected error processing %s: %s", instance_id, exc)
         logger.debug(traceback.format_exc())
         # Save an empty prediction so we don't retry on --resume.
-        save_prediction(output_dir, instance_id, "", logger)
+        save_prediction(output_dir, instance_id, "", logger, metadata)
         return False
     finally:
         if not args.keep_container:

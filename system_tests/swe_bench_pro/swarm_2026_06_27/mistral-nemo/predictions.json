@@ -1,0 +1,6 @@
+[
+  {
+    "instance_id": "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan",
+    "patch": "diff --git a/src/user/email.js b/src/user/email.js\nindex 9b51b43ddd..13688f5c2a 100644\n--- a/src/user/email.js\n+++ b/src/user/email.js\n@@ -34,7 +34,7 @@ UserEmail.remove = async function (uid, sessionId) {\n \tawait Promise.all([\n \t\tuser.setUserFields(uid, {\n \t\t\temail: '',\n-\t\t\t'email:confirmed': 0,\n+\t\t\t'email:confirmed': 1,\n \t\t}),\n \t\tdb.sortedSetRemove('email:uid', email.toLowerCase()),\n \t\tdb.sortedSetRemove('email:sorted', `${email.toLowerCase()}:${uid}`),\n"
+  }
+]

