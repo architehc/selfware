@@ -651,9 +651,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_tool_focus_with_id() {
-        // Skip test if no X11 display is available
-        if std::env::var("DISPLAY").is_err() {
-            eprintln!("Skipping test: no X11 display");
+        // Skip test if no working X11 display / window manager is available
+        if std::env::var("DISPLAY").is_err()
+            || std::process::Command::new("xdotool")
+                .arg("getactivewindow")
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(true)
+        {
+            eprintln!("Skipping test: no working X11 display");
             return;
         }
         // Skip test if window management tools aren't available
