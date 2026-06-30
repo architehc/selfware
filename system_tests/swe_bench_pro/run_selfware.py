@@ -1799,11 +1799,16 @@ def run_plan_then_patch(
     )
     (log_dir / f"{name}.patch.response.md").write_text(patch_response, encoding="utf-8")
 
-    applied = apply_model_response(host_repo_dir, patch_response, logger)
-    if not applied:
+    applied, missing_files = apply_model_response_with_missing(
+        host_repo_dir, patch_response, logger
+    )
+    if not applied or missing_files:
         logger.warning(
-            "Plan-then-patch response for %s could not be fully applied; rejecting patch",
+            "Plan-then-patch response for %s could not be fully applied "
+            "(applied=%s, missing_files=%s); rejecting patch",
             instance_id,
+            applied,
+            sorted(missing_files),
         )
         _reset_repo(host_repo_dir, instance.get("base_commit", ""), logger)
         return ""

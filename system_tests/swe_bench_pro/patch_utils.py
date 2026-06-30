@@ -285,8 +285,9 @@ def apply_edits_with_missing(
     """Apply simple file edits in ### FILE / SEARCH / REPLACE blocks.
 
     Returns whether any edit was applied and the set of file paths referenced
-    by the model that do not exist in the repository.  Missing files are
-    skipped instead of crashing so callers can detect hallucinated paths.
+    by the model that could not be edited (non-existent files, or existing
+    files where the SEARCH block could not be matched).  Failed files are
+    recorded so callers can detect partial or hallucinated patches.
     """
     # Strip markdown code fences so wrapped blocks still parse.
     cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
@@ -359,6 +360,7 @@ def apply_edits_with_missing(
                         logger.warning(
                             "Search block not found in %s (exact and whitespace-normalized)", rel_path
                         )
+                    missing.add(rel_path)
                     continue
                 text = fuzzy
             else:

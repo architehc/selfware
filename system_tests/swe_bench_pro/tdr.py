@@ -130,6 +130,7 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
     return (
         "#!/bin/bash\n"
         "set -uo pipefail\n"
+        """trap 'if [ ! -f /workspace/output.json ]; then echo '"'"'{"tests": []}'"'"' > /workspace/output.json; fi' EXIT\n"""
         "cd /app\n"
         #
         # Reset defensively and capture the optional setup command status.
