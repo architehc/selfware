@@ -22,8 +22,10 @@ from run_selfware import (
     _parse_context_limit_from_error,
     _run_diff_recovery,
     call_chat_endpoint,
+    load_config,
     load_existing_predictions,
     main,
+    prepare_effective_config,
     run_agentless,
     run_diff_fallback,
     run_plan_then_patch,
@@ -129,6 +131,83 @@ def test_should_use_agentless_agentless_default_metadata():
         "metadata": {"agentless_default": True, "recommended": True},
     }
     assert should_use_agentless(_args(sample_size=50), config) is True
+
+
+def test_should_use_agentless_no_auto_agentless_disables_small_routing():
+    """--no-auto-agentless prevents small-tier models from defaulting to agentless."""
+    config = {
+        "model": "qwen2.5-7b",
+        "metadata": {"recommended": False},
+    }
+    assert should_use_agentless(_args(auto_agentless=False, sample_size=5), config) is False
+
+
+def test_should_use_agentless_no_auto_agentless_still_honors_explicit():
+    """--no-auto-agentless does not override an explicit --agentless=true."""
+    config = {
+        "model": "gemini-2.5-pro",
+        "metadata": {"recommended": True},
+    }
+    assert should_use_agentless(
+        _args(agentless=True, auto_agentless=False, sample_size=5), config
+    ) is True
+
+
+def test_should_use_agentless_no_auto_agentless_still_honors_metadata_default():
+    """--no-auto-agentless still respects metadata.agentless_default."""
+    config = {
+        "model": "gemini-2.5-pro",
+        "metadata": {"agentless_default": True, "recommended": True},
+    }
+    assert should_use_agentless(
+        _args(auto_agentless=False, sample_size=5), config
+    ) is True
+
+
+def test_prepare_effective_config_merges_small_model_yaml(tmp_path):
+    """YAML overrides are merged over the TOML config for small-model profiles."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    small_model_config_dir = tmp_path / "small_configs"
+    small_model_config_dir.mkdir()
+    output_dir = tmp_path / "out"
+
+    (config_dir / "openrouter_test-small.toml").write_text(
+        'model = "test/small"\n'
+        "max_tokens = 1024\n"
+        'temperature = 0.5\n'
+        '[metadata]\ntier = "small"\nrecommended = true\n',
+        encoding="utf-8",
+    )
+    (small_model_config_dir / "test-small.yaml").write_text(
+        "max_tokens: 4096\n"
+        "temperature: 0.1\n"
+        "metadata:\n"
+        "  recommended: false\n"
+        '  notes: "from yaml"\n',
+        encoding="utf-8",
+    )
+
+    args = argparse.Namespace(
+        model_profile="test-small",
+        config_dir=str(config_dir),
+        small_model_config_dir=str(small_model_config_dir),
+        output_dir=str(output_dir),
+        local_endpoint=None,
+        small_model=False,
+        compact_prompt=False,
+        adaptive=False,
+        agentless=None,
+        auto_agentless=None,
+    )
+    effective_path = prepare_effective_config(args, logging.getLogger("test"))
+    effective = load_config(effective_path)
+
+    assert effective["max_tokens"] == 4096
+    assert effective["temperature"] == 0.1
+    assert effective["metadata"]["recommended"] is False
+    assert effective["metadata"]["notes"] == "from yaml"
+    assert effective["model"] == "test/small"
 
 
 def test_load_existing_predictions_skips_empty_patches():
@@ -903,6 +982,9 @@ def _make_base_args(output_dir: Path, sample_file: Path | None = None, **overrid
         output_dir=str(output_dir),
         timeout=1800,
         config_dir=str(Path(__file__).parent / "fake_config"),
+        small_model_config_dir=str(
+            Path(__file__).parent.parent / "configs"
+        ),
         binary=__file__,
         repo_dir="/app",
         resume=False,

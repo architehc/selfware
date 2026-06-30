@@ -68,21 +68,23 @@ def main() -> None:
         completed = report.get("completed_instances", 0)
         errored = report.get("errored_instances", total - completed)
         overall_pass = report.get("overall_passed_instances", 0)
-        overall_rate = report.get("overall_pass_rate", 0.0)
-        ftp_rate = report.get("fail_to_pass_rate", 0.0)
-        ptp_rate = report.get("pass_to_pass_rate", 0.0)
+        # Use the total-instance (errors-counted-as-failed) rates as the headline
+        # so shrinking denominators do not inflate the reported pass rate.
+        overall_rate_total = report.get("overall_pass_rate_total", 0.0)
+        ftp_rate_total = report.get("fail_to_pass_rate_total", 0.0)
+        ptp_rate_total = report.get("pass_to_pass_rate_total", 0.0)
 
         rows.append(
-            f"| {model_name} | {total} | {completed} | {errored} | {overall_pass}/{completed} "
-            f"({overall_rate:.1%}) | {ftp_rate:.1%} | {ptp_rate:.1%} |"
+            f"| {model_name} | {total} | {completed} | {errored} | {overall_pass}/{total} "
+            f"({overall_rate_total:.1%}) | {ftp_rate_total:.1%} | {ptp_rate_total:.1%} |"
         )
 
         model_results.append(
             {
                 "model": model_name,
-                "overall_rate": overall_rate,
-                "ftp_rate": ftp_rate,
-                "ptp_rate": ptp_rate,
+                "overall_rate": overall_rate_total,
+                "ftp_rate": ftp_rate_total,
+                "ptp_rate": ptp_rate_total,
             }
         )
 
@@ -119,8 +121,8 @@ def main() -> None:
         "",
         "## Per-Model Results",
         "",
-        "| Model | Total | Completed | Errored | Overall Pass | Fail-to-Pass | Pass-to-Pass |",
-        "|-------|-------|-----------|---------|--------------|--------------|--------------|",
+        "| Model | Total | Completed | Errored | Overall Pass (total) | Fail-to-Pass (total) | Pass-to-Pass (total) |",
+        "|-------|-------|-----------|---------|----------------------|----------------------|----------------------|",
     ]
     lines.extend(rows)
     lines.append("")

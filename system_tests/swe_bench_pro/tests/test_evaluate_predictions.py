@@ -169,7 +169,11 @@ def test_no_tests_were_executed_false_when_expected_tests_present():
 
 
 def test_score_and_classify_marks_no_tests_as_errored():
-    """Simulate the post-scoring classification used by evaluate_instance."""
+    """Simulate the post-scoring classification used by evaluate_instance.
+
+    Errored instances keep the expected test totals so they still count in the
+    headline fail-to-pass / pass-to-pass denominators.
+    """
     instance = _instance_with_tests(
         fail_to_pass=["test_fail.py::test_x"],
         pass_to_pass=["test_pass.py::test_y"],
@@ -190,16 +194,14 @@ def test_score_and_classify_marks_no_tests_as_errored():
         result["error"] = "no tests executed"
         result["overall_pass"] = False
         result["fail_to_pass_passed"] = 0
-        result["fail_to_pass_total"] = 0
         result["pass_to_pass_passed"] = 0
-        result["pass_to_pass_total"] = 0
 
     assert result["error"] == "no tests executed"
     assert result["overall_pass"] is False
     assert result["fail_to_pass_passed"] == 0
-    assert result["fail_to_pass_total"] == 0
+    assert result["fail_to_pass_total"] == 1
     assert result["pass_to_pass_passed"] == 0
-    assert result["pass_to_pass_total"] == 0
+    assert result["pass_to_pass_total"] == 1
 
 
 def test_write_report_includes_diagnostic_counters(tmp_path):
@@ -343,6 +345,8 @@ def test_augment_results_adds_missing_prediction(tmp_path):
     assert report["completed_instances"] == 1
     assert report["errored_instances"] == 1
     assert report["overall_passed_instances"] == 1
+    assert report["overall_pass_rate_total"] == 1 / 2
+    assert report["overall_pass_rate"] == 1 / 1
     assert report["missing_prediction_count"] == 1
 
     missing = next(r for r in report["per_instance"] if r["instance_id"] == "missing")
@@ -356,6 +360,59 @@ def test_augment_results_adds_missing_prediction(tmp_path):
 
     summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
     assert "Missing prediction: **1**" in summary_text
+
+
+def test_write_report_headline_uses_total_rate(tmp_path):
+    """The honest headline denominator is the total sample, counting errors as failed."""
+    patch_text = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n"
+    results = [
+        {
+            "instance_id": "passed",
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 1,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+        {
+            "instance_id": "failed",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+        {
+            "instance_id": "errored",
+            "error": "no tests executed",
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+    ]
+
+    report = _write_report(tmp_path, results)
+
+    assert report["total_instances"] == 3
+    assert report["completed_instances"] == 2
+    assert report["errored_instances"] == 1
+    assert report["overall_passed_instances"] == 1
+    assert report["overall_pass_rate_total"] == 1 / 3
+    assert report["overall_pass_rate"] == 1 / 2
+
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    # The summary must lead with the total-instance headline.
+    assert "Overall passed instances (errors counted as failed): **1/3**" in summary_text
+    assert "Overall passed instances (completed only): **1/2**" in summary_text
 
 
 def test_pre_pull_called_with_unique_images_before_evaluation(tmp_path, monkeypatch):

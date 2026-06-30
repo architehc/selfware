@@ -62,6 +62,12 @@ from small_model_adapter import (
     truncate_file_reads,
 )
 
+from small_model_configs import (
+    DEFAULT_SMALL_MODEL_CONFIG_DIR,
+    load_small_model_config,
+    merge_over_toml,
+)
+
 from patch_utils import (
     apply_edits,
     apply_model_response,
@@ -251,6 +257,12 @@ def parse_args() -> argparse.Namespace:
         "--config-dir",
         default=str(DEFAULT_CONFIG_DIR),
         help="Directory containing openrouter_<profile>.toml config files.",
+    )
+    parser.add_argument(
+        "--small-model-config-dir",
+        default=str(DEFAULT_SMALL_MODEL_CONFIG_DIR),
+        help="Directory containing <profile>.yaml small-model config files. "
+             "When a small model is selected, these YAML files override the TOML config.",
     )
     parser.add_argument(
         "--binary",
@@ -628,6 +640,20 @@ def prepare_effective_config(
 
     config = load_config(config_path)
     patched = False
+
+    # Prefer small-model YAML overrides when agentless routing is selected.
+    if should_use_agentless(args, config):
+        yaml_config = load_small_model_config(
+            args.model_profile, args.small_model_config_dir, logger
+        )
+        if yaml_config is not None:
+            config = merge_over_toml(config, yaml_config)
+            patched = True
+            logger.info(
+                "Merged small-model YAML config for '%s' from %s",
+                args.model_profile,
+                Path(args.small_model_config_dir) / f"{args.model_profile}.yaml",
+            )
 
     if args.local_endpoint:
         config["endpoint"] = args.local_endpoint
@@ -1391,6 +1417,10 @@ def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bo
     Explicit flags always win:
       * ``--agentless`` / ``--agentless=true`` forces agentless on.
       * ``--no-agentless`` / ``--agentless=false`` forces the tool loop on.
+
+    ``--auto-agentless`` (the default) routes small-tier models to agentless.
+    ``--no-auto-agentless`` disables that automatic routing while still
+    respecting explicit flags and ``metadata.agentless_default``.
     """
     # Explicit opt-in / opt-out always wins.
     if args.agentless is True:
@@ -1401,6 +1431,10 @@ def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bo
     metadata = config.get("metadata", {}) or {}
     if metadata.get("agentless_default"):
         return True
+
+    # Honor --no-auto-agentless: do not route to agentless solely based on tier.
+    if args.auto_agentless is False:
+        return False
 
     model_id = config.get("model", "")
     tier = infer_capability_tier(model_id, config)

@@ -1,0 +1,34 @@
+# Auto-generated from system_tests/projecte2e/config/openrouter_llama-3.1-8b.toml
+# Do NOT put the real API key here; set SELFWARE_API_KEY in the environment.
+
+endpoint: "https://openrouter.ai/api/v1"
+model: "meta-llama/llama-3.1-8b-instruct"
+max_tokens: 8192
+temperature: 0.1
+api_key: "$SELFWARE_API_KEY"
+
+agent:
+  max_iterations: 25
+  step_timeout_secs: 600
+  token_budget: 32768
+  context_window: 0
+  native_function_calling: false
+  streaming: false
+  min_completion_steps: 2
+  require_verification_before_completion: true
+
+retry:
+  max_retries: 8
+  base_delay_ms: 2000
+  max_delay_ms: 60000
+
+safety:
+  allowed_paths:
+    - "./**"
+    - "/app/**"
+
+metadata:
+  tier: "small"
+  tool_style: "xml"
+  recommended: true
+  notes: "Meta Llama 3.1 8B Instruct; small, fast, open weights."

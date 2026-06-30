@@ -63,6 +63,12 @@ def parse_summary(report_path: Path):
         "fail_to_pass": (0, 0),
         "pass_to_pass": (0, 0),
     }
+    # The Markdown summary lists the total-instance headline first and the
+    # "completed only" alternative afterwards; only capture the first match so
+    # the conservative denominator is preserved.
+    got_passed = False
+    got_f2p = False
+    got_p2p = False
     for line in text.splitlines():
         m = re.search(r"Total instances:\s*\*\*(\d+)\*\*", line)
         if m:
@@ -73,15 +79,23 @@ def parse_summary(report_path: Path):
         m = re.search(r"Errored:\s*\*\*(\d+)\*\*", line)
         if m:
             result["errored"] = int(m.group(1))
-        m = re.search(r"Overall passed instances:\s*\*\*(\d+)/(\d+)\*\*", line)
-        if m:
-            result["passed"] = int(m.group(1))
-        m = re.search(r"Fail-to-pass:\s*\*\*(\d+)/(\d+)\*\*", line)
-        if m:
-            result["fail_to_pass"] = (int(m.group(1)), int(m.group(2)))
-        m = re.search(r"Pass-to-pass:\s*\*\*(\d+)/(\d+)\*\*", line)
-        if m:
-            result["pass_to_pass"] = (int(m.group(1)), int(m.group(2)))
+        if not got_passed:
+            m = re.search(
+                r"Overall passed instances[^*]*\*\*(\d+)/(\d+)\*\*", line
+            )
+            if m:
+                result["passed"] = int(m.group(1))
+                got_passed = True
+        if not got_f2p:
+            m = re.search(r"Fail-to-pass[^*]*\*\*(\d+)/(\d+)\*\*", line)
+            if m:
+                result["fail_to_pass"] = (int(m.group(1)), int(m.group(2)))
+                got_f2p = True
+        if not got_p2p:
+            m = re.search(r"Pass-to-pass[^*]*\*\*(\d+)/(\d+)\*\*", line)
+            if m:
+                result["pass_to_pass"] = (int(m.group(1)), int(m.group(2)))
+                got_p2p = True
     return result
 
 

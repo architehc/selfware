@@ -851,9 +851,10 @@ def main() -> int:
 
     report = _write_report(output_dir, results)
     logger.info(
-        "Evaluation complete. Overall passed: %s/%s",
+        "Evaluation complete. Overall passed: %s/%s (%s total rate)",
         report["overall_passed_instances"],
-        report["completed_instances"],
+        report["total_instances"],
+        f"{report['overall_pass_rate_total']:.1%}",
     )
     logger.info("Report: %s", output_dir / "evaluation_report.json")
     logger.info("Summary: %s", output_dir / "evaluation_summary.md")
