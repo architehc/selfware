@@ -30,10 +30,57 @@ def test_entryscript_has_parser_fallback():
     assert "python /workspace/parser.py" in script
     assert "if [ ! -f /workspace/output.json ]; then" in script
     assert "echo '{\"tests\": []}' > /workspace/output.json" in script
-    # Fallback must come after the parser invocation.
+    # Fallback must come after the parser invocation (the trap has a similar
+    # guard earlier, so search from the parser invocation).
     parser_idx = script.index("python /workspace/parser.py")
-    fallback_idx = script.index("if [ ! -f /workspace/output.json ]; then")
+    fallback_idx = script.index("if [ ! -f /workspace/output.json ]; then", parser_idx)
     assert fallback_idx > parser_idx
+
+
+def test_entryscript_has_exit_trap_for_output_json():
+    """A container crash must still leave an output.json for the harness."""
+    script = tdr._build_entryscript(_minimal_instance())
+    assert "trap " in script and "/workspace/output.json" in script
+    assert "EXIT" in script
+
+
+def test_entryscript_clears_stale_output_before_tests():
+    """Stale output.json from a prior iteration must be removed before tests run."""
+    script = tdr._build_entryscript(_minimal_instance())
+    run_idx = script.index("bash /workspace/run_script.sh")
+    clear_idx = script.index("rm -f /workspace/output.json")
+    assert clear_idx < run_idx
+
+
+def test_entryscript_passes_tests_as_separate_quoted_args():
+    """Selected tests must be passed as separate shell arguments, not comma-joined."""
+    instance = {
+        **_minimal_instance(),
+        "selected_test_files_to_run": ["tests/test_a.py", "tests/test_b.py"],
+    }
+    script = tdr._build_entryscript(instance)
+    assert "bash /workspace/run_script.sh tests/test_a.py tests/test_b.py" in script
+    assert "tests/test_a.py,tests/test_b.py" not in script
+
+
+def test_entryscript_quotes_paths_with_special_chars():
+    """Paths containing spaces or globs must be shell-quoted."""
+    instance = {
+        **_minimal_instance(),
+        "selected_test_files_to_run": ["tests/my test.py", "tests/*.py"],
+    }
+    script = tdr._build_entryscript(instance)
+    assert "bash /workspace/run_script.sh 'tests/my test.py' 'tests/*.py'" in script
+    assert "tests/my test.py,tests/*.py" not in script
+
+
+def test_compile_check_js_does_not_ignore_failure():
+    """The JS/TS compile check must not be masked by '|| true'."""
+    js_instance = {**_minimal_instance(), "repo_language": "javascript"}
+    cmd = tdr._compile_check_command(js_instance)
+    assert cmd is not None
+    joined = " ".join(cmd)
+    assert "|| true" not in joined
 
 
 def test_entryscript_detects_no_op_patch():

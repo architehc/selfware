@@ -1,7 +1,7 @@
 #!/bin/bash
 # Launch a matrix of v2 harness runs on cheap/free OpenRouter models.
 # Each run uses an isolated podman root to avoid storage races.
-# Usage: run_v2_matrix.sh
+# Usage: run_v2_matrix.sh [--fresh]
 set -uo pipefail
 
 REPO="/home/habitat/selfware"
@@ -9,6 +9,21 @@ SWE_DIR="${REPO}/system_tests/swe_bench_pro"
 CONFIG_DIR="${REPO}/system_tests/projecte2e/config"
 VENV="/tmp/SWE-bench_Pro-os/eval_venv/bin/python3"
 SAMPLE_FILE="${SWE_DIR}/sample_50.jsonl"
+
+FRESH=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --fresh)
+      FRESH=true
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--fresh]"
+      exit 1
+      ;;
+  esac
+done
 
 # Array entries: "profile:root_idx:sample_size"
 # root_idx 1 is reserved for the already-running glm-5.2 baseline.
@@ -36,8 +51,10 @@ for entry in "${MODELS[@]}"; do
 
   mkdir -p "${out_dir}"
 
-  # Start fresh so that earlier failed/empty predictions are not reused.
-  rm -f "${out_dir}/out/predictions.jsonl" "${out_dir}/out/predictions.json"
+  if [ "${FRESH}" = true ]; then
+    rm -rf "${out_dir}/out"
+  fi
+  mkdir -p "${out_dir}/out"
 
   export PATH="${podman_root}/bin:${PATH}"
 
@@ -52,6 +69,7 @@ for entry in "${MODELS[@]}"; do
 
   nohup bash -c "
     ${VENV} run_selfware.py \\
+      --resume \\
       --model-profile '${profile}' \\
       --config-dir '${CONFIG_DIR}' \\
       --sample-file '${SAMPLE_FILE}' \\

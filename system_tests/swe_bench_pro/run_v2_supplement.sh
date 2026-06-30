@@ -1,5 +1,6 @@
 #!/bin/bash
 # Supplementary v2 runs replacing rate-limited free models with cheap paid ones.
+# Usage: run_v2_supplement.sh [--fresh]
 set -uo pipefail
 
 REPO="/home/habitat/selfware"
@@ -7,6 +8,21 @@ SWE_DIR="${REPO}/system_tests/swe_bench_pro"
 CONFIG_DIR="${REPO}/system_tests/projecte2e/config"
 VENV="/tmp/SWE-bench_Pro-os/eval_venv/bin/python3"
 SAMPLE_FILE="${SWE_DIR}/sample_50.jsonl"
+
+FRESH=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --fresh)
+      FRESH=true
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: $0 [--fresh]"
+      exit 1
+      ;;
+  esac
+done
 
 # profile:root_idx:sample_size
 MODELS=(
@@ -25,7 +41,11 @@ for entry in "${MODELS[@]}"; do
   podman_root="/tmp/podman-root-${root_idx}"
 
   mkdir -p "${out_dir}"
-  rm -f "${out_dir}/out/predictions.jsonl" "${out_dir}/out/predictions.json"
+
+  if [ "${FRESH}" = true ]; then
+    rm -rf "${out_dir}/out"
+  fi
+  mkdir -p "${out_dir}/out"
 
   export PATH="${podman_root}/bin:${PATH}"
 
@@ -39,6 +59,7 @@ for entry in "${MODELS[@]}"; do
 
   nohup bash -c "
     ${VENV} run_selfware.py \\
+      --resume \\
       --model-profile '${profile}' \\
       --config-dir '${CONFIG_DIR}' \\
       --sample-file '${SAMPLE_FILE}' \\

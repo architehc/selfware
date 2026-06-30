@@ -16,7 +16,43 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-def parse_summary(summary_path: Path):
+def parse_summary(report_path: Path):
+    """Read the structured evaluation report JSON.
+
+    Falls back to the Markdown summary only when the JSON report is missing.
+    """
+    if report_path.exists():
+        try:
+            data = json.loads(report_path.read_text(encoding="utf-8"))
+            return {
+                "total": data.get("total_instances", 0),
+                "completed": data.get("completed_instances", 0),
+                "errored": data.get("errored_instances", 0),
+                "passed": data.get("overall_passed_instances", 0),
+                "pass_rate": 0.0,
+                "fail_to_pass": (
+                    data.get("fail_to_pass_passed", 0),
+                    data.get("fail_to_pass_total", 0),
+                ),
+                "pass_to_pass": (
+                    data.get("pass_to_pass_passed", 0),
+                    data.get("pass_to_pass_total", 0),
+                ),
+            }
+        except Exception:
+            pass
+    # Markdown fallback for legacy summaries.
+    summary_path = report_path.with_name("evaluation_summary.md")
+    if not summary_path.exists():
+        return {
+            "total": 0,
+            "completed": 0,
+            "errored": 0,
+            "passed": 0,
+            "pass_rate": 0.0,
+            "fail_to_pass": (0, 0),
+            "pass_to_pass": (0, 0),
+        }
     text = summary_path.read_text(encoding="utf-8")
     result = {
         "total": 0,
@@ -121,7 +157,7 @@ def collect_results(base_dir: Path, pricing: dict):
             continue
         sample_size = int(m.group(1))
         model = m.group(2)
-        summary = run_dir / "eval" / "evaluation_summary.md"
+        report = run_dir / "eval" / "evaluation_report.json"
         preds_file = run_dir / "out" / "predictions.jsonl"
         preds_count = sum(1 for _ in preds_file.open(encoding="utf-8") if _.strip()) if preds_file.exists() else 0
         log_file = run_dir / "agent.log"
@@ -139,8 +175,8 @@ def collect_results(base_dir: Path, pricing: dict):
             "elapsed_hours": elapsed,
             "instances_per_hour": round(sample_size / elapsed, 2) if elapsed and elapsed > 0 else None,
         }
-        if summary.exists():
-            s = parse_summary(summary)
+        if report.exists() or (run_dir / "eval" / "evaluation_summary.md").exists():
+            s = parse_summary(report)
             s["pass_rate"] = compute_conservative_pass_rate(s)
             row.update({
                 "completed": s["completed"],
