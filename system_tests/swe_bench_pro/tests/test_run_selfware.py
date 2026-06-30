@@ -681,6 +681,120 @@ def test_run_diff_fallback_extracts_valid_unified_diff(tmp_path, monkeypatch):
     assert "-old" in patch
 
 
+def test_run_diff_fallback_rejects_partial_search_replace(tmp_path, monkeypatch):
+    """A partial SEARCH/REPLACE patch is rejected and the repo is reset."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "a.py").write_text("old_a\n", encoding="utf-8")
+    (repo / "b.py").write_text("old_b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    response = (
+        "### FILE: a.py\n"
+        "<<<<<<< SEARCH\n"
+        "old_a\n"
+        "=======\n"
+        "new_a\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: b.py\n"
+        "<<<<<<< SEARCH\n"
+        "does_not_exist\n"
+        "=======\n"
+        "new_b\n"
+        ">>>>>>> REPLACE\n"
+    )
+
+    monkeypatch.setattr("run_selfware.call_chat_endpoint", lambda cfg, prompt, timeout, logger: response)
+
+    instance = {
+        "instance_id": "inst-partial-fallback",
+        "base_commit": "HEAD",
+        "test_patch": "",
+    }
+    args = argparse.Namespace(patch_timeout=30)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    patch = run_diff_fallback(
+        repo,
+        instance,
+        "prompt",
+        ["a.py", "b.py"],
+        {},
+        args,
+        log_dir,
+        logging.getLogger("test"),
+        "name",
+    )
+    assert patch == ""
+    assert (repo / "a.py").read_text(encoding="utf-8") == "old_a\n"
+    assert (repo / "b.py").read_text(encoding="utf-8") == "old_b\n"
+
+
+def test_diff_recovery_rejects_partial_search_replace(tmp_path, monkeypatch):
+    """EMPTY_PATCH recovery rejects a partial SEARCH/REPLACE patch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "a.py").write_text("old_a\n", encoding="utf-8")
+    (repo / "b.py").write_text("old_b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    response = (
+        "### FILE: a.py\n"
+        "<<<<<<< SEARCH\n"
+        "old_a\n"
+        "=======\n"
+        "new_a\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: b.py\n"
+        "<<<<<<< SEARCH\n"
+        "does_not_exist\n"
+        "=======\n"
+        "new_b\n"
+        ">>>>>>> REPLACE\n"
+    )
+
+    monkeypatch.setattr("run_selfware.call_chat_endpoint", lambda cfg, prompt, timeout, logger: response)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    metadata: dict[str, Any] = {}
+    instance = {
+        "instance_id": "inst-partial-recovery",
+        "base_commit": "HEAD",
+        "test_patch": "",
+        "repo_language": "python",
+    }
+    args = argparse.Namespace(patch_timeout=30, patch_config={})
+
+    patch = _run_diff_recovery(
+        repo,
+        instance,
+        "prompt",
+        ["a.py", "b.py"],
+        {},
+        args,
+        log_dir,
+        output_dir,
+        logging.getLogger("test"),
+        "name",
+        1,
+        metadata,
+    )
+
+    assert patch == ""
+    assert (repo / "a.py").read_text(encoding="utf-8") == "old_a\n"
+    assert (repo / "b.py").read_text(encoding="utf-8") == "old_b\n"
+    assert metadata.get("diff_recovery_fired") is True
+    assert metadata.get("recovery_succeeded") is not True
+    assert not list(output_dir.glob("predictions.jsonl"))
+
+
 def test_diff_recovery_saves_prediction_on_empty_patch(tmp_path, monkeypatch):
     """EMPTY_PATCH recovery via diff fallback saves a non-empty prediction."""
     repo = tmp_path / "repo"
@@ -1000,6 +1114,7 @@ def _make_base_args(output_dir: Path, sample_file: Path | None = None, **overrid
         max_retries=2,
         diff_fallback=True,
         early_diff_fallback=True,
+        small_model_diff_fallback=False,
         agentless=None,
         auto_agentless=None,
         adaptive=False,
@@ -1027,13 +1142,34 @@ def _make_base_args(output_dir: Path, sample_file: Path | None = None, **overrid
     return argparse.Namespace(**kwargs)
 
 
+def _runtime_flags(**overrides):
+    """Return a matching runtime_flags dict for provenance tests."""
+    defaults = {
+        "agentless": None,
+        "auto_agentless": None,
+        "small_model_diff_fallback": False,
+        "diff_fallback": True,
+        "retry_failures": True,
+        "max_retries": 2,
+        "early_diff_fallback": True,
+        "force_edit": False,
+        "small_model": False,
+        "adaptive": False,
+        "compact_prompt": False,
+    }
+    defaults.update(overrides)
+    return defaults
+
+
 def test_check_run_manifest_rejects_mismatched_sha():
     """A mismatched harness_sha makes an existing manifest incompatible."""
     current = {
         "model_profile": "p1",
+        "config_dir": "cfg",
         "config_files": ["c1.toml"],
         "sample_file": "s.jsonl",
         "harness_sha": "abc123",
+        "runtime_flags": _runtime_flags(),
     }
     existing = dict(current, harness_sha="def456")
     with pytest.raises(RuntimeError) as exc_info:
@@ -1042,15 +1178,51 @@ def test_check_run_manifest_rejects_mismatched_sha():
     assert "--fresh" in str(exc_info.value)
 
 
+def test_check_run_manifest_accepts_matching_runtime_flags():
+    """Identical provenance, including runtime flags, is accepted."""
+    current = {
+        "model_profile": "p1",
+        "config_dir": "cfg",
+        "config_files": ["c1.toml"],
+        "sample_file": "s.jsonl",
+        "harness_sha": "abc123",
+        "runtime_flags": _runtime_flags(),
+    }
+    existing = dict(current)
+    # Should not raise.
+    _check_run_manifest(current, existing)
+
+
+def test_check_run_manifest_rejects_mismatched_runtime_flag():
+    """A changed runtime flag invalidates a resume."""
+    current = {
+        "model_profile": "p1",
+        "config_dir": "cfg",
+        "config_files": ["c1.toml"],
+        "sample_file": "s.jsonl",
+        "harness_sha": "abc123",
+        "runtime_flags": _runtime_flags(),
+    }
+    existing = dict(current)
+    existing["runtime_flags"] = _runtime_flags(agentless=True)
+    with pytest.raises(RuntimeError) as exc_info:
+        _check_run_manifest(current, existing)
+    assert "runtime_flags.agentless" in str(exc_info.value)
+    assert "--fresh" in str(exc_info.value)
+
+
 def test_main_resume_rejects_mismatched_manifest(tmp_path, monkeypatch):
     """--resume with an incompatible existing manifest exits with an error."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
+    config_dir = str(Path(__file__).parent / "fake_config")
     manifest = {
         "model_profile": "other-profile",
+        "config_dir": config_dir,
         "config_files": ["other.toml"],
         "sample_file": None,
         "harness_sha": "mismatched-sha",
+        "runtime_flags": _runtime_flags(),
     }
     (output_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -1070,6 +1242,45 @@ def test_main_resume_rejects_mismatched_manifest(tmp_path, monkeypatch):
 
     rc = main()
     assert rc == 1
+
+
+def test_main_resume_accepts_matching_manifest(tmp_path, monkeypatch):
+    """--resume with a compatible existing manifest continues the run."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    config_dir = str(Path(__file__).parent / "fake_config")
+
+    fake_config = tmp_path / "openrouter_test-profile.toml"
+    fake_config.write_text("[agent]\n", encoding="utf-8")
+
+    manifest = {
+        "model_profile": "test-profile",
+        "config_dir": config_dir,
+        "config_files": [str(fake_config)],
+        "sample_file": None,
+        "harness_sha": "current-sha",
+        "runtime_flags": _runtime_flags(),
+    }
+    (output_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _fake_prepare_effective_config(args, logger):
+        return fake_config
+
+    monkeypatch.setattr("run_selfware.prepare_effective_config", _fake_prepare_effective_config)
+    monkeypatch.setattr("run_selfware.load_config", lambda path: {"model": "test-model"})
+    monkeypatch.setattr("run_selfware._get_harness_sha", lambda: "current-sha")
+    monkeypatch.setenv("SELFWARE_API_KEY", "test-key")
+    monkeypatch.setattr("run_selfware.select_instances", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "run_selfware.parse_args",
+        lambda: _make_base_args(output_dir, resume=True),
+    )
+
+    rc = main()
+    assert rc == 0
+    new_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert new_manifest["model_profile"] == "test-profile"
+    assert new_manifest["runtime_flags"] == _runtime_flags()
 
 
 def test_main_fresh_clears_predictions_and_manifest(tmp_path, monkeypatch):

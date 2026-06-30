@@ -237,6 +237,7 @@ from patch_utils import (
     _normalize_edit_response,
     _strip_line_number_gutter,
     apply_edits,
+    apply_edits_with_missing,
 )
 
 
@@ -361,3 +362,54 @@ def test_apply_edits_only_applies_after_normalization(tmp_path):
     )
     assert apply_edits(tmp_path, response, None) is True
     assert target.read_text() == "def foo():\n    return 2\n"
+
+
+def test_apply_edits_with_missing_rejects_leftover_patch_markers(tmp_path):
+    """A malformed REPLACE block that leaves markers in the result must fail."""
+    target = tmp_path / "file.py"
+    target.write_text("x = 1\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "x = 1\n"
+        "=======\n"
+        "x = 2\n"
+        "<<<<<<< SEARCH\n"
+        "oops\n"
+        ">>>>>>> REPLACE\n"
+    )
+    applied, missing = apply_edits_with_missing(tmp_path, response, None)
+    assert "file.py" in missing
+    assert target.read_text() == "x = 1\n"
+    assert not (applied and not missing)
+
+
+def test_apply_edits_with_missing_records_partial_failure_with_markers(tmp_path):
+    """Repro: first edit applies, second malformed edit is skipped and recorded."""
+    first = tmp_path / "first.py"
+    first.write_text("a = 1\n")
+    second = tmp_path / "second.py"
+    second.write_text("b = 1\n")
+    response = (
+        "### FILE: first.py\n"
+        "<<<<<<< SEARCH\n"
+        "a = 1\n"
+        "=======\n"
+        "a = 2\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: second.py\n"
+        "<<<<<<< SEARCH\n"
+        "b = 1\n"
+        "=======\n"
+        "b = 2\n"
+        "<<<<<<< SEARCH\n"
+        "oops\n"
+        ">>>>>>> REPLACE\n"
+    )
+    applied, missing = apply_edits_with_missing(tmp_path, response, None)
+    assert applied is True
+    assert "second.py" in missing
+    assert "first.py" not in missing
+    assert first.read_text() == "a = 2\n"
+    assert second.read_text() == "b = 1\n"
+    assert missing  # patch is not fully applied

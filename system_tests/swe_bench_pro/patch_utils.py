@@ -372,6 +372,7 @@ def apply_edits_with_missing(
             ):
                 if logger is not None:
                     logger.warning("Refusing edit to %s: result contains patch markers", rel_path)
+                missing.add(rel_path)
                 continue
             path.write_text(text, encoding="utf-8")
             applied = True

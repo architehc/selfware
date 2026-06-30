@@ -647,9 +647,30 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
     pass_tp_passed = sum(r.get("pass_to_pass_passed", 0) for r in results)
     pass_tp_total = sum(r.get("pass_to_pass_total", 0) for r in results)
 
+    fail_tp_passed_completed = sum(
+        r.get("fail_to_pass_passed", 0) for r in completed
+    )
+    fail_tp_total_completed = sum(
+        r.get("fail_to_pass_total", 0) for r in completed
+    )
+    pass_tp_passed_completed = sum(
+        r.get("pass_to_pass_passed", 0) for r in completed
+    )
+    pass_tp_total_completed = sum(
+        r.get("pass_to_pass_total", 0) for r in completed
+    )
+
     overall_pass_rate_completed = overall_passed / len(completed) if completed else 0.0
-    fail_tp_rate_completed = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
-    pass_tp_rate_completed = pass_tp_passed / pass_tp_total if pass_tp_total else 0.0
+    fail_tp_rate_completed = (
+        fail_tp_passed_completed / fail_tp_total_completed
+        if fail_tp_total_completed
+        else 0.0
+    )
+    pass_tp_rate_completed = (
+        pass_tp_passed_completed / pass_tp_total_completed
+        if pass_tp_total_completed
+        else 0.0
+    )
 
     overall_pass_rate_total = overall_passed / total if total else 0.0
     fail_tp_rate_total = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
@@ -706,10 +727,14 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "overall_pass_rate_total": overall_pass_rate_total,
         "fail_to_pass_passed": fail_tp_passed,
         "fail_to_pass_total": fail_tp_total,
+        "fail_to_pass_passed_completed": fail_tp_passed_completed,
+        "fail_to_pass_total_completed": fail_tp_total_completed,
         "fail_to_pass_rate": fail_tp_rate_completed,
         "fail_to_pass_rate_total": fail_tp_rate_total,
         "pass_to_pass_passed": pass_tp_passed,
         "pass_to_pass_total": pass_tp_total,
+        "pass_to_pass_passed_completed": pass_tp_passed_completed,
+        "pass_to_pass_total_completed": pass_tp_total_completed,
         "pass_to_pass_rate": pass_tp_rate_completed,
         "pass_to_pass_rate_total": pass_tp_rate_total,
         **counters,
@@ -732,11 +757,11 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"({report['overall_pass_rate']:.2%})",
         f"- Fail-to-pass (total): **{fail_tp_passed}/{fail_tp_total}** "
         f"({report['fail_to_pass_rate_total']:.2%})",
-        f"- Fail-to-pass (completed only): **{fail_tp_passed}/{fail_tp_total}** "
+        f"- Fail-to-pass (completed only): **{fail_tp_passed_completed}/{fail_tp_total_completed}** "
         f"({report['fail_to_pass_rate']:.2%})",
         f"- Pass-to-pass (total): **{pass_tp_passed}/{pass_tp_total}** "
         f"({report['pass_to_pass_rate_total']:.2%})",
-        f"- Pass-to-pass (completed only): **{pass_tp_passed}/{pass_tp_total}** "
+        f"- Pass-to-pass (completed only): **{pass_tp_passed_completed}/{pass_tp_total_completed}** "
         f"({report['pass_to_pass_rate']:.2%})",
         "",
         "## Diagnostic counters",

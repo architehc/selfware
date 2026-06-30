@@ -137,13 +137,39 @@ def _get_harness_sha() -> str:
         return "unknown"
 
 
-def _write_run_manifest(
-    output_dir: Path,
+# Runtime flags that affect harness behavior enough that changing them between
+# invocations should invalidate a --resume.
+_RUN_RESUME_FLAG_FIELDS: tuple[str, ...] = (
+    "agentless",
+    "auto_agentless",
+    "small_model_diff_fallback",
+    "diff_fallback",
+    "retry_failures",
+    "max_retries",
+    "early_diff_fallback",
+    "force_edit",
+    "small_model",
+    "adaptive",
+    "compact_prompt",
+)
+
+
+# Provenance fields that must match exactly for a resume to be safe.
+_RESUME_PATH_FIELDS: tuple[str, ...] = (
+    "model_profile",
+    "config_dir",
+    "config_files",
+    "sample_file",
+    "harness_sha",
+)
+
+
+def _build_run_manifest(
     args: argparse.Namespace,
     config_files: list[str],
-) -> None:
-    """Write run_manifest.json with provenance for this harness invocation."""
-    manifest = {
+) -> dict[str, Any]:
+    """Build the provenance manifest for this harness invocation."""
+    return {
         "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "model_profile": args.model_profile,
         "config_dir": args.config_dir,
@@ -152,7 +178,17 @@ def _write_run_manifest(
         "harness_sha": _get_harness_sha(),
         "command": sys.argv,
         "version": HARNESS_VERSION,
+        "runtime_flags": {
+            field: getattr(args, field, None) for field in _RUN_RESUME_FLAG_FIELDS
+        },
     }
+
+
+def _write_run_manifest(
+    output_dir: Path,
+    manifest: dict[str, Any],
+) -> None:
+    """Write run_manifest.json with provenance for this harness invocation."""
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "run_manifest.json"
     with open(manifest_path, "w", encoding="utf-8") as f:
@@ -173,13 +209,22 @@ def _check_run_manifest(
     existing: dict[str, Any],
 ) -> None:
     """Raise an error if provenance differs between the current and existing run."""
-    fields = ("model_profile", "config_files", "sample_file", "harness_sha")
-    diffs = []
-    for field in fields:
+    diffs: list[str] = []
+    for field in _RESUME_PATH_FIELDS:
         if existing.get(field) != current.get(field):
             diffs.append(
                 f"{field}: existing={existing.get(field)!r} current={current.get(field)!r}"
             )
+
+    current_flags = current.get("runtime_flags") or {}
+    existing_flags = existing.get("runtime_flags") or {}
+    for field in _RUN_RESUME_FLAG_FIELDS:
+        if existing_flags.get(field) != current_flags.get(field):
+            diffs.append(
+                f"runtime_flags.{field}: "
+                f"existing={existing_flags.get(field)!r} current={current_flags.get(field)!r}"
+            )
+
     if diffs:
         raise RuntimeError(
             "Output directory contains a run_manifest.json from an incompatible run.\n"
@@ -1303,13 +1348,24 @@ def run_diff_fallback(
 
     if not diff_text:
         # Some models return SEARCH/REPLACE blocks even when asked for a diff.
-        # Accept any applyable patch shape before giving up.
-        applied, _ = apply_model_response_with_missing(
+        # Accept any applyable patch shape before giving up, but reject partial
+        # patches where some referenced files could not be edited.
+        applied, missing_files = apply_model_response_with_missing(
             host_repo_dir, response, logger
         )
         if not applied:
             logger.warning(
                 "Diff fallback for %s produced no applyable patch", instance_id
+            )
+            return ""
+        if missing_files:
+            logger.warning(
+                "Diff fallback for %s applied only partially; missing files: %s",
+                instance_id,
+                sorted(missing_files),
+            )
+            _reset_repo(
+                host_repo_dir, instance.get("base_commit"), logger
             )
             return ""
         logger.info("Diff fallback applied SEARCH/REPLACE edits for %s", instance_id)
@@ -3569,16 +3625,7 @@ def main() -> int:
     if args.plan_then_patch:
         config_files.append(str(plan_config_path))
 
-    current_manifest = {
-        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "model_profile": args.model_profile,
-        "config_dir": args.config_dir,
-        "config_files": config_files,
-        "sample_file": args.sample_file,
-        "harness_sha": _get_harness_sha(),
-        "command": sys.argv,
-        "version": HARNESS_VERSION,
-    }
+    current_manifest = _build_run_manifest(args, config_files)
     existing_manifest = _read_run_manifest(output_dir)
 
     if args.fresh:
@@ -3609,7 +3656,7 @@ def main() -> int:
         if args.resume:
             logger.info("No run_manifest.json found; --resume will skip existing predictions only")
 
-    _write_run_manifest(output_dir, args, config_files)
+    _write_run_manifest(output_dir, current_manifest)
 
     binary_path = Path(args.binary)
     if not args.plan_then_patch and not binary_path.exists():

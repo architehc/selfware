@@ -415,6 +415,72 @@ def test_write_report_headline_uses_total_rate(tmp_path):
     assert "Overall passed instances (completed only): **1/2**" in summary_text
 
 
+def test_write_report_f2p_p2p_completed_only_excludes_errors(tmp_path):
+    """Fail-to-pass/pass-to-pass completed-only rates exclude errored instances."""
+    patch_text = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n"
+    results = [
+        {
+            "instance_id": "passed",
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 1,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+        {
+            "instance_id": "failed",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+        {
+            "instance_id": "errored",
+            "error": "no tests executed",
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+    ]
+
+    report = _write_report(tmp_path, results)
+
+    assert report["total_instances"] == 3
+    assert report["completed_instances"] == 2
+
+    # Total rates include the errored instance's expected tests.
+    assert report["fail_to_pass_passed"] == 1
+    assert report["fail_to_pass_total"] == 3
+    assert report["fail_to_pass_rate_total"] == 1 / 3
+    assert report["pass_to_pass_passed"] == 2
+    assert report["pass_to_pass_total"] == 3
+    assert report["pass_to_pass_rate_total"] == 2 / 3
+
+    # Completed-only rates exclude the errored instance.
+    assert report["fail_to_pass_passed_completed"] == 1
+    assert report["fail_to_pass_total_completed"] == 2
+    assert report["fail_to_pass_rate"] == 1 / 2
+    assert report["pass_to_pass_passed_completed"] == 2
+    assert report["pass_to_pass_total_completed"] == 2
+    assert report["pass_to_pass_rate"] == 1.0
+
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert "Fail-to-pass (total): **1/3**" in summary_text
+    assert "Fail-to-pass (completed only): **1/2**" in summary_text
+    assert "Pass-to-pass (total): **2/3**" in summary_text
+    assert "Pass-to-pass (completed only): **2/2**" in summary_text
+
+
 def test_pre_pull_called_with_unique_images_before_evaluation(tmp_path, monkeypatch):
     """Unique required images are pre-pulled once before workers start."""
     pred_path = tmp_path / "predictions.jsonl"
