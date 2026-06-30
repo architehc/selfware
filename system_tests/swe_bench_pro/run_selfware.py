@@ -1318,15 +1318,36 @@ def run_diff_fallback(
 ) -> str:
     """Make a one-shot diff request and, if it applies, return the git diff."""
     instance_id = instance["instance_id"]
+
+    # Cap source snippets so the full fallback prompt fits inside the model's
+    # context window after reserving space for the output and prompt overhead.
+    context_window = patch_config.get("agent", {}).get("context_window") or 0
+    max_tokens = patch_config.get("max_tokens") or 4096
+    prompt_tokens = _estimate_input_tokens(prompt_text)
+    if context_window:
+        available_tokens = context_window - max_tokens - prompt_tokens - 300
+        max_snippet_chars = max(2000, min(16000, available_tokens * 3))
+    else:
+        max_snippet_chars = 8000
+
     fallback_prompt = build_diff_fallback_prompt(
         prompt_text,
         ranked_files,
         host_repo_dir,
+        max_chars=int(max_snippet_chars),
+        allow_full_file_replacement=True,
     )
     (log_dir / f"{name}.diff_fallback.prompt.txt").write_text(
         fallback_prompt, encoding="utf-8"
     )
-    logger.info("Running diff fallback for %s", instance_id)
+    logger.info(
+        "Running diff fallback for %s (context_window=%s max_tokens=%s prompt_tokens=%s max_snippet_chars=%s)",
+        instance_id,
+        context_window,
+        max_tokens,
+        prompt_tokens,
+        max_snippet_chars,
+    )
 
     response = call_chat_endpoint(
         patch_config,

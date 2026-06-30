@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -520,7 +521,12 @@ def extract_partial_diff(response: str) -> str | None:
 
 
 def _apply_diff_with_check(repo_dir: Path, diff_text: str, logger: Any) -> bool:
-    """Validate a diff with ``git apply --check`` and then apply it."""
+    """Validate a diff with ``git apply --check`` and then apply it.
+
+    If ``git apply`` rejects the diff, fall back to the system's ``patch -p1``
+    command, which is more tolerant of whitespace/offset drift.  This mirrors
+    the fuzzy matching already used by the SEARCH/REPLACE applier.
+    """
     # Import lazily to avoid circular imports with run_selfware.py.
     from run_selfware import run_cmd
 
@@ -531,20 +537,40 @@ def _apply_diff_with_check(repo_dir: Path, diff_text: str, logger: Any) -> bool:
             ["git", "-C", str(repo_dir), "apply", "--check", str(patch_path)],
             logger=logger,
         )
-        if check.returncode != 0:
+        if check.returncode == 0:
+            apply = run_cmd(
+                ["git", "-C", str(repo_dir), "apply", str(patch_path)],
+                logger=logger,
+            )
+            if apply.returncode == 0:
+                logger.info("Applied diff fallback patch")
+                return True
+            logger.warning("git apply failed: %s", apply.stderr.strip())
+        else:
             logger.warning("git apply --check failed: %s", check.stderr.strip())
+
+        if shutil.which("patch") is None:
+            logger.warning("patch binary not available; cannot attempt tolerant diff fallback")
             return False
 
-        apply = run_cmd(
-            ["git", "-C", str(repo_dir), "apply", str(patch_path)],
+        logger.info("Attempting tolerant patch -p1 fallback")
+        patch_proc = run_cmd(
+            [
+                "patch",
+                "-p1",
+                "--no-backup-if-mismatch",
+                "--force",
+                "-i",
+                str(patch_path),
+            ],
+            cwd=repo_dir,
             logger=logger,
         )
-        if apply.returncode != 0:
-            logger.warning("git apply failed: %s", apply.stderr.strip())
-            return False
-
-        logger.info("Applied diff fallback patch")
-        return True
+        if patch_proc.returncode == 0:
+            logger.info("Applied diff fallback patch with patch -p1")
+            return True
+        logger.warning("patch -p1 fallback failed: %s", patch_proc.stderr.strip())
+        return False
     finally:
         patch_path.unlink(missing_ok=True)
 
