@@ -726,18 +726,18 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"- Total instances: **{total}**",
         f"- Completed: **{len(completed)}**",
         f"- Errored: **{total - len(completed)}**",
+        f"- Overall passed instances (errors counted as failed): **{overall_passed}/{total}** "
+        f"({report['overall_pass_rate_total']:.2%})",
         f"- Overall passed instances (completed only): **{overall_passed}/{len(completed)}** "
         f"({report['overall_pass_rate']:.2%})",
-        f"- Overall passed instances (total, errors counted as failed): **{overall_passed}/{total}** "
-        f"({report['overall_pass_rate_total']:.2%})",
-        f"- Fail-to-pass (completed only): **{fail_tp_passed}/{fail_tp_total}** "
-        f"({report['fail_to_pass_rate']:.2%})",
         f"- Fail-to-pass (total): **{fail_tp_passed}/{fail_tp_total}** "
         f"({report['fail_to_pass_rate_total']:.2%})",
-        f"- Pass-to-pass (completed only): **{pass_tp_passed}/{pass_tp_total}** "
-        f"({report['pass_to_pass_rate']:.2%})",
+        f"- Fail-to-pass (completed only): **{fail_tp_passed}/{fail_tp_total}** "
+        f"({report['fail_to_pass_rate']:.2%})",
         f"- Pass-to-pass (total): **{pass_tp_passed}/{pass_tp_total}** "
         f"({report['pass_to_pass_rate_total']:.2%})",
+        f"- Pass-to-pass (completed only): **{pass_tp_passed}/{pass_tp_total}** "
+        f"({report['pass_to_pass_rate']:.2%})",
         "",
         "## Diagnostic counters",
         "",
