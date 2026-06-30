@@ -1028,3 +1028,72 @@ def test_main_fresh_clears_predictions_and_manifest(tmp_path, monkeypatch):
     manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["model_profile"] == "test-profile"
     assert manifest["sample_file"] == str(sample_file)
+
+
+def test_run_agentless_diff_fallback_records_recovery_metadata(tmp_path, monkeypatch):
+    """When agentless SEARCH/REPLACE fails, the diff fallback path records
+    recovery counters in the supplied metadata dict."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "a.py").write_text("old_a\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    # First response is an unapplyable SEARCH/REPLACE block.
+    bad_response = _make_search_replace_block("a.py", "does_not_exist", "new_a")
+    expected_patch = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@\n"
+        "-old_a\n"
+        "+new_a\n"
+    )
+
+    monkeypatch.setattr(
+        "run_selfware.call_chat_endpoint",
+        lambda cfg, prompt, timeout, logger: bad_response,
+    )
+    monkeypatch.setattr(
+        "run_selfware.build_agentless_prompt", lambda *args, **kwargs: "prompt"
+    )
+    monkeypatch.setattr(
+        "run_selfware.build_agentless_retry_prompt",
+        lambda *args, **kwargs: "retry",
+    )
+    monkeypatch.setattr(
+        "run_selfware.run_diff_fallback", lambda *args, **kwargs: expected_patch
+    )
+    monkeypatch.setattr(
+        "run_selfware._check_patch_builds",
+        lambda repo_dir, patch, language, logger: True,
+    )
+
+    args = argparse.Namespace(
+        patch_timeout=30, diff_fallback=True, early_diff_fallback=False
+    )
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    metadata: dict[str, Any] = {}
+    instance = {
+        "instance_id": "inst-agentless-recovery",
+        "base_commit": "HEAD",
+        "test_patch": "",
+        "patch": "",
+        "problem_statement": "change a",
+    }
+    patch = run_agentless(
+        repo,
+        instance,
+        {},
+        args,
+        log_dir,
+        logging.getLogger("test"),
+        "name",
+        metadata=metadata,
+    )
+    assert patch == expected_patch
+    assert metadata.get("diff_recovery_fired") is True
+    assert metadata.get("recovery_attempts", 0) > 0
+    assert metadata.get("recovery_succeeded") is True

@@ -1532,8 +1532,13 @@ def run_agentless(
     few_shot_examples: str | None = None,
     system_message: str | None = None,
     prompt_suffix: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
     """Run the direct one-shot patch path and return the captured git diff.
+
+    The optional ``metadata`` dict is mutated in place so callers can record
+    recovery counters (``recovery_attempts``, ``diff_recovery_fired``,
+    ``recovery_succeeded``) even when the agentless path is used.
 
     If the first response cannot be applied, reset the repo and retry once with
     a stricter prompt that includes exact file contents. If the retry also fails
@@ -1546,6 +1551,8 @@ def run_agentless(
     """
     instance_id = instance["instance_id"]
     base_commit = instance.get("base_commit", "")
+    if metadata is None:
+        metadata = {}
     logger.info("Running agentless patch generation for %s", instance_id)
 
     def _attempt(
@@ -1707,6 +1714,13 @@ def run_agentless(
 
     # Final one-shot unified-diff fallback when SEARCH/REPLACE edits fail.
     if args.diff_fallback:
+        metadata["recovery_attempts"] = metadata.get("recovery_attempts", 0) + 1
+        metadata["diff_recovery_fired"] = True
+        logger.info(
+            "RECOVERY_ESCALATION instance=%s agentless_diff_fallback=%s",
+            instance_id,
+            True,
+        )
         if not _reset_repo(host_repo_dir, base_commit, logger):
             return ""
 
@@ -1744,6 +1758,7 @@ def run_agentless(
                 "Agentless diff fallback produced a non-empty patch for %s",
                 instance_id,
             )
+            metadata["recovery_succeeded"] = True
             return fallback_patch
 
     return ""
@@ -2846,6 +2861,7 @@ def process_instance(
                 logger,
                 name,
                 few_shot_examples=few_shot_examples,
+                metadata=metadata,
             )
             if patch.strip() and not _verify_patch_applies(
                 host_repo_dir, patch, instance.get("base_commit"), logger
@@ -3229,6 +3245,7 @@ def process_instance(
                         few_shot_examples=few_shot_examples,
                         system_message=system_message,
                         prompt_suffix=prompt_suffix,
+                        metadata=metadata,
                     )
                     success = bool(patch.strip())
                 else:
@@ -3560,6 +3577,39 @@ def main() -> int:
     logger.info("Finished. Failures: %s/%s", failures, len(instances))
     logger.info("Predictions written to %s", output_dir / "predictions.jsonl")
     write_predictions_json(output_dir, logger)
+
+    # Sanity check: if recovery is requested for a non-trivial run, at least
+    # one instance should have triggered a recovery step.  Zero recoveries
+    # across many instances means the escalation path is misconfigured or
+    # bypassed (e.g. agentless mode returns before the recovery loop).
+    if args.retry_failures and len(instances) >= 10:
+        recovery_fired = 0
+        predictions_path = output_dir / "predictions.jsonl"
+        if predictions_path.exists():
+            for line in predictions_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("metadata", {}).get("recovery_attempts", 0) > 0:
+                    recovery_fired += 1
+        if recovery_fired == 0:
+            logger.error(
+                "SANITY CHECK FAILED: --retry-failures is enabled but "
+                "recovery_fired_count=0 across %s instances. The recovery "
+                "escalation path is likely bypassed; check agentless routing.",
+                len(instances),
+            )
+            failures += 1
+        else:
+            logger.info(
+                "SANITY CHECK PASSED: recovery fired for %s/%s instances",
+                recovery_fired,
+                len(instances),
+            )
+
     return 0 if failures == 0 else 1
 
 
