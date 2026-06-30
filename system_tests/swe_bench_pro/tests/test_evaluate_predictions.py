@@ -661,3 +661,56 @@ def test_prepull_images_warns_on_failure_but_does_not_abort(monkeypatch, caplog)
 
     assert any("Pre-pull failed" in rec.message for rec in caplog.records)
     assert any("img:1" in rec.message or "img:2" in rec.message for rec in caplog.records)
+
+
+def test_write_report_counts_compile_gate_skipped_when_toolchain_missing(
+    tmp_path, monkeypatch
+):
+    """A compile-gate rejection caused by a missing host toolchain is counted separately."""
+    patch_text = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: None if name == "go" else "/fake/bin/" + name,
+    )
+    results = [
+        {
+            "instance_id": "go-skipped",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "repo_language": "go",
+            "metadata": {"compile_gate_rejected": True},
+        },
+        {
+            "instance_id": "go-real-fail",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "repo_language": "go",
+            "metadata": {"compile_gate_rejected": True},
+        },
+    ]
+    # Second case: pretend go *is* present so it is a real rejection, not a skip.
+    real_fail_seen = {"count": 0}
+
+    def _which(name):
+        if name == "go":
+            real_fail_seen["count"] += 1
+            return None if real_fail_seen["count"] == 1 else "/fake/go"
+        return "/fake/bin/" + name
+
+    monkeypatch.setattr("shutil.which", _which)
+
+    report = _write_report(tmp_path, results)
+    assert report["compile_gate_rejected_count"] == 2
+    assert report["compile_gate_skipped_count"] == 1
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert "Compile gate skipped (missing host toolchain): **1**" in summary_text

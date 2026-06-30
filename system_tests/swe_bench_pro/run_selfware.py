@@ -2679,6 +2679,44 @@ def _changed_files_from_patch(patch: str) -> list[str]:
     return files
 
 
+def _language_toolchain(language: str) -> str | None:
+    """Return the host binary required to compile/type-check a repo language."""
+    mapping = {
+        "go": "go",
+        "rust": "cargo",
+        "typescript": "npx",
+        "javascript": "node",
+    }
+    return mapping.get((language or "").lower())
+
+
+def _check_host_toolchains(
+    instances: list[dict[str, Any]],
+    logger: logging.Logger,
+) -> bool:
+    """Exit early if the sample requires a host toolchain that is not installed."""
+    languages = sorted({inst.get("repo_language", "") for inst in instances if inst.get("repo_language")})
+    missing: list[tuple[str, str]] = []
+    for lang in languages:
+        binary = _language_toolchain(lang)
+        if binary and shutil.which(binary) is None:
+            missing.append((lang, binary))
+    if missing:
+        for lang, binary in missing:
+            logger.error(
+                "Host toolchain missing for repo_language=%s: %s not found in PATH",
+                lang,
+                binary,
+            )
+        logger.error(
+            "Aborting because %s required toolchain(s) are missing. "
+            "Install them or set SELFWARE_BYPASS_COMPILE_GATE=1 to skip the compile gate.",
+            len(missing),
+        )
+        return False
+    return True
+
+
 def _check_patch_builds(
     repo_dir: Path,
     patch: str,
@@ -2705,8 +2743,10 @@ def _check_patch_builds(
 
     if language == "go":
         if shutil.which("go") is None:
-            logger.info("Build gate skipped: go binary not available on host")
-            return True
+            logger.warning(
+                "Build gate rejecting patch: go binary not available on host"
+            )
+            return False
         proc = run_cmd(
             ["go", "build", "./..."],
             cwd=repo_dir,
@@ -2742,8 +2782,10 @@ def _check_patch_builds(
 
     if language == "rust":
         if shutil.which("cargo") is None:
-            logger.info("Build gate skipped: cargo not available on host")
-            return True
+            logger.warning(
+                "Build gate rejecting patch: cargo binary not available on host"
+            )
+            return False
         proc = run_cmd(
             ["cargo", "check"],
             cwd=repo_dir,
@@ -2763,8 +2805,10 @@ def _check_patch_builds(
         tsconfig = repo_dir / "tsconfig.json"
         if tsconfig.is_file() and language == "typescript":
             if shutil.which("npx") is None:
-                logger.info("Build gate skipped: npx not available on host")
-                return True
+                logger.warning(
+                    "Build gate rejecting patch: npx not available on host"
+                )
+                return False
             proc = run_cmd(
                 ["npx", "tsc", "--noEmit"],
                 cwd=repo_dir,
@@ -2785,8 +2829,10 @@ def _check_patch_builds(
             return True
         node_bin = shutil.which("node")
         if node_bin is None:
-            logger.info("Build gate skipped: node not available on host")
-            return True
+            logger.warning(
+                "Build gate rejecting patch: node binary not available on host"
+            )
+            return False
         for js_file in js_files:
             proc = run_cmd(
                 [node_bin, "--check", js_file],
@@ -3710,6 +3756,11 @@ def main() -> int:
     if not instances:
         logger.info("No instances to process.")
         return 0
+
+    if not os.environ.get("SELFWARE_BYPASS_COMPILE_GATE") and not _check_host_toolchains(
+        instances, logger
+    ):
+        return 1
 
     failures = 0
     if args.workers > 1:

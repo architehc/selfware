@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import pytest
 
 from run_selfware import (
+    _check_host_toolchains,
     _check_patch_builds,
     _check_run_manifest,
     _estimate_input_tokens,
@@ -1473,3 +1474,91 @@ def test_run_agentless_small_model_diff_fallback_skips_search_replace(
     # The test patch should have been applied to the repo.
     applied_test = (repo / "test_a.py").read_text(encoding="utf-8")
     assert "# patched" in applied_test
+
+
+def test_compile_gate_rejects_when_go_binary_missing(tmp_path, monkeypatch):
+    """Missing Go toolchain must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr("run_selfware.shutil.which", lambda name: None if name == "go" else shutil.which(name))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module gate\ngo 1.21\n")
+    (repo / "mod.go").write_text("package gate\nvar X = 2\n")
+    patch = _make_patch("mod.go", "x := 1", "var X = 2")
+    assert _check_patch_builds(repo, patch, "go", logging.getLogger("test")) is False
+
+
+def test_compile_gate_rejects_when_cargo_binary_missing(tmp_path, monkeypatch):
+    """Missing Rust toolchain must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "cargo" else shutil.which(name),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Cargo.toml").write_text(
+        '[package]\nname = "gate"\nversion = "0.1.0"\nedition = "2021"\n'
+    )
+    src = repo / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text("pub fn ok() -> i32 { 2 }\n")
+    patch = _make_patch("src/lib.rs", "fn ok() {}", "pub fn ok() -> i32 { 2 }")
+    assert _check_patch_builds(repo, patch, "rust", logging.getLogger("test")) is False
+
+
+def test_compile_gate_rejects_when_npx_binary_missing_for_typescript(tmp_path, monkeypatch):
+    """Missing npx for TypeScript must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "npx" else shutil.which(name),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tsconfig.json").write_text('{"compilerOptions": {"strict": true}}')
+    (repo / "mod.ts").write_text("const x: number = 2;\n")
+    patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
+    assert _check_patch_builds(repo, patch, "typescript", logging.getLogger("test")) is False
+
+
+def test_compile_gate_rejects_when_node_binary_missing_for_javascript(tmp_path, monkeypatch):
+    """Missing node for JavaScript must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "node" else shutil.which(name),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.js").write_text("x = 2\n")
+    patch = _make_patch("mod.js", "x = 1", "x = 2")
+    assert _check_patch_builds(repo, patch, "javascript", logging.getLogger("test")) is False
+
+
+def test_check_host_toolchains_fails_when_required_binary_missing(monkeypatch):
+    """Startup check fails if any instance requires a missing host toolchain."""
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "go" else "/fake",
+    )
+    logger = logging.getLogger("test")
+    instances = [
+        {"instance_id": "go-inst", "repo_language": "go"},
+        {"instance_id": "py-inst", "repo_language": "python"},
+    ]
+    assert _check_host_toolchains(instances, logger) is False
+
+
+def test_check_host_toolchains_passes_when_required_binaries_present(monkeypatch):
+    """Startup check passes if all required host toolchains are present."""
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: "/fake/bin/" + name,
+    )
+    logger = logging.getLogger("test")
+    instances = [
+        {"instance_id": "go-inst", "repo_language": "go"},
+        {"instance_id": "ts-inst", "repo_language": "typescript"},
+    ]
+    assert _check_host_toolchains(instances, logger) is True

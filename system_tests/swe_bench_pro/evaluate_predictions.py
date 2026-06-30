@@ -636,6 +636,22 @@ def evaluate_instance(
         stop_and_remove_container(name, logger)
 
 
+def _compile_gate_skipped(result: dict[str, Any]) -> bool:
+    """True if a compile-gate rejection happened because the host toolchain is missing."""
+    if not result.get("metadata", {}).get("compile_gate_rejected"):
+        return False
+    mapping = {
+        "go": "go",
+        "rust": "cargo",
+        "typescript": "npx",
+        "javascript": "node",
+    }
+    binary = mapping.get((result.get("repo_language") or "").lower())
+    if binary is None:
+        return False
+    return shutil.which(binary) is None
+
+
 def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate results and write JSON report + Markdown summary."""
     total = len(results)
@@ -689,6 +705,9 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
             1
             for r in results
             if r.get("metadata", {}).get("compile_gate_rejected") is True
+        ),
+        "compile_gate_skipped_count": sum(
+            1 for r in results if _compile_gate_skipped(r)
         ),
         "recovery_fired_count": sum(
             1
@@ -769,6 +788,7 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"- Missing prediction: **{counters['missing_prediction_count']}**",
         f"- Empty patch: **{counters['empty_patch_count']}**",
         f"- Compile gate rejected: **{counters['compile_gate_rejected_count']}**",
+        f"- Compile gate skipped (missing host toolchain): **{counters['compile_gate_skipped_count']}**",
         f"- Recovery fired: **{counters['recovery_fired_count']}**",
         f"- Recovery succeeded: **{counters['recovery_succeeded_count']}**",
         f"- Patch applied but changed no files: **{counters['applied_no_op_count']}**",
