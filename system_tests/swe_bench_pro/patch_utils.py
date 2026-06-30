@@ -57,14 +57,35 @@ def _is_excluded_diff_hunk(hunk_lines: list[str]) -> bool:
     return False
 
 
+def _trim_trailing_text(diff_text: str) -> str:
+    r"""Return ``diff_text`` truncated after the last unified-diff hunk line.
+
+    Keeps the trailing newline that belongs to the final `` ``, ``+``, ``-``,
+    or ``\ No newline at end of file`` line so ``git apply`` does not see a
+    malformed patch.
+    """
+    lines = diff_text.splitlines(keepends=True)
+    last_hunk_idx = -1
+    for i, line in enumerate(lines):
+        if line.startswith((" ", "+", "-", "\\")):
+            last_hunk_idx = i
+    if last_hunk_idx >= 0:
+        return "".join(lines[: last_hunk_idx + 1])
+    return diff_text
+
+
 def extract_diff(response: str) -> str | None:
-    """Extract a unified diff from the model response."""
+    """Extract a unified diff from the model response.
+
+    Preserves the trailing newline on the final hunk line; stripping it can
+    corrupt an otherwise valid ``git apply`` patch.
+    """
     for m in re.finditer(r"```(?:diff)?\s*(.*?)\s*```", response, re.DOTALL):
-        content = m.group(1).strip()
+        content = m.group(1)
         if "diff --git" in content:
-            return content
+            return _trim_trailing_text(content[content.index("diff --git"):])
     if "diff --git" in response:
-        return response[response.index("diff --git"):].strip()
+        return _trim_trailing_text(response[response.index("diff --git"):])
     return None
 
 

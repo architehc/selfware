@@ -57,7 +57,7 @@ ${VENV} evaluate_predictions.py \
   --predictions "${OUT_DIR}/out/predictions.jsonl" \
   --output-dir "${OUT_DIR}/eval" \
   --sample-file "${SAMPLE_FILE}" \
-  --timeout 600 \
+  --test-timeout 600 \
   2>&1 | tee -a "${LOG_FILE}" || true
 
 echo "[$(date -Iseconds)] Evaluation done" | tee -a "${LOG_FILE}"

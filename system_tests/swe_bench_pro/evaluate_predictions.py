@@ -15,6 +15,8 @@ import ast
 import json
 import logging
 import shlex
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -26,7 +28,6 @@ from run_selfware import (
     container_name,
     copy_into_container,
     podman,
-    pull_image,
     start_container,
     stop_and_remove_container,
 )
@@ -68,6 +69,11 @@ def parse_args() -> argparse.Namespace:
         default=600,
         help="Timeout in seconds for each containerized test run (default: 600).",
     )
+    parser.add_argument(
+        "--skip-pre-pull",
+        action="store_true",
+        help="Skip pre-pulling Docker images before starting evaluation workers.",
+    )
     return parser.parse_args()
 
 
@@ -94,6 +100,136 @@ def _is_patch_empty(patch: str) -> bool:
     if not patch:
         return True
     return not any(line.strip() for line in patch.splitlines())
+
+
+# Global Podman options mirrored from run_selfware.py so image pre-pull and
+# existence checks use the same storage configuration as the rest of the harness.
+_PODMAN_GLOBAL_OPTS: list[str] = ["--storage-opt", "ignore_chown_errors=true"]
+
+
+def _container_cmd() -> str:
+    """Return ``podman`` if available, otherwise ``docker`` as a fallback."""
+    if shutil.which("podman"):
+        return "podman"
+    if shutil.which("docker"):
+        return "docker"
+    # Default to podman; callers will surface the "command not found" error.
+    return "podman"
+
+
+def _run_container_cmd(
+    *args: str,
+    timeout: int | None = None,
+    logger: logging.Logger | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a podman/docker subcommand and return its CompletedProcess."""
+    cmd = _container_cmd()
+    if cmd == "podman":
+        full_cmd = [cmd, *_PODMAN_GLOBAL_OPTS, *args]
+    else:
+        full_cmd = [cmd, *args]
+    if logger:
+        logger.debug("Running: %s", " ".join(shlex.quote(str(c)) for c in full_cmd))
+    try:
+        return subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            errors="replace",
+        )
+    except subprocess.TimeoutExpired as exc:
+        if logger:
+            logger.error("Command timed out after %ss: %s", timeout, full_cmd)
+        raise
+
+
+def _image_exists_locally(image: str, logger: logging.Logger | None = None) -> bool:
+    """Return True if the image is already present in the local container store."""
+    cmd = _container_cmd()
+    if cmd == "podman":
+        proc = _run_container_cmd("image", "exists", image, logger=logger)
+    else:
+        # Docker does not have ``image exists``; ``image inspect`` is equivalent.
+        proc = _run_container_cmd("image", "inspect", image, logger=logger)
+    return proc.returncode == 0
+
+
+def _pull_image(image: str, logger: logging.Logger, timeout: int = 600) -> bool:
+    """Pull a single image using podman (preferred) or docker."""
+    logger.info("Pulling image %s", image)
+    proc = _run_container_cmd("pull", image, timeout=timeout, logger=logger)
+    if proc.returncode != 0:
+        logger.error("Failed to pull image %s: %s", image, (proc.stderr or "").strip())
+        return False
+    logger.info("Pulled image %s", image)
+    return True
+
+
+def _prepull_images(images: set[str], logger: logging.Logger) -> None:
+    """Pull each unique image once, in parallel, logging warnings on failure."""
+    if not images:
+        return
+
+    max_workers = min(4, len(images))
+    pulled = 0
+    failed: list[str] = []
+
+    def _pull_one(image: str) -> tuple[str, bool]:
+        return image, _pull_image(image, logger)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_image = {executor.submit(_pull_one, img): img for img in images}
+        for future in as_completed(future_to_image):
+            image, ok = future.result()
+            if ok:
+                pulled += 1
+            else:
+                failed.append(image)
+                logger.warning(
+                    "Pre-pull failed for %s; per-instance logic will retry if needed",
+                    image,
+                )
+
+    logger.info("Pre-pulled %s/%s images (%s failed)", pulled, len(images), len(failed))
+
+
+def _ensure_image(image: str, logger: logging.Logger) -> bool:
+    """Ensure an image is available locally, skipping the pull if it exists."""
+    if _image_exists_locally(image, logger=logger):
+        logger.info("Image %s already exists locally; skipping pull", image)
+        return True
+    return _pull_image(image, logger)
+
+
+def _synthesize_missing_result(instance: dict[str, Any]) -> dict[str, Any]:
+    """Create an errored result for an instance with no prediction record."""
+    instance_id = instance["instance_id"]
+    fail_to_pass = _load_list_field(instance.get("fail_to_pass", []))
+    pass_to_pass = _load_list_field(instance.get("pass_to_pass", []))
+    return {
+        "instance_id": instance_id,
+        "error": "missing_prediction",
+        "overall_pass": False,
+        "fail_to_pass_passed": 0,
+        "fail_to_pass_total": len(fail_to_pass),
+        "pass_to_pass_passed": 0,
+        "pass_to_pass_total": len(pass_to_pass),
+        "metadata": {},
+    }
+
+
+def _augment_results_with_missing_predictions(
+    results: list[dict[str, Any]],
+    instances: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add synthesized errored results for any sample instance lacking a result."""
+    seen_ids = {r.get("instance_id", "") for r in results}
+    for instance_id, instance in instances.items():
+        if instance_id not in seen_ids:
+            results.append(_synthesize_missing_result(instance))
+    return results
 
 
 def load_predictions(path: Path) -> list[dict[str, Any]]:
@@ -363,7 +499,7 @@ def evaluate_instance(
         result["error"] = "empty patch"
         return result
 
-    if not pull_image(image, logger):
+    if not _ensure_image(image, logger):
         result["error"] = "failed to pull image"
         return result
 
@@ -520,6 +656,9 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
     pass_tp_rate_total = pass_tp_passed / pass_tp_total if pass_tp_total else 0.0
 
     counters = {
+        "missing_prediction_count": sum(
+            1 for r in results if r.get("error") == "missing_prediction"
+        ),
         "empty_patch_count": sum(
             1
             for r in results
@@ -602,6 +741,7 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "",
         "## Diagnostic counters",
         "",
+        f"- Missing prediction: **{counters['missing_prediction_count']}**",
         f"- Empty patch: **{counters['empty_patch_count']}**",
         f"- Compile gate rejected: **{counters['compile_gate_rejected_count']}**",
         f"- Recovery fired: **{counters['recovery_fired_count']}**",
@@ -647,6 +787,22 @@ def main() -> int:
     instances = load_instances(Path(args.sample_file))
     logger.info("Loaded %s predictions and %s instance metadata rows", len(predictions), len(instances))
 
+    predictions_by_id: dict[str, dict[str, Any]] = {
+        p.get("instance_id", ""): p for p in predictions if p.get("instance_id")
+    }
+
+    if not args.skip_pre_pull:
+        images: set[str] = set()
+        for pred in predictions:
+            iid = pred.get("instance_id", "")
+            if iid in instances:
+                images.add(
+                    f"docker.io/jefzda/sweap-images:{instances[iid]['dockerhub_tag']}"
+                )
+        if images:
+            logger.info("Pre-pulling %s unique image(s) before evaluation", len(images))
+            _prepull_images(images, logger)
+
     results: list[dict[str, Any]] = []
 
     def _process(pred: dict[str, Any]) -> dict[str, Any]:
@@ -680,6 +836,18 @@ def main() -> int:
     else:
         for pred in predictions:
             results.append(_process(pred))
+
+    # Ensure every instance in the sample appears in the report, even if the
+    # prediction generation run crashed or returned early for it. Without this
+    # augmentation, missing predictions silently disappear and denominators
+    # shrink, inflating pass rates.
+    before_count = len(results)
+    results = _augment_results_with_missing_predictions(results, instances)
+    if len(results) > before_count:
+        logger.warning(
+            "Synthesized %s missing-prediction result(s)",
+            len(results) - before_count,
+        )
 
     report = _write_report(output_dir, results)
     logger.info(

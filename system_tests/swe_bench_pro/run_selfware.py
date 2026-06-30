@@ -7,6 +7,7 @@ SWE-bench Pro containers and capturing the resulting git diff.
 
 import argparse
 import ast
+import datetime
 import hashlib
 import json
 import logging
@@ -95,8 +96,90 @@ CONTAINER_CONFIG_PATH = "/tmp/selfware_config.toml"
 CONTAINER_PROMPT_PATH = "/tmp/task_prompt.txt"
 CONTAINER_REPO_DIR = "/app"
 
+# Repo root used for git provenance. run_selfware.py lives under
+# system_tests/swe_bench_pro/, so three parents point at the project root.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 # Lock for serializing appends to predictions.jsonl when running instances in parallel.
 PREDICTIONS_LOCK = threading.Lock()
+
+
+def _get_harness_version() -> str:
+    """Return a harness version string, falling back to 'dev'."""
+    try:
+        from importlib.metadata import version
+        return version("selfware")
+    except Exception:
+        return "dev"
+
+
+HARNESS_VERSION = _get_harness_version()
+
+
+def _get_harness_sha() -> str:
+    """Return the current git HEAD sha, or 'unknown' if not available."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _write_run_manifest(
+    output_dir: Path,
+    args: argparse.Namespace,
+    config_files: list[str],
+) -> None:
+    """Write run_manifest.json with provenance for this harness invocation."""
+    manifest = {
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "model_profile": args.model_profile,
+        "config_dir": args.config_dir,
+        "config_files": config_files,
+        "sample_file": args.sample_file,
+        "harness_sha": _get_harness_sha(),
+        "command": sys.argv,
+        "version": HARNESS_VERSION,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "run_manifest.json"
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+
+def _read_run_manifest(output_dir: Path) -> dict[str, Any] | None:
+    """Return the existing run manifest, or None if it does not exist."""
+    manifest_path = output_dir / "run_manifest.json"
+    if not manifest_path.exists():
+        return None
+    with open(manifest_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _check_run_manifest(
+    current: dict[str, Any],
+    existing: dict[str, Any],
+) -> None:
+    """Raise an error if provenance differs between the current and existing run."""
+    fields = ("model_profile", "config_files", "sample_file", "harness_sha")
+    diffs = []
+    for field in fields:
+        if existing.get(field) != current.get(field):
+            diffs.append(
+                f"{field}: existing={existing.get(field)!r} current={current.get(field)!r}"
+            )
+    if diffs:
+        raise RuntimeError(
+            "Output directory contains a run_manifest.json from an incompatible run.\n"
+            + "\n".join(diffs)
+            + "\nUse --fresh to clear the output directory or change --output-dir."
+        )
 
 # Global Podman options applied to every podman invocation.  The most important
 # one for SWE-bench Pro is --storage-opt ignore_chown_errors=true: the official
@@ -183,6 +266,11 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Skip instances that already have a prediction in predictions.jsonl.",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="Delete existing predictions and run_manifest.json in the output directory before starting.",
     )
     parser.add_argument(
         "--keep-container",
@@ -626,6 +714,35 @@ def normalize_endpoint(endpoint: str) -> str:
     return endpoint
 
 
+def _parse_context_limit_from_error(error_body: str) -> tuple[int | None, int | None, int | None]:
+    """Extract context limit and token breakdown from a provider error body."""
+    limit: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    try:
+        data = json.loads(error_body)
+        message = (data.get("error", {}).get("message") or data.get("message") or "")
+    except (json.JSONDecodeError, AttributeError):
+        message = error_body
+    m = re.search(r"maximum context length is (\d+) tokens?", message, re.IGNORECASE)
+    if m:
+        limit = int(m.group(1))
+    m = re.search(r"\((\d+) of text input", message)
+    if m:
+        input_tokens = int(m.group(1))
+    m = re.search(r"(\d+) in the output", message)
+    if m:
+        output_tokens = int(m.group(1))
+    return limit, input_tokens, output_tokens
+
+
+def _estimate_input_tokens(text: str) -> int:
+    """Rough token count heuristic for prompt text."""
+    if not text:
+        return 0
+    return max(1, len(text.split()))
+
+
 def call_chat_endpoint(
     config: dict[str, Any],
     prompt: str,
@@ -717,22 +834,52 @@ def call_chat_endpoint(
                 # enough headroom to emit the actual code patch.
                 if finish_reason in ("length", "MAX_TOKENS", "max_tokens") and attempt < max_retries:
                     next_max_tokens = min(effective_max_tokens * 2, absolute_max_tokens)
-                    if next_max_tokens > effective_max_tokens:
+                    context_window = config.get("agent", {}).get("context_window") if config.get("agent") else None
+                    prompt_tokens = usage.get("prompt_tokens")
+                    if context_window and prompt_tokens is not None:
+                        max_allowed = context_window - prompt_tokens - 1
+                        if max_allowed < next_max_tokens:
+                            next_max_tokens = max_allowed
+                    elif context_window and prompt_tokens is None:
+                        max_allowed = context_window - _estimate_input_tokens(prompt) - 1
+                        if max_allowed < next_max_tokens:
+                            next_max_tokens = max_allowed
+                    if next_max_tokens <= effective_max_tokens:
                         logger.warning(
-                            "Chat response hit token limit (finish_reason=%s, completion_tokens=%s); retrying with max_tokens=%s",
+                            "Chat response hit token limit but cannot increase max_tokens within context window (finish_reason=%s); returning truncated content",
                             finish_reason,
-                            completion_tokens,
+                        )
+                        return content
+                    logger.warning(
+                        "Chat response hit token limit (finish_reason=%s, completion_tokens=%s); retrying with max_tokens=%s",
+                        finish_reason,
+                        completion_tokens,
+                        next_max_tokens,
+                    )
+                    effective_max_tokens = next_max_tokens
+                    payload["max_tokens"] = effective_max_tokens
+                    data = json.dumps(payload).encode("utf-8")
+                    continue
+                return content
+            except (KeyError, IndexError) as exc:
+                raise RuntimeError(f"Unexpected chat response shape: {result}") from exc
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="ignore")
+            if exc.code == 400:
+                limit, input_tokens, _ = _parse_context_limit_from_error(body)
+                if limit is not None and input_tokens is not None:
+                    next_max_tokens = limit - input_tokens - 1
+                    if next_max_tokens < effective_max_tokens:
+                        logger.warning(
+                            "Chat request hit context limit (%s tokens); reducing max_tokens from %s to %s and retrying",
+                            limit,
+                            effective_max_tokens,
                             next_max_tokens,
                         )
                         effective_max_tokens = next_max_tokens
                         payload["max_tokens"] = effective_max_tokens
                         data = json.dumps(payload).encode("utf-8")
                         continue
-                return content
-            except (KeyError, IndexError) as exc:
-                raise RuntimeError(f"Unexpected chat response shape: {result}") from exc
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="ignore")
             if exc.code == 429 or exc.code >= 500:
                 last_exc = exc
                 delay = min(base_delay * (2 ** attempt), max_delay) + random.uniform(0, 1)
@@ -1148,6 +1295,86 @@ def run_diff_fallback(
     return patch
 
 
+def _run_diff_recovery(
+    host_repo_dir: Path,
+    instance: dict[str, Any],
+    prompt_text: str,
+    ranked_files: list[str],
+    patch_config: dict[str, Any],
+    args: argparse.Namespace,
+    log_dir: Path,
+    output_dir: Path,
+    logger: logging.Logger,
+    name: str,
+    attempt: int,
+    metadata: dict[str, Any],
+) -> str:
+    """Run the one-shot diff fallback as an EMPTY_PATCH recovery step.
+
+    Resets the repo, re-applies the official test patch, asks the model for a
+    raw unified diff, and runs the compile gate.  On success the prediction is
+    saved and ``recovery_succeeded`` is recorded in ``metadata``.
+    """
+    instance_id = instance["instance_id"]
+    base_commit = instance["base_commit"]
+    logger.info("Diff recovery for %s attempt %s", instance_id, attempt)
+    metadata["diff_recovery_fired"] = True
+
+    if not _reset_repo(host_repo_dir, base_commit, logger):
+        logger.error(
+            "Failed to reset repo for diff recovery %s attempt %s",
+            instance_id,
+            attempt,
+        )
+        return ""
+
+    if not _apply_test_patch(
+        host_repo_dir,
+        instance.get("test_patch", "") or "",
+        logger,
+    ):
+        logger.error(
+            "Failed to apply test_patch for diff recovery %s attempt %s",
+            instance_id,
+            attempt,
+        )
+        return ""
+
+    fallback_patch = run_diff_fallback(
+        host_repo_dir,
+        instance,
+        prompt_text,
+        ranked_files,
+        patch_config,
+        args,
+        log_dir,
+        logger,
+        f"{name}_attempt{attempt}",
+    )
+    if not fallback_patch.strip():
+        logger.info(
+            "Diff recovery for %s attempt %s produced no applyable patch",
+            instance_id,
+            attempt,
+        )
+        return ""
+
+    language = (instance.get("repo_language") or "").lower()
+    if not _check_patch_builds(host_repo_dir, fallback_patch, language, logger):
+        logger.warning(
+            "Diff recovery patch for %s attempt %s failed compile gate; treating as empty",
+            instance_id,
+            attempt,
+        )
+        metadata["compile_gate_rejected"] = True
+        return ""
+
+    logger.info("Diff recovery succeeded for %s attempt %s", instance_id, attempt)
+    metadata["recovery_succeeded"] = True
+    save_prediction(output_dir, instance_id, fallback_patch, logger, metadata)
+    return fallback_patch
+
+
 def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bool:
     """Return True when the agent loop should be skipped entirely.
 
@@ -1362,6 +1589,18 @@ def run_agentless(
         applied, missing_files = apply_model_response_with_missing(
             host_repo_dir, response, logger
         )
+        if not applied or missing_files:
+            logger.warning(
+                "Agentless response for %s%s could not be fully applied "
+                "(applied=%s, missing_files=%s); rejecting patch",
+                instance_id,
+                suffix,
+                applied,
+                sorted(missing_files),
+            )
+            _reset_repo(host_repo_dir, base_commit, logger)
+            return "", False, missing_files
+
         test_patch_paths = paths_from_patch(instance.get("test_patch", "") or "")
         patch = capture_patch_on_host(
             host_repo_dir,
@@ -1369,62 +1608,70 @@ def run_agentless(
             base_commit=base_commit,
             test_patch_paths=test_patch_paths,
         )
-        if patch.strip():
-            search_text = instance.get("problem_statement", "") or ""
-            requirements = instance.get("requirements", "") or ""
-            if requirements:
-                search_text += "\n" + requirements
-            tests = load_list_field(instance.get("selected_test_files_to_run", []))
-            fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
-            relevant = rank_files_by_relevance(
-                host_repo_dir,
-                search_text,
-                test_names=tests + fail_to_pass,
-                top_k=20,
+        if not patch.strip():
+            logger.warning(
+                "Agentless path produced no patch for %s%s after successful apply",
+                instance_id,
+                suffix,
             )
-            # Keep any new files the model created (e.g., test fixtures) and any
-            # paths touched by the official fix patch, rather than filtering them
-            # out because they were not in the ranked set.
-            official_fix_paths = set(_changed_files_from_patch(instance.get("patch", "") or "")) | set(
-                _new_files_from_patch(instance.get("patch", "") or "")
-            )
-            extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or ""))
-            patch = filter_patch_to_source_files(
-                patch,
-                extra_allowed=extra_allowed,
-                official_fix_paths=official_fix_paths,
-                test_patch_paths=test_patch_paths,
-            )
-            if patch.strip():
-                logger.info(
-                    "Agentless path produced a non-empty patch for %s%s",
+            if allow_retry and not verify_edits_apply(host_repo_dir, response, logger):
+                logger.warning(
+                    "Agentless response for %s%s contains unapplyable edits; retrying",
                     instance_id,
                     suffix,
                 )
-                return patch, True, set()
+            return "", False, missing_files
+
+        search_text = instance.get("problem_statement", "") or ""
+        requirements = instance.get("requirements", "") or ""
+        if requirements:
+            search_text += "\n" + requirements
+        tests = load_list_field(instance.get("selected_test_files_to_run", []))
+        fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
+        relevant = rank_files_by_relevance(
+            host_repo_dir,
+            search_text,
+            test_names=tests + fail_to_pass,
+            top_k=20,
+        )
+        # Keep any new files the model created (e.g., test fixtures) and any
+        # paths touched by the official fix patch, rather than filtering them
+        # out because they were not in the ranked set.
+        official_fix_paths = set(_changed_files_from_patch(instance.get("patch", "") or "")) | set(
+            _new_files_from_patch(instance.get("patch", "") or "")
+        )
+        extra_allowed = set(_new_files_from_patch(instance.get("test_patch", "") or ""))
+        patch = filter_patch_to_source_files(
+            patch,
+            extra_allowed=extra_allowed,
+            official_fix_paths=official_fix_paths,
+            test_patch_paths=test_patch_paths,
+        )
+        if not patch.strip():
             logger.warning(
                 "Agentless patch for %s%s was filtered to empty",
                 instance_id,
                 suffix,
             )
+            _reset_repo(host_repo_dir, base_commit, logger)
             return "", False, missing_files
 
-        logger.warning(
-            "Agentless path produced no patch for %s%s (applied=%s, missing_files=%s)",
-            instance_id,
-            suffix,
-            applied,
-            sorted(missing_files),
-        )
-        if allow_retry and (missing_files or not verify_edits_apply(host_repo_dir, response, logger)):
+        if not _verify_patch_applies(host_repo_dir, patch, base_commit, logger):
             logger.warning(
-                "Agentless response for %s%s contains unapplyable edits (missing files: %s); retrying",
+                "Agentless patch for %s%s does not apply cleanly on base commit; rejecting",
                 instance_id,
                 suffix,
-                sorted(missing_files),
             )
+            _reset_repo(host_repo_dir, base_commit, logger)
             return "", False, missing_files
-        return "", False, missing_files
+
+        logger.info(
+            "Agentless path produced a non-empty patch for %s%s",
+            instance_id,
+            suffix,
+        )
+        return patch, True, set()
+
 
     context_window = patch_config.get("agent", {}).get("context_window", 32768)
     expand_to_package = _agentless_needs_package_expansion(
@@ -1552,13 +1799,32 @@ def run_plan_then_patch(
     )
     (log_dir / f"{name}.patch.response.md").write_text(patch_response, encoding="utf-8")
 
-    apply_model_response(host_repo_dir, patch_response, logger)
-    return capture_patch_on_host(
+    applied = apply_model_response(host_repo_dir, patch_response, logger)
+    if not applied:
+        logger.warning(
+            "Plan-then-patch response for %s could not be fully applied; rejecting patch",
+            instance_id,
+        )
+        _reset_repo(host_repo_dir, instance.get("base_commit", ""), logger)
+        return ""
+
+    patch = capture_patch_on_host(
         host_repo_dir,
         logger,
         base_commit=instance.get("base_commit"),
         test_patch_paths=paths_from_patch(instance.get("test_patch", "") or ""),
     )
+    if patch.strip() and not _verify_patch_applies(
+        host_repo_dir, patch, instance.get("base_commit"), logger
+    ):
+        logger.warning(
+            "Plan-then-patch patch for %s does not apply cleanly on base commit; rejecting",
+            instance_id,
+        )
+        _reset_repo(host_repo_dir, instance.get("base_commit", ""), logger)
+        return ""
+
+    return patch
 
 
 def run_cmd(
@@ -1856,12 +2122,24 @@ def save_prediction(
     patch: str,
     logger: logging.Logger,
     metadata: dict[str, Any] | None = None,
+    *,
+    error_code: str | None = None,
+    provider: str | None = None,
+    model_profile: str | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = output_dir / "predictions.jsonl"
     record: dict[str, Any] = {"instance_id": instance_id, "patch": patch}
     if metadata:
-        record["metadata"] = metadata
+        record["metadata"] = dict(metadata)
+    if error_code is not None or provider is not None or model_profile is not None:
+        record.setdefault("metadata", {})
+        if error_code is not None:
+            record["metadata"]["error_code"] = error_code
+        if provider is not None:
+            record["metadata"]["provider"] = provider
+        if model_profile is not None:
+            record["metadata"]["model_profile"] = model_profile
     with PREDICTIONS_LOCK:
         records = _read_predictions_jsonl(predictions_path)
         # Keep the latest record per instance_id so recovery attempts overwrite
@@ -2051,6 +2329,7 @@ def run_selfware_on_host(
     logger: logging.Logger,
     few_shot_examples: str | None = None,
     post_edit_test_command: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Run selfware directly on the host against the extracted repo."""
     logger.info("Running selfware on host repo %s", repo_dir)
@@ -2138,6 +2417,8 @@ def run_selfware_on_host(
         prompt_path.unlink(missing_ok=True)
         if few_shot_path is not None:
             few_shot_path.unlink(missing_ok=True)
+        if metadata is not None:
+            metadata["error_code"] = "timeout"
         return False
 
     stdout_thread.join(timeout=5)
@@ -2153,6 +2434,13 @@ def run_selfware_on_host(
             repo_dir.name,
             repo_dir.name,
         )
+        if metadata is not None:
+            stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
+            failure_class = classify_failure(stderr_path)
+            if failure_class == MAX_ITERATIONS:
+                metadata["error_code"] = "max_iterations"
+            elif failure_class == JSON_PARSE_ERROR:
+                metadata["error_code"] = "json_parse_error"
         return False
 
     logger.info("selfware completed on host repo %s", repo_dir.name)
@@ -2465,6 +2753,8 @@ def process_instance(
     tdr_name = f"{name}-tdr"
     log_dir = output_dir
     binary_path = Path(args.binary)
+    provider: str | None = None
+    model_profile: str | None = args.model_profile
     logger.info("=" * 60)
     logger.info("Processing %s", instance_id)
     logger.info("Image: %s", image)
@@ -2538,6 +2828,8 @@ def process_instance(
                 logger.warning("Few-shot examples file not found: %s", few_shot_path)
 
         metadata: dict[str, Any] = {}
+        error_code: str | None = None
+        provider = patch_config.get("model")
 
         if should_use_agentless(args, patch_config):
             patch = run_agentless(
@@ -2563,8 +2855,12 @@ def process_instance(
                         instance_id,
                     )
                     patch = ""
+                    error_code = "compile_gate_rejected"
                     metadata["compile_gate_rejected"] = True
-            save_prediction(output_dir, instance_id, patch, logger, metadata)
+            save_prediction(
+                output_dir, instance_id, patch, logger, metadata,
+                error_code=error_code, provider=provider, model_profile=model_profile,
+            )
             if (args.tdr and patch.strip()) or args.ensemble_models:
                 patch, success = _run_tdr_block(
                     host_repo_dir,
@@ -2580,7 +2876,11 @@ def process_instance(
                 return success and bool(patch.strip())
             if not patch.strip():
                 metadata["empty_patch"] = True
-                save_prediction(output_dir, instance_id, patch, logger, metadata)
+                error_code = error_code or "empty_patch"
+                save_prediction(
+                    output_dir, instance_id, patch, logger, metadata,
+                    error_code=error_code, provider=provider, model_profile=model_profile,
+                )
                 logger.warning("Empty patch for %s", instance_id)
                 return False
             return True
@@ -2604,8 +2904,12 @@ def process_instance(
                         instance_id,
                     )
                     patch = ""
+                    error_code = "compile_gate_rejected"
                     metadata["compile_gate_rejected"] = True
-            save_prediction(output_dir, instance_id, patch, logger, metadata)
+            save_prediction(
+                output_dir, instance_id, patch, logger, metadata,
+                error_code=error_code, provider=provider, model_profile=model_profile,
+            )
             if (args.tdr and patch.strip()) or args.ensemble_models:
                 patch, success = _run_tdr_block(
                     host_repo_dir,
@@ -2621,7 +2925,11 @@ def process_instance(
                 return success and bool(patch.strip())
             if not patch.strip():
                 metadata["empty_patch"] = True
-                save_prediction(output_dir, instance_id, patch, logger, metadata)
+                error_code = error_code or "empty_patch"
+                save_prediction(
+                    output_dir, instance_id, patch, logger, metadata,
+                    error_code=error_code, provider=provider, model_profile=model_profile,
+                )
                 logger.warning("Empty patch for %s", instance_id)
                 return False
             return True
@@ -2680,6 +2988,7 @@ def process_instance(
             logger,
             few_shot_examples=few_shot_examples,
             post_edit_test_command=test_cmd,
+            metadata=metadata,
         )
 
         # Capture patch regardless of success, so we record partial work.
@@ -2709,9 +3018,13 @@ def process_instance(
                     instance_id,
                 )
                 patch = ""
+                error_code = "compile_gate_rejected"
                 metadata["compile_gate_rejected"] = True
 
-        save_prediction(output_dir, instance_id, patch, logger, metadata)
+        save_prediction(
+            output_dir, instance_id, patch, logger, metadata,
+            error_code=error_code, provider=provider, model_profile=model_profile,
+        )
 
         if not patch.strip():
             logger.warning("Empty patch for %s", instance_id)
@@ -2734,6 +3047,7 @@ def process_instance(
                     logger,
                     few_shot_examples=few_shot_examples,
                     post_edit_test_command=test_cmd,
+                    metadata=metadata,
                 )
                 patch = capture_patch_on_host(
                     host_repo_dir,
@@ -2749,8 +3063,12 @@ def process_instance(
                             instance_id,
                         )
                         patch = ""
+                        error_code = "compile_gate_rejected"
                         metadata["compile_gate_rejected"] = True
-                save_prediction(output_dir, instance_id, patch, logger, metadata)
+                save_prediction(
+                    output_dir, instance_id, patch, logger, metadata,
+                    error_code=error_code, provider=provider, model_profile=model_profile,
+                )
 
         # ------------------------------------------------------------------
         # Early diff fallback: fragile models often fail on the first agent
@@ -2798,8 +3116,12 @@ def process_instance(
                                 instance_id,
                             )
                             patch = ""
+                            error_code = "compile_gate_rejected"
                             metadata["compile_gate_rejected"] = True
-                        save_prediction(output_dir, instance_id, patch, logger, metadata)
+                        save_prediction(
+                            output_dir, instance_id, patch, logger, metadata,
+                            error_code=error_code, provider=provider, model_profile=model_profile,
+                        )
                         success = bool(patch.strip())
                         logger.info("Early diff fallback succeeded for %s", instance_id)
 
@@ -2932,6 +3254,7 @@ def process_instance(
                         logger,
                         few_shot_examples=few_shot_examples,
                         post_edit_test_command=test_cmd,
+                        metadata=metadata,
                     )
                     patch = capture_patch_on_host(
                         host_repo_dir,
@@ -2939,7 +3262,10 @@ def process_instance(
                         base_commit=instance.get("base_commit"),
                         test_patch_paths=test_patch_paths,
                     )
-                save_prediction(output_dir, instance_id, patch, logger, metadata)
+                save_prediction(
+                    output_dir, instance_id, patch, logger, metadata,
+                    error_code=error_code, provider=provider, model_profile=model_profile,
+                )
 
                 if success and patch.strip():
                     logger.info(
@@ -3007,14 +3333,22 @@ def process_instance(
                             instance_id,
                         )
                         patch = ""
+                        error_code = "compile_gate_rejected"
                         metadata["compile_gate_rejected"] = True
-                    save_prediction(output_dir, instance_id, patch, logger, metadata)
+                    save_prediction(
+                        output_dir, instance_id, patch, logger, metadata,
+                        error_code=error_code, provider=provider, model_profile=model_profile,
+                    )
                     success = bool(patch.strip())
                     logger.info("Diff fallback succeeded for %s", instance_id)
 
         if not patch.strip():
             metadata["empty_patch"] = True
-            save_prediction(output_dir, instance_id, patch, logger, metadata)
+            error_code = error_code or "empty_patch"
+            save_prediction(
+                output_dir, instance_id, patch, logger, metadata,
+                error_code=error_code, provider=provider, model_profile=model_profile,
+            )
 
         if not success:
             logger.warning("selfware did not succeed for %s; empty/short patch likely", instance_id)
@@ -3042,7 +3376,12 @@ def process_instance(
         logger.error("Unexpected error processing %s: %s", instance_id, exc)
         logger.debug(traceback.format_exc())
         # Save an empty prediction so we don't retry on --resume.
-        save_prediction(output_dir, instance_id, "", logger, metadata)
+        if isinstance(exc, RuntimeError) and "api" in str(exc).lower():
+            error_code = "api_error"
+        save_prediction(
+            output_dir, instance_id, "", logger, metadata,
+            error_code=error_code or "api_error", provider=provider, model_profile=model_profile,
+        )
         return False
     finally:
         if not args.keep_container:
@@ -3083,6 +3422,60 @@ def main() -> int:
             args.plan_config["endpoint"] = args.local_endpoint
             logger.info("Overriding plan endpoint with --local-endpoint: %s", args.local_endpoint)
         logger.info("Using plan config: %s", plan_config_path)
+
+    # ------------------------------------------------------------------
+    # Run provenance: enforce --fresh/--resume semantics and write the
+    # run manifest so later invocations can verify they are compatible.
+    # ------------------------------------------------------------------
+    if args.resume and args.fresh:
+        logger.error("Cannot use both --resume and --fresh")
+        return 1
+
+    config_files = [str(config_path)]
+    if args.plan_then_patch:
+        config_files.append(str(plan_config_path))
+
+    current_manifest = {
+        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "model_profile": args.model_profile,
+        "config_dir": args.config_dir,
+        "config_files": config_files,
+        "sample_file": args.sample_file,
+        "harness_sha": _get_harness_sha(),
+        "command": sys.argv,
+        "version": HARNESS_VERSION,
+    }
+    existing_manifest = _read_run_manifest(output_dir)
+
+    if args.fresh:
+        for stale in ("predictions.jsonl", "predictions.json", "run_manifest.json"):
+            stale_path = output_dir / stale
+            if stale_path.exists():
+                stale_path.unlink()
+                logger.info("Removed stale %s", stale_path.name)
+    elif existing_manifest is not None:
+        if args.resume:
+            try:
+                _check_run_manifest(current_manifest, existing_manifest)
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                return 1
+        else:
+            logger.warning(
+                "Existing run_manifest.json found; assuming --resume (provenance not re-verified). "
+                "Pass --fresh to restart or --resume to confirm."
+            )
+            args.resume = True
+            try:
+                _check_run_manifest(current_manifest, existing_manifest)
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                return 1
+    else:
+        if args.resume:
+            logger.info("No run_manifest.json found; --resume will skip existing predictions only")
+
+    _write_run_manifest(output_dir, args, config_files)
 
     binary_path = Path(args.binary)
     if not args.plan_then_patch and not binary_path.exists():

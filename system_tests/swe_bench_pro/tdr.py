@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -124,7 +125,7 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
     tests on the unpatched base commit.
     """
     selected = _load_list_field(instance.get("selected_test_files_to_run", []))
-    test_arg = ",".join(selected)
+    test_arg = " ".join(shlex.quote(t) for t in selected)
     before_cmd = instance.get("before_repo_set_cmd", "") or ""
     return (
         "#!/bin/bash\n"
@@ -179,6 +180,9 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         #
         # Run tests and parse results.
         #
+        # Clear stale artifacts from any previous iteration so a timeout or
+        # crash cannot be mis-scored using old output.
+        "rm -f /workspace/output.json /workspace/patch_apply_status.txt\n"
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
         "run_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
@@ -251,7 +255,7 @@ def _compile_check_command(instance: dict[str, Any]) -> list[str] | None:
     if language == "go":
         return ["bash", "-c", "cd /app && go build ./... 2>&1"]
     if language in ("javascript", "typescript"):
-        return ["bash", "-c", "cd /app && (npm run build 2>&1 || true)"]
+        return ["bash", "-c", "cd /app && npm run build 2>&1"]
     return None
 
 

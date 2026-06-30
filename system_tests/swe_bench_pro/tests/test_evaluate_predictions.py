@@ -1,17 +1,24 @@
 """Tests for SWE-bench Pro evaluation entryscript and scoring."""
 
 import json
+import logging
 import os
+import shutil
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from evaluate_predictions import (
+    _augment_results_with_missing_predictions,
     _build_entryscript,
+    _ensure_image,
     _is_patch_empty,
     _no_tests_were_executed,
+    _prepull_images,
     _score_output,
     _write_report,
+    main,
 )
 
 
@@ -299,3 +306,235 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
     assert "Patch applied but no tests executed: **1**" in summary_text
     assert "Fail-to-pass failed: **2**" in summary_text
     assert "Pass-to-pass regressed: **1**" in summary_text
+
+
+def test_augment_results_adds_missing_prediction(tmp_path):
+    """A missing prediction row must appear as errored and count in totals."""
+    instances = {
+        "present": {
+            "instance_id": "present",
+            "fail_to_pass": ['["f1"]'],
+            "pass_to_pass": ['["p1"]'],
+        },
+        "missing": {
+            "instance_id": "missing",
+            "fail_to_pass": ["f2"],
+            "pass_to_pass": ["p2", "p3"],
+        },
+    }
+    results = [
+        {
+            "instance_id": "present",
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 1,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": "diff --git\n",
+            "metadata": {},
+        },
+    ]
+
+    augmented = _augment_results_with_missing_predictions(results, instances)
+    report = _write_report(tmp_path, augmented)
+
+    assert report["total_instances"] == 2
+    assert report["completed_instances"] == 1
+    assert report["errored_instances"] == 1
+    assert report["overall_passed_instances"] == 1
+    assert report["missing_prediction_count"] == 1
+
+    missing = next(r for r in report["per_instance"] if r["instance_id"] == "missing")
+    assert missing["error"] == "missing_prediction"
+    assert missing["overall_pass"] is False
+    assert missing["fail_to_pass_passed"] == 0
+    assert missing["fail_to_pass_total"] == 1
+    assert missing["pass_to_pass_passed"] == 0
+    assert missing["pass_to_pass_total"] == 2
+    assert missing["metadata"] == {}
+
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert "Missing prediction: **1**" in summary_text
+
+
+def test_pre_pull_called_with_unique_images_before_evaluation(tmp_path, monkeypatch):
+    """Unique required images are pre-pulled once before workers start."""
+    pred_path = tmp_path / "predictions.jsonl"
+    sample_path = tmp_path / "sample.jsonl"
+
+    pred_path.write_text(
+        json.dumps({"instance_id": "inst-1", "patch": "diff --git\n"}) + "\n"
+        + json.dumps({"instance_id": "inst-2", "patch": "diff --git\n"}) + "\n"
+        + json.dumps({"instance_id": "inst-3", "patch": "diff --git\n"}) + "\n",
+        encoding="utf-8",
+    )
+    sample_path.write_text(
+        json.dumps({
+            "instance_id": "inst-1",
+            "dockerhub_tag": "tag-a",
+            "fail_to_pass": [],
+            "pass_to_pass": [],
+        }) + "\n"
+        + json.dumps({
+            "instance_id": "inst-2",
+            "dockerhub_tag": "tag-b",
+            "fail_to_pass": [],
+            "pass_to_pass": [],
+        }) + "\n"
+        + json.dumps({
+            "instance_id": "inst-3",
+            "dockerhub_tag": "tag-a",
+            "fail_to_pass": [],
+            "pass_to_pass": [],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    captured_images: list[set[str]] = []
+
+    def _fake_prepull(images, logger):
+        captured_images.append(set(images))
+
+    def _fake_evaluate_instance(instance, prediction, output_dir, logger, test_timeout):
+        return {
+            "instance_id": instance["instance_id"],
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 0,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 0,
+            "patch": prediction.get("patch", ""),
+            "metadata": {},
+        }
+
+    monkeypatch.setattr("evaluate_predictions._prepull_images", _fake_prepull)
+    monkeypatch.setattr("evaluate_predictions.evaluate_instance", _fake_evaluate_instance)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_predictions.py",
+            "--predictions",
+            str(pred_path),
+            "--sample-file",
+            str(sample_path),
+            "--output-dir",
+            str(tmp_path),
+            "--workers",
+            "2",
+        ],
+    )
+
+    main()
+
+    assert len(captured_images) == 1
+    assert captured_images[0] == {
+        "docker.io/jefzda/sweap-images:tag-a",
+        "docker.io/jefzda/sweap-images:tag-b",
+    }
+
+
+def test_pre_pull_can_be_skipped(tmp_path, monkeypatch):
+    """--skip-pre-pull disables the pre-pull step."""
+    pred_path = tmp_path / "predictions.jsonl"
+    sample_path = tmp_path / "sample.jsonl"
+    pred_path.write_text(
+        json.dumps({"instance_id": "inst-1", "patch": "diff --git\n"}) + "\n",
+        encoding="utf-8",
+    )
+    sample_path.write_text(
+        json.dumps({
+            "instance_id": "inst-1",
+            "dockerhub_tag": "tag-x",
+            "fail_to_pass": [],
+            "pass_to_pass": [],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    called = False
+
+    def _fake_prepull(images, logger):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("evaluate_predictions._prepull_images", _fake_prepull)
+    monkeypatch.setattr(
+        "evaluate_predictions.evaluate_instance",
+        lambda *args, **kwargs: {
+            "instance_id": args[0]["instance_id"],
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 0,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 0,
+            "patch": "",
+            "metadata": {},
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_predictions.py",
+            "--predictions",
+            str(pred_path),
+            "--sample-file",
+            str(sample_path),
+            "--output-dir",
+            str(tmp_path),
+            "--skip-pre-pull",
+        ],
+    )
+
+    main()
+    assert called is False
+
+
+def test_ensure_image_skips_pull_when_image_exists_locally(monkeypatch):
+    """_ensure_image does not call pull when ``podman image exists`` succeeds."""
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda cmd: "/usr/bin/podman" if cmd == "podman" else None,
+    )
+
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    logger = logging.getLogger("test_ensure_image")
+
+    assert _ensure_image("docker.io/img:tag", logger) is True
+
+    assert any(c[0] == "podman" and "image" in c and "exists" in c for c in calls)
+    assert not any("pull" in c for c in calls)
+
+
+def test_prepull_images_warns_on_failure_but_does_not_abort(monkeypatch, caplog):
+    """A failed pre-pull is logged as a warning and does not raise."""
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda cmd: "/usr/bin/podman" if cmd == "podman" else None,
+    )
+
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="pull failed"
+        )
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    caplog.set_level(logging.WARNING)
+
+    logger = logging.getLogger("test_prepull")
+    _prepull_images({"img:1", "img:2"}, logger)
+
+    assert any("Pre-pull failed" in rec.message for rec in caplog.records)
+    assert any("img:1" in rec.message or "img:2" in rec.message for rec in caplog.records)
