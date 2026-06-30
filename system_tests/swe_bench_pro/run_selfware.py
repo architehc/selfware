@@ -335,6 +335,12 @@ def parse_args() -> argparse.Namespace:
         help="If the first agent attempt fails with JSON_PARSE_ERROR or MAX_ITERATIONS, run the one-shot diff fallback before the recovery loop (default: true).",
     )
     parser.add_argument(
+        "--small-model-diff-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="For small/fragile models that default to agentless, skip SEARCH/REPLACE and ask the model directly for a unified diff (with the test patch applied).",
+    )
+    parser.add_argument(
         "--agentless",
         "--no-agentless",
         action=TristateAction,
@@ -1692,6 +1698,73 @@ def run_agentless(
         context_window=context_window,
         expand_to_package=expand_to_package,
     )
+
+    tests = load_list_field(instance.get("selected_test_files_to_run", []))
+    fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
+    search_text = instance.get("problem_statement", "") or ""
+    requirements_text = instance.get("requirements", "") or ""
+    if requirements_text:
+        search_text = f"{search_text}\n{requirements_text}".strip()
+    ranked_files = rank_files_by_relevance(
+        host_repo_dir,
+        search_text,
+        test_names=tests + fail_to_pass,
+        top_k=20,
+    )
+
+    # ------------------------------------------------------------------
+    # Small-model fast path: skip SEARCH/REPLACE entirely and ask the
+    # model for a unified diff with the failing test patch applied.  This
+    # matches the productive signal seen in swarm_diff_recovery/.
+    # ------------------------------------------------------------------
+    if getattr(args, "small_model_diff_fallback", False):
+        logger.info(
+            "Small-model diff-fallback-first path for %s (ranked_files=%s)",
+            instance_id,
+            ranked_files,
+        )
+        metadata["recovery_attempts"] = metadata.get("recovery_attempts", 0) + 1
+        metadata["diff_recovery_fired"] = True
+        if not _reset_repo(host_repo_dir, base_commit, logger):
+            return ""
+        if not _apply_test_patch(
+            host_repo_dir,
+            instance.get("test_patch", "") or "",
+            logger,
+        ):
+            logger.error(
+                "Failed to apply test_patch for small-model diff fallback %s",
+                instance_id,
+            )
+            return ""
+
+        fallback_patch = run_diff_fallback(
+            host_repo_dir,
+            instance,
+            agentless_prompt,
+            ranked_files,
+            patch_config,
+            args,
+            log_dir,
+            logger,
+            name,
+        )
+        if fallback_patch.strip():
+            language = (instance.get("repo_language") or "").lower()
+            if _check_patch_builds(host_repo_dir, fallback_patch, language, logger):
+                logger.info(
+                    "Small-model diff fallback produced a non-empty patch for %s",
+                    instance_id,
+                )
+                metadata["recovery_succeeded"] = True
+                return fallback_patch
+            logger.warning(
+                "Small-model diff fallback patch for %s failed compile gate; treating as empty",
+                instance_id,
+            )
+            metadata["compile_gate_rejected"] = True
+        return ""
+
     patch, ok, _ = _attempt(agentless_prompt, "", allow_retry=True)
     if ok:
         return patch
@@ -1723,19 +1796,17 @@ def run_agentless(
         )
         if not _reset_repo(host_repo_dir, base_commit, logger):
             return ""
-
-        tests = load_list_field(instance.get("selected_test_files_to_run", []))
-        fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
-        search_text = instance.get("problem_statement", "") or ""
-        requirements_text = instance.get("requirements", "") or ""
-        if requirements_text:
-            search_text = f"{search_text}\n{requirements_text}".strip()
-        ranked_files = rank_files_by_relevance(
+        if not _apply_test_patch(
             host_repo_dir,
-            search_text,
-            test_names=tests + fail_to_pass,
-            top_k=20,
-        )
+            instance.get("test_patch", "") or "",
+            logger,
+        ):
+            logger.error(
+                "Failed to apply test_patch for agentless diff fallback %s",
+                instance_id,
+            )
+            return ""
+
         logger.info(
             "Ranked files for agentless diff fallback for %s: %s",
             instance_id,
@@ -1754,12 +1825,19 @@ def run_agentless(
             name,
         )
         if fallback_patch.strip():
-            logger.info(
-                "Agentless diff fallback produced a non-empty patch for %s",
+            language = (instance.get("repo_language") or "").lower()
+            if _check_patch_builds(host_repo_dir, fallback_patch, language, logger):
+                logger.info(
+                    "Agentless diff fallback produced a non-empty patch for %s",
+                    instance_id,
+                )
+                metadata["recovery_succeeded"] = True
+                return fallback_patch
+            logger.warning(
+                "Agentless diff fallback patch for %s failed compile gate; treating as empty",
                 instance_id,
             )
-            metadata["recovery_succeeded"] = True
-            return fallback_patch
+            metadata["compile_gate_rejected"] = True
 
     return ""
 

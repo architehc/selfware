@@ -1097,3 +1097,86 @@ def test_run_agentless_diff_fallback_records_recovery_metadata(tmp_path, monkeyp
     assert metadata.get("diff_recovery_fired") is True
     assert metadata.get("recovery_attempts", 0) > 0
     assert metadata.get("recovery_succeeded") is True
+
+
+def test_run_agentless_small_model_diff_fallback_skips_search_replace(
+    tmp_path, monkeypatch
+):
+    """--small-model-diff-fallback bypasses SEARCH/REPLACE and applies test_patch before diff fallback."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "a.py").write_text("old_a\n", encoding="utf-8")
+    (repo / "test_a.py").write_text("def test_a(): pass\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    expected_patch = (
+        "diff --git a/a.py b/a.py\n"
+        "--- a/a.py\n"
+        "+++ b/a.py\n"
+        "@@ -1 +1 @@\n"
+        "-old_a\n"
+        "+new_a\n"
+    )
+
+    test_patch = (
+        "diff --git a/test_a.py b/test_a.py\n"
+        "--- a/test_a.py\n"
+        "+++ b/test_a.py\n"
+        "@@ -1 +1 @@\n"
+        "-def test_a(): pass\n"
+        "+def test_a(): pass  # patched\n"
+    )
+
+    calls = []
+
+    def _fake_run_diff_fallback(host_repo_dir, instance, prompt, ranked_files, *args, **kwargs):
+        calls.append((host_repo_dir, instance, prompt, ranked_files))
+        return expected_patch
+
+    monkeypatch.setattr("run_selfware.run_diff_fallback", _fake_run_diff_fallback)
+    monkeypatch.setattr(
+        "run_selfware._check_patch_builds",
+        lambda repo_dir, patch, language, logger: True,
+    )
+    monkeypatch.setattr(
+        "run_selfware.rank_files_by_relevance",
+        lambda *args, **kwargs: ["a.py"],
+    )
+
+    args = argparse.Namespace(
+        patch_timeout=30,
+        diff_fallback=True,
+        small_model_diff_fallback=True,
+        early_diff_fallback=False,
+    )
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    metadata: dict[str, Any] = {}
+    instance = {
+        "instance_id": "inst-small-diff",
+        "base_commit": "HEAD",
+        "test_patch": test_patch,
+        "patch": "",
+        "problem_statement": "change a",
+        "repo_language": "python",
+    }
+    patch = run_agentless(
+        repo,
+        instance,
+        {},
+        args,
+        log_dir,
+        logging.getLogger("test"),
+        "name",
+        metadata=metadata,
+    )
+    assert patch == expected_patch
+    assert metadata.get("diff_recovery_fired") is True
+    assert metadata.get("recovery_succeeded") is True
+    # run_diff_fallback should have been called.
+    assert len(calls) == 1
+    # The test patch should have been applied to the repo.
+    applied_test = (repo / "test_a.py").read_text(encoding="utf-8")
+    assert "# patched" in applied_test
