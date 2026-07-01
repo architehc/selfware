@@ -430,6 +430,42 @@ impl Agent {
             return Ok(false);
         }
 
+        // Read-only completion gate. For a non-mutating task (code review /
+        // analysis / question) that returns no tool call, accept a substantial
+        // final answer immediately; and if the model instead keeps narrating
+        // ("let me check ...") without answering, force-finalize after a few such
+        // turns rather than spinning to MAX_ITERATIONS (observed: read-only
+        // reviews looped 100 steps and were mislabeled FAKE_COMPLETE). This ONLY
+        // adds an acceptance/finalize path — when neither condition holds it falls
+        // through to the existing flow, so normal short/empty completions and all
+        // mutation tasks are unaffected (the FAKE_COMPLETE edit gate stays intact).
+        if tool_calls.is_empty() && !self.current_task_requires_mutation() {
+            let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+            let looks_final = clean.len() >= 40
+                && !super::verification::is_incomplete_action_response(&content)
+                && !super::verification::is_confused_response(&content);
+            if looks_final && self.check_completion_gate().await.is_none() {
+                info!("Read-only task: accepting substantial final answer");
+                output::final_answer(&clean);
+                self.last_assistant_response = clean;
+                return Ok(true);
+            }
+            if clean.len() > self.last_assistant_response.len() {
+                self.last_assistant_response = clean.clone();
+            }
+            self.readonly_no_tool_streak += 1;
+            if self.readonly_no_tool_streak >= 6 && self.last_assistant_response.len() >= 40 {
+                info!(
+                    "Read-only task: force-finalizing after {} no-tool turns",
+                    self.readonly_no_tool_streak
+                );
+                let best = self.last_assistant_response.clone();
+                output::final_answer(&best);
+                return Ok(true);
+            }
+            // else: fall through to the existing completion/fallback handling.
+        }
+
         match self.maybe_prompt_for_action(
             &content,
             tool_calls.is_empty(),
@@ -463,40 +499,15 @@ impl Agent {
                     return Ok(false);
                 }
 
-                // A repeated auto-fallback means the model is stuck producing prose
-                // that mines the same phantom tool (observed: read-only reviews
-                // mining their own report text for `file_read`, failing/suppressed,
-                // and looping to MAX_ITERATIONS). After a few such turns, stop
-                // fabricating fallbacks and ask the model to finalize with what it
-                // already has, instead of spinning forever.
-                self.consecutive_no_action_prompts += 1;
-                if self.consecutive_no_action_prompts >= 3 {
-                    if self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0 {
-                        bail!(
-                            "NONTERM_PROSE_NO_TOOL: mutation-required task produced repeated prose-only turns with 0 mutating tools"
-                        );
-                    }
-                    info!("Repeated auto-fallback — prompting model to finalize");
-                    self.messages.push(crate::api::types::Message::user(
-                        "<selfware_system_directive>\n\
-                         You already have enough context. Provide your COMPLETE final \
-                         answer now based on what you know. Do not narrate next steps or \
-                         say \"let me\" — output only the finished answer.\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
-                    return Ok(false);
-                }
-
                 info!("Smart fallback: {} {}", tool_name, tool_args);
                 output::smart_fallback_action(&tool_name, &tool_args);
                 let fallback: Vec<CollectedToolCall> = vec![(tool_name.clone(), tool_args, None)];
                 self.execute_tool_batch(fallback).await?;
 
-                // NOTE: do NOT reset consecutive_no_action_prompts here. A fabricated
-                // fallback is not real progress; resetting it masked the finalize/abort
-                // ceiling above and let the loop run to MAX_ITERATIONS. It is reset by
-                // reset_no_action_prompt_state() when the model makes a real tool call.
+                // Successful fallback = progress. Reset consecutive counter
+                // so it doesn't accumulate toward abort. The total counter
+                // still tracks lifetime attempts for the hard ceiling.
+                self.consecutive_no_action_prompts = 0;
 
                 self.messages.push(crate::api::types::Message::user(format!(
                     "<selfware_system_directive>\n\

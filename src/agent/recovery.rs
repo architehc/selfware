@@ -148,6 +148,7 @@ fn strip_gemma_thinking(content: &str) -> String {
 impl Agent {
     pub(super) fn reset_no_action_prompt_state(&mut self) {
         self.consecutive_no_action_prompts = 0;
+        self.readonly_no_tool_streak = 0;
         self.last_no_action_prompt_hash = None;
     }
 

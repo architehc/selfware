@@ -174,6 +174,25 @@ impl std::fmt::Display for TaskType {
 pub fn classify_task(task: &str) -> TaskType {
     let t = task.to_lowercase();
 
+    // Explicit read-only intent wins over everything else. Without this, a review
+    // prompt like "... Do NOT edit any files ..." was classified as Edit (it
+    // contains the substring "edit"), so the preamble told the model to modify
+    // code — it then tried to edit a read-only task and looped. A prohibition on
+    // editing is the strongest possible signal that this is a reading task.
+    if t.contains("do not edit")
+        || t.contains("don't edit")
+        || t.contains("do not modify")
+        || t.contains("don't modify")
+        || t.contains("do not change")
+        || t.contains("don't change")
+        || t.contains("without editing")
+        || t.contains("without modifying")
+        || t.contains("read-only")
+        || t.contains("read only")
+    {
+        return TaskType::Read;
+    }
+
     // Ship/deploy — check first because "commit" could appear in edit tasks
     if t.contains("commit") && (t.contains("push") || t.contains("ship") || t.contains("deploy"))
         || t.contains("deploy")
@@ -334,6 +353,22 @@ pub fn reorder_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_do_not_edit_is_read_only() {
+        // Regression: a prohibition on editing must classify as Read, not Edit
+        // (the prompt contains the substring "edit").
+        assert_eq!(
+            classify_task(
+                "In one sentence, which module is registered as the shell tool? Do NOT edit any files."
+            ),
+            TaskType::Read
+        );
+        assert_eq!(
+            classify_task("Review src/ for dead code without modifying anything"),
+            TaskType::Read
+        );
+    }
 
     #[test]
     fn test_classify_read_tasks() {

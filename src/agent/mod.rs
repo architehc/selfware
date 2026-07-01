@@ -496,6 +496,10 @@ pub struct Agent {
     pending_synthesis: Option<String>,
     /// Consecutive turns where the model described intent but emitted no tool call.
     consecutive_no_action_prompts: usize,
+    /// Consecutive no-tool-call turns on a read-only (non-mutating) task. Reset by
+    /// any real tool call. Used to force-finalize a read-only task that keeps
+    /// narrating without answering, instead of spinning to MAX_ITERATIONS.
+    readonly_no_tool_streak: usize,
     /// Lifetime total of no-action prompts across the entire task.
     /// Unlike the consecutive counter, this is NOT reset when the model produces
     /// a non-intent response. It provides a hard abort ceiling.
@@ -1076,6 +1080,7 @@ To call a tool, use this EXACT XML structure:
             pending_failure_hint: None,
             pending_synthesis: None,
             consecutive_no_action_prompts: 0,
+            readonly_no_tool_streak: 0,
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             permission_store,
