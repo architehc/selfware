@@ -136,36 +136,6 @@ pub fn default_shell() -> (&'static str, &'static str) {
     }
 }
 
-/// Heuristic: does `command` invoke a build/test/compile that routinely exceeds
-/// the 60s shell default on large projects? Used to raise the timeout floor so
-/// the command can finish and report instead of being killed with empty output.
-fn command_is_long_running_build(command: &str) -> bool {
-    let c = command.to_lowercase();
-    const MARKERS: &[&str] = &[
-        "cargo build",
-        "cargo check",
-        "cargo test",
-        "cargo clippy",
-        "cargo bench",
-        "cargo install",
-        "cargo doc",
-        "cargo run",
-        "cmake",
-        "ninja",
-        "npm run build",
-        "npm install",
-        "npm ci",
-        "yarn build",
-        "pnpm build",
-        "go build",
-        "go test",
-        "gradle",
-        "bazel",
-        "pip install",
-    ];
-    MARKERS.iter().any(|m| c.contains(m))
-}
-
 /// Shell command execution tool.
 pub struct ShellExec;
 
@@ -218,16 +188,6 @@ impl Tool for ShellExec {
         }
 
         let mut args: Args = serde_json::from_value(args)?;
-
-        // Build/test commands routinely take far longer than the 60s default on
-        // large projects. Killing them at 60s returns empty output, and the model
-        // — unable to see the result — loops re-running the command (observed:
-        // `cargo check` self-improvement runs spinning to MAX_ITERATIONS). Give
-        // known long-running build/test commands a generous floor so they can
-        // actually finish and report.
-        if command_is_long_running_build(&args.command) {
-            args.timeout_secs = args.timeout_secs.max(600);
-        }
 
         // Cap timeout to prevent indefinite hangs (1 hour max)
         const MAX_TIMEOUT_SECS: u64 = 3600;
@@ -321,18 +281,7 @@ impl Tool for ShellExec {
                 false,
             ),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => (
-                -1,
-                "".to_string(),
-                format!(
-                    "Command timed out after {}s and was killed (no output captured). \
-                     For long-running builds/tests (e.g. `cargo check`/`build`/`test`), \
-                     retry the SAME command with a larger timeout, e.g. add \
-                     \"timeout_secs\": 600 to the tool arguments.",
-                    args.timeout_secs
-                ),
-                true,
-            ),
+            Err(_) => (-1, "".to_string(), "Command timed out".to_string(), true),
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -462,22 +411,7 @@ mod tests {
 
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["timed_out"], true);
-        let stderr = result["stderr"].as_str().unwrap();
-        assert!(stderr.contains("timed out"));
-        // Regression: the timeout must be actionable so the model retries with a
-        // larger timeout instead of looping (e.g. `cargo check` on big crates).
-        assert!(stderr.contains("timeout_secs"), "stderr was: {stderr}");
-    }
-
-    #[test]
-    fn test_command_is_long_running_build() {
-        // Build/test commands get a generous timeout floor so they aren't killed
-        // at 60s with empty output (which made the model loop on `cargo check`).
-        assert!(command_is_long_running_build("cargo check --all-targets"));
-        assert!(command_is_long_running_build("cd foo && cargo build --release"));
-        assert!(command_is_long_running_build("npm install"));
-        assert!(!command_is_long_running_build("ls -la"));
-        assert!(!command_is_long_running_build("grep -r foo src/"));
+        assert!(result["stderr"].as_str().unwrap().contains("timed out"));
     }
 
     #[tokio::test]

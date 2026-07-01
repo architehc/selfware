@@ -557,37 +557,6 @@ fn extract_explicit_disallowed_tools(task_context: &str) -> std::collections::BT
     disallowed
 }
 
-/// True if `needle` appears in `lower` at least once WITHOUT an immediately
-/// preceding negation ("not", "don't", "never", "without", "avoid", "no").
-///
-/// This prevents a read-only instruction such as "do NOT edit any files" from
-/// arming the mutation machinery just because it contains the substring "edit",
-/// while still treating "fix the bug but do not edit the tests" as a mutation
-/// task (the un-negated "fix" wins).
-fn mention_is_unnegated(lower: &str, needle: &str) -> bool {
-    const NEGATORS: &[&str] = &["not ", "n't ", "never ", "without ", "avoid ", "no "];
-    let mut start = 0;
-    while let Some(pos) = lower[start..].find(needle) {
-        let abs = start + pos;
-        // Look back up to ~16 chars for a negation, in a UTF-8-safe way
-        // (byte-slicing a fixed offset could split a multibyte char and panic).
-        let prefix = &lower[..abs];
-        let win_start = prefix
-            .char_indices()
-            .rev()
-            .take(16)
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        let window = &prefix[win_start..];
-        if !NEGATORS.iter().any(|n| window.contains(n)) {
-            return true;
-        }
-        start = abs + needle.len().max(1);
-    }
-    false
-}
-
 pub(super) fn task_requires_mutation(task_context: &str) -> bool {
     let lower = task_context.to_lowercase();
     [
@@ -610,7 +579,7 @@ pub(super) fn task_requires_mutation(task_context: &str) -> bool {
         "add ",
     ]
     .iter()
-    .any(|needle| mention_is_unnegated(&lower, needle))
+    .any(|needle| lower.contains(needle))
 }
 
 pub(super) fn shell_command_is_observational(command: &str) -> bool {
@@ -3952,24 +3921,6 @@ mod tests {
     #[test]
     fn test_task_requires_mutation_fix() {
         assert!(task_requires_mutation("Fix the failing test"));
-    }
-
-    #[test]
-    fn test_task_requires_mutation_respects_negation() {
-        // Regression: a read-only review whose prompt says "do NOT edit" must not
-        // be classified as mutation-required just because it contains "edit".
-        assert!(!task_requires_mutation(
-            "Review the codebase and produce a report. Do NOT edit any files."
-        ));
-        assert!(!task_requires_mutation(
-            "Analyze src/ for dead code without modifying anything; output your findings."
-        ));
-        // But an un-negated mutation verb still wins even alongside a negation.
-        assert!(task_requires_mutation(
-            "Fix the bug, but do not edit the tests."
-        ));
-        // Plain mutation instructions are unaffected.
-        assert!(task_requires_mutation("edit main.rs to add a field"));
     }
 
     #[test]
