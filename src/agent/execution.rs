@@ -184,6 +184,21 @@ impl Agent {
         blocked
     }
 
+    /// True if `line` looks like a `FILES:` checklist header.
+    ///
+    /// Tolerant of leading markdown decoration and case, because capable hosted
+    /// models (e.g. GLM-4.x/5.x) format the header as `**FILES:**`, `- Files:`,
+    /// or `#### FILES:` rather than a bare `FILES:`. Without this tolerance the
+    /// P2.1 edit guard never sees the checklist, blocks every edit, and the model
+    /// loops emitting the (unrecognized) header as prose — surfacing as
+    /// `NONTERM_PROSE_NO_TOOL`.
+    fn is_files_checklist_line(line: &str) -> bool {
+        let cleaned = line.trim_start().trim_start_matches(|c: char| {
+            matches!(c, '*' | '#' | '`' | '-' | '>' | '_' | '•' | ' ' | '\t')
+        });
+        cleaned.to_ascii_lowercase().starts_with("files:")
+    }
+
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
     /// instead of making a new API call (used after planning phase)
@@ -319,7 +334,7 @@ impl Agent {
         // reduces catastrophic edits on the wrong files.
         if super::recovery::strip_think_blocks(&content)
             .lines()
-            .any(|line| line.trim_start().starts_with("FILES:"))
+            .any(Self::is_files_checklist_line)
         {
             self.files_checklist_seen = true;
         }
@@ -1172,6 +1187,21 @@ mod tests {
     use crate::testing::mock_api::MockLlmServer;
     use chrono::Utc;
     use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn files_checklist_line_tolerates_markdown_decoration() {
+        // Bare form still works.
+        assert!(Agent::is_files_checklist_line("FILES: src/main.rs"));
+        assert!(Agent::is_files_checklist_line("  FILES: a.rs"));
+        // Markdown decoration that capable hosted models (GLM-4.x/5.x) emit.
+        assert!(Agent::is_files_checklist_line("**FILES:** src/main.rs"));
+        assert!(Agent::is_files_checklist_line("- **Files:** a.rs, b.rs"));
+        assert!(Agent::is_files_checklist_line("#### FILES: a.rs"));
+        assert!(Agent::is_files_checklist_line("> files: a.rs"));
+        // Non-headers must not match.
+        assert!(!Agent::is_files_checklist_line("The files are listed below"));
+        assert!(!Agent::is_files_checklist_line("profiles: none"));
+    }
 
     /// Detect a real existing codebase to suppress the Rust scaffold injection.
     /// Empty dir + the SAB scratch shape (only src/lib.rs) must report zero.

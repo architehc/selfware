@@ -104,6 +104,76 @@ An **agentic coding harness** for local LLMs that runs entirely on your hardware
 
 ## Quick Start
 
+> ### ⚡ Fastest path — hosted, no GPU: OpenRouter + GLM‑5.2
+>
+> Want to try Selfware in two minutes with a frontier model and **no local server**?
+> Point it at [OpenRouter](https://openrouter.ai) and run GLM‑5.2. All you provide is
+> an API key.
+>
+> **1. Get a key** at <https://openrouter.ai/keys> (starts with `sk-or-...`).
+>
+> **2. Create `~/.config/selfware/config.toml`** (works from any directory):
+>
+> ```toml
+> endpoint = "https://openrouter.ai/api/v1"
+> model    = "z-ai/glm-5.2"        # or z-ai/glm-4.7, z-ai/glm-4.6, etc.
+> max_tokens      = 32768          # GLM-5.2 completion cap
+> context_length  = 1048576        # GLM-5.2 is a 1M-token model
+> temperature     = 0.6
+>
+> [agent]
+> native_function_calling = true   # OpenRouter/GLM support OpenAI tool calling
+>
+> [safety]
+> allowed_paths = ["./**", "~/**", "/tmp/**"]
+>
+> # Optional but recommended on OpenRouter: only route to providers that actually
+> # honor the tools you send (avoids "describes intent without calling tools"),
+> # and prefer ones serving the full context window.
+> [extra_body.provider]
+> require_parameters = true
+> ```
+>
+> **3. Provide the key** (either way works):
+>
+> ```bash
+> export SELFWARE_API_KEY="sk-or-..."     # preferred; or:
+> #   add  api_key = "sk-or-..."  to the [top] of config.toml and `chmod 600` it
+> ```
+>
+> **4. Validate it works — run this first:**
+>
+> ```bash
+> selfware llm-doctor
+> ```
+>
+> A healthy setup prints `[PASS] api_key present`, `[PASS] endpoint reachable`,
+> `Model: z-ai/glm-5.2`, and a passing connection + tool-calling test. Then just:
+>
+> ```bash
+> cd ~/my-project
+> selfware chat                      # or:  selfware -p "add a docstring to main.py"
+> ```
+>
+> <details><summary><b>Troubleshooting — if something doesn't work</b></summary>
+>
+> | Symptom | Cause & fix |
+> |---------|-------------|
+> | `api_key: no key found` / 401 Unauthorized | Key not seen. `export SELFWARE_API_KEY=sk-or-...` in the shell you run from, or put `api_key=` in `config.toml`. Precedence: `SELFWARE_API_KEY` env → OS keyring → config file. |
+> | `endpoint … not reachable` | No network / wrong URL. It must be exactly `https://openrouter.ai/api/v1` (no trailing `/chat/completions`). |
+> | `model not found` / 400 | Check the exact slug at <https://openrouter.ai/models> — e.g. `z-ai/glm-5.2`, not `glm5.2`. |
+> | `402 / insufficient credits` | Add credit at <https://openrouter.ai/credits> (GLM‑5.2 is inexpensive but not free). |
+> | Config isn't picked up | Discovery order: `--config <file>` → `SELFWARE_CONFIG` env → `./selfware.toml` (cwd) → `~/.config/selfware/config.toml`. Run `selfware config show` to see the effective config + where each value came from. |
+> | Slow output (a few tok/s) | Normal — that's the hosted provider's speed for a 1M‑token reasoning model. Interactive `chat` is fine; long autonomous runs will take a while. |
+> | Context seems trimmed around ~128–262k despite a 1M model | That's the **OpenRouter provider's** own limit, not Selfware (Selfware honors `context_length`). Providers for the same model differ — see them at `https://openrouter.ai/models` → the model's *Providers* tab. Pin full-context ones with `[extra_body.provider] order = ["DeepInfra", "Morph", ...]` (or `only = [...]`). The `provider` block in the response tells you who served you. |
+> | Headless `-p` stops with *"requires confirmation … Use --yolo"* | Mutating tools need approval. Add `--yolo` to auto-approve in headless mode, or use interactive `selfware chat` and confirm each edit. |
+> | `FAKE_COMPLETE` / "produced final answer but executed 0 mutating calls" | The model answered in prose instead of editing. Add `--yolo` (headless), keep `native_function_calling = true` + `[extra_body.provider] require_parameters = true`, and phrase the task as a concrete change ("edit X to do Y"), not a question. |
+> | `NONTERM_PROSE_NO_TOOL` / "kept describing intent without using tools" | The model narrated instead of calling a tool. Make sure `native_function_calling = true`, keep `selfware` up to date (older builds mis-detected some models' `**FILES:**` planning headers), and give a concrete, single-goal task. Re-run — recovery usually proceeds. |
+>
+> Still stuck? `selfware llm-doctor` prints a step-by-step diagnosis, and
+> `selfware config show` shows exactly which config file and key source are in effect.
+> </details>
+
 ### 1. Install Selfware
 
 **Option A: Download prebuilt binary (recommended)**
