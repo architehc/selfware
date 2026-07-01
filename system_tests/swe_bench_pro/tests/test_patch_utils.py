@@ -1,7 +1,11 @@
 """Tests for SWE-bench Pro patch utilities."""
 
+import logging
 import os
+import subprocess
 import sys
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -237,6 +241,7 @@ from patch_utils import (
     _normalize_edit_response,
     _strip_line_number_gutter,
     apply_edits,
+    apply_edits_with_missing,
 )
 
 
@@ -361,3 +366,115 @@ def test_apply_edits_only_applies_after_normalization(tmp_path):
     )
     assert apply_edits(tmp_path, response, None) is True
     assert target.read_text() == "def foo():\n    return 2\n"
+
+
+def test_apply_edits_with_missing_rejects_leftover_patch_markers(tmp_path):
+    """A malformed REPLACE block that leaves markers in the result must fail."""
+    target = tmp_path / "file.py"
+    target.write_text("x = 1\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "x = 1\n"
+        "=======\n"
+        "x = 2\n"
+        "<<<<<<< SEARCH\n"
+        "oops\n"
+        ">>>>>>> REPLACE\n"
+    )
+    applied, missing = apply_edits_with_missing(tmp_path, response, None)
+    assert "file.py" in missing
+    assert target.read_text() == "x = 1\n"
+    assert not (applied and not missing)
+
+
+def test_apply_edits_with_missing_records_partial_failure_with_markers(tmp_path):
+    """Repro: first edit applies, second malformed edit is skipped and recorded."""
+    first = tmp_path / "first.py"
+    first.write_text("a = 1\n")
+    second = tmp_path / "second.py"
+    second.write_text("b = 1\n")
+    response = (
+        "### FILE: first.py\n"
+        "<<<<<<< SEARCH\n"
+        "a = 1\n"
+        "=======\n"
+        "a = 2\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: second.py\n"
+        "<<<<<<< SEARCH\n"
+        "b = 1\n"
+        "=======\n"
+        "b = 2\n"
+        "<<<<<<< SEARCH\n"
+        "oops\n"
+        ">>>>>>> REPLACE\n"
+    )
+    applied, missing = apply_edits_with_missing(tmp_path, response, None)
+    assert applied is True
+    assert "second.py" in missing
+    assert "first.py" not in missing
+    assert first.read_text() == "a = 2\n"
+    assert second.read_text() == "b = 1\n"
+    assert missing  # patch is not fully applied
+
+
+def test_apply_diff_with_check_falls_back_to_patch_command(tmp_path):
+    """If git apply rejects a diff, the applier should try patch -p1."""
+    from patch_utils import _apply_diff_with_check
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+    (repo / "file.txt").write_text("line1\nline2\nline3\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    # A diff with trailing whitespace changes that git apply may reject
+    # depending on config, but patch -p1 can usually apply.
+    diff_text = (
+        "diff --git a/file.txt b/file.txt\n"
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -1,3 +1,3 @@\n"
+        " line1\n"
+        "-line2\n"
+        "+line2 modified\n"
+        " line3\n"
+    )
+    import shutil
+    if shutil.which("patch") is None:
+        pytest.skip("patch binary not available")
+
+    assert _apply_diff_with_check(repo, diff_text, logging.getLogger("test")) is True
+    assert "line2 modified" in (repo / "file.txt").read_text(encoding="utf-8")
+
+
+def test_build_diff_fallback_prompt_allows_full_file_replacement():
+    """When allow_full_file_replacement=True the prompt drops the whole-file ban."""
+    from harness_recovery import build_diff_fallback_prompt
+
+    prompt = build_diff_fallback_prompt(
+        "Issue:\nfix bug\n",
+        ["a.py"],
+        "/tmp",
+        max_chars=100,
+        allow_full_file_replacement=True,
+    )
+    assert "Full-file replacement is allowed" in prompt
+    assert "Do NOT rewrite whole files" not in prompt
+
+
+def test_build_diff_fallback_prompt_caps_snippet_length(tmp_path):
+    """max_chars is respected in the generated prompt."""
+    from harness_recovery import build_diff_fallback_prompt
+
+    (tmp_path / "a.py").write_text("# line\n" * 50, encoding="utf-8")
+    prompt = build_diff_fallback_prompt(
+        "Issue:\nfix bug\n",
+        ["a.py"],
+        str(tmp_path),
+        max_chars=50,
+        allow_full_file_replacement=False,
+    )
+    assert "... (truncated due to char limit) ..." in prompt

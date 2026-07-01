@@ -481,6 +481,7 @@ def evaluate_instance(
         "error": None,
         "patch": prediction.get("patch", ""),
         "metadata": prediction.get("metadata", {}),
+        "repo_language": instance.get("repo_language", ""),
     }
 
     # Always record the expected test counts so errored instances can be counted
@@ -636,6 +637,41 @@ def evaluate_instance(
         stop_and_remove_container(name, logger)
 
 
+def _compile_gate_skipped(result: dict[str, Any]) -> bool:
+    """True if a compile-gate rejection happened because the host toolchain is missing."""
+    metadata = result.get("metadata", {})
+    if not metadata.get("compile_gate_rejected"):
+        return False
+    if metadata.get("compile_gate_skip_reason") == "missing_toolchain":
+        return True
+    mapping = {
+        "go": "go",
+        "rust": "cargo",
+        "typescript": "npx",
+        "javascript": "node",
+    }
+    binary = mapping.get((result.get("repo_language") or "").lower())
+    if binary is None:
+        return False
+    return shutil.which(binary) is None
+
+
+def _effective_recovery_success(result: dict[str, Any]) -> bool:
+    """True when a recovery-marked prediction also preserved useful eval signal."""
+    if result.get("metadata", {}).get("recovery_succeeded") is not True:
+        return False
+    if result.get("error") is not None:
+        return False
+    if _is_patch_empty(result.get("patch", "")):
+        return False
+    if result.get("fail_to_pass_passed", 0) > 0:
+        return True
+    return (
+        result.get("pass_to_pass_total", 0) > 0
+        and result.get("pass_to_pass_passed", 0) >= result.get("pass_to_pass_total", 0)
+    )
+
+
 def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate results and write JSON report + Markdown summary."""
     total = len(results)
@@ -647,9 +683,30 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
     pass_tp_passed = sum(r.get("pass_to_pass_passed", 0) for r in results)
     pass_tp_total = sum(r.get("pass_to_pass_total", 0) for r in results)
 
+    fail_tp_passed_completed = sum(
+        r.get("fail_to_pass_passed", 0) for r in completed
+    )
+    fail_tp_total_completed = sum(
+        r.get("fail_to_pass_total", 0) for r in completed
+    )
+    pass_tp_passed_completed = sum(
+        r.get("pass_to_pass_passed", 0) for r in completed
+    )
+    pass_tp_total_completed = sum(
+        r.get("pass_to_pass_total", 0) for r in completed
+    )
+
     overall_pass_rate_completed = overall_passed / len(completed) if completed else 0.0
-    fail_tp_rate_completed = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
-    pass_tp_rate_completed = pass_tp_passed / pass_tp_total if pass_tp_total else 0.0
+    fail_tp_rate_completed = (
+        fail_tp_passed_completed / fail_tp_total_completed
+        if fail_tp_total_completed
+        else 0.0
+    )
+    pass_tp_rate_completed = (
+        pass_tp_passed_completed / pass_tp_total_completed
+        if pass_tp_total_completed
+        else 0.0
+    )
 
     overall_pass_rate_total = overall_passed / total if total else 0.0
     fail_tp_rate_total = fail_tp_passed / fail_tp_total if fail_tp_total else 0.0
@@ -669,6 +726,9 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
             for r in results
             if r.get("metadata", {}).get("compile_gate_rejected") is True
         ),
+        "compile_gate_skipped_count": sum(
+            1 for r in results if _compile_gate_skipped(r)
+        ),
         "recovery_fired_count": sum(
             1
             for r in results
@@ -677,7 +737,7 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "recovery_succeeded_count": sum(
             1
             for r in results
-            if r.get("metadata", {}).get("recovery_succeeded") is True
+            if _effective_recovery_success(r)
         ),
         "applied_no_op_count": sum(
             1 for r in results if r.get("error") == "patch applied but changed no files"
@@ -706,10 +766,14 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "overall_pass_rate_total": overall_pass_rate_total,
         "fail_to_pass_passed": fail_tp_passed,
         "fail_to_pass_total": fail_tp_total,
+        "fail_to_pass_passed_completed": fail_tp_passed_completed,
+        "fail_to_pass_total_completed": fail_tp_total_completed,
         "fail_to_pass_rate": fail_tp_rate_completed,
         "fail_to_pass_rate_total": fail_tp_rate_total,
         "pass_to_pass_passed": pass_tp_passed,
         "pass_to_pass_total": pass_tp_total,
+        "pass_to_pass_passed_completed": pass_tp_passed_completed,
+        "pass_to_pass_total_completed": pass_tp_total_completed,
         "pass_to_pass_rate": pass_tp_rate_completed,
         "pass_to_pass_rate_total": pass_tp_rate_total,
         **counters,
@@ -732,11 +796,11 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"({report['overall_pass_rate']:.2%})",
         f"- Fail-to-pass (total): **{fail_tp_passed}/{fail_tp_total}** "
         f"({report['fail_to_pass_rate_total']:.2%})",
-        f"- Fail-to-pass (completed only): **{fail_tp_passed}/{fail_tp_total}** "
+        f"- Fail-to-pass (completed only): **{fail_tp_passed_completed}/{fail_tp_total_completed}** "
         f"({report['fail_to_pass_rate']:.2%})",
         f"- Pass-to-pass (total): **{pass_tp_passed}/{pass_tp_total}** "
         f"({report['pass_to_pass_rate_total']:.2%})",
-        f"- Pass-to-pass (completed only): **{pass_tp_passed}/{pass_tp_total}** "
+        f"- Pass-to-pass (completed only): **{pass_tp_passed_completed}/{pass_tp_total_completed}** "
         f"({report['pass_to_pass_rate']:.2%})",
         "",
         "## Diagnostic counters",
@@ -744,6 +808,7 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"- Missing prediction: **{counters['missing_prediction_count']}**",
         f"- Empty patch: **{counters['empty_patch_count']}**",
         f"- Compile gate rejected: **{counters['compile_gate_rejected_count']}**",
+        f"- Compile gate skipped (missing host toolchain): **{counters['compile_gate_skipped_count']}**",
         f"- Recovery fired: **{counters['recovery_fired_count']}**",
         f"- Recovery succeeded: **{counters['recovery_succeeded_count']}**",
         f"- Patch applied but changed no files: **{counters['applied_no_op_count']}**",

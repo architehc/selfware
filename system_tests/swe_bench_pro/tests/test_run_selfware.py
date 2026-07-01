@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import pytest
 
 from run_selfware import (
+    _check_host_toolchains,
     _check_patch_builds,
     _check_run_manifest,
     _estimate_input_tokens,
@@ -308,6 +309,61 @@ def test_compile_gate_accepts_valid_typescript_patch_with_tsconfig(tmp_path, mon
     (repo / "mod.ts").write_text("const x: number = 2;\n")
     patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
     assert _check_patch_builds(repo, patch, "typescript", logging.getLogger("test")) is True
+
+
+def test_compile_gate_javascript_label_rejects_ts_patch_when_npx_missing(
+    tmp_path, monkeypatch
+):
+    """JS-labeled TS repos must not bypass tsc when the patch touches TS files."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "npx" else "/fake/bin/" + name,
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tsconfig.json").write_text('{"compilerOptions": {"strict": true}}')
+    (repo / "mod.ts").write_text("const x: number = 2;\n")
+    patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
+    metadata: dict[str, Any] = {}
+
+    assert (
+        _check_patch_builds(
+            repo, patch, "javascript", logging.getLogger("test"), metadata
+        )
+        is False
+    )
+    assert metadata["compile_gate_skip_reason"] == "missing_toolchain"
+    assert metadata["compile_gate_missing_tool"] == "npx"
+
+
+def test_compile_gate_javascript_label_runs_tsc_for_ts_patch(tmp_path, monkeypatch):
+    """A JS-labeled repo with tsconfig and TS edits should run tsc."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: "/fake/bin/" + name,
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tsconfig.json").write_text('{"compilerOptions": {"strict": true}}')
+    (repo / "mod.ts").write_text("const x: number = 2;\n")
+    patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
+    captured: list[list[str]] = []
+
+    def fake_run_cmd(cmd, **kwargs):
+        captured.append(cmd)
+
+        class _R:
+            returncode = 0
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr("run_selfware.run_cmd", fake_run_cmd)
+
+    assert _check_patch_builds(repo, patch, "javascript", logging.getLogger("test"))
+    assert captured == [["npx", "tsc", "--noEmit"]]
 
 
 def test_compile_gate_typescript_without_tsconfig_uses_node_check(tmp_path, monkeypatch):
@@ -681,6 +737,120 @@ def test_run_diff_fallback_extracts_valid_unified_diff(tmp_path, monkeypatch):
     assert "-old" in patch
 
 
+def test_run_diff_fallback_rejects_partial_search_replace(tmp_path, monkeypatch):
+    """A partial SEARCH/REPLACE patch is rejected and the repo is reset."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "a.py").write_text("old_a\n", encoding="utf-8")
+    (repo / "b.py").write_text("old_b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    response = (
+        "### FILE: a.py\n"
+        "<<<<<<< SEARCH\n"
+        "old_a\n"
+        "=======\n"
+        "new_a\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: b.py\n"
+        "<<<<<<< SEARCH\n"
+        "does_not_exist\n"
+        "=======\n"
+        "new_b\n"
+        ">>>>>>> REPLACE\n"
+    )
+
+    monkeypatch.setattr("run_selfware.call_chat_endpoint", lambda cfg, prompt, timeout, logger: response)
+
+    instance = {
+        "instance_id": "inst-partial-fallback",
+        "base_commit": "HEAD",
+        "test_patch": "",
+    }
+    args = argparse.Namespace(patch_timeout=30)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    patch = run_diff_fallback(
+        repo,
+        instance,
+        "prompt",
+        ["a.py", "b.py"],
+        {},
+        args,
+        log_dir,
+        logging.getLogger("test"),
+        "name",
+    )
+    assert patch == ""
+    assert (repo / "a.py").read_text(encoding="utf-8") == "old_a\n"
+    assert (repo / "b.py").read_text(encoding="utf-8") == "old_b\n"
+
+
+def test_diff_recovery_rejects_partial_search_replace(tmp_path, monkeypatch):
+    """EMPTY_PATCH recovery rejects a partial SEARCH/REPLACE patch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "a.py").write_text("old_a\n", encoding="utf-8")
+    (repo / "b.py").write_text("old_b\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    response = (
+        "### FILE: a.py\n"
+        "<<<<<<< SEARCH\n"
+        "old_a\n"
+        "=======\n"
+        "new_a\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: b.py\n"
+        "<<<<<<< SEARCH\n"
+        "does_not_exist\n"
+        "=======\n"
+        "new_b\n"
+        ">>>>>>> REPLACE\n"
+    )
+
+    monkeypatch.setattr("run_selfware.call_chat_endpoint", lambda cfg, prompt, timeout, logger: response)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    metadata: dict[str, Any] = {}
+    instance = {
+        "instance_id": "inst-partial-recovery",
+        "base_commit": "HEAD",
+        "test_patch": "",
+        "repo_language": "python",
+    }
+    args = argparse.Namespace(patch_timeout=30, patch_config={})
+
+    patch = _run_diff_recovery(
+        repo,
+        instance,
+        "prompt",
+        ["a.py", "b.py"],
+        {},
+        args,
+        log_dir,
+        output_dir,
+        logging.getLogger("test"),
+        "name",
+        1,
+        metadata,
+    )
+
+    assert patch == ""
+    assert (repo / "a.py").read_text(encoding="utf-8") == "old_a\n"
+    assert (repo / "b.py").read_text(encoding="utf-8") == "old_b\n"
+    assert metadata.get("diff_recovery_fired") is True
+    assert metadata.get("recovery_succeeded") is not True
+    assert not list(output_dir.glob("predictions.jsonl"))
+
+
 def test_diff_recovery_saves_prediction_on_empty_patch(tmp_path, monkeypatch):
     """EMPTY_PATCH recovery via diff fallback saves a non-empty prediction."""
     repo = tmp_path / "repo"
@@ -714,7 +884,7 @@ def test_diff_recovery_saves_prediction_on_empty_patch(tmp_path, monkeypatch):
     monkeypatch.setattr("run_selfware.run_diff_fallback", _fake_run_diff_fallback)
     monkeypatch.setattr(
         "run_selfware._check_patch_builds",
-        lambda repo_dir, patch, language, logger: True,
+        lambda repo_dir, patch, language, logger, metadata=None: True,
     )
 
     output_dir = tmp_path / "out"
@@ -1000,6 +1170,7 @@ def _make_base_args(output_dir: Path, sample_file: Path | None = None, **overrid
         max_retries=2,
         diff_fallback=True,
         early_diff_fallback=True,
+        small_model_diff_fallback=False,
         agentless=None,
         auto_agentless=None,
         adaptive=False,
@@ -1027,13 +1198,34 @@ def _make_base_args(output_dir: Path, sample_file: Path | None = None, **overrid
     return argparse.Namespace(**kwargs)
 
 
+def _runtime_flags(**overrides):
+    """Return a matching runtime_flags dict for provenance tests."""
+    defaults = {
+        "agentless": None,
+        "auto_agentless": None,
+        "small_model_diff_fallback": False,
+        "diff_fallback": True,
+        "retry_failures": True,
+        "max_retries": 2,
+        "early_diff_fallback": True,
+        "force_edit": False,
+        "small_model": False,
+        "adaptive": False,
+        "compact_prompt": False,
+    }
+    defaults.update(overrides)
+    return defaults
+
+
 def test_check_run_manifest_rejects_mismatched_sha():
     """A mismatched harness_sha makes an existing manifest incompatible."""
     current = {
         "model_profile": "p1",
+        "config_dir": "cfg",
         "config_files": ["c1.toml"],
         "sample_file": "s.jsonl",
         "harness_sha": "abc123",
+        "runtime_flags": _runtime_flags(),
     }
     existing = dict(current, harness_sha="def456")
     with pytest.raises(RuntimeError) as exc_info:
@@ -1042,15 +1234,51 @@ def test_check_run_manifest_rejects_mismatched_sha():
     assert "--fresh" in str(exc_info.value)
 
 
+def test_check_run_manifest_accepts_matching_runtime_flags():
+    """Identical provenance, including runtime flags, is accepted."""
+    current = {
+        "model_profile": "p1",
+        "config_dir": "cfg",
+        "config_files": ["c1.toml"],
+        "sample_file": "s.jsonl",
+        "harness_sha": "abc123",
+        "runtime_flags": _runtime_flags(),
+    }
+    existing = dict(current)
+    # Should not raise.
+    _check_run_manifest(current, existing)
+
+
+def test_check_run_manifest_rejects_mismatched_runtime_flag():
+    """A changed runtime flag invalidates a resume."""
+    current = {
+        "model_profile": "p1",
+        "config_dir": "cfg",
+        "config_files": ["c1.toml"],
+        "sample_file": "s.jsonl",
+        "harness_sha": "abc123",
+        "runtime_flags": _runtime_flags(),
+    }
+    existing = dict(current)
+    existing["runtime_flags"] = _runtime_flags(agentless=True)
+    with pytest.raises(RuntimeError) as exc_info:
+        _check_run_manifest(current, existing)
+    assert "runtime_flags.agentless" in str(exc_info.value)
+    assert "--fresh" in str(exc_info.value)
+
+
 def test_main_resume_rejects_mismatched_manifest(tmp_path, monkeypatch):
     """--resume with an incompatible existing manifest exits with an error."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
+    config_dir = str(Path(__file__).parent / "fake_config")
     manifest = {
         "model_profile": "other-profile",
+        "config_dir": config_dir,
         "config_files": ["other.toml"],
         "sample_file": None,
         "harness_sha": "mismatched-sha",
+        "runtime_flags": _runtime_flags(),
     }
     (output_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -1070,6 +1298,45 @@ def test_main_resume_rejects_mismatched_manifest(tmp_path, monkeypatch):
 
     rc = main()
     assert rc == 1
+
+
+def test_main_resume_accepts_matching_manifest(tmp_path, monkeypatch):
+    """--resume with a compatible existing manifest continues the run."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    config_dir = str(Path(__file__).parent / "fake_config")
+
+    fake_config = tmp_path / "openrouter_test-profile.toml"
+    fake_config.write_text("[agent]\n", encoding="utf-8")
+
+    manifest = {
+        "model_profile": "test-profile",
+        "config_dir": config_dir,
+        "config_files": [str(fake_config)],
+        "sample_file": None,
+        "harness_sha": "current-sha",
+        "runtime_flags": _runtime_flags(),
+    }
+    (output_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _fake_prepare_effective_config(args, logger):
+        return fake_config
+
+    monkeypatch.setattr("run_selfware.prepare_effective_config", _fake_prepare_effective_config)
+    monkeypatch.setattr("run_selfware.load_config", lambda path: {"model": "test-model"})
+    monkeypatch.setattr("run_selfware._get_harness_sha", lambda: "current-sha")
+    monkeypatch.setenv("SELFWARE_API_KEY", "test-key")
+    monkeypatch.setattr("run_selfware.select_instances", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "run_selfware.parse_args",
+        lambda: _make_base_args(output_dir, resume=True),
+    )
+
+    rc = main()
+    assert rc == 0
+    new_manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert new_manifest["model_profile"] == "test-profile"
+    assert new_manifest["runtime_flags"] == _runtime_flags()
 
 
 def test_main_fresh_clears_predictions_and_manifest(tmp_path, monkeypatch):
@@ -1149,7 +1416,7 @@ def test_run_agentless_diff_fallback_records_recovery_metadata(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         "run_selfware._check_patch_builds",
-        lambda repo_dir, patch, language, logger: True,
+        lambda repo_dir, patch, language, logger, metadata=None: True,
     )
 
     args = argparse.Namespace(
@@ -1220,7 +1487,7 @@ def test_run_agentless_small_model_diff_fallback_skips_search_replace(
     monkeypatch.setattr("run_selfware.run_diff_fallback", _fake_run_diff_fallback)
     monkeypatch.setattr(
         "run_selfware._check_patch_builds",
-        lambda repo_dir, patch, language, logger: True,
+        lambda repo_dir, patch, language, logger, metadata=None: True,
     )
     monkeypatch.setattr(
         "run_selfware.rank_files_by_relevance",
@@ -1262,3 +1529,91 @@ def test_run_agentless_small_model_diff_fallback_skips_search_replace(
     # The test patch should have been applied to the repo.
     applied_test = (repo / "test_a.py").read_text(encoding="utf-8")
     assert "# patched" in applied_test
+
+
+def test_compile_gate_rejects_when_go_binary_missing(tmp_path, monkeypatch):
+    """Missing Go toolchain must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr("run_selfware.shutil.which", lambda name: None if name == "go" else shutil.which(name))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "go.mod").write_text("module gate\ngo 1.21\n")
+    (repo / "mod.go").write_text("package gate\nvar X = 2\n")
+    patch = _make_patch("mod.go", "x := 1", "var X = 2")
+    assert _check_patch_builds(repo, patch, "go", logging.getLogger("test")) is False
+
+
+def test_compile_gate_rejects_when_cargo_binary_missing(tmp_path, monkeypatch):
+    """Missing Rust toolchain must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "cargo" else shutil.which(name),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "Cargo.toml").write_text(
+        '[package]\nname = "gate"\nversion = "0.1.0"\nedition = "2021"\n'
+    )
+    src = repo / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text("pub fn ok() -> i32 { 2 }\n")
+    patch = _make_patch("src/lib.rs", "fn ok() {}", "pub fn ok() -> i32 { 2 }")
+    assert _check_patch_builds(repo, patch, "rust", logging.getLogger("test")) is False
+
+
+def test_compile_gate_rejects_when_npx_binary_missing_for_typescript(tmp_path, monkeypatch):
+    """Missing npx for TypeScript must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "npx" else shutil.which(name),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tsconfig.json").write_text('{"compilerOptions": {"strict": true}}')
+    (repo / "mod.ts").write_text("const x: number = 2;\n")
+    patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
+    assert _check_patch_builds(repo, patch, "typescript", logging.getLogger("test")) is False
+
+
+def test_compile_gate_rejects_when_node_binary_missing_for_javascript(tmp_path, monkeypatch):
+    """Missing node for JavaScript must reject the patch, not silently skip."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "node" else shutil.which(name),
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "mod.js").write_text("x = 2\n")
+    patch = _make_patch("mod.js", "x = 1", "x = 2")
+    assert _check_patch_builds(repo, patch, "javascript", logging.getLogger("test")) is False
+
+
+def test_check_host_toolchains_fails_when_required_binary_missing(monkeypatch):
+    """Startup check fails if any instance requires a missing host toolchain."""
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "go" else "/fake",
+    )
+    logger = logging.getLogger("test")
+    instances = [
+        {"instance_id": "go-inst", "repo_language": "go"},
+        {"instance_id": "py-inst", "repo_language": "python"},
+    ]
+    assert _check_host_toolchains(instances, logger) is False
+
+
+def test_check_host_toolchains_passes_when_required_binaries_present(monkeypatch):
+    """Startup check passes if all required host toolchains are present."""
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: "/fake/bin/" + name,
+    )
+    logger = logging.getLogger("test")
+    instances = [
+        {"instance_id": "go-inst", "repo_language": "go"},
+        {"instance_id": "ts-inst", "repo_language": "typescript"},
+    ]
+    assert _check_host_toolchains(instances, logger) is True

@@ -3,7 +3,7 @@
 
 endpoint: "https://openrouter.ai/api/v1"
 model: "meta-llama/llama-3.1-8b-instruct"
-max_tokens: 8192
+max_tokens: 6000
 temperature: 0.1
 api_key: "$SELFWARE_API_KEY"
 
@@ -15,6 +15,7 @@ agent:
   native_function_calling: false
   streaming: false
   min_completion_steps: 2
+  edit_deadline_step: 6
   require_verification_before_completion: true
 
 retry:

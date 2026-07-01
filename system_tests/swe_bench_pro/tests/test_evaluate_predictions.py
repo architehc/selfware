@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -14,6 +15,7 @@ from evaluate_predictions import (
     _build_entryscript,
     _ensure_image,
     _is_patch_empty,
+    _load_list_field,
     _no_tests_were_executed,
     _prepull_images,
     _score_output,
@@ -112,6 +114,18 @@ def _instance_with_tests(fail_to_pass=None, pass_to_pass=None):
     instance["fail_to_pass"] = fail_to_pass or []
     instance["pass_to_pass"] = pass_to_pass or []
     return instance
+
+
+def test_sample_10_rows_all_have_pass_to_pass_tests():
+    """The 10-instance smoke sample should keep a useful P2P denominator."""
+    sample_path = Path(__file__).resolve().parents[1] / "sample_10.jsonl"
+    rows = [
+        json.loads(line)
+        for line in sample_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 10
+    assert all(_load_list_field(row.get("pass_to_pass", [])) for row in rows)
 
 
 def test_no_tests_were_executed_detects_sentinel_only():
@@ -236,6 +250,28 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
             "metadata": {"recovery_attempts": 2, "recovery_succeeded": True},
         },
         {
+            "instance_id": "recovery-regressed-p2p",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 0,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {"recovery_attempts": 1, "recovery_succeeded": True},
+        },
+        {
+            "instance_id": "recovery-zero-denominator",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 0,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 0,
+            "patch": patch_text,
+            "metadata": {"recovery_attempts": 1, "recovery_succeeded": True},
+        },
+        {
             "instance_id": "no-op",
             "error": "patch applied but changed no files",
             "patch": patch_text,
@@ -275,12 +311,12 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
 
     assert report["empty_patch_count"] == 1
     assert report["compile_gate_rejected_count"] == 1
-    assert report["recovery_fired_count"] == 1
+    assert report["recovery_fired_count"] == 3
     assert report["recovery_succeeded_count"] == 1
     assert report["applied_no_op_count"] == 1
     assert report["applied_compile_failed_count"] == 1
     assert report["applied_f2p_failed_count"] == 2  # compile-gate + f2p-failed
-    assert report["applied_p2p_regressed_count"] == 1  # p2p-regressed
+    assert report["applied_p2p_regressed_count"] == 2  # recovery-regressed + p2p-regressed
 
     report_path = tmp_path / "evaluation_report.json"
     assert report_path.exists()
@@ -302,12 +338,12 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
     assert "## Diagnostic counters" in summary_text
     assert "Empty patch: **1**" in summary_text
     assert "Compile gate rejected: **1**" in summary_text
-    assert "Recovery fired: **1**" in summary_text
+    assert "Recovery fired: **3**" in summary_text
     assert "Recovery succeeded: **1**" in summary_text
     assert "Patch applied but changed no files: **1**" in summary_text
     assert "Patch applied but no tests executed: **1**" in summary_text
     assert "Fail-to-pass failed: **2**" in summary_text
-    assert "Pass-to-pass regressed: **1**" in summary_text
+    assert "Pass-to-pass regressed: **2**" in summary_text
 
 
 def test_augment_results_adds_missing_prediction(tmp_path):
@@ -413,6 +449,72 @@ def test_write_report_headline_uses_total_rate(tmp_path):
     # The summary must lead with the total-instance headline.
     assert "Overall passed instances (errors counted as failed): **1/3**" in summary_text
     assert "Overall passed instances (completed only): **1/2**" in summary_text
+
+
+def test_write_report_f2p_p2p_completed_only_excludes_errors(tmp_path):
+    """Fail-to-pass/pass-to-pass completed-only rates exclude errored instances."""
+    patch_text = "diff --git a/foo b/foo\n--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n"
+    results = [
+        {
+            "instance_id": "passed",
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 1,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+        {
+            "instance_id": "failed",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+        {
+            "instance_id": "errored",
+            "error": "no tests executed",
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {},
+        },
+    ]
+
+    report = _write_report(tmp_path, results)
+
+    assert report["total_instances"] == 3
+    assert report["completed_instances"] == 2
+
+    # Total rates include the errored instance's expected tests.
+    assert report["fail_to_pass_passed"] == 1
+    assert report["fail_to_pass_total"] == 3
+    assert report["fail_to_pass_rate_total"] == 1 / 3
+    assert report["pass_to_pass_passed"] == 2
+    assert report["pass_to_pass_total"] == 3
+    assert report["pass_to_pass_rate_total"] == 2 / 3
+
+    # Completed-only rates exclude the errored instance.
+    assert report["fail_to_pass_passed_completed"] == 1
+    assert report["fail_to_pass_total_completed"] == 2
+    assert report["fail_to_pass_rate"] == 1 / 2
+    assert report["pass_to_pass_passed_completed"] == 2
+    assert report["pass_to_pass_total_completed"] == 2
+    assert report["pass_to_pass_rate"] == 1.0
+
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert "Fail-to-pass (total): **1/3**" in summary_text
+    assert "Fail-to-pass (completed only): **1/2**" in summary_text
+    assert "Pass-to-pass (total): **2/3**" in summary_text
+    assert "Pass-to-pass (completed only): **2/2**" in summary_text
 
 
 def test_pre_pull_called_with_unique_images_before_evaluation(tmp_path, monkeypatch):
@@ -595,3 +697,86 @@ def test_prepull_images_warns_on_failure_but_does_not_abort(monkeypatch, caplog)
 
     assert any("Pre-pull failed" in rec.message for rec in caplog.records)
     assert any("img:1" in rec.message or "img:2" in rec.message for rec in caplog.records)
+
+
+def test_write_report_counts_compile_gate_skipped_when_toolchain_missing(
+    tmp_path, monkeypatch
+):
+    """A compile-gate rejection caused by a missing host toolchain is counted separately."""
+    patch_text = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: None if name == "go" else "/fake/bin/" + name,
+    )
+    results = [
+        {
+            "instance_id": "go-skipped",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "repo_language": "go",
+            "metadata": {"compile_gate_rejected": True},
+        },
+        {
+            "instance_id": "go-real-fail",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "repo_language": "go",
+            "metadata": {"compile_gate_rejected": True},
+        },
+    ]
+    # Second case: pretend go *is* present so it is a real rejection, not a skip.
+    real_fail_seen = {"count": 0}
+
+    def _which(name):
+        if name == "go":
+            real_fail_seen["count"] += 1
+            return None if real_fail_seen["count"] == 1 else "/fake/go"
+        return "/fake/bin/" + name
+
+    monkeypatch.setattr("shutil.which", _which)
+
+    report = _write_report(tmp_path, results)
+    assert report["compile_gate_rejected_count"] == 2
+    assert report["compile_gate_skipped_count"] == 1
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert "Compile gate skipped (missing host toolchain): **1**" in summary_text
+
+
+def test_write_report_counts_compile_gate_skipped_from_generation_metadata(
+    tmp_path, monkeypatch
+):
+    """Generation-time missing-toolchain metadata should be stable across hosts."""
+    patch_text = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n"
+    monkeypatch.setattr("shutil.which", lambda name: "/fake/bin/" + name)
+    results = [
+        {
+            "instance_id": "js-ts-missing-npx",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "repo_language": "javascript",
+            "metadata": {
+                "compile_gate_rejected": True,
+                "compile_gate_skip_reason": "missing_toolchain",
+                "compile_gate_missing_tool": "npx",
+            },
+        },
+    ]
+
+    report = _write_report(tmp_path, results)
+    assert report["compile_gate_rejected_count"] == 1
+    assert report["compile_gate_skipped_count"] == 1

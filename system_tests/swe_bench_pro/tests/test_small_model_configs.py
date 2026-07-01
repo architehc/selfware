@@ -46,6 +46,14 @@ def test_all_small_model_yaml_configs_load():
         assert config["metadata"].get("tier") == "small", f"{profile} is not tier small"
 
 
+def test_llama_3_1_8b_uses_validated_smoke_grid_defaults():
+    """Llama 3.1 8B should keep the best sample_3 tuning-grid defaults."""
+    config = load_small_model_config("llama-3.1-8b")
+    assert config is not None
+    assert config["max_tokens"] == 6000
+    assert config["agent"]["edit_deadline_step"] == 6
+
+
 def test_load_small_model_config_returns_none_for_missing_profile():
     """Missing profiles fall back to None rather than raising."""
     assert load_small_model_config("definitely-not-a-real-model") is None

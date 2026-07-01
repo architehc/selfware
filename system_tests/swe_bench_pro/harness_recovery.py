@@ -276,6 +276,8 @@ def build_diff_fallback_prompt(
     prompt_text: str,
     ranked_files: list[str],
     repo_path: str | Path,
+    max_chars: int = 8000,
+    allow_full_file_replacement: bool = False,
 ) -> str:
     """Build a one-shot unified-diff prompt for small/fragile models.
 
@@ -290,7 +292,7 @@ def build_diff_fallback_prompt(
         ranked_files[:5],
         repo_path=repo_path,
         max_lines=200,
-        max_chars=8000,
+        max_chars=max_chars,
         highlight_terms=snippet_terms,
     )
 
@@ -310,6 +312,12 @@ def build_diff_fallback_prompt(
         " \n"
     )
 
+    full_file_rule = (
+        "- Full-file replacement is allowed for small files, but prefer surgical changes when possible.\n"
+        if allow_full_file_replacement
+        else "- Do NOT rewrite whole files or invent functions/types that are not already in the source snippets above.\n"
+    )
+
     parts = [
         "[ONE-SHOT DIFF FALLBACK]",
         "",
@@ -327,7 +335,7 @@ def build_diff_fallback_prompt(
         "that fixes the issue above.",
         "- Use 3 lines of context around each change and keep hunks small.",
         "- Modify source files only. Do NOT edit tests, configs, docs, or unrelated code.",
-        "- Do NOT rewrite whole files or invent functions/types that are not already in the source snippets above.",
+        full_file_rule,
         "- Do not output explanations, markdown fences (```diff ... ```), or any text outside the diff.",
         "- The line numbers shown in the snippets are for reference only; do not include them in the diff.",
         "- The diff must apply cleanly with `git apply --check`.",
