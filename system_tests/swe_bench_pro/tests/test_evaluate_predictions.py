@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -14,6 +15,7 @@ from evaluate_predictions import (
     _build_entryscript,
     _ensure_image,
     _is_patch_empty,
+    _load_list_field,
     _no_tests_were_executed,
     _prepull_images,
     _score_output,
@@ -112,6 +114,18 @@ def _instance_with_tests(fail_to_pass=None, pass_to_pass=None):
     instance["fail_to_pass"] = fail_to_pass or []
     instance["pass_to_pass"] = pass_to_pass or []
     return instance
+
+
+def test_sample_10_rows_all_have_pass_to_pass_tests():
+    """The 10-instance smoke sample should keep a useful P2P denominator."""
+    sample_path = Path(__file__).resolve().parents[1] / "sample_10.jsonl"
+    rows = [
+        json.loads(line)
+        for line in sample_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 10
+    assert all(_load_list_field(row.get("pass_to_pass", [])) for row in rows)
 
 
 def test_no_tests_were_executed_detects_sentinel_only():
@@ -236,6 +250,17 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
             "metadata": {"recovery_attempts": 2, "recovery_succeeded": True},
         },
         {
+            "instance_id": "recovery-regressed-p2p",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 0,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "metadata": {"recovery_attempts": 1, "recovery_succeeded": True},
+        },
+        {
             "instance_id": "no-op",
             "error": "patch applied but changed no files",
             "patch": patch_text,
@@ -275,12 +300,12 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
 
     assert report["empty_patch_count"] == 1
     assert report["compile_gate_rejected_count"] == 1
-    assert report["recovery_fired_count"] == 1
+    assert report["recovery_fired_count"] == 2
     assert report["recovery_succeeded_count"] == 1
     assert report["applied_no_op_count"] == 1
     assert report["applied_compile_failed_count"] == 1
     assert report["applied_f2p_failed_count"] == 2  # compile-gate + f2p-failed
-    assert report["applied_p2p_regressed_count"] == 1  # p2p-regressed
+    assert report["applied_p2p_regressed_count"] == 2  # recovery-regressed + p2p-regressed
 
     report_path = tmp_path / "evaluation_report.json"
     assert report_path.exists()
@@ -302,12 +327,12 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
     assert "## Diagnostic counters" in summary_text
     assert "Empty patch: **1**" in summary_text
     assert "Compile gate rejected: **1**" in summary_text
-    assert "Recovery fired: **1**" in summary_text
+    assert "Recovery fired: **2**" in summary_text
     assert "Recovery succeeded: **1**" in summary_text
     assert "Patch applied but changed no files: **1**" in summary_text
     assert "Patch applied but no tests executed: **1**" in summary_text
     assert "Fail-to-pass failed: **2**" in summary_text
-    assert "Pass-to-pass regressed: **1**" in summary_text
+    assert "Pass-to-pass regressed: **2**" in summary_text
 
 
 def test_augment_results_adds_missing_prediction(tmp_path):

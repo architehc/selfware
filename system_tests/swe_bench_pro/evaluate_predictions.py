@@ -652,6 +652,19 @@ def _compile_gate_skipped(result: dict[str, Any]) -> bool:
     return shutil.which(binary) is None
 
 
+def _effective_recovery_success(result: dict[str, Any]) -> bool:
+    """True when a recovery-marked prediction also preserved useful eval signal."""
+    if result.get("metadata", {}).get("recovery_succeeded") is not True:
+        return False
+    if result.get("error") is not None:
+        return False
+    if _is_patch_empty(result.get("patch", "")):
+        return False
+    if result.get("fail_to_pass_passed", 0) > 0:
+        return True
+    return result.get("pass_to_pass_passed", 0) >= result.get("pass_to_pass_total", 0)
+
+
 def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate results and write JSON report + Markdown summary."""
     total = len(results)
@@ -717,7 +730,7 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "recovery_succeeded_count": sum(
             1
             for r in results
-            if r.get("metadata", {}).get("recovery_succeeded") is True
+            if _effective_recovery_success(r)
         ),
         "applied_no_op_count": sum(
             1 for r in results if r.get("error") == "patch applied but changed no files"
