@@ -311,6 +311,61 @@ def test_compile_gate_accepts_valid_typescript_patch_with_tsconfig(tmp_path, mon
     assert _check_patch_builds(repo, patch, "typescript", logging.getLogger("test")) is True
 
 
+def test_compile_gate_javascript_label_rejects_ts_patch_when_npx_missing(
+    tmp_path, monkeypatch
+):
+    """JS-labeled TS repos must not bypass tsc when the patch touches TS files."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: None if name == "npx" else "/fake/bin/" + name,
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tsconfig.json").write_text('{"compilerOptions": {"strict": true}}')
+    (repo / "mod.ts").write_text("const x: number = 2;\n")
+    patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
+    metadata: dict[str, Any] = {}
+
+    assert (
+        _check_patch_builds(
+            repo, patch, "javascript", logging.getLogger("test"), metadata
+        )
+        is False
+    )
+    assert metadata["compile_gate_skip_reason"] == "missing_toolchain"
+    assert metadata["compile_gate_missing_tool"] == "npx"
+
+
+def test_compile_gate_javascript_label_runs_tsc_for_ts_patch(tmp_path, monkeypatch):
+    """A JS-labeled repo with tsconfig and TS edits should run tsc."""
+    monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
+    monkeypatch.setattr(
+        "run_selfware.shutil.which",
+        lambda name: "/fake/bin/" + name,
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tsconfig.json").write_text('{"compilerOptions": {"strict": true}}')
+    (repo / "mod.ts").write_text("const x: number = 2;\n")
+    patch = _make_patch("mod.ts", "const x: number = 1;", "const x: number = 2;")
+    captured: list[list[str]] = []
+
+    def fake_run_cmd(cmd, **kwargs):
+        captured.append(cmd)
+
+        class _R:
+            returncode = 0
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr("run_selfware.run_cmd", fake_run_cmd)
+
+    assert _check_patch_builds(repo, patch, "javascript", logging.getLogger("test"))
+    assert captured == [["npx", "tsc", "--noEmit"]]
+
+
 def test_compile_gate_typescript_without_tsconfig_uses_node_check(tmp_path, monkeypatch):
     """TypeScript without a tsconfig falls back to node --check on changed .js files."""
     monkeypatch.delenv("SELFWARE_BYPASS_COMPILE_GATE", raising=False)
@@ -829,7 +884,7 @@ def test_diff_recovery_saves_prediction_on_empty_patch(tmp_path, monkeypatch):
     monkeypatch.setattr("run_selfware.run_diff_fallback", _fake_run_diff_fallback)
     monkeypatch.setattr(
         "run_selfware._check_patch_builds",
-        lambda repo_dir, patch, language, logger: True,
+        lambda repo_dir, patch, language, logger, metadata=None: True,
     )
 
     output_dir = tmp_path / "out"
@@ -1361,7 +1416,7 @@ def test_run_agentless_diff_fallback_records_recovery_metadata(tmp_path, monkeyp
     )
     monkeypatch.setattr(
         "run_selfware._check_patch_builds",
-        lambda repo_dir, patch, language, logger: True,
+        lambda repo_dir, patch, language, logger, metadata=None: True,
     )
 
     args = argparse.Namespace(
@@ -1432,7 +1487,7 @@ def test_run_agentless_small_model_diff_fallback_skips_search_replace(
     monkeypatch.setattr("run_selfware.run_diff_fallback", _fake_run_diff_fallback)
     monkeypatch.setattr(
         "run_selfware._check_patch_builds",
-        lambda repo_dir, patch, language, logger: True,
+        lambda repo_dir, patch, language, logger, metadata=None: True,
     )
     monkeypatch.setattr(
         "run_selfware.rank_files_by_relevance",

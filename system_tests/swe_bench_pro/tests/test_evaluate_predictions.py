@@ -261,6 +261,17 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
             "metadata": {"recovery_attempts": 1, "recovery_succeeded": True},
         },
         {
+            "instance_id": "recovery-zero-denominator",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 0,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 0,
+            "patch": patch_text,
+            "metadata": {"recovery_attempts": 1, "recovery_succeeded": True},
+        },
+        {
             "instance_id": "no-op",
             "error": "patch applied but changed no files",
             "patch": patch_text,
@@ -300,7 +311,7 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
 
     assert report["empty_patch_count"] == 1
     assert report["compile_gate_rejected_count"] == 1
-    assert report["recovery_fired_count"] == 2
+    assert report["recovery_fired_count"] == 3
     assert report["recovery_succeeded_count"] == 1
     assert report["applied_no_op_count"] == 1
     assert report["applied_compile_failed_count"] == 1
@@ -327,7 +338,7 @@ def test_write_report_includes_diagnostic_counters(tmp_path):
     assert "## Diagnostic counters" in summary_text
     assert "Empty patch: **1**" in summary_text
     assert "Compile gate rejected: **1**" in summary_text
-    assert "Recovery fired: **2**" in summary_text
+    assert "Recovery fired: **3**" in summary_text
     assert "Recovery succeeded: **1**" in summary_text
     assert "Patch applied but changed no files: **1**" in summary_text
     assert "Patch applied but no tests executed: **1**" in summary_text
@@ -739,3 +750,33 @@ def test_write_report_counts_compile_gate_skipped_when_toolchain_missing(
     assert report["compile_gate_skipped_count"] == 1
     summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
     assert "Compile gate skipped (missing host toolchain): **1**" in summary_text
+
+
+def test_write_report_counts_compile_gate_skipped_from_generation_metadata(
+    tmp_path, monkeypatch
+):
+    """Generation-time missing-toolchain metadata should be stable across hosts."""
+    patch_text = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n"
+    monkeypatch.setattr("shutil.which", lambda name: "/fake/bin/" + name)
+    results = [
+        {
+            "instance_id": "js-ts-missing-npx",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": patch_text,
+            "repo_language": "javascript",
+            "metadata": {
+                "compile_gate_rejected": True,
+                "compile_gate_skip_reason": "missing_toolchain",
+                "compile_gate_missing_tool": "npx",
+            },
+        },
+    ]
+
+    report = _write_report(tmp_path, results)
+    assert report["compile_gate_rejected_count"] == 1
+    assert report["compile_gate_skipped_count"] == 1

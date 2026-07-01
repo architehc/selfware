@@ -44,7 +44,7 @@ ${VENV} run_selfware.py \
   --no-early-diff-fallback \
   --no-small-model-diff-fallback \
   --fresh \
-  2>&1 | tee -a "${LOG_FILE}" || true
+  2>&1 | tee -a "${LOG_FILE}"
 
 echo "[$(date -Iseconds)] Predictions done; starting evaluation" | tee -a "${LOG_FILE}"
 
@@ -53,7 +53,7 @@ ${VENV} evaluate_predictions.py \
   --output-dir "${OUT_DIR}/eval" \
   --sample-file "${SAMPLE_FILE}" \
   --test-timeout 600 \
-  2>&1 | tee -a "${LOG_FILE}" || true
+  2>&1 | tee -a "${LOG_FILE}"
 
 echo "[$(date -Iseconds)] Evaluation done" | tee -a "${LOG_FILE}"
 

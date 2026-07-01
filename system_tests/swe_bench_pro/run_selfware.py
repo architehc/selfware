@@ -1469,7 +1469,7 @@ def _run_diff_recovery(
         return ""
 
     language = (instance.get("repo_language") or "").lower()
-    if not _check_patch_builds(host_repo_dir, fallback_patch, language, logger):
+    if not _check_patch_builds(host_repo_dir, fallback_patch, language, logger, metadata):
         logger.warning(
             "Diff recovery patch for %s attempt %s failed compile gate; treating as empty",
             instance_id,
@@ -1862,7 +1862,7 @@ def run_agentless(
         )
         if fallback_patch.strip():
             language = (instance.get("repo_language") or "").lower()
-            if _check_patch_builds(host_repo_dir, fallback_patch, language, logger):
+            if _check_patch_builds(host_repo_dir, fallback_patch, language, logger, metadata):
                 logger.info(
                     "Small-model diff fallback produced a non-empty patch for %s",
                     instance_id,
@@ -1937,7 +1937,7 @@ def run_agentless(
         )
         if fallback_patch.strip():
             language = (instance.get("repo_language") or "").lower()
-            if _check_patch_builds(host_repo_dir, fallback_patch, language, logger):
+            if _check_patch_builds(host_repo_dir, fallback_patch, language, logger, metadata):
                 logger.info(
                     "Agentless diff fallback produced a non-empty patch for %s",
                     instance_id,
@@ -2743,6 +2743,7 @@ def _check_patch_builds(
     patch: str,
     language: str,
     logger: logging.Logger,
+    metadata: dict[str, Any] | None = None,
 ) -> bool:
     """Run a lightweight pre-submission compile/type-check gate.
 
@@ -2762,12 +2763,19 @@ def _check_patch_builds(
     language = (language or "").lower()
     logger.info("Running build/type-check gate for language=%s", language)
 
+    def _reject_missing_tool(binary: str, message: str) -> bool:
+        logger.warning(message)
+        if metadata is not None:
+            metadata["compile_gate_skip_reason"] = "missing_toolchain"
+            metadata["compile_gate_missing_tool"] = binary
+        return False
+
     if language == "go":
         if shutil.which("go") is None:
-            logger.warning(
-                "Build gate rejecting patch: go binary not available on host"
+            return _reject_missing_tool(
+                "go",
+                "Build gate rejecting patch: go binary not available on host",
             )
-            return False
         proc = run_cmd(
             ["go", "build", "./..."],
             cwd=repo_dir,
@@ -2803,10 +2811,10 @@ def _check_patch_builds(
 
     if language == "rust":
         if shutil.which("cargo") is None:
-            logger.warning(
-                "Build gate rejecting patch: cargo binary not available on host"
+            return _reject_missing_tool(
+                "cargo",
+                "Build gate rejecting patch: cargo binary not available on host",
             )
-            return False
         proc = run_cmd(
             ["cargo", "check"],
             cwd=repo_dir,
@@ -2824,12 +2832,16 @@ def _check_patch_builds(
     if language in ("javascript", "typescript"):
         files = _changed_files_from_patch(patch)
         tsconfig = repo_dir / "tsconfig.json"
-        if tsconfig.is_file() and language == "typescript":
+        ts_files = [f for f in files if f.endswith((".ts", ".tsx"))]
+        should_run_tsc = tsconfig.is_file() and (
+            language == "typescript" or bool(ts_files)
+        )
+        if should_run_tsc:
             if shutil.which("npx") is None:
-                logger.warning(
-                    "Build gate rejecting patch: npx not available on host"
+                return _reject_missing_tool(
+                    "npx",
+                    "Build gate rejecting patch: npx not available on host",
                 )
-                return False
             proc = run_cmd(
                 ["npx", "tsc", "--noEmit"],
                 cwd=repo_dir,
@@ -2842,7 +2854,6 @@ def _check_patch_builds(
                     proc.stderr.strip()[:500],
                 )
                 return False
-            return True
 
         # JavaScript gate (also used for TypeScript without a tsconfig).
         js_files = [f for f in files if f.endswith(".js")]
@@ -2850,10 +2861,10 @@ def _check_patch_builds(
             return True
         node_bin = shutil.which("node")
         if node_bin is None:
-            logger.warning(
-                "Build gate rejecting patch: node binary not available on host"
+            return _reject_missing_tool(
+                "node",
+                "Build gate rejecting patch: node binary not available on host",
             )
-            return False
         for js_file in js_files:
             proc = run_cmd(
                 [node_bin, "--check", js_file],
@@ -3105,7 +3116,7 @@ def process_instance(
                 patch = ""
             if patch.strip():
                 language = (instance.get("repo_language") or "").lower()
-                if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
                     logger.warning(
                         "Agentless patch for %s failed compile gate; treating as empty",
                         instance_id,
@@ -3154,7 +3165,7 @@ def process_instance(
             )
             if patch.strip():
                 language = (instance.get("repo_language") or "").lower()
-                if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
                     logger.warning(
                         "Plan-then-patch patch for %s failed compile gate; treating as empty",
                         instance_id,
@@ -3268,7 +3279,7 @@ def process_instance(
         # Compile / type-check gate: hard reject broken patches before submission.
         if patch.strip():
             language = (instance.get("repo_language") or "").lower()
-            if not _check_patch_builds(host_repo_dir, patch, language, logger):
+            if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
                 logger.warning(
                     "Captured patch for %s failed compile gate; treating as empty",
                     instance_id,
@@ -3313,7 +3324,7 @@ def process_instance(
                 )
                 if patch.strip():
                     language = (instance.get("repo_language") or "").lower()
-                    if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                    if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
                         logger.warning(
                             "Force-edit patch for %s failed compile gate; treating as empty",
                             instance_id,
@@ -3366,7 +3377,7 @@ def process_instance(
                     if early_patch.strip():
                         patch = early_patch
                         language = (instance.get("repo_language") or "").lower()
-                        if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                        if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
                             logger.warning(
                                 "Early diff fallback patch for %s failed compile gate; treating as empty",
                                 instance_id,
@@ -3584,7 +3595,7 @@ def process_instance(
                 if fallback_patch.strip():
                     patch = fallback_patch
                     language = (instance.get("repo_language") or "").lower()
-                    if not _check_patch_builds(host_repo_dir, patch, language, logger):
+                    if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
                         logger.warning(
                             "Diff fallback patch for %s failed compile gate; treating as empty",
                             instance_id,

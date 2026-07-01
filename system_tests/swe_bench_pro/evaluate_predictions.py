@@ -481,6 +481,7 @@ def evaluate_instance(
         "error": None,
         "patch": prediction.get("patch", ""),
         "metadata": prediction.get("metadata", {}),
+        "repo_language": instance.get("repo_language", ""),
     }
 
     # Always record the expected test counts so errored instances can be counted
@@ -638,8 +639,11 @@ def evaluate_instance(
 
 def _compile_gate_skipped(result: dict[str, Any]) -> bool:
     """True if a compile-gate rejection happened because the host toolchain is missing."""
-    if not result.get("metadata", {}).get("compile_gate_rejected"):
+    metadata = result.get("metadata", {})
+    if not metadata.get("compile_gate_rejected"):
         return False
+    if metadata.get("compile_gate_skip_reason") == "missing_toolchain":
+        return True
     mapping = {
         "go": "go",
         "rust": "cargo",
@@ -662,7 +666,10 @@ def _effective_recovery_success(result: dict[str, Any]) -> bool:
         return False
     if result.get("fail_to_pass_passed", 0) > 0:
         return True
-    return result.get("pass_to_pass_passed", 0) >= result.get("pass_to_pass_total", 0)
+    return (
+        result.get("pass_to_pass_total", 0) > 0
+        and result.get("pass_to_pass_passed", 0) >= result.get("pass_to_pass_total", 0)
+    )
 
 
 def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, Any]:
