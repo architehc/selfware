@@ -1,0 +1,565 @@
+{
+  "model": "z-ai/glm-5.2",
+  "passed": 93,
+  "results": [
+    {
+      "detail": "valid args: {\"script\": \"document.title\", \"url\": \"https://example.com\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "browser_eval"
+    },
+    {
+      "detail": "valid args: {\"url\": \"https://example.com\",\"javascript\": true,\"timeout_secs\": 15, \"…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "browser_fetch"
+    },
+    {
+      "detail": "valid args: {\"url\": \"https://en.wikipedia.org/wiki/Web_scraping\", \"filter\": \"scrap…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "browser_links"
+    },
+    {
+      "detail": "valid args: {\"url\": \"https://en.wikipedia.org/wiki/Artificial_intelligence\", \"outp…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "browser_pdf"
+    },
+    {
+      "detail": "valid args: {\"url\": \"https://example.com\",\"full_page\": true,\"width\": 1920,\"height\"…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "browser_screenshot"
+    },
+    {
+      "detail": "valid args: {\"all_features\": true,\"all_targets\": true,\"release\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "cargo_check"
+    },
+    {
+      "detail": "valid args: {\"all_targets\": true,\"deny_warnings\": true,\"fix\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "cargo_clippy"
+    },
+    {
+      "detail": "valid args: {\"all\": true,\"check\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "cargo_fmt"
+    },
+    {
+      "detail": "valid args: {\"no_fail_fast\": true,\"release\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "cargo_test"
+    },
+    {
+      "detail": "valid args: {\"affected_symbol\": \"calculate_total_price\", \"change_type\": \"modify\", …",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "code_diff_plan"
+    },
+    {
+      "detail": "valid args: {\"target\": \".\", \"depth\": \"signatures\", \"format\": \"tree\", \"language\": \"…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "code_introspect"
+    },
+    {
+      "detail": "valid args: {\"depth\": 2, \"format\": \"summary\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "code_map"
+    },
+    {
+      "detail": "valid args: {\"file_path\": \"src/main.rs\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "code_metrics"
+    },
+    {
+      "detail": "valid args: {\"goal\": \"Refactor the authentication module to support OAuth2 with PK…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "code_plan"
+    },
+    {
+      "detail": "valid args: {\"query\": \"database connection initialization and configuration\",\"incl…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "code_query"
+    },
+    {
+      "detail": "valid args: {\"path\": \"./my-project\", \"file\": \"docker-compose.yml\",\"volumes\": true,…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "compose_down"
+    },
+    {
+      "detail": "valid args: {\"path\": \"./my-project\", \"file\": \"docker-compose.yml\",\"services\": [\"we…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "compose_up"
+    },
+    {
+      "detail": "valid args: {\"action\": \"type\", \"text\": \"Hello, world!\", \"expected_visual\": \"The te…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "computer_keyboard"
+    },
+    {
+      "detail": "valid args: {\"action\": \"move_to\",\"x\": 500,\"y\": 400, \"expected_visual\": \"Mouse curs…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "computer_mouse"
+    },
+    {
+      "detail": "valid args: {\"action\": \"full\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "computer_screen"
+    },
+    {
+      "detail": "valid args: {\"action\": \"list\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "computer_window"
+    },
+    {
+      "detail": "valid args: {\"tag\": \"myapp:latest\", \"path\": \".\", \"dockerfile\": \"Dockerfile\",\"no_ca…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_build"
+    },
+    {
+      "detail": "valid args: {\"command\": [\"ls\", \"-la\"], \"container\": \"my-app\", \"user\": \"root\", \"wor…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_exec"
+    },
+    {
+      "detail": "valid args: {\"all\": false, \"filter\": \"reference=nginx*\", \"runtime\": \"auto\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_images"
+    },
+    {
+      "detail": "valid args: {\"all\": true, \"runtime\": \"docker\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_list"
+    },
+    {
+      "detail": "valid args: {\"container\": \"nginx-web\", \"runtime\": \"docker\",\"tail\": 50, \"since\": \"1…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_logs"
+    },
+    {
+      "detail": "valid args: {\"image\": \"nginx:latest\", \"runtime\": \"docker\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_pull"
+    },
+    {
+      "detail": "valid args: {\"container\": \"my-app-container\",\"force\": true, \"runtime\": \"docker\",\"v…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_remove"
+    },
+    {
+      "detail": "valid args: {\"image\": \"nginx:latest\", \"name\": \"my-nginx\",\"ports\": [\"8080:80\"],\"vol…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_run"
+    },
+    {
+      "detail": "valid args: {\"container\": \"my-web-app\", \"runtime\": \"docker\",\"timeout\": 15}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "container_stop"
+    },
+    {
+      "detail": "valid args: {\"action\": \"inspect\", \"fusion\": \"trinary\", \"target\": \"src/tools/codema…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "context_action"
+    },
+    {
+      "detail": "valid args: {}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "context_budget"
+    },
+    {
+      "detail": "valid args: {\"path\": \".\",\"max_depth\": 3,\"include_hidden\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "directory_tree"
+    },
+    {
+      "detail": "valid args: {\"branch\": \"feature/validation-test\", \"path\": \".selfware/worktrees/val…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "enter_worktree"
+    },
+    {
+      "detail": "valid args: {\"path\": \"/feature-branch-worktree\",\"remove\": true}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "exit_worktree"
+    },
+    {
+      "detail": "valid args: {\"path\": \"/tmp/test_file.txt\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "file_delete"
+    },
+    {
+      "detail": "valid args: {\"new_str\": \"def calculate_total(items):\\n    return sum(item[\\\"price\\…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "file_edit"
+    },
+    {
+      "detail": "valid args: {\"edits\": [{\"new_str\": \"def greet(name: str) -> str:\\n    \\\"\\\"\\\"Return…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "file_multi_edit"
+    },
+    {
+      "detail": "valid args: {\"path\": \"README.md\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "file_read"
+    },
+    {
+      "detail": "valid args: {\"backup\": true, \"content\": \"# Sample Project\\n\\nThis is a sample proj…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "file_write"
+    },
+    {
+      "detail": "valid args: {\"message\": \"Checkpoint before refactoring authentication module\", \"ta…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "git_checkpoint"
+    },
+    {
+      "detail": "valid args: {\"commit_type\": \"feat\",\"files\": [\"src/components/Button.tsx\", \"src/sty…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "git_commit"
+    },
+    {
+      "detail": "valid args: {\"base\": \"HEAD~1\", \"path\": \"src/main.py\",\"staged\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "git_diff"
+    },
+    {
+      "detail": "valid args: {\"branch\": \"main\", \"remote\": \"origin\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "git_push"
+    },
+    {
+      "detail": "valid args: {\"repo_path\": \".\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "git_status"
+    },
+    {
+      "detail": "valid args: {\"pattern\": \"**/*.py\", \"path\": \".\",\"max_results\": 50}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "glob_find"
+    },
+    {
+      "detail": "valid args: {\"path\": \".\", \"pattern\": \"function\\\\s+\\\\w+\\\\s*\\\\(\", \"include\": \"*.js\",…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "grep_search"
+    },
+    {
+      "detail": "valid args: {\"method\": \"GET\",\"timeout_secs\": 15, \"url\": \"https://jsonplaceholder.t…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "http_request"
+    },
+    {
+      "detail": "valid args: {\"name\": \"Vec<T>\", \"node_type\": \"struct\", \"description\": \"A contiguous…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_add"
+    },
+    {
+      "detail": "valid args: {\"file_path\": \"src/main.rs\",\"add_relations\": true,\"dry_run\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_auto_extract"
+    },
+    {
+      "detail": "valid args: {\"confirm\": true}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_clear"
+    },
+    {
+      "detail": "valid args: {\"output_path\": \"/knowledge_graph_export.json\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_export"
+    },
+    {
+      "detail": "valid args: {\"name\": \"python\", \"node_type\": \"language\",\"include_edges\": true,\"limi…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_query"
+    },
+    {
+      "detail": "valid args: {\"from\": \"AuthService\", \"relation\": \"uses\", \"to\": \"DatabaseClient\",\"pr…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_relate"
+    },
+    {
+      "detail": "valid args: {\"node_id\": \"entity_12345\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_remove"
+    },
+    {
+      "detail": "valid args: {}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "knowledge_stats"
+    },
+    {
+      "detail": "valid args: {}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "list_worktrees"
+    },
+    {
+      "detail": "valid args: {\"issue\": \"When a user submits a form with an empty email field, the a…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "localize_issue"
+    },
+    {
+      "detail": "valid args: {\"file\": \"src/main.py\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_diagnostics"
+    },
+    {
+      "detail": "valid args: {\"file\": \"src/main.py\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_document_symbols"
+    },
+    {
+      "detail": "valid args: {\"column\": 0, \"file\": \"src/main.py\",\"line\": 10}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_find_references"
+    },
+    {
+      "detail": "valid args: {\"column\": 8, \"file\": \"src/index.ts\",\"line\": 10}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_goto_definition"
+    },
+    {
+      "detail": "valid args: {\"column\": 5, \"file\": \"src/main.py\",\"line\": 10}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_goto_implementation"
+    },
+    {
+      "detail": "valid args: {\"column\": 5, \"file\": \"src/main.py\",\"line\": 10}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_hover"
+    },
+    {
+      "detail": "valid args: {\"query\": \"main\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "lsp_workspace_symbols"
+    },
+    {
+      "detail": "valid args: {\"packages\": [\"express@4.18.2\", \"cors@2.8.5\"], \"path\": \"./my-project\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "npm_install"
+    },
+    {
+      "detail": "valid args: {\"script\": \"build\", \"path\": \".\",\"timeout_secs\": 300}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "npm_run"
+    },
+    {
+      "detail": "valid args: {\"path\": \".\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "npm_scripts"
+    },
+    {
+      "detail": "valid args: {\"action\": \"goto\", \"url\": \"https://example.com\", \"wait_until\": \"load\",…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "page_control"
+    },
+    {
+      "detail": "valid args: {\"diff\": \"diff --git a/hello.py b/hello.py\\nnew file mode 100644\\ninde…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "patch_apply"
+    },
+    {
+      "detail": "valid args: {\"output_file\": \"requirements.txt\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "pip_freeze"
+    },
+    {
+      "detail": "valid args: {\"packages\": [\"requests\", \"numpy\", \"pandas\"],\"upgrade\": true}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "pip_install"
+    },
+    {
+      "detail": "valid args: {\"format\": \"json\",\"outdated\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "pip_list"
+    },
+    {
+      "detail": "valid args: {\"find_available\": true,\"port\": 8080,\"range_end\": 9000,\"range_start\": …",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "port_check"
+    },
+    {
+      "detail": "valid args: {}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "process_list"
+    },
+    {
+      "detail": "valid args: {\"id\": \"web-server-01\",\"lines\": 100}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "process_logs"
+    },
+    {
+      "detail": "valid args: {\"id\": \"nginx-web-server\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "process_restart"
+    },
+    {
+      "detail": "valid args: {\"command\": \"npm\",\"args\": [\"run\", \"dev\"], \"cwd\": \"/home/user/my-app\",\"…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "process_start"
+    },
+    {
+      "detail": "valid args: {\"id\": \"worker-1234\",\"force\": false}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "process_stop"
+    },
+    {
+      "detail": "valid args: {\"action\": \"start\", \"shell\": \"/bin/bash\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "pty_shell"
+    },
+    {
+      "detail": "valid args: {\"operation\": \"calibrate\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "radarcam_control"
+    },
+    {
+      "detail": "valid args: {\"camera_index\": 0, \"view\": \"overlay\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "radarcam_frame"
+    },
+    {
+      "detail": "valid args: {\"camera_index\": 0,\"include_validation\": true}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "radarcam_introspect"
+    },
+    {
+      "detail": "valid args: {\"log_type\": \"server\",\"tail_lines\": 50}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "radarcam_logs"
+    },
+    {
+      "detail": "valid args: {\"include_awareness\": true,\"include_calibration\": true}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "radarcam_status"
+    },
+    {
+      "detail": "valid args: {\"test_type\": \"validation\",\"max_samples\": 100}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "radarcam_test"
+    },
+    {
+      "detail": "valid args: {\"target\": \"screen\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "screen_capture"
+    },
+    {
+      "detail": "valid args: {\"command\": \"echo \\\"Hello, world!\\\" && uname -a && date\",\"timeout_secs…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "shell_exec"
+    },
+    {
+      "detail": "valid args: {\"name\": \"Vec\", \"path\": \".\", \"symbol_type\": \"struct\",\"max_results\": 10…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "symbol_search"
+    },
+    {
+      "detail": "valid args: {\"query\": \"git\",\"limit\": 5}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "tool_search"
+    },
+    {
+      "detail": "valid args: {\"endpoint\": \"http://localhost:1234/v1\", \"model\": \"llava-v1.5-7b\", \"pr…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "vision_analyze"
+    },
+    {
+      "detail": "valid args: {\"image_a\": \"/expected/homepage_v1.png\", \"image_b\": \"/actual/homepage_…",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "vision_compare"
+    },
+    {
+      "detail": "valid args: {\"packages\": [\"lodash\", \"axios\"], \"path\": \"./my-project\"}",
+      "passed": true,
+      "provider": "Fireworks",
+      "tool": "yarn_install"
+    }
+  ],
+  "total": 93
+}
