@@ -153,7 +153,11 @@ impl FileSkeleton {
                     out.push_str(&format!("L{}: const {}: {}\n", line, name, type_hint));
                 }
                 SkeletonItem::Use { path, line } => {
-                    out.push_str(&format!("L{}: use {}\n", line, path));
+                    // `path` already includes the `use`/`pub use` keyword (see
+                    // extract_rust_skeleton), so print it verbatim. Prepending
+                    // another `use ` here produced `use use ...`, which models
+                    // mistook for a syntax error and chased as a phantom bug.
+                    out.push_str(&format!("L{}: {}\n", line, path));
                 }
             }
         }
@@ -2151,7 +2155,10 @@ mod tests {
             token_count: 2,
         };
         let rendered = skeleton.render();
-        assert!(rendered.contains("use use std::io")); // "use " prefix from render + path
+        // `path` already carries the `use` keyword, so it renders verbatim —
+        // NOT doubled into `use use`, which models mistook for a syntax error.
+        assert!(rendered.contains("use std::io"));
+        assert!(!rendered.contains("use use"));
     }
 
     #[test]
