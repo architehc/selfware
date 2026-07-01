@@ -430,6 +430,63 @@ impl Agent {
             return Ok(false);
         }
 
+        // Terminal-answer gate for read-only tasks. A non-mutating task (e.g. a
+        // code review / analysis) that returns a substantial prose answer with no
+        // tool call is DONE — accept it. Without this, the fallback path below
+        // mines the finished report for phantom tool calls and the loop never
+        // terminates (observed: read-only reviews spun to MAX_ITERATIONS / timeout,
+        // growing context to 340k while discarding 10+ finished reports).
+        // Guarded by `!current_task_requires_mutation()` so mutation tasks still
+        // require a real edit before completing (the FAKE_COMPLETE gate is intact).
+        if tool_calls.is_empty() && !self.current_task_requires_mutation() {
+            let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+            let looks_final = clean.len() >= 40
+                && !super::verification::is_incomplete_action_response(&content)
+                && !super::verification::is_confused_response(&content);
+
+            // (a) A clean, non-forward-looking final answer completes immediately.
+            if looks_final && self.check_completion_gate().await.is_none() {
+                info!("Accepting prose final answer for read-only task (no tool call needed)");
+                output::final_answer(&clean);
+                self.last_assistant_response = clean;
+                return Ok(true);
+            }
+
+            // (b) Otherwise the model narrated a next step without calling a tool.
+            // Track the best substantial answer so far and, after a few such turns,
+            // force-finalize instead of spinning to MAX_ITERATIONS. This bypasses
+            // the fallback miner below (which fabricates phantom reads from report
+            // prose and never terminates on read-only tasks).
+            if clean.len() > self.last_assistant_response.len() {
+                self.last_assistant_response = clean.clone();
+            }
+            self.consecutive_no_action_prompts += 1;
+            if self.consecutive_no_action_prompts >= 4 {
+                let best = if !self.last_assistant_response.is_empty() {
+                    self.last_assistant_response.clone()
+                } else {
+                    clean
+                };
+                if best.len() >= 40 {
+                    info!(
+                        "Force-finalizing read-only task after {} no-tool turns",
+                        self.consecutive_no_action_prompts
+                    );
+                    output::final_answer(&best);
+                    return Ok(true);
+                }
+            }
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 Either call the tool you need, or — if you already have enough \
+                 information — give your COMPLETE final answer now. Do not narrate \
+                 next steps or say \"let me\"; output only the finished answer.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+            return Ok(false);
+        }
+
         match self.maybe_prompt_for_action(
             &content,
             tool_calls.is_empty(),

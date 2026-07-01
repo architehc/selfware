@@ -120,11 +120,24 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         return false;
     }
 
+    // A response that ends by announcing a next action (trailing colon) is a
+    // lead-in, not a final answer — e.g. "Now let me check which module …:".
+    if lower.ends_with(':') {
+        return true;
+    }
+
     let strong_prefixes = [
         "i need to ",
         "first i need to ",
         "first, i need to ",
         "let me ",
+        "now let me ",
+        "okay, let me ",
+        "ok, let me ",
+        "alright, let me ",
+        "now i'll ",
+        "now i need to ",
+        "let's ",
         "before i can ",
         "the next step is to ",
         "to continue, i need to ",
@@ -1105,6 +1118,23 @@ impl Agent {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn incomplete_action_response_catches_forward_looking_narration() {
+        // Regression: the read-only terminal-answer gate must not accept a
+        // lead-in like "Now let me check …:" as a final answer.
+        assert!(is_incomplete_action_response(
+            "Now let me check which module is actually registered/exported:"
+        ));
+        assert!(is_incomplete_action_response("Let me read the file first."));
+        assert!(is_incomplete_action_response(
+            "I will inspect the registration next:"
+        ));
+        // A genuine final answer is NOT flagged.
+        assert!(!is_incomplete_action_response(
+            "The two files are duplicates. shell_exec is the registered tool; shell.rs is unused."
+        ));
+    }
 
     #[test]
     fn explicit_visual_expectation_takes_priority() {
