@@ -127,10 +127,12 @@ An **agentic coding harness** for local LLMs that runs entirely on your hardware
 > [safety]
 > allowed_paths = ["./**", "~/**", "/tmp/**"]
 >
-> # Optional but recommended on OpenRouter: only route to providers that actually
-> # honor the tools you send (avoids "describes intent without calling tools"),
-> # and prefer ones serving the full context window.
+> # Optional but recommended on OpenRouter: pin providers that serve the FULL
+> # 1M context AND honor tool calls (verified for GLM-5.2). This avoids being
+> # routed to a provider that silently caps context at 131k/262k, and avoids
+> # "describes intent without calling tools".
 > [extra_body.provider]
+> only = ["fireworks", "morph", "friendli", "inceptron", "deepinfra"]
 > require_parameters = true
 > ```
 >

@@ -121,6 +121,13 @@ const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
     "use_beam_search",
     "length_penalty",
     "early_stopping",
+    // OpenRouter routing directives (control which upstream provider serves the
+    // request; e.g. pin providers that offer the full context window and honor
+    // tool calls). These steer routing, not output content, so they are safe.
+    "provider",
+    "models",
+    "route",
+    "transforms",
 ];
 
 pub(crate) fn merge_extra_body(
