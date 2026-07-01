@@ -2162,6 +2162,18 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_and_render_use_no_double_keyword() {
+        // End-to-end regression: extracting real source with `use`/`pub use`
+        // and rendering the skeleton must never produce `use use ...`.
+        let code = "use std::io;\npub use crate::foo::Bar;\n\nfn main() {}\n";
+        let skeleton = extract_rust_skeleton(Path::new("src/lib.rs"), code);
+        let rendered = skeleton.render();
+        assert!(!rendered.contains("use use"), "rendered:\n{rendered}");
+        assert!(rendered.contains("use std::io"));
+        assert!(rendered.contains("pub use crate::foo::Bar"));
+    }
+
+    #[test]
     fn test_skeleton_render_empty() {
         let skeleton = FileSkeleton {
             path: "src/empty.rs".into(),

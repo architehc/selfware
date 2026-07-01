@@ -2358,6 +2358,37 @@ fn test_merge_extra_body_allows_backend_specific_keys() {
 }
 
 #[test]
+fn test_merge_extra_body_allows_openrouter_routing_keys() {
+    // Regression: OpenRouter routing directives must pass the extra_body
+    // allowlist so users can pin providers (e.g. full-context, tool-capable
+    // ones). Previously `provider` was rejected as a disallowed key.
+    let mut body = serde_json::json!({
+        "model": "z-ai/glm-5.2",
+        "messages": [],
+        "stream": false
+    });
+    let mut extra = serde_json::Map::new();
+    extra.insert(
+        "provider".to_string(),
+        serde_json::json!({ "only": ["fireworks", "morph"], "require_parameters": true }),
+    );
+    extra.insert("route".to_string(), serde_json::json!("fallback"));
+    extra.insert(
+        "models".to_string(),
+        serde_json::json!(["z-ai/glm-5.2", "z-ai/glm-4.7"]),
+    );
+    extra.insert("transforms".to_string(), serde_json::json!(["middle-out"]));
+
+    merge_extra_body(&mut body, Some(&extra), "openrouter routing")
+        .expect("OpenRouter routing keys must be allowed in extra_body");
+
+    assert_eq!(body["provider"]["only"][0], "fireworks");
+    assert_eq!(body["route"], "fallback");
+    assert_eq!(body["models"][1], "z-ai/glm-4.7");
+    assert_eq!(body["transforms"][0], "middle-out");
+}
+
+#[test]
 fn test_merge_extra_body_rejects_reserved_keys_for_default_chat_request() {
     let mut body = serde_json::json!({
         "model": "text-model",

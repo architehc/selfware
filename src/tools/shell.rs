@@ -183,18 +183,7 @@ impl Tool for ShellExec {
                 false,
             ),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => (
-                -1,
-                "".to_string(),
-                format!(
-                    "Command timed out after {}s and was killed (no output captured). \
-                     For long-running builds/tests (e.g. `cargo check`/`build`/`test`), \
-                     retry the SAME command with a larger timeout, e.g. add \
-                     \"timeout_secs\": 600 to the tool arguments.",
-                    args.timeout_secs
-                ),
-                true,
-            ),
+            Err(_) => (-1, "".to_string(), "Command timed out".to_string(), true),
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;

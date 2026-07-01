@@ -281,7 +281,18 @@ impl Tool for ShellExec {
                 false,
             ),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => (-1, "".to_string(), "Command timed out".to_string(), true),
+            Err(_) => (
+                -1,
+                "".to_string(),
+                format!(
+                    "Command timed out after {}s and was killed (no output captured). \
+                     For long-running builds/tests (e.g. `cargo check`/`build`/`test`), \
+                     retry the SAME command with a larger timeout, e.g. add \
+                     \"timeout_secs\": 600 to the tool arguments.",
+                    args.timeout_secs
+                ),
+                true,
+            ),
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -411,7 +422,11 @@ mod tests {
 
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["timed_out"], true);
-        assert!(result["stderr"].as_str().unwrap().contains("timed out"));
+        let stderr = result["stderr"].as_str().unwrap();
+        assert!(stderr.contains("timed out"));
+        // Regression: the timeout must be actionable so the model retries with a
+        // larger timeout instead of looping (e.g. `cargo check` on big crates).
+        assert!(stderr.contains("timeout_secs"), "stderr was: {stderr}");
     }
 
     #[tokio::test]
