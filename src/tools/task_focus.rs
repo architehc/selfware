@@ -174,12 +174,17 @@ impl std::fmt::Display for TaskType {
 pub fn classify_task(task: &str) -> TaskType {
     let t = task.to_lowercase();
 
-    // Explicit read-only intent wins over everything else. Without this, a review
-    // prompt like "... Do NOT edit any files ..." was classified as Edit (it
-    // contains the substring "edit"), so the preamble told the model to modify
-    // code — it then tried to edit a read-only task and looped. A prohibition on
-    // editing is the strongest possible signal that this is a reading task.
-    if t.contains("do not edit")
+    // Explicit read-only intent wins — UNLESS the prompt also carries a clear
+    // standalone mutation instruction ("fix the bug, but do not edit the tests"
+    // is still an Edit task). Without this override, a review prompt like
+    // "... Do NOT edit any files ..." was classified as Edit (it contains the
+    // substring "edit"), so the preamble told the model to modify code — it then
+    // tried to edit a read-only task and looped.
+    let has_standalone_mutation_intent = ["fix ", "implement ", "refactor ", "create ", "write "]
+        .iter()
+        .any(|verb| t.contains(verb));
+    if !has_standalone_mutation_intent
+        && (t.contains("do not edit")
         || t.contains("don't edit")
         || t.contains("do not modify")
         || t.contains("don't modify")
@@ -188,7 +193,7 @@ pub fn classify_task(task: &str) -> TaskType {
         || t.contains("without editing")
         || t.contains("without modifying")
         || t.contains("read-only")
-        || t.contains("read only")
+        || t.contains("read only"))
     {
         return TaskType::Read;
     }
@@ -367,6 +372,11 @@ mod tests {
         assert_eq!(
             classify_task("Review src/ for dead code without modifying anything"),
             TaskType::Read
+        );
+        // But a standalone mutation instruction beats the read-only override.
+        assert_eq!(
+            classify_task("Fix the bug in parser.rs, but do not edit the tests."),
+            TaskType::Edit
         );
     }
 
