@@ -164,6 +164,12 @@ bench-harness = []
 # Memory consolidation ("sleep") system
 consolidation = []
 
+# Context-selection benchmark experiment (experiments/context_select)
+context-select = []
+
+# Tool-verification harness (experiments/tool_verify)
+tool-verify = []
+
 # System-level E2E tests (require live LLM endpoint, run manually)
 system-tests = []
 
@@ -296,6 +302,19 @@ required-features = ["vlm-bench"]
 name = "computer_control_test"
 path = "system_tests/computer_control_test.rs"
 required-features = ["system-tests"]
+
+# Context-selection benchmark experiment (standalone; reuses BM25 + skeleton + token counting)
+[[bin]]
+name = "context_select_bench"
+path = "experiments/context_select/main.rs"
+required-features = ["context-select"]
+
+# Tool-verification harness: forces the configured model (GLM-5.2) to call every
+# registered tool and validates the arguments against each tool's JSON schema.
+[[bin]]
+name = "tool_verify"
+path = "experiments/tool_verify/main.rs"
+required-features = ["tool-verify"]
 
 # Benchmarks
 [[bench]]

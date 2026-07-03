@@ -184,6 +184,21 @@ impl Agent {
         blocked
     }
 
+    /// True if `line` looks like a `FILES:` checklist header.
+    ///
+    /// Tolerant of leading markdown decoration and case, because capable hosted
+    /// models (e.g. GLM-4.x/5.x) format the header as `**FILES:**`, `- Files:`,
+    /// or `#### FILES:` rather than a bare `FILES:`. Without this tolerance the
+    /// P2.1 edit guard never sees the checklist, blocks every edit, and the model
+    /// loops emitting the (unrecognized) header as prose — surfacing as
+    /// `NONTERM_PROSE_NO_TOOL`.
+    fn is_files_checklist_line(line: &str) -> bool {
+        let cleaned = line.trim_start().trim_start_matches(|c: char| {
+            matches!(c, '*' | '#' | '`' | '-' | '>' | '_' | '•' | ' ' | '\t')
+        });
+        cleaned.to_ascii_lowercase().starts_with("files:")
+    }
+
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
     /// instead of making a new API call (used after planning phase)
@@ -319,7 +334,7 @@ impl Agent {
         // reduces catastrophic edits on the wrong files.
         if super::recovery::strip_think_blocks(&content)
             .lines()
-            .any(|line| line.trim_start().starts_with("FILES:"))
+            .any(Self::is_files_checklist_line)
         {
             self.files_checklist_seen = true;
         }
@@ -413,6 +428,42 @@ impl Agent {
         if self.detect_and_correct_malformed_tools(&content, &tool_calls) {
             self.note_mutation_no_tool_stall("malformed tool XML")?;
             return Ok(false);
+        }
+
+        // Read-only completion gate. For a non-mutating task (code review /
+        // analysis / question) that returns no tool call, accept a substantial
+        // final answer immediately; and if the model instead keeps narrating
+        // ("let me check ...") without answering, force-finalize after a few such
+        // turns rather than spinning to MAX_ITERATIONS (observed: read-only
+        // reviews looped 100 steps and were mislabeled FAKE_COMPLETE). This ONLY
+        // adds an acceptance/finalize path — when neither condition holds it falls
+        // through to the existing flow, so normal short/empty completions and all
+        // mutation tasks are unaffected (the FAKE_COMPLETE edit gate stays intact).
+        if tool_calls.is_empty() && !self.current_task_requires_mutation() {
+            let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+            let looks_final = clean.len() >= 40
+                && !super::verification::is_incomplete_action_response(&content)
+                && !super::verification::is_confused_response(&content);
+            if looks_final && self.check_completion_gate().await.is_none() {
+                info!("Read-only task: accepting substantial final answer");
+                output::final_answer(&clean);
+                self.last_assistant_response = clean;
+                return Ok(true);
+            }
+            if clean.len() > self.last_assistant_response.len() {
+                self.last_assistant_response = clean.clone();
+            }
+            self.readonly_no_tool_streak += 1;
+            if self.readonly_no_tool_streak >= 6 && self.last_assistant_response.len() >= 40 {
+                info!(
+                    "Read-only task: force-finalizing after {} no-tool turns",
+                    self.readonly_no_tool_streak
+                );
+                let best = self.last_assistant_response.clone();
+                output::final_answer(&best);
+                return Ok(true);
+            }
+            // else: fall through to the existing completion/fallback handling.
         }
 
         match self.maybe_prompt_for_action(
@@ -1172,6 +1223,21 @@ mod tests {
     use crate::testing::mock_api::MockLlmServer;
     use chrono::Utc;
     use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn files_checklist_line_tolerates_markdown_decoration() {
+        // Bare form still works.
+        assert!(Agent::is_files_checklist_line("FILES: src/main.rs"));
+        assert!(Agent::is_files_checklist_line("  FILES: a.rs"));
+        // Markdown decoration that capable hosted models (GLM-4.x/5.x) emit.
+        assert!(Agent::is_files_checklist_line("**FILES:** src/main.rs"));
+        assert!(Agent::is_files_checklist_line("- **Files:** a.rs, b.rs"));
+        assert!(Agent::is_files_checklist_line("#### FILES: a.rs"));
+        assert!(Agent::is_files_checklist_line("> files: a.rs"));
+        // Non-headers must not match.
+        assert!(!Agent::is_files_checklist_line("The files are listed below"));
+        assert!(!Agent::is_files_checklist_line("profiles: none"));
+    }
 
     /// Detect a real existing codebase to suppress the Rust scaffold injection.
     /// Empty dir + the SAB scratch shape (only src/lib.rs) must report zero.
