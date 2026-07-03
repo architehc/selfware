@@ -1677,10 +1677,10 @@ mod tests {
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
-        agent.run_task("Fix the login bug").await.unwrap();
+        agent.run_task("Describe the login bug").await.unwrap();
         assert_eq!(
             agent.current_checkpoint.as_ref().unwrap().task_description,
-            "Fix the login bug"
+            "Describe the login bug"
         );
         server.stop().await;
     }
@@ -1698,11 +1698,11 @@ mod tests {
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
-        agent.run_task("Add error handling").await.unwrap();
+        agent.run_task("Summarize error handling").await.unwrap();
         let has_msg = agent
             .messages
             .iter()
-            .any(|m| m.role == "user" && m.content.text().contains("Add error handling"));
+            .any(|m| m.role == "user" && m.content.text().contains("Summarize error handling"));
         assert!(has_msg, "task text should appear as a user message");
         server.stop().await;
     }
@@ -1772,7 +1772,7 @@ mod tests {
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
-        agent.run_task("Write unit tests").await.unwrap();
+        agent.run_task("Review unit tests").await.unwrap();
         assert!(!agent.cognitive_state.strategic_goals.is_empty());
         assert!(agent.cognitive_state.active_tactical_plan.is_some());
         server.stop().await;
@@ -1791,7 +1791,7 @@ mod tests {
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
-        agent.run_task("Implement feature X").await.unwrap();
+        agent.run_task("Review feature X").await.unwrap();
         let plan = agent
             .cognitive_state
             .active_operational_plan
@@ -1884,7 +1884,7 @@ mod tests {
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
-        agent.run_task("Write tests for parser").await.unwrap();
+        agent.run_task("Read tests for parser").await.unwrap();
         assert!(!agent.current_task_context.is_empty());
         server.stop().await;
     }

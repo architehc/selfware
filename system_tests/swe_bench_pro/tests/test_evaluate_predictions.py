@@ -207,7 +207,6 @@ def test_score_and_classify_marks_no_tests_as_errored():
     if _no_tests_were_executed(score, output):
         result["error"] = "no tests executed"
         result["overall_pass"] = False
-        result["fail_to_pass_passed"] = 0
         result["pass_to_pass_passed"] = 0
 
     assert result["error"] == "no tests executed"

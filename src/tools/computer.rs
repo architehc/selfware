@@ -651,6 +651,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_tool_focus_with_id() {
+        // Skip test if no working X11 display / window manager is available
+        if std::env::var("DISPLAY").is_err()
+            || std::process::Command::new("xdotool")
+                .arg("getactivewindow")
+                .output()
+                .map(|o| !o.status.success())
+                .unwrap_or(true)
+        {
+            eprintln!("Skipping test: no working X11 display");
+            return;
+        }
         // Skip test if window management tools aren't available
         if std::process::Command::new("wmctrl")
             .arg("-l")
@@ -665,8 +676,19 @@ mod tests {
             return;
         }
         let tool = ComputerWindowTool;
+        let active_window = std::process::Command::new("xdotool")
+            .arg("getactivewindow")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        let Some(window_id) = active_window else {
+            eprintln!("Skipping test: no active window");
+            return;
+        };
         let result = tool
-            .execute(json!({"action": "focus", "window_id": 1}))
+            .execute(json!({"action": "focus", "window_id": window_id}))
             .await
             .unwrap();
         assert_eq!(result["status"], "ok");

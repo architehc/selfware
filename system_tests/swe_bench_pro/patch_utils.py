@@ -130,17 +130,28 @@ def _strip_line_number_gutter(text: str) -> str:
     """Remove harness line-number gutters such as '  123 | ' from snippets.
 
     Small models often copy the gutter back into SEARCH blocks; stripping it
-    makes those blocks apply without requiring a second API call.
+    makes those blocks apply without requiring a second API call.  Blank lines
+    that are shown only as a gutter (e.g. ``  5 |``) are reduced to an empty
+    string.
 
     Recognizes gutters like ``123 |``, ``123:``, ``123.`` and ``123 ``.
     """
     lines = text.splitlines()
     stripped: list[str] = []
     for line in lines:
+        # Trailing spaces after the gutter are not meaningful for code.
+        line = line.rstrip()
         # Match a left gutter of the form "  123 | " (leading spaces, digits,
-        # optional colon/dot, optional pipe, then a space separator).
-        if re.match(r"^\s*\d+[:\.]?\s*[│|]?\s", line):
-            line = re.sub(r"^\s*\d+[:\.]?\s*[│|]?\s", "", line, count=1)
+        # optional colon/dot or pipe, then one separator space or end-of-line).
+        # The alternation order treats space-only gutters as the fallback, so
+        # indentation is preserved in content lines and plain text like
+        # "123hello" is left untouched.
+        line = re.sub(
+            r"^\s*\d+(?:\s*(?:[:\.]|[│|])(?:\s|$)|\s+)",
+            "",
+            line,
+            count=1,
+        )
         stripped.append(line)
     return "\n".join(stripped)
 
@@ -282,13 +293,16 @@ def _fuzzy_replace(text: str, old: str, new: str) -> str | None:
 
 def apply_edits_with_missing(
     repo_dir: Path, response: str, logger: Any
-) -> tuple[bool, set[str]]:
+) -> tuple[bool, set[str], set[str]]:
     """Apply simple file edits in ### FILE / SEARCH / REPLACE blocks.
 
-    Returns whether any edit was applied and the set of file paths referenced
-    by the model that could not be edited (non-existent files, or existing
-    files where the SEARCH block could not be matched).  Failed files are
-    recorded so callers can detect partial or hallucinated patches.
+    Returns a tuple of:
+      * ``applied`` - whether at least one edit was applied successfully.
+      * ``missing`` - file paths referenced by the model that do not exist.
+      * ``failed`` - existing files whose SEARCH block could not be matched
+        (exactly or with fuzzy normalization).  Callers should treat a
+        non-empty ``failed`` set the same as a missing file: the patch is
+        incomplete and must be retried.
     """
     # Strip markdown code fences so wrapped blocks still parse.
     cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
@@ -317,6 +331,7 @@ def apply_edits_with_missing(
 
     applied = False
     missing: set[str] = set()
+    failed: set[str] = set()
     for m in pattern.finditer(cleaned):
         rel_path = m.group("path").strip()
         old = _strip_line_number_gutter(m.group("old"))
@@ -361,7 +376,7 @@ def apply_edits_with_missing(
                         logger.warning(
                             "Search block not found in %s (exact and whitespace-normalized)", rel_path
                         )
-                    missing.add(rel_path)
+                    failed.add(rel_path)
                     continue
                 text = fuzzy
             else:
@@ -373,7 +388,7 @@ def apply_edits_with_missing(
             ):
                 if logger is not None:
                     logger.warning("Refusing edit to %s: result contains patch markers", rel_path)
-                missing.add(rel_path)
+                failed.add(rel_path)
                 continue
             path.write_text(text, encoding="utf-8")
             applied = True
@@ -382,13 +397,18 @@ def apply_edits_with_missing(
         except Exception as exc:
             if logger is not None:
                 logger.error("Failed to apply edit to %s: %s", rel_path, exc)
-    return applied, missing
+            failed.add(rel_path)
+    return applied, missing, failed
 
 
 def apply_edits(repo_dir: Path, response: str, logger: Any) -> bool:
-    """Apply simple file edits in ### FILE / SEARCH / REPLACE blocks."""
-    applied, _ = apply_edits_with_missing(repo_dir, response, logger)
-    return applied
+    """Apply simple file edits in ### FILE / SEARCH / REPLACE blocks.
+
+    Returns ``True`` only when every parsed edit block was applied successfully.
+    A single failed SEARCH/REPLACE block makes the whole response unapplyable.
+    """
+    applied, _, failed = apply_edits_with_missing(repo_dir, response, logger)
+    return applied and not failed
 
 
 def verify_edits_apply(repo_dir: Path, response: str, logger: Any) -> bool:
@@ -439,18 +459,24 @@ def apply_model_response_with_missing(
 ) -> tuple[bool, set[str]]:
     """Try to apply the model response as a diff, then as edits.
 
-    Returns the application status and any file paths referenced by the model
-    that do not exist on disk.
+    Returns the application status and the set of file paths that could not be
+    applied.  This includes missing files and files whose SEARCH block could not
+    be matched (exactly or fuzzily).
     """
     diff = extract_diff(response)
     if diff and apply_patch(repo_dir, diff, logger):
         return True, set()
-    applied, missing = apply_edits_with_missing(repo_dir, response, logger)
+    applied, missing, failed = apply_edits_with_missing(repo_dir, response, logger)
+    unapplied = missing | failed
     if applied:
-        return True, missing
+        return True, unapplied
     if logger is not None:
-        logger.warning("Could not apply any patch from model response")
-    return False, missing
+        logger.warning(
+            "Could not apply any patch from model response (missing=%s, failed_search=%s)",
+            sorted(missing),
+            sorted(failed),
+        )
+    return False, unapplied
 
 
 def apply_model_response(repo_dir: Path, response: str, logger: Any) -> bool:

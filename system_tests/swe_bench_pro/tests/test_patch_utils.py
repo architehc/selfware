@@ -382,10 +382,10 @@ def test_apply_edits_with_missing_rejects_leftover_patch_markers(tmp_path):
         "oops\n"
         ">>>>>>> REPLACE\n"
     )
-    applied, missing = apply_edits_with_missing(tmp_path, response, None)
-    assert "file.py" in missing
+    applied, missing, failed = apply_edits_with_missing(tmp_path, response, None)
+    assert "file.py" in failed
     assert target.read_text() == "x = 1\n"
-    assert not (applied and not missing)
+    assert not (applied and not failed)
 
 
 def test_apply_edits_with_missing_records_partial_failure_with_markers(tmp_path):
@@ -410,13 +410,13 @@ def test_apply_edits_with_missing_records_partial_failure_with_markers(tmp_path)
         "oops\n"
         ">>>>>>> REPLACE\n"
     )
-    applied, missing = apply_edits_with_missing(tmp_path, response, None)
+    applied, missing, failed = apply_edits_with_missing(tmp_path, response, None)
     assert applied is True
-    assert "second.py" in missing
-    assert "first.py" not in missing
+    assert "second.py" in failed
+    assert "first.py" not in failed
     assert first.read_text() == "a = 2\n"
     assert second.read_text() == "b = 1\n"
-    assert missing  # patch is not fully applied
+    assert failed  # patch is not fully applied
 
 
 def test_apply_diff_with_check_falls_back_to_patch_command(tmp_path):
@@ -478,3 +478,51 @@ def test_build_diff_fallback_prompt_caps_snippet_length(tmp_path):
         allow_full_file_replacement=False,
     )
     assert "... (truncated due to char limit) ..." in prompt
+
+
+def test_apply_edits_reports_failed_search_block(tmp_path):
+    """A SEARCH block that does not match must fail loudly, not silently succeed."""
+    target = tmp_path / "file.py"
+    target.write_text("def foo():\n    return 1\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "def not_present():\n"
+        "    return 1\n"
+        "=======\n"
+        "def not_present():\n"
+        "    return 2\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is False
+    assert target.read_text() == "def foo():\n    return 1\n"
+
+
+def test_strip_line_number_gutter_handles_blank_content():
+    """A guttered blank line is reduced to an empty string."""
+    from patch_utils import _strip_line_number_gutter
+
+    assert _strip_line_number_gutter("  1 | ") == ""
+    assert _strip_line_number_gutter("42:  ") == ""
+    assert _strip_line_number_gutter("  5 |") == ""
+    assert _strip_line_number_gutter("7.") == ""
+
+
+def test_apply_edits_strips_blank_line_gutters(tmp_path):
+    """SEARCH/REPLACE blocks may include guttered blank lines."""
+    target = tmp_path / "file.py"
+    target.write_text("a\n\nb\n")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "a\n"
+        "  2 |\n"
+        "b\n"
+        "=======\n"
+        "a\n"
+        "  2 |\n"
+        "changed\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text() == "a\n\nchanged\n"
