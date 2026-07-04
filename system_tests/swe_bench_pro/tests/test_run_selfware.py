@@ -22,6 +22,7 @@ from run_selfware import (
     _estimate_input_tokens,
     _parse_context_limit_from_error,
     _run_diff_recovery,
+    apply_adaptive_overrides,
     call_chat_endpoint,
     load_config,
     load_existing_predictions,
@@ -209,6 +210,43 @@ def test_prepare_effective_config_merges_small_model_yaml(tmp_path):
     assert effective["metadata"]["recommended"] is False
     assert effective["metadata"]["notes"] == "from yaml"
     assert effective["model"] == "test/small"
+
+
+def test_apply_adaptive_overrides_caps_without_clobbering_tuned_values():
+    """Adaptive mode should preserve tighter per-model tuning."""
+    config = {
+        "agent": {
+            "max_iterations": 25,
+            "edit_deadline_step": 6,
+            "max_no_edit_steps": 4,
+        }
+    }
+
+    apply_adaptive_overrides(config, "medium")
+
+    assert config["agent"]["max_iterations"] == 25
+    assert config["agent"]["edit_deadline_step"] == 6
+    assert config["agent"]["max_no_edit_steps"] == 4
+
+
+def test_apply_adaptive_overrides_tightens_loose_values():
+    config = {
+        "agent": {
+            "max_iterations": 80,
+            "edit_deadline_step": 20,
+            "max_no_edit_steps": 12,
+            "context_window": 8192,
+        }
+    }
+
+    apply_adaptive_overrides(config, "small")
+
+    assert config["agent"]["max_iterations"] == 30
+    assert config["agent"]["edit_deadline_step"] == 6
+    assert config["agent"]["max_no_edit_steps"] == 6
+    assert config["agent"]["context_window"] == 0
+    assert config["agent"]["disable_episodic_memory"] is True
+    assert config["agent"]["minimal_tool_catalog"] is True
 
 
 def test_load_existing_predictions_skips_empty_patches():

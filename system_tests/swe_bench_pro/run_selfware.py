@@ -615,22 +615,22 @@ def infer_capability_tier(model_id: str, config: dict[str, Any] | None = None) -
 
 
 def apply_adaptive_overrides(config: dict[str, Any], tier: str) -> None:
-    """Patch the [agent] table of a loaded TOML config in place."""
+    """Patch the [agent] table of a loaded TOML config in place.
+
+    Adaptive mode supplies conservative ceilings and defaults; it must not
+    clobber tighter per-model tuning from YAML/TOML configs.
+    """
     agent = config.setdefault("agent", {})
     if tier == "small":
-        agent.update({
-            "max_iterations": 30,
-            "edit_deadline_step": 6,
-            "max_no_edit_steps": 6,
-            "disable_episodic_memory": True,
-            "minimal_tool_catalog": True,
-            "context_window": 0,
-        })
+        agent["max_iterations"] = min(agent.get("max_iterations", 30), 30)
+        agent["edit_deadline_step"] = min(agent.get("edit_deadline_step", 6), 6)
+        agent["max_no_edit_steps"] = min(agent.get("max_no_edit_steps", 6), 6)
+        agent["disable_episodic_memory"] = True
+        agent["minimal_tool_catalog"] = True
+        agent["context_window"] = min(agent.get("context_window", 0), 0)
     elif tier == "medium":
-        agent.update({
-            "max_iterations": 45,
-            "edit_deadline_step": 8,
-        })
+        agent["max_iterations"] = min(agent.get("max_iterations", 45), 45)
+        agent["edit_deadline_step"] = min(agent.get("edit_deadline_step", 8), 8)
     # large: leave defaults unchanged.
 
 
@@ -673,7 +673,7 @@ def prepare_effective_config(
 ) -> Path:
     """Load the requested config, apply runtime overrides, and write a temp copy.
 
-    When --adaptive is set the [agent] section is rewritten based on the
+    When --adaptive is set the [agent] section is capped based on the
     inferred capability tier.  --small-model (or a small-tier model with
     --compact-prompt) applies additional aggressive [agent] limits and
     signals process_instance to build a ranked-snippet prompt.  --local-endpoint

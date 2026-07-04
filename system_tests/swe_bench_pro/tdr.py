@@ -132,6 +132,10 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         "set -uo pipefail\n"
         """trap 'if [ ! -f /workspace/output.json ]; then echo '"'"'{"tests": []}'"'"' > /workspace/output.json; fi' EXIT\n"""
         "cd /app\n"
+        # Clear stale artifacts before this iteration starts.  The patch status
+        # must be preserved after patch application because the host-side compile
+        # check uses it to decide whether it is checking patched code.
+        "rm -f /workspace/output.json /workspace/patch_apply_status.txt\n"
         #
         # Reset defensively and capture the optional setup command status.
         #
@@ -180,9 +184,9 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         #
         # Run tests and parse results.
         #
-        # Clear stale artifacts from any previous iteration so a timeout or
-        # crash cannot be mis-scored using old output.
-        "rm -f /workspace/output.json /workspace/patch_apply_status.txt\n"
+        # Clear stale test output so a timeout or crash cannot be mis-scored
+        # using old parser output.
+        "rm -f /workspace/output.json\n"
         f"bash /workspace/run_script.sh {test_arg} > /workspace/stdout.log 2> /workspace/stderr.log\n"
         "run_status=$?\n"
         "python /workspace/parser.py /workspace/stdout.log /workspace/stderr.log /workspace/output.json\n"
@@ -778,7 +782,7 @@ def _apply_repair_and_capture(
     Returns the new unified diff, or ``None`` if it could not be captured.
     """
     from run_selfware import capture_patch_on_host, run_cmd
-    from patch_utils import apply_model_response
+    from patch_utils import apply_model_response_with_missing, apply_patch
 
     reset = run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", base_commit], logger=logger)
     if reset.returncode != 0:
@@ -788,16 +792,27 @@ def _apply_repair_and_capture(
     if checkout.returncode != 0:
         logger.warning("git checkout before repair failed: %s", checkout.stderr.strip())
 
+    def _restore_repair_context() -> None:
+        run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", base_commit], logger=logger)
+        run_cmd(["git", "-C", str(repo_dir), "clean", "-fd"], logger=logger)
+        if current_patch.strip() and not apply_patch(repo_dir, current_patch, logger):
+            logger.warning("Could not restore current patch after rejecting repair")
+
     # Re-apply the patch we are repairing so the model can reason from a known state.
     if current_patch.strip():
-        from patch_utils import apply_patch
-
         if not apply_patch(repo_dir, current_patch, logger):
             logger.warning("Could not re-apply current patch before repair")
             return None
 
     cleaned_response = _strip_incomplete_diff(response)
-    applied = apply_model_response(repo_dir, cleaned_response, logger)
+    applied, unapplied = apply_model_response_with_missing(repo_dir, cleaned_response, logger)
+    if applied and unapplied:
+        logger.warning(
+            "Repair response only partially applied; rejecting incomplete repair: %s",
+            sorted(unapplied),
+        )
+        _restore_repair_context()
+        return None
     if not applied:
         # Try to salvage a partial diff if the response was truncated mid-hunk.
         from patch_utils import extract_partial_diff, is_truncated_diff
@@ -805,9 +820,16 @@ def _apply_repair_and_capture(
             partial = extract_partial_diff(response)
             if partial:
                 logger.info("Attempting to apply partial truncated diff for repair")
-                applied = apply_model_response(repo_dir, partial, logger)
-                if applied:
+                applied, unapplied = apply_model_response_with_missing(repo_dir, partial, logger)
+                if applied and not unapplied:
                     cleaned_response = partial
+                elif applied:
+                    logger.warning(
+                        "Partial truncated repair only partially applied; rejecting: %s",
+                        sorted(unapplied),
+                    )
+                    _restore_repair_context()
+                    return None
         if not applied:
             return None
     new_patch = capture_patch_on_host(repo_dir, logger, base_commit=base_commit)
@@ -1018,7 +1040,7 @@ def run_ensemble_seed_generation(
         run_cmd,
         stop_and_remove_container,
     )
-    from patch_utils import apply_model_response
+    from patch_utils import apply_model_response_with_missing
 
     instance_id = instance["instance_id"]
     base_commit = instance["base_commit"]
@@ -1074,12 +1096,14 @@ def run_ensemble_seed_generation(
         response_path = log_dir / f"{instance_id}.ensemble.{profile}.response.md"
         response_path.write_text(response, encoding="utf-8")
 
-        applied = apply_model_response(host_repo_dir, response, logger)
-        if not applied:
+        applied, unapplied = apply_model_response_with_missing(host_repo_dir, response, logger)
+        if not applied or unapplied:
             logger.warning(
-                "Ensemble seed %s for %s could not be applied; skipping",
+                "Ensemble seed %s for %s could not be fully applied; skipping (applied=%s, unapplied=%s)",
                 profile,
                 instance_id,
+                applied,
+                sorted(unapplied),
             )
             # Reset so a partial/failed apply does not leak into the next seed.
             run_cmd(

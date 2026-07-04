@@ -2,6 +2,7 @@
 
 import logging
 import os
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -47,9 +48,24 @@ def test_entryscript_has_exit_trap_for_output_json():
 def test_entryscript_clears_stale_output_before_tests():
     """Stale output.json from a prior iteration must be removed before tests run."""
     script = tdr._build_entryscript(_minimal_instance())
+    status_write_idx = script.index("echo $apply_status > /workspace/patch_apply_status.txt")
     run_idx = script.index("bash /workspace/run_script.sh")
-    clear_idx = script.index("rm -f /workspace/output.json")
+    clear_idx = script.index("rm -f /workspace/output.json\n", status_write_idx)
     assert clear_idx < run_idx
+
+
+def test_entryscript_preserves_patch_status_for_compile_gate():
+    """Successful patch status must survive test execution for host compile checks."""
+    script = tdr._build_entryscript(_minimal_instance())
+    initial_clear_idx = script.index("rm -f /workspace/output.json /workspace/patch_apply_status.txt")
+    apply_idx = script.index("git apply -v /workspace/patch.diff")
+    status_write_idx = script.index("echo $apply_status > /workspace/patch_apply_status.txt")
+    test_clear_idx = script.index("rm -f /workspace/output.json\n", status_write_idx)
+    run_idx = script.index("bash /workspace/run_script.sh")
+
+    assert initial_clear_idx < apply_idx
+    assert status_write_idx < test_clear_idx < run_idx
+    assert "/workspace/patch_apply_status.txt" not in script[test_clear_idx:run_idx]
 
 
 def test_entryscript_passes_tests_as_separate_quoted_args():
@@ -229,3 +245,56 @@ def _run_tdr_once(tmp_path, monkeypatch, patch_status: str):
         iteration=0,
     )
     return calls
+
+
+def test_repair_rejects_partial_search_replace(tmp_path):
+    """TDR repair must not capture patches when one SEARCH/REPLACE block failed."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test User"],
+        check=True,
+    )
+    (repo / "a.txt").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True)
+    base_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    search = "<" * 7 + " SEARCH"
+    divider = "=" * 7
+    replace = ">" * 7 + " REPLACE"
+    response = f"""### FILE: a.txt
+{search}
+old
+{divider}
+new
+{replace}
+
+### FILE: missing.txt
+{search}
+old
+{divider}
+new
+{replace}
+"""
+
+    patch = tdr._apply_repair_and_capture(
+        repo,
+        base_commit,
+        current_patch="",
+        response=response,
+        logger=logging.getLogger("test_tdr"),
+    )
+
+    assert patch is None
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "old\n"

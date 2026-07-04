@@ -3,7 +3,7 @@
 
 Runs a subset of SWE-bench Pro instances through ``run_selfware.py`` using
 several cheap OpenRouter model profiles and produces a JSON/CSV summary of
-patch sizes and success flags.
+patch sizes, harness completion, and evaluator-backed solve flags.
 
 This script does not call any model API itself; it shells out to the harness.
 """
@@ -26,6 +26,7 @@ from typing import Any
 
 DEFAULT_SAMPLE_FILE = Path(__file__).resolve().parent / "sample_50.jsonl"
 DEFAULT_HARNESS = Path(__file__).resolve().parent / "run_selfware.py"
+DEFAULT_EVALUATOR = Path(__file__).resolve().parent / "evaluate_predictions.py"
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "projecte2e" / "config"
 DEFAULT_BINARY = Path(__file__).resolve().parents[2] / "target" / "release" / "selfware"
 DEFAULT_OUTPUT_BASE = Path(__file__).resolve().parent / "matrix_outputs"
@@ -157,6 +158,41 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Print the commands that would be run without executing them.",
+    )
+    parser.add_argument(
+        "--evaluate",
+        dest="evaluate",
+        action="store_true",
+        default=True,
+        help="Run evaluate_predictions.py after generation and report solve success (default).",
+    )
+    parser.add_argument(
+        "--no-evaluate",
+        dest="evaluate",
+        action="store_false",
+        help="Skip evaluator and report only harness completion/patch sizes.",
+    )
+    parser.add_argument(
+        "--evaluator",
+        default=str(DEFAULT_EVALUATOR),
+        help="Path to evaluate_predictions.py.",
+    )
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=1,
+        help="Number of evaluation workers per model profile (default: 1).",
+    )
+    parser.add_argument(
+        "--eval-timeout",
+        type=int,
+        default=600,
+        help="Per-instance evaluator test timeout in seconds (default: 600).",
+    )
+    parser.add_argument(
+        "--skip-eval-pre-pull",
+        action="store_true",
+        help="Pass --skip-pre-pull to evaluate_predictions.py.",
     )
     return parser.parse_args()
 
@@ -293,13 +329,13 @@ def build_harness_command(
     return cmd
 
 
-def read_patch_size(output_dir: Path, instance_id: str) -> tuple[int, int]:
-    """Return (patch_chars, patch_lines) from the last matching record in predictions.jsonl."""
+def read_last_prediction(output_dir: Path, instance_id: str) -> dict[str, Any] | None:
+    """Return the last prediction record for ``instance_id`` from an output dir."""
     predictions_path = output_dir / "predictions.jsonl"
     if not predictions_path.exists():
-        return 0, 0
+        return None
     try:
-        last_patch = ""
+        last_record: dict[str, Any] | None = None
         with open(predictions_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -310,12 +346,169 @@ def read_patch_size(output_dir: Path, instance_id: str) -> tuple[int, int]:
                 except json.JSONDecodeError:
                     continue
                 if record.get("instance_id") == instance_id:
-                    patch = record.get("patch", "") or ""
-                    last_patch = patch
-        return len(last_patch), len(last_patch.splitlines())
+                    last_record = record
+        return last_record
     except OSError:
         pass
-    return 0, 0
+    return None
+
+
+def read_patch_size(output_dir: Path, instance_id: str) -> tuple[int, int]:
+    """Return (patch_chars, patch_lines) from the last matching prediction."""
+    record = read_last_prediction(output_dir, instance_id)
+    if record is None:
+        return 0, 0
+    patch = record.get("patch", "") or ""
+    return len(patch), len(patch.splitlines())
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def write_profile_eval_inputs(
+    args: argparse.Namespace,
+    profile: str,
+    instance_ids: list[str],
+    sample_rows: dict[str, dict[str, Any]],
+) -> tuple[Path, Path, list[str]]:
+    """Write model-level predictions/sample files for the standard evaluator."""
+    output_base = Path(args.output_base)
+    profile_dir = output_base / profile
+
+    predictions: list[dict[str, Any]] = []
+    missing_predictions: list[str] = []
+    for instance_id in instance_ids:
+        record = read_last_prediction(profile_dir / instance_id, instance_id)
+        if record is None:
+            missing_predictions.append(instance_id)
+            continue
+        predictions.append(record)
+
+    sample_subset: list[dict[str, Any]] = []
+    for instance_id in instance_ids:
+        row = sample_rows.get(instance_id)
+        if row is not None:
+            sample_subset.append(row)
+
+    predictions_path = profile_dir / "predictions.jsonl"
+    sample_path = profile_dir / "sample.jsonl"
+    _write_jsonl(predictions_path, predictions)
+    _write_jsonl(sample_path, sample_subset)
+    return predictions_path, sample_path, missing_predictions
+
+
+def apply_evaluation_report(
+    results: list[dict[str, Any]],
+    profile: str,
+    report: dict[str, Any],
+) -> None:
+    """Attach per-instance evaluator results and make success mean overall pass."""
+    by_key = {
+        (result["model_profile"], result["instance_id"]): result
+        for result in results
+    }
+    for evaluated in report.get("per_instance", []):
+        instance_id = evaluated.get("instance_id")
+        result = by_key.get((profile, instance_id))
+        if result is None:
+            continue
+        error = evaluated.get("error")
+        overall_pass = bool(evaluated.get("overall_pass"))
+        result.update(
+            {
+                "evaluation_error": error,
+                "overall_pass": overall_pass,
+                "success": overall_pass,
+                "fail_to_pass_passed": evaluated.get("fail_to_pass_passed", 0),
+                "fail_to_pass_total": evaluated.get("fail_to_pass_total", 0),
+                "pass_to_pass_passed": evaluated.get("pass_to_pass_passed", 0),
+                "pass_to_pass_total": evaluated.get("pass_to_pass_total", 0),
+            }
+        )
+
+
+def run_evaluations(
+    args: argparse.Namespace,
+    models: list[str],
+    instance_ids: list[str],
+    results: list[dict[str, Any]],
+    logger: logging.Logger,
+) -> int:
+    """Run the standard evaluator once per model and attach solve metrics."""
+    evaluator_path = Path(args.evaluator)
+    if not evaluator_path.exists():
+        logger.error("Evaluator not found: %s", evaluator_path)
+        return len(models)
+
+    sample_rows = {row["instance_id"]: row for row in load_sample(Path(args.sample_file))}
+    failed_profiles = 0
+
+    for profile in models:
+        predictions_path, sample_path, missing = write_profile_eval_inputs(
+            args, profile, instance_ids, sample_rows
+        )
+        if missing:
+            logger.warning(
+                "[%s] %d/%d selected instance(s) missing predictions before evaluation: %s",
+                profile,
+                len(missing),
+                len(instance_ids),
+                ", ".join(missing[:5]) + ("..." if len(missing) > 5 else ""),
+            )
+
+        eval_dir = Path(args.output_base) / profile / "eval"
+        cmd = [
+            sys.executable,
+            str(evaluator_path),
+            "--predictions",
+            str(predictions_path),
+            "--sample-file",
+            str(sample_path),
+            "--output-dir",
+            str(eval_dir),
+            "--workers",
+            str(args.eval_workers),
+            "--test-timeout",
+            str(args.eval_timeout),
+        ]
+        if args.skip_eval_pre_pull:
+            cmd.append("--skip-pre-pull")
+
+        logger.info("[%s] starting evaluator", profile)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=None)
+        report_path = eval_dir / "evaluation_report.json"
+        if proc.returncode != 0 or not report_path.exists():
+            failed_profiles += 1
+            logger.error(
+                "[%s] evaluator failed with rc=%s (stderr tail: %s)",
+                profile,
+                proc.returncode,
+                proc.stderr[-1000:].strip(),
+            )
+            for result in results:
+                if result["model_profile"] == profile:
+                    result["evaluation_returncode"] = proc.returncode
+                    result["evaluation_error"] = "evaluator failed"
+            continue
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        apply_evaluation_report(results, profile, report)
+        for result in results:
+            if result["model_profile"] == profile:
+                result["evaluation_returncode"] = proc.returncode
+                result["evaluation_report"] = str(report_path)
+        logger.info(
+            "[%s] evaluator complete: %s/%s overall passed",
+            profile,
+            report.get("overall_passed_instances", 0),
+            report.get("total_instances", 0),
+        )
+
+    return failed_profiles
 
 
 def run_model_matrix(
@@ -361,6 +554,7 @@ def run_model_matrix(
                     "returncode": -1,
                     "patch_chars": 0,
                     "patch_lines": 0,
+                    "harness_success": False,
                     "success": False,
                     "duration_seconds": 0.0,
                     "command": " ".join(cmd),
@@ -371,9 +565,9 @@ def run_model_matrix(
 
         duration = time.monotonic() - start
         patch_chars, patch_lines = read_patch_size(output_dir, instance_id)
-        success = proc.returncode == 0
+        harness_success = proc.returncode == 0
 
-        if not success:
+        if not harness_success:
             logger.warning(
                 "[%s / %s] harness exited %s (stderr tail: %s)",
                 profile,
@@ -399,7 +593,8 @@ def run_model_matrix(
                 "returncode": proc.returncode,
                 "patch_chars": patch_chars,
                 "patch_lines": patch_lines,
-                "success": success,
+                "harness_success": harness_success,
+                "success": harness_success,
                 "duration_seconds": round(duration, 2),
                 "command": " ".join(cmd),
             }
@@ -451,9 +646,18 @@ def write_summary(
         "small_model": args.small_model,
         "retry_failures": args.retry_failures,
         "force_edit": args.force_edit,
+        "evaluate": args.evaluate,
         "few_shot_examples": args.few_shot_examples,
         "total_runs": len(results),
         "successful_runs": sum(1 for r in results if r["success"]),
+        "harness_successful_runs": sum(
+            1 for r in results if r.get("harness_success", r["success"])
+        ),
+        "evaluated_runs": sum(1 for r in results if "overall_pass" in r),
+        "solved_runs": sum(1 for r in results if r.get("overall_pass") is True),
+        "evaluation_failed_runs": sum(
+            1 for r in results if r.get("evaluation_error") == "evaluator failed"
+        ),
         "results": results,
     }
 
@@ -470,7 +674,16 @@ def write_summary(
             "returncode",
             "patch_chars",
             "patch_lines",
+            "harness_success",
             "success",
+            "overall_pass",
+            "fail_to_pass_passed",
+            "fail_to_pass_total",
+            "pass_to_pass_passed",
+            "pass_to_pass_total",
+            "evaluation_error",
+            "evaluation_returncode",
+            "evaluation_report",
             "duration_seconds",
             "command",
         ]
@@ -515,10 +728,15 @@ def main() -> int:
     if args.dry_run:
         print(f"Dry-run: would test {len(instance_ids)} instance(s) against {len(models)} model profile(s)")
         print(f"Output base: {output_base}")
+        print(f"Evaluation: {'enabled' if args.evaluate else 'disabled'}")
         print()
         for cmd in plan_runs(args, models, instance_ids):
             print(" ".join(cmd))
         return 0
+
+    if args.evaluate and not Path(args.evaluator).exists():
+        print(f"Evaluator not found: {args.evaluator}", file=sys.stderr)
+        return 1
 
     logger = setup_logging(output_base)
     logger.info("Starting small-model matrix")
@@ -551,14 +769,37 @@ def main() -> int:
                 except Exception as exc:
                     logger.error("Model profile %s failed: %s", profile, exc)
 
+    evaluation_failures = 0
+    if args.evaluate:
+        evaluation_failures = run_evaluations(
+            args, models, instance_ids, all_results, logger
+        )
+
     all_results.sort(key=lambda r: (r["model_profile"], r["instance_id"]))
     write_summary(output_base, all_results, args)
 
-    success_count = sum(1 for r in all_results if r["success"])
-    logger.info(
-        "Matrix complete: %d/%d runs succeeded", success_count, len(all_results)
+    harness_success_count = sum(
+        1 for r in all_results if r.get("harness_success", r["success"])
     )
-    return 0 if success_count == len(all_results) else 1
+    solved_count = sum(1 for r in all_results if r.get("overall_pass") is True)
+    if args.evaluate:
+        logger.info(
+            "Matrix complete: %d/%d harness runs succeeded; %d/%d evaluated runs solved",
+            harness_success_count,
+            len(all_results),
+            solved_count,
+            len(all_results),
+        )
+    else:
+        logger.info(
+            "Matrix complete: %d/%d harness runs succeeded",
+            harness_success_count,
+            len(all_results),
+        )
+    if evaluation_failures:
+        logger.error("%d evaluator profile(s) failed", evaluation_failures)
+        return 1
+    return 0 if harness_success_count == len(all_results) else 1
 
 
 if __name__ == "__main__":
