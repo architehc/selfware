@@ -896,6 +896,19 @@ impl Agent {
         // lacking a FILES: line.
         if self.check_files_guard(has_write_tool) {
             info!("Blocked premature edit: no FILES: checklist yet");
+            // Correct the turn artifact: this edit was blocked and never dispatched,
+            // so it must not stay recorded as ExecutedTools (ART-EXEC-MISLABEL).
+            self.write_turn_artifact(
+                artifact_step,
+                chat_metadata.as_ref(),
+                &parsed_tool_calls_for_artifact,
+                super::turn_artifacts::AgentDecision::Refused {
+                    reason: "blocked: no FILES: checklist before the first edit".to_string(),
+                },
+                &content,
+                response.reasoning_content.as_deref(),
+            )
+            .await;
             self.messages.push(crate::api::types::Message::user(
                 "Your edit was NOT applied and has been discarded — no FILES: checklist was \
                  provided yet. First output a line `FILES: <path>` naming the file(s) you will \

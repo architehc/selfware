@@ -1219,6 +1219,7 @@ impl Agent {
 
     pub(super) fn clear_failed_tool_attempts(&mut self) {
         self.recent_failed_tool_attempts.clear();
+        self.escalated_edit_args_hashes.clear();
         self.consecutive_suppressions = 0;
     }
 
@@ -1450,6 +1451,39 @@ impl Agent {
         if tool_name == "file_edit" {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    // If this exact edit was already escalated once, suppress the
+                    // repeat WITHOUT re-reading and re-injecting the whole file —
+                    // the model already has the content (EDIT-RETRY-REINJECT).
+                    if self.escalated_edit_args_hashes.contains(&args_hash) {
+                        let short = format!(
+                            "<selfware_system_directive>\n\
+                             file_edit for {} keeps failing (old_str not found) and you were \
+                             already given the full file content. Use file_write to replace the \
+                             ENTIRE file now — do not retry file_edit.\n\
+                             </selfware_system_directive>",
+                            path
+                        );
+                        self.push_tool_result_message(
+                            use_native_fc,
+                            call_id,
+                            tool_name,
+                            false,
+                            &short,
+                        )
+                        .await;
+                        self.log_tool_call(
+                            tool_name,
+                            args_str,
+                            "edit_reescalation_suppressed",
+                            false,
+                            start_time,
+                            false,
+                        );
+                        self.consecutive_suppressions += 1;
+                        return true;
+                    }
+                    self.escalated_edit_args_hashes.insert(args_hash);
+
                     let edit_fail_count = self
                         .recent_failed_tool_attempts
                         .iter()
