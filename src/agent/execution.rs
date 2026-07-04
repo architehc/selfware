@@ -477,6 +477,25 @@ impl Agent {
             Ok(ActionPrompt::ForceFallback) => {
                 let (tool_name, tool_args) = self.pick_smart_fallback(&content);
 
+                // Lifetime stall accounting for mutation tasks. The fallback below
+                // "succeeds" and resets the consecutive counter every turn, so a model
+                // that keeps emitting tool-less final answers on a mutation task loops
+                // to MAX_ITERATIONS (observed at $4–$22/run). This counter is immune
+                // to that reset — it clears only on a real mutating call — and aborts
+                // early with the same FAKE_COMPLETE diagnosis, ~10× cheaper.
+                if self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0 {
+                    self.mutation_gate_rejections += 1;
+                    const MAX_MUTATION_FALLBACK_STALLS: usize = 8;
+                    if self.mutation_gate_rejections >= MAX_MUTATION_FALLBACK_STALLS {
+                        bail!(
+                            "FAKE_COMPLETE_LOOP: {} no-tool turns auto-recovered by fallback on a \
+                             mutation-required task with 0 mutating tool calls — the model is not \
+                             converging to an edit; aborting early instead of burning iterations",
+                            self.mutation_gate_rejections
+                        );
+                    }
+                }
+
                 // If the only fallback is directory_tree (nothing new to load),
                 // the model is stuck and should just answer with what it has.
                 if tool_name == super::FALLBACK_TOOL_NAME {
