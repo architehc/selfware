@@ -336,12 +336,22 @@ impl YoloManager {
             }
         }
 
-        // Check any tool classified as destructive (file_delete, container_remove, etc.)
-        let metadata = crate::safety::default_tool_metadata(tool_name);
-        if metadata.destructive && !self.config.allow_destructive_shell {
-            return YoloDecision::RequireConfirmation(
-                "Destructive operation requires confirmation".to_string(),
-            );
+        // Check any tool classified as destructive (file_delete, container_remove, etc.).
+        // Tools with a more specific per-argument check above (shell_exec,
+        // pty_shell, git_push) are excluded here: those tools are broadly
+        // classified `destructive: true` in tool_metadata regardless of the
+        // actual command/args, so without this exclusion every single
+        // shell_exec call -- including harmless ones like `ls` -- would
+        // require confirmation whenever `allow_destructive_shell` is false
+        // (the default), which is exactly the setting every production
+        // config in this repo uses for headless/unattended runs.
+        if !matches!(tool_name, "shell_exec" | "pty_shell" | "git_push") {
+            let metadata = crate::safety::default_tool_metadata(tool_name);
+            if metadata.destructive && !self.config.allow_destructive_shell {
+                return YoloDecision::RequireConfirmation(
+                    "Destructive operation requires confirmation".to_string(),
+                );
+            }
         }
 
         YoloDecision::AutoApprove
@@ -1035,6 +1045,25 @@ mod tests {
 
         // Should auto-approve since destructive shell is enabled
         // and it's not in the forbidden list
+        assert_eq!(decision, YoloDecision::AutoApprove);
+    }
+
+    #[test]
+    fn test_harmless_shell_command_auto_approved_even_with_destructive_shell_disallowed() {
+        // Regression test: shell_exec is broadly classified `destructive: true`
+        // in tool_metadata regardless of the actual command. The blanket
+        // "any destructive tool requires confirmation" fallback must not
+        // apply to shell_exec/pty_shell/git_push -- they have their own
+        // more specific per-argument checks above it -- otherwise every
+        // harmless shell command would require confirmation whenever
+        // allow_destructive_shell is false (the default in every production
+        // config in this repo).
+        let config = YoloConfig::fully_autonomous(); // allow_destructive_shell: false
+        let manager = YoloManager::new(config);
+
+        let args = serde_json::json!({"command": "echo hello"});
+        let decision = manager.should_auto_approve("shell_exec", &args);
+
         assert_eq!(decision, YoloDecision::AutoApprove);
     }
 

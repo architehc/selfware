@@ -423,6 +423,11 @@ pub struct Agent {
     tools: ToolRegistry,
     memory: AgentMemory,
     safety: SafetyChecker,
+    /// Enforces the YOLO-mode safety floor (forbidden operations, protected
+    /// paths, destructive shell/git-push gating, dangerous container mounts)
+    /// that must hold even when `needs_confirmation()` says no prompt is
+    /// needed. See `confirm_tool_execution` in `tool_dispatch.rs`.
+    yolo_manager: crate::safety::yolo::YoloManager,
     config: Config,
     loop_control: AgentLoop,
     messages: Vec<Message>,
@@ -627,6 +632,23 @@ impl Agent {
         let safety = SafetyChecker::new(&config.safety);
         // Keep global init as fallback for tools not yet migrated to per-instance config.
         init_safety_config(&config.safety);
+        let yolo_manager = {
+            use crate::safety::yolo::YoloConfig as SafetyYoloConfig;
+            let is_yolo_mode = matches!(
+                config.execution_mode,
+                crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon
+            );
+            crate::safety::yolo::YoloManager::new(SafetyYoloConfig {
+                enabled: is_yolo_mode || config.yolo.enabled,
+                max_operations: config.yolo.max_operations,
+                max_hours: config.yolo.max_hours,
+                allow_git_push: config.yolo.allow_git_push,
+                allow_destructive_shell: config.yolo.allow_destructive_shell,
+                audit_log_path: config.yolo.audit_log_path.clone(),
+                status_interval: config.yolo.status_interval,
+                ..Default::default()
+            })
+        };
         let loop_control = AgentLoop::new(config.agent.max_iterations);
         // Compressor is created later, after max_context_tokens is calculated.
         // See the block near "Calculate max_context_tokens" below.
@@ -1049,6 +1071,7 @@ To call a tool, use this EXACT XML structure:
             tools,
             memory,
             safety,
+            yolo_manager,
             config,
             loop_control,
             messages,

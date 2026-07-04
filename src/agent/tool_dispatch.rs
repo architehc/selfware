@@ -2550,6 +2550,23 @@ impl Agent {
         (call_id, use_native_fc, fake_call)
     }
 
+    /// Push a `<tool_result><skipped>...</skipped></tool_result>` (or native
+    /// tool-message equivalent) recording that a tool call was denied/skipped
+    /// without being executed.
+    fn push_tool_skip_message(&mut self, call_id: &str, use_native_fc: bool, msg: &str) {
+        if use_native_fc {
+            self.messages.push(Message::tool(
+                serde_json::json!({"skipped": msg}).to_string(),
+                call_id,
+            ));
+        } else {
+            self.messages.push(Message::user(format!(
+                "<tool_result><skipped>{}</skipped></tool_result>",
+                msg
+            )));
+        }
+    }
+
     async fn confirm_tool_execution(
         &mut self,
         name: &str,
@@ -2557,10 +2574,93 @@ impl Agent {
         call_id: &str,
         use_native_fc: bool,
     ) -> Result<bool> {
+        // In Yolo/Daemon mode `needs_confirmation()` below always says "no
+        // need to ask" -- but the YoloManager still enforces a hard floor:
+        // forbidden operations, protected paths, dangerous container mounts,
+        // and (unless explicitly allowed in config) destructive shell
+        // commands / unconfirmed git pushes. This is the only place those
+        // checks run, so it must not be skipped.
+        if matches!(
+            self.config.execution_mode,
+            crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon
+        ) {
+            let args_value: serde_json::Value =
+                serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
+            let decision = self.yolo_manager.should_auto_approve(name, &args_value);
+            use crate::safety::yolo::YoloDecision;
+            match decision {
+                YoloDecision::AutoApprove => {
+                    self.yolo_manager.record_operation(
+                        name,
+                        &args_value,
+                        true,
+                        crate::safety::yolo::AuditResult::Success,
+                        0,
+                    );
+                }
+                YoloDecision::Block(reason) => {
+                    self.yolo_manager.record_operation(
+                        name,
+                        &args_value,
+                        false,
+                        crate::safety::yolo::AuditResult::Blocked(reason.clone()),
+                        0,
+                    );
+                    self.push_tool_skip_message(
+                        call_id,
+                        use_native_fc,
+                        &format!("Blocked by YOLO safety gate: {}", reason),
+                    );
+                    return Ok(false);
+                }
+                YoloDecision::RequireConfirmation(reason) => {
+                    // No operator to ask in a headless/daemon run -- fail
+                    // closed rather than silently allowing or hanging.
+                    if !self.is_interactive() && !self.has_tui_renderer() {
+                        self.yolo_manager.record_operation(
+                            name,
+                            &args_value,
+                            false,
+                            crate::safety::yolo::AuditResult::Blocked(reason.clone()),
+                            0,
+                        );
+                        self.push_tool_skip_message(
+                            call_id,
+                            use_native_fc,
+                            &format!(
+                                "Denied (unattended session, no operator to confirm): {}",
+                                reason
+                            ),
+                        );
+                        return Ok(false);
+                    }
+                    // An operator is present (CLI or TUI): fall through to
+                    // the normal interactive prompt below instead of the
+                    // usual YOLO auto-approve.
+                    return self
+                        .prompt_tool_confirmation(name, args_str, call_id, use_native_fc)
+                        .await;
+                }
+            }
+        }
+
         if !self.needs_confirmation(name) {
             return Ok(true);
         }
 
+        self.prompt_tool_confirmation(name, args_str, call_id, use_native_fc)
+            .await
+    }
+
+    /// Interactive (CLI or TUI) yes/no confirmation prompt for a single tool
+    /// call. Assumes the caller has already decided confirmation is required.
+    async fn prompt_tool_confirmation(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+    ) -> Result<bool> {
         let args_preview: String = args_str
             .chars()
             .take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS)
@@ -2582,18 +2682,11 @@ impl Agent {
             });
             let approved = self.await_tui_permission_response().await;
             if !approved {
-                let skip_msg = "Tool execution denied via TUI permission prompt";
-                if use_native_fc {
-                    self.messages.push(Message::tool(
-                        serde_json::json!({"skipped": skip_msg}).to_string(),
-                        call_id,
-                    ));
-                } else {
-                    self.messages.push(Message::user(format!(
-                        "<tool_result><skipped>{}</skipped></tool_result>",
-                        skip_msg
-                    )));
-                }
+                self.push_tool_skip_message(
+                    call_id,
+                    use_native_fc,
+                    "Tool execution denied via TUI permission prompt",
+                );
             }
             return Ok(approved);
         }
@@ -2636,17 +2729,7 @@ impl Agent {
 
         let skip_msg = "Tool execution skipped by user";
         cli_println!("{} {}", "⏭️".bright_yellow(), skip_msg);
-        if use_native_fc {
-            self.messages.push(Message::tool(
-                serde_json::json!({"skipped": skip_msg}).to_string(),
-                call_id,
-            ));
-        } else {
-            self.messages.push(Message::user(format!(
-                "<tool_result><skipped>{}</skipped></tool_result>",
-                skip_msg
-            )));
-        }
+        self.push_tool_skip_message(call_id, use_native_fc, skip_msg);
         Ok(false)
     }
 
@@ -4542,5 +4625,141 @@ mod tests {
         // file_* tools are always mutating.
         assert!(classify_shell_as_mutating("file_write", None));
         assert!(classify_shell_as_mutating("file_edit", None));
+    }
+
+    #[tokio::test]
+    async fn tui_permission_response_denies_when_no_channel_wired() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // No channel wired at all -- must fail closed, not auto-approve.
+        assert!(!agent.await_tui_permission_response().await);
+        server.stop().await;
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn tui_permission_response_relays_user_answer() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        agent = agent.with_permission_channel(rx);
+        tx.send(true).unwrap();
+        assert!(agent.await_tui_permission_response().await);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        agent = agent.with_permission_channel(rx);
+        tx.send(false).unwrap();
+        assert!(!agent.await_tui_permission_response().await);
+
+        server.stop().await;
+    }
+
+    #[cfg(feature = "tui")]
+    #[tokio::test]
+    async fn tui_permission_response_denies_when_sender_dropped() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        agent = agent.with_permission_channel(rx);
+        drop(tx); // simulate the TUI thread exiting without answering
+
+        assert!(!agent.await_tui_permission_response().await);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn yolo_gate_blocks_protected_path_write() {
+        // YoloConfig's protected_paths (e.g. /etc) apply to any tool with a
+        // path/file/directory argument, independent of the pre-existing
+        // SafetyChecker/path_validator's allowed_paths -- this test's config
+        // permissively allows "/**" and only denies .env/.ssh/secrets, so
+        // /etc is only blocked because of the (newly wired-in) YOLO gate.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![(
+                "file_write".to_string(),
+                r#"{"path":"/etc/selfware-test.conf","content":"x"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let last = agent.messages.last().expect("expected a skip message");
+        assert!(last.content.text().contains("Blocked by YOLO safety gate"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn yolo_gate_denies_destructive_shell_without_operator() {
+        // Destructive but not forbidden -- YoloDecision::RequireConfirmation.
+        // No CLI/TUI operator is attached in this test harness, so it must
+        // fail closed rather than hang or silently auto-approve.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![(
+                "shell_exec".to_string(),
+                r#"{"command":"rm -rf ./scratch"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let last = agent.messages.last().expect("expected a skip message");
+        assert!(last.content.text().contains("unattended session"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn yolo_gate_allows_non_destructive_shell_command() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![(
+                "shell_exec".to_string(),
+                r#"{"command":"echo hello"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let last = agent.messages.last().expect("expected a tool result");
+        assert!(!last.content.text().contains("Blocked by YOLO safety gate"));
+        assert!(!last.content.text().contains("unattended session"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn yolo_gate_denies_git_push_when_disallowed() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.yolo.allow_git_push = false;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![(
+                "git_push".to_string(),
+                r#"{"branch":"main"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let last = agent.messages.last().expect("expected a skip message");
+        assert!(last.content.text().contains("unattended session"));
+        server.stop().await;
     }
 }
