@@ -25,6 +25,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from repo_templates import load_repo_template
+
 
 DEFAULT_EXCLUDE_DIRS: frozenset[str] = frozenset({
     ".git",
@@ -1719,6 +1721,7 @@ def build_agentless_prompt(
         ">>>>>>> REPLACE"
     )
 
+    repo_template = load_repo_template(repo)
     sections = [
         "You are a coding assistant. Produce the smallest source-code patch that fixes the issue below.",
         "Do NOT explain your reasoning. Return ONLY SEARCH/REPLACE blocks.",
@@ -1764,6 +1767,12 @@ def build_agentless_prompt(
         "Example for CREATING a new file (empty SEARCH block):",
         create_example,
         "",
+        *([
+            "",
+            "REPO-SPECIFIC INSTRUCTIONS:",
+            repo_template,
+            "",
+        ] if repo_template else []),
         "CRITICAL RULES:",
         "- Modify source files only. Do NOT edit tests, configs, docs, or unrelated code.",
         "- Keep the patch minimal: no formatting, comment, or unrelated changes.",
@@ -1812,6 +1821,7 @@ def build_agentless_retry_prompt(
     repo_path = Path(repo_path)
     problem = instance.get("problem_statement", "") or ""
     requirements = instance.get("requirements", "") or ""
+    repo = instance.get("repo", "")
     search_text = problem
     if requirements:
         search_text += "\n" + requirements
@@ -1863,6 +1873,7 @@ def build_agentless_retry_prompt(
         snippet_files, repo_path, new_files=new_files
     )
 
+    repo_template = load_repo_template(repo)
     sections = [
         "Your previous SEARCH/REPLACE patch could not be applied because the SEARCH text did not match the source files exactly.",
         "Return ONLY corrected SEARCH/REPLACE blocks. Do NOT explain. Do NOT add markdown fences around the whole patch.",
@@ -1892,6 +1903,12 @@ def build_agentless_retry_prompt(
         "new line(s) to replace them with",
         ">>>>>>> REPLACE",
         "",
+        *([
+            "",
+            "REPO-SPECIFIC INSTRUCTIONS:",
+            repo_template,
+            "",
+        ] if repo_template else []),
         "CRITICAL RULES:",
         "- Modify source files only. Do NOT edit tests, configs, docs, or unrelated code.",
         "- Keep the patch minimal: no formatting, comment, or unrelated changes.",
