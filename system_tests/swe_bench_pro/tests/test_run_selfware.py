@@ -1231,6 +1231,10 @@ def _make_base_args(output_dir: Path, sample_file: Path | None = None, **overrid
         ensemble_models=None,
         ensemble_timeout=180,
         ensemble_max_tokens=4096,
+        critic_iterations=0,
+        critic_model_profile=None,
+        critic_timeout=300,
+        critic_max_tokens=16384,
     )
     kwargs.update(overrides)
     return argparse.Namespace(**kwargs)
@@ -1250,6 +1254,8 @@ def _runtime_flags(**overrides):
         "small_model": False,
         "adaptive": False,
         "compact_prompt": False,
+        "critic_iterations": 0,
+        "critic_model_profile": None,
     }
     defaults.update(overrides)
     return defaults

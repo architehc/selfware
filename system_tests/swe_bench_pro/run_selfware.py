@@ -87,6 +87,11 @@ from patch_utils import (
     _apply_diff_with_check,
 )
 
+from critic import (
+    build_critic_prompt,
+    run_critic_loop,
+)
+
 try:
     from datasets import load_dataset
 except Exception as exc:  # pragma: no cover - harness dependency check
@@ -153,6 +158,8 @@ _RUN_RESUME_FLAG_FIELDS: tuple[str, ...] = (
     "small_model",
     "adaptive",
     "compact_prompt",
+    "critic_iterations",
+    "critic_model_profile",
 )
 
 
@@ -526,6 +533,29 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4096,
         help="Maximum tokens for each ensemble seed generation API call (default: 4096).",
+    )
+    parser.add_argument(
+        "--critic-iterations",
+        type=int,
+        default=0,
+        help="Enable P2 critic loop: after a patch passes the compile gate, re-run fail-to-pass tests and ask a critic model to refine the patch up to N times (default: 0).",
+    )
+    parser.add_argument(
+        "--critic-model-profile",
+        default=None,
+        help="OpenRouter profile for the P2 critic model. Defaults to --model-profile.",
+    )
+    parser.add_argument(
+        "--critic-timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for each critic model API call (default: 300).",
+    )
+    parser.add_argument(
+        "--critic-max-tokens",
+        type=int,
+        default=16384,
+        help="Maximum tokens for each critic model API call (default: 16384).",
     )
     return parser.parse_args()
 
@@ -3632,6 +3662,28 @@ def process_instance(
             logger.warning("selfware did not succeed for %s; empty/short patch likely", instance_id)
 
         # ------------------------------------------------------------------
+        # P2 critic loop: if the patch passes the compile gate but fails F2P,
+        # ask a critic model to refine it.
+        # ------------------------------------------------------------------
+        if patch.strip() and args.critic_iterations > 0:
+            critic_config = getattr(args, "critic_config", None) or args.patch_config
+            patch = run_critic_loop(
+                host_repo_dir,
+                instance,
+                patch,
+                critic_config,
+                args,
+                log_dir,
+                logger,
+                metadata=metadata,
+            )
+            save_prediction(
+                output_dir, instance_id, patch, logger, metadata,
+                error_code=error_code, provider=provider, model_profile=model_profile,
+            )
+            success = bool(patch.strip())
+
+        # ------------------------------------------------------------------
         # Test-driven repair loop: validate in the official container and
         # ask a repair model to fix remaining test failures.
         # ------------------------------------------------------------------
@@ -3793,6 +3845,18 @@ def main() -> int:
             return 1
         args.repair_config = load_config(repair_config_path)
         logger.info("Using repair config: %s", repair_config_path)
+
+    if args.critic_iterations > 0:
+        if args.critic_model_profile:
+            critic_config_path = Path(args.config_dir) / f"openrouter_{args.critic_model_profile}.toml"
+            if not critic_config_path.exists():
+                logger.error("Critic config not found: %s", critic_config_path)
+                return 1
+            args.critic_config = load_config(critic_config_path)
+            logger.info("Using critic config: %s", critic_config_path)
+        else:
+            args.critic_config = args.patch_config
+            logger.info("Using main model config for critic loop")
 
     instances = select_instances(dataset, args, existing, logger)
     if not instances:
