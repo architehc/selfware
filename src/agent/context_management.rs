@@ -660,15 +660,19 @@ impl Agent {
             .sum()
     }
 
-    /// Get the best estimate of total tokens used
+    /// Best estimate of the CURRENT context size (tokens in the next request).
+    ///
+    /// This must reflect the assembled message set, not lifetime usage.
+    /// `output::get_total_tokens()` is a cumulative process-global counter
+    /// (`fetch_add` per API turn), so — because every turn re-sends the whole
+    /// conversation — using it here made the reported size grow without bound and
+    /// exceed the model window (observed 1332k against a 1049k window, latching
+    /// compaction and the status bar at 100%). Estimate from the actual messages
+    /// and memory instead (CTX-CUMULATIVE-TOKENS).
     pub(super) fn total_tokens_used(&self) -> usize {
-        // Use the MAX of: API-reported usage, message estimates, memory estimates
-        // API usage may be 0 if the provider doesn't send usage chunks
-        let (api_prompt, api_completion) = output::get_total_tokens();
-        let api_tokens = (api_prompt + api_completion) as usize;
         let msg_tokens = self.estimate_messages_tokens();
         let mem_tokens = self.memory.total_tokens();
-        api_tokens.max(msg_tokens).max(mem_tokens)
+        msg_tokens.max(mem_tokens)
     }
 
     pub(super) fn context_usage_pct(&self) -> f64 {

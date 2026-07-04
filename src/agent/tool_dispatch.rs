@@ -611,6 +611,36 @@ pub(super) fn task_requires_mutation(task_context: &str) -> bool {
     ]
     .iter()
     .any(|needle| mention_is_unnegated(&lower, needle))
+        || make_is_mutation_imperative(&lower)
+}
+
+/// True if the task contains an un-negated "make X ..." mutation imperative
+/// ("Make parse_port return Result"), excluding the qualifier phrases
+/// "make sure"/"make certain" and (via the trailing space) the filename
+/// "makefile". Without this, a task phrased purely as "Make X do Y" with no
+/// other mutation verb was classified read-only and every anti-fake-complete
+/// gate silently no-oped (MUT-MAKE-VERB).
+fn make_is_mutation_imperative(lower: &str) -> bool {
+    const NEGATORS: &[&str] = &["not ", "n't ", "never ", "without ", "avoid ", "no "];
+    let mut start = 0;
+    while let Some(pos) = lower[start..].find("make ") {
+        let abs = start + pos;
+        let prefix = &lower[..abs];
+        let win_start = prefix
+            .char_indices()
+            .rev()
+            .take(16)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let negated = NEGATORS.iter().any(|n| prefix[win_start..].contains(n));
+        let after = lower[abs + "make ".len()..].trim_start();
+        if !negated && !after.starts_with("sure") && !after.starts_with("certain") {
+            return true;
+        }
+        start = abs + "make ".len();
+    }
+    false
 }
 
 pub(super) fn shell_command_is_observational(command: &str) -> bool {
@@ -4088,6 +4118,24 @@ mod tests {
         ));
         // Plain mutation instructions are unaffected.
         assert!(task_requires_mutation("edit main.rs to add a field"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_make_imperative() {
+        // Regression (MUT-MAKE-VERB): "Make X return Y" with no other mutation
+        // verb must be treated as a mutation task so the safety gates arm.
+        assert!(task_requires_mutation(
+            "Make parse_port return Result<u16, String> instead of panicking"
+        ));
+        assert!(task_requires_mutation("Make the function generic over T"));
+        // But qualifier phrases are not mutations on their own.
+        assert!(!task_requires_mutation(
+            "Make sure you understand how the parser works"
+        ));
+        assert!(!task_requires_mutation("Explain the makefile targets"));
+        assert!(!task_requires_mutation(
+            "Review the code but do not make any changes"
+        ));
     }
 
     #[test]

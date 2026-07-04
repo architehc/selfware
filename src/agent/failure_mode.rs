@@ -156,6 +156,34 @@ impl FailureMode {
                         advice: "disable assistant prefill or switch to a server build that accepts the prefill format".to_string(),
                     };
                 }
+                // Explicit loop-abort markers carry their own diagnosis. Match them
+                // BEFORE the counter fallback (which otherwise misfiles them as
+                // MaxIterations with the exact-wrong "raise max_iterations" advice
+                // even though the ceiling was never approached — FAIL-MISLABEL-MAXITER).
+                if reason.contains("FAKE_COMPLETE_LOOP") {
+                    return FailureMode {
+                        kind: FailureKind::FakeComplete,
+                        evidence: format!(
+                            "aborted early: repeated final answers with 0 mutating tool calls ({} total)",
+                            total_calls
+                        ),
+                        advice: "the model will not edit — narrow/clarify the task or supply the target file and exact change; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains("NONTERM_PROSE_NO_TOOL") {
+                    return FailureMode {
+                        kind: FailureKind::NontermProse,
+                        evidence: "aborted early: repeated prose-only turns with no tool call".to_string(),
+                        advice: "the model narrated instead of acting — ensure native tool-calling works and give a concrete single-goal task; do NOT raise max_iterations".to_string(),
+                    };
+                }
+                if reason.contains("READ_LOOP_NO_EDIT") {
+                    return FailureMode {
+                        kind: FailureKind::ReadLoop,
+                        evidence: "aborted early: read-only tool loop on a mutation task with 0 edits".to_string(),
+                        advice: "the model kept reading without editing — point it at the file to change; do NOT raise max_iterations".to_string(),
+                    };
+                }
                 if reason.contains("Max iterations") {
                     return classify_max_iter_failure(
                         mutating,
