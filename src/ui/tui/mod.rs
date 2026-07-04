@@ -19,8 +19,9 @@ mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
 pub use dashboard_widgets::{
-    render_active_tools, render_garden_health, render_help_overlay, render_logs, render_status_bar,
-    ActiveTool, DashboardState, LogEntry, LogLevel, SharedDashboardState, TuiEvent,
+    render_active_tools, render_garden_health, render_help_overlay, render_logs,
+    render_permission_overlay, render_status_bar, ActiveTool, DashboardState, LogEntry, LogLevel,
+    SharedDashboardState, TuiEvent,
 };
 pub use garden_view::{render_garden_view, GardenFocus, GardenItem, GardenView};
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
@@ -986,11 +987,16 @@ pub fn run_tui_dashboard_with_events(
     shared_state: SharedDashboardState,
     event_rx: std::sync::mpsc::Receiver<TuiEvent>,
     user_input_tx: std::sync::mpsc::Sender<String>,
+    permission_response_tx: std::sync::mpsc::Sender<bool>,
 ) -> Result<()> {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
     let mut layout_engine = LayoutEngine::new();
     let mut garden_view = garden_view::GardenView::new();
+    // Set while a tool's `AgentEvent::PermissionRequested` is awaiting a
+    // y/n answer. While this is `Some`, normal key handling is suspended
+    // and a modal is rendered instead (see the permission-modal block below).
+    let mut pending_permission: Option<(String, String)> = None;
     let mut show_help = false;
     let mut paused = false;
     let mut quit_armed_at: Option<Instant> = None;
@@ -1074,6 +1080,9 @@ pub fn run_tui_dashboard_with_events(
                             let status = if *success { "completed" } else { "failed" };
                             app.add_tool_message(name, &format!("{} ({}ms)", status, duration_ms));
                         }
+                        TuiEvent::PermissionRequested { tool_name, reason } => {
+                            pending_permission = Some((tool_name.clone(), reason.clone()));
+                        }
                         _ => {}
                     }
                     with_dashboard_state(&shared_state, |state| state.process_event(event));
@@ -1156,6 +1165,10 @@ pub fn run_tui_dashboard_with_events(
                 if paused {
                     render_pause_indicator(frame, area);
                 }
+
+                if let Some((tool_name, reason)) = &pending_permission {
+                    render_permission_overlay(frame, area, tool_name, reason);
+                }
             })?;
             last_draw = Instant::now();
             needs_redraw = false;
@@ -1164,6 +1177,35 @@ pub fn run_tui_dashboard_with_events(
         // Handle events (same logic as run_tui_dashboard)
         if let Some(Event::Key(key)) = read_event(100)? {
             needs_redraw = true;
+
+            // A permission modal takes over all key input until answered --
+            // it must never fall through to chat input, quit handling, etc.
+            if let Some((tool_name, reason)) = pending_permission.take() {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let _ = permission_response_tx.send(true);
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Info, &format!("Allowed: {}", tool_name));
+                        });
+                    }
+                    KeyCode::Char('n')
+                    | KeyCode::Char('N')
+                    | KeyCode::Esc
+                    | KeyCode::Enter => {
+                        let _ = permission_response_tx.send(false);
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Warning, &format!("Denied: {}", tool_name));
+                        });
+                    }
+                    _ => {
+                        // Any other key: keep the modal open, don't consume
+                        // a decision yet.
+                        pending_permission = Some((tool_name, reason));
+                    }
+                }
+                continue;
+            }
+
             let in_input_mode = app.state == AppState::Chatting && !show_help;
             let allow_q_quit = !in_input_mode || app.input.is_empty();
 

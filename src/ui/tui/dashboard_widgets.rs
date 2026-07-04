@@ -617,6 +617,67 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(list, inner);
 }
 
+/// Renders a blocking permission-confirmation modal over the dashboard.
+///
+/// While this is shown, the main loop routes all key input to the
+/// yes/no/deny handler instead of chat/quit/pane navigation -- see
+/// `run_tui_dashboard_with_events` for the key-interception logic that
+/// pairs with this.
+pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str, reason: &str) {
+    let width = 60.min(area.width.saturating_sub(4)).max(20);
+    let height = 8.min(area.height.saturating_sub(4)).max(6);
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+
+    let modal_area = Rect::new(x, y, width, height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(TuiPalette::AMBER))
+        .style(Style::default().bg(TuiPalette::INK))
+        .title(Span::styled(
+            " Permission Required ",
+            Style::default()
+                .fg(TuiPalette::AMBER)
+                .add_modifier(Modifier::BOLD),
+        ));
+
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Tool: ", TuiPalette::muted_style()),
+            Span::styled(
+                tool_name,
+                Style::default()
+                    .fg(TuiPalette::PARCHMENT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(reason, TuiPalette::muted_style())),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[y]",
+                Style::default()
+                    .fg(TuiPalette::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" allow   "),
+            Span::styled(
+                "[n/Esc]",
+                Style::default()
+                    .fg(TuiPalette::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" deny"),
+        ]),
+    ];
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

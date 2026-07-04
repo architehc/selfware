@@ -2561,13 +2561,6 @@ impl Agent {
             return Ok(true);
         }
 
-        // When TUI is active, auto-approve — the TUI can't show stdin prompts
-        if self.has_tui_renderer() {
-            return Ok(true);
-        }
-
-        use tokio::io::AsyncWriteExt;
-
         let args_preview: String = args_str
             .chars()
             .take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS)
@@ -2577,6 +2570,35 @@ impl Agent {
         } else {
             args_preview
         };
+
+        // When TUI is active, route the confirmation through the TUI's own
+        // permission modal instead of writing to stdout/stdin (which the TUI
+        // owns) or auto-approving.
+        if self.has_tui_renderer() {
+            use super::tui_events::AgentEvent;
+            self.emit_event(AgentEvent::PermissionRequested {
+                tool_name: name.to_string(),
+                reason: format!("Args: {}", args_display),
+            });
+            let approved = self.await_tui_permission_response().await;
+            if !approved {
+                let skip_msg = "Tool execution denied via TUI permission prompt";
+                if use_native_fc {
+                    self.messages.push(Message::tool(
+                        serde_json::json!({"skipped": skip_msg}).to_string(),
+                        call_id,
+                    ));
+                } else {
+                    self.messages.push(Message::user(format!(
+                        "<tool_result><skipped>{}</skipped></tool_result>",
+                        skip_msg
+                    )));
+                }
+            }
+            return Ok(approved);
+        }
+
+        use tokio::io::AsyncWriteExt;
 
         if !self.is_interactive() {
             return Err(AgentError::ConfirmationRequired {

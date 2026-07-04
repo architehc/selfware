@@ -625,10 +625,12 @@ pub async fn run() -> Result<()> {
         if should_use_tui {
             let (event_tx, event_rx) = mpsc::channel();
             let (user_input_tx, user_input_rx) = mpsc::channel();
+            let (permission_tx, permission_rx) = mpsc::channel();
 
             let mut agent = Agent::new(config.clone())
                 .await?
-                .with_event_sender(event_tx);
+                .with_event_sender(event_tx)
+                .with_permission_channel(permission_rx);
 
             let shared_state = crate::ui::tui::SharedDashboardState::default();
             let model = config.model.clone();
@@ -644,6 +646,7 @@ pub async fn run() -> Result<()> {
                     shared_state,
                     event_rx,
                     user_input_tx,
+                    permission_tx,
                 )
             });
 

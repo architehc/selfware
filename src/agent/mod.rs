@@ -453,6 +453,15 @@ pub struct Agent {
     checkpoint_persisted_once: bool,
     /// Event emitter for real-time updates (TUI or other)
     events: Arc<dyn EventEmitter>,
+    /// Receives the user's y/n answer to a TUI permission prompt. `None`
+    /// when not running under the TUI (or the TUI never wired one up) --
+    /// in that case a confirmation-gated tool must fall back to the CLI
+    /// prompt rather than being silently approved or denied.
+    ///
+    /// Wrapped in `Arc<Mutex<..>>` (rather than held directly) so `Agent`
+    /// stays `Sync` -- some call sites `tokio::spawn` futures that hold
+    /// `&Agent` across an await point.
+    permission_response_rx: Option<Arc<std::sync::Mutex<std::sync::mpsc::Receiver<bool>>>>,
     /// Structured progress emitter (stderr / TUI / future Prometheus, etc).
     /// Defaults to a no-op; set to a `StderrProgressEmitter` for headless runs.
     progress_emitter: Arc<dyn progress::ProgressEmitter>,
@@ -1058,6 +1067,7 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
             events: Arc::new(NoopEmitter),
+            permission_response_rx: None,
             progress_emitter: Arc::new(progress::NoopProgressEmitter),
             edit_history,
             last_assistant_response: String::new(),
@@ -1136,6 +1146,34 @@ To call a tool, use this EXACT XML structure:
     ) -> Self {
         self.events = Arc::new(tui_events::TuiEmitter::new(tx));
         self
+    }
+
+    /// Wire up the channel the TUI uses to answer permission prompts
+    /// (see `AgentEvent::PermissionRequested` / `await_tui_permission_response`).
+    #[cfg(feature = "tui")]
+    pub fn with_permission_channel(mut self, rx: std::sync::mpsc::Receiver<bool>) -> Self {
+        self.permission_response_rx = Some(Arc::new(std::sync::Mutex::new(rx)));
+        self
+    }
+
+    /// Block (off the async executor) until the TUI answers a permission
+    /// prompt this agent just emitted via `AgentEvent::PermissionRequested`.
+    ///
+    /// Fails closed: if the TUI never wired up a response channel, or the
+    /// channel is disconnected (TUI thread exited), the tool is denied
+    /// rather than silently approved.
+    async fn await_tui_permission_response(&mut self) -> bool {
+        let Some(rx) = self.permission_response_rx.clone() else {
+            warn!("TUI permission prompt requested but no response channel is wired up; denying");
+            return false;
+        };
+        tokio::task::spawn_blocking(move || {
+            rx.lock()
+                .map(|guard| guard.recv().unwrap_or(false))
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// Attach an evolution event bus. All existing AgentEvents will be
