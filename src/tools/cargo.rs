@@ -8,6 +8,27 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tracing::instrument;
 
+/// Resolve the `cargo` binary. Prefers PATH, but falls back to the standard
+/// rustup location (`~/.cargo/bin/cargo`) so the cargo tools work even when the
+/// agent process was launched without cargo on PATH (observed: cargo_check
+/// returned "No such file or directory" and the model then looped trying to
+/// verify via full-path shell commands that weren't credited as verification).
+fn cargo_program() -> std::path::PathBuf {
+    let exe = if cfg!(windows) { "cargo.exe" } else { "cargo" };
+    if let Some(path) = std::env::var_os("PATH") {
+        if std::env::split_paths(&path).any(|dir| dir.join(exe).is_file()) {
+            return std::path::PathBuf::from("cargo");
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join(".cargo").join("bin").join(exe);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    std::path::PathBuf::from("cargo")
+}
+
 /// Maximum output buffer size from a cargo command (16 MB).
 /// Prevents a runaway cargo process from consuming unlimited memory.
 const MAX_CARGO_OUTPUT_SIZE: usize = 16 * 1024 * 1024;
@@ -174,7 +195,7 @@ impl Tool for CargoTest {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let mut cmd = tokio::process::Command::new("cargo");
+        let mut cmd = tokio::process::Command::new(cargo_program());
         cmd.arg("test");
 
         if let Some(pkg) = args.get("package").and_then(|v| v.as_str()) {
@@ -276,7 +297,7 @@ impl Tool for CargoCheck {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let mut cmd = tokio::process::Command::new("cargo");
+        let mut cmd = tokio::process::Command::new(cargo_program());
         cmd.arg("check");
         cmd.arg("--message-format=json");
         cmd.kill_on_drop(true);
@@ -391,7 +412,7 @@ impl Tool for CargoClippy {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let mut cmd = tokio::process::Command::new("cargo");
+        let mut cmd = tokio::process::Command::new(cargo_program());
         cmd.arg("clippy");
         cmd.arg("--message-format=json");
         cmd.kill_on_drop(true);
@@ -498,7 +519,7 @@ impl Tool for CargoFmt {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let mut cmd = tokio::process::Command::new("cargo");
+        let mut cmd = tokio::process::Command::new(cargo_program());
         cmd.arg("fmt");
         cmd.kill_on_drop(true);
 

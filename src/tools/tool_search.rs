@@ -48,11 +48,46 @@ pub struct ToolSearchResult {
 
 impl ToolSearchable for Vec<ToolSearchResult> {
     fn search(&self, query: &str, limit: usize) -> Vec<ToolSearchResult> {
-        let query_lower = query.to_lowercase();
+        // Tokenize the query and match on individual words, normalizing `_` to a
+        // space in the haystack so a query like "cargo check" finds the tool named
+        // "cargo_check" (a plain substring match missed it — space vs underscore —
+        // which left the model unable to discover the verification tool).
+        let q = query.to_lowercase();
+        let tokens: Vec<String> = q
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() >= 2)
+            .map(String::from)
+            .collect();
+        let haystack = |r: &ToolSearchResult| {
+            format!("{} {}", r.name, r.description)
+                .to_lowercase()
+                .replace('_', " ")
+        };
+        if tokens.is_empty() {
+            return self
+                .iter()
+                .filter(|r| haystack(r).contains(&q))
+                .take(limit)
+                .cloned()
+                .collect();
+        }
+        // Prefer tools matching ALL query tokens; fall back to ANY if none match all.
+        let all: Vec<ToolSearchResult> = self
+            .iter()
+            .filter(|r| {
+                let h = haystack(r);
+                tokens.iter().all(|t| h.contains(t.as_str()))
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        if !all.is_empty() {
+            return all;
+        }
         self.iter()
             .filter(|r| {
-                r.name.to_lowercase().contains(&query_lower)
-                    || r.description.to_lowercase().contains(&query_lower)
+                let h = haystack(r);
+                tokens.iter().any(|t| h.contains(t.as_str()))
             })
             .take(limit)
             .cloned()

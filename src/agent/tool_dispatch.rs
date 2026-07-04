@@ -765,11 +765,35 @@ pub(super) fn shell_command_is_verification(command: &str) -> bool {
         "sqlfluff lint",
     ];
 
-    verification_prefixes.iter().any(|prefix| {
-        normalized == *prefix
-            || normalized.starts_with(&format!("{} ", prefix))
-            || normalized.starts_with(&format!("{} --", prefix))
-    })
+    // Match the verification command at a shell command boundary, not just at the
+    // very start — so a full path ("~/.cargo/bin/cargo check"), a cd prefix
+    // ("cd sub && cargo check"), or an env prefix still counts. Otherwise a model
+    // that works around a PATH issue by invoking cargo by full path never gets
+    // its verification credited and loops on StaleVerification.
+    verification_prefixes
+        .iter()
+        .any(|prefix| command_contains_at_boundary(&normalized, prefix))
+}
+
+/// True if `prefix` occurs in `command` starting at a shell command boundary
+/// (start of string, or after a space / `/` / `&` / `;` / `|` / tab) and is
+/// followed by end-of-command (space, `-`, `;`, `&`, `|`, tab, or end).
+fn command_contains_at_boundary(command: &str, prefix: &str) -> bool {
+    let bytes = command.as_bytes();
+    let mut from = 0;
+    while let Some(rel) = command[from..].find(prefix) {
+        let abs = from + rel;
+        let before_ok =
+            abs == 0 || matches!(bytes[abs - 1], b' ' | b'/' | b'&' | b';' | b'|' | b'\t' | b'(');
+        let after = abs + prefix.len();
+        let after_ok = after >= command.len()
+            || matches!(bytes[after], b' ' | b'-' | b';' | b'&' | b'|' | b'\t');
+        if before_ok && after_ok {
+            return true;
+        }
+        from = abs + 1;
+    }
+    false
 }
 
 pub(super) fn tool_call_is_verification(name: &str, args_str: &str) -> bool {
@@ -3359,6 +3383,22 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::testing::mock_api::MockLlmServer;
+
+    #[test]
+    fn test_shell_verification_matches_at_command_boundary() {
+        // Plain and flagged forms still match.
+        assert!(shell_command_is_verification("cargo check"));
+        assert!(shell_command_is_verification("cargo test --all"));
+        // Regression: full-path / cd-prefixed invocations must be credited too
+        // (the model used ~/.cargo/bin/cargo to dodge a PATH issue and looped).
+        assert!(shell_command_is_verification("~/.cargo/bin/cargo check"));
+        assert!(shell_command_is_verification("/usr/bin/cargo check --message-format short"));
+        assert!(shell_command_is_verification("cd crates/foo && cargo test"));
+        // Non-verification commands are not falsely credited.
+        assert!(!shell_command_is_verification("cargo add serde"));
+        assert!(!shell_command_is_verification("echo cargo checkers"));
+        assert!(!shell_command_is_verification("ls -la"));
+    }
 
     fn test_config(endpoint: String) -> Config {
         Config {
