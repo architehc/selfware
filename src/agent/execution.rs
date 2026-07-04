@@ -644,6 +644,23 @@ impl Agent {
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate().await {
                 info!("Completion gate rejected: {}", gate_msg);
+                // Early hard-stop for the fake-complete loop: on a mutation-required
+                // task with zero mutating calls, the model alternating {final answer →
+                // gate rejection → read-only tool} resets every consecutive counter and
+                // previously burned all 100 iterations (observed: $4–$22 per run before
+                // MAX_ITERATIONS). This lifetime counter is immune to those resets.
+                if self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0 {
+                    self.mutation_gate_rejections += 1;
+                    const MAX_MUTATION_GATE_REJECTIONS: usize = 4;
+                    if self.mutation_gate_rejections >= MAX_MUTATION_GATE_REJECTIONS {
+                        bail!(
+                            "FAKE_COMPLETE_LOOP: completion gate rejected {} final answers on a \
+                             mutation-required task with 0 mutating tool calls — the model is not \
+                             converging to an edit; aborting early instead of burning iterations",
+                            self.mutation_gate_rejections
+                        );
+                    }
+                }
                 // Refine the previously-written turn artifact: this turn ended
                 // with a gate refusal, not a plain "no tool call".
                 self.write_turn_artifact(

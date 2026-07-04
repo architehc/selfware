@@ -514,6 +514,11 @@ pub struct Agent {
     /// any real tool call. Used to force-finalize a read-only task that keeps
     /// narrating without answering, instead of spinning to MAX_ITERATIONS.
     readonly_no_tool_streak: usize,
+    /// Lifetime count of completion-gate rejections on a mutation-required task
+    /// with zero mutating calls. NOT reset by read-only tool calls or recovery
+    /// nudges (that reset is what previously let this loop burn 100 iterations);
+    /// reset only at task start and on a real mutating tool call.
+    mutation_gate_rejections: usize,
     /// Lifetime total of no-action prompts across the entire task.
     /// Unlike the consecutive counter, this is NOT reset when the model produces
     /// a non-intent response. It provides a hard abort ceiling.
@@ -1114,6 +1119,7 @@ To call a tool, use this EXACT XML structure:
             pending_synthesis: None,
             consecutive_no_action_prompts: 0,
             readonly_no_tool_streak: 0,
+            mutation_gate_rejections: 0,
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             permission_store,
@@ -2061,6 +2067,7 @@ To call a tool, use this EXACT XML structure:
     pub(super) fn reset_failure_mode_counters(&mut self) {
         self.mutating_tool_call_count = 0;
         self.total_tool_call_count = 0;
+        self.mutation_gate_rejections = 0;
         self.progress_guard_fire_count = 0;
         self.mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
@@ -2076,6 +2083,7 @@ To call a tool, use this EXACT XML structure:
     pub(super) fn note_mutating_tool_call(&mut self) {
         self.mutating_tool_call_count += 1;
         self.mutation_sequence += 1;
+        self.mutation_gate_rejections = 0;
         self.last_failed_verification_summary = None;
         self.post_edit_observational_shell_count = 0;
     }

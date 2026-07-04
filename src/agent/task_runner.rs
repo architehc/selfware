@@ -28,6 +28,9 @@ fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
     msg.contains("READ_LOOP_NO_EDIT")
         || msg.contains("EDIT_FAILURE_LOOP_AFTER_EDIT")
         || msg.contains("VERIFICATION_LOOP_AFTER_EDIT")
+        // Repeated fake-complete on a mutation task: the model has demonstrated it
+        // will not edit; auto-recovery nudges just multiply the cost (observed 10×).
+        || msg.contains("FAKE_COMPLETE_LOOP")
 }
 
 impl Agent {
@@ -1197,6 +1200,10 @@ mod tests {
         )));
         assert!(is_fatal_loop_error(&anyhow::anyhow!(
             "VERIFICATION_LOOP_AFTER_EDIT: repeated checks"
+        )));
+        // Regression: repeated fake-completes must be terminal, not re-nudged 10×.
+        assert!(is_fatal_loop_error(&anyhow::anyhow!(
+            "FAKE_COMPLETE_LOOP: completion gate rejected 4 final answers"
         )));
         assert!(!is_fatal_loop_error(&anyhow::anyhow!(
             "temporary API failure"
