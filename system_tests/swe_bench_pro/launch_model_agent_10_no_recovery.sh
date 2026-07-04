@@ -1,5 +1,6 @@
 #!/bin/bash
-# Launch one model on 10 SWE-bench Pro instances with recovery/fallback disabled.
+# Launch one model on 10 SWE-bench Pro instances with NO recovery at all.
+# This is the true baseline arm: no --retry-failures, no --diff-fallback, no --early-diff-fallback.
 # Usage: launch_model_agent_10_no_recovery.sh <model-profile> <podman-root-index>
 set -euo pipefail
 
@@ -27,7 +28,7 @@ fi
 
 cd "${SWE_DIR}"
 
-echo "[$(date -Iseconds)] Starting model=${MODEL_PROFILE} no_recovery podman_root=${PODMAN_ROOT} out=${OUT_DIR}" | tee -a "${LOG_FILE}"
+echo "[$(date -Iseconds)] Starting model=${MODEL_PROFILE} no-recovery podman_root=${PODMAN_ROOT} out=${OUT_DIR}" | tee -a "${LOG_FILE}"
 
 ${VENV} run_selfware.py \
   --model-profile "${MODEL_PROFILE}" \
@@ -41,10 +42,8 @@ ${VENV} run_selfware.py \
   --auto-agentless \
   --no-retry-failures \
   --no-diff-fallback \
-  --no-early-diff-fallback \
-  --no-small-model-diff-fallback \
   --fresh \
-  2>&1 | tee -a "${LOG_FILE}"
+  2>&1 | tee -a "${LOG_FILE}" || true
 
 echo "[$(date -Iseconds)] Predictions done; starting evaluation" | tee -a "${LOG_FILE}"
 
@@ -53,7 +52,7 @@ ${VENV} evaluate_predictions.py \
   --output-dir "${OUT_DIR}/eval" \
   --sample-file "${SAMPLE_FILE}" \
   --test-timeout 600 \
-  2>&1 | tee -a "${LOG_FILE}"
+  2>&1 | tee -a "${LOG_FILE}" || true
 
 echo "[$(date -Iseconds)] Evaluation done" | tee -a "${LOG_FILE}"
 
