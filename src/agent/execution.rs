@@ -363,6 +363,38 @@ impl Agent {
             self.files_checklist_seen = true;
         }
 
+        // Descriptive step line, printed now that the model's action for this step
+        // is known (a plain "Step N Executing..." before the call is uninformative).
+        // Shows the tool(s) being run with a hint of the first arg, or that the
+        // turn is a final answer / narration with no tool call.
+        {
+            let step_no = self.loop_control.current_step().saturating_add(1);
+            let desc = if let Some((name, args, _)) = tool_calls.first() {
+                let hint = serde_json::from_str::<serde_json::Value>(args)
+                    .ok()
+                    .and_then(|v| {
+                        ["path", "command", "query", "pattern", "file"]
+                            .iter()
+                            .find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from))
+                    })
+                    .map(|s| s.chars().take(56).collect::<String>());
+                let extra = if tool_calls.len() > 1 {
+                    format!(" (+{} more)", tool_calls.len() - 1)
+                } else {
+                    String::new()
+                };
+                match hint {
+                    Some(h) => format!("→ {} {}{}", name, h, extra),
+                    None => format!("→ {}{}", name, extra),
+                }
+            } else if super::recovery::strip_think_blocks(&content).trim().len() >= 40 {
+                "→ final answer".to_string()
+            } else {
+                "→ thinking (no tool call)".to_string()
+            };
+            output::step_start(step_no, &desc);
+        }
+
         // Convert XML-extracted CollectedToolCall back to the structured
         // ToolCall shape that goes into the artifact.  Use a deterministic
         // synthetic id when the XML branch produced none.

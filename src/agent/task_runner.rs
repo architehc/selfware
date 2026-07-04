@@ -650,9 +650,6 @@ impl Agent {
                     }
                     self.transition_from_planning_to_executing()?;
 
-                    if has_tool_calls && mode == LoopMode::NewTask {
-                        output::step_start(1, "Executing");
-                    }
                     match self
                         .execute_planned_tool_calls_if_any(task_description, has_tool_calls, 1)
                         .await
@@ -742,7 +739,9 @@ impl Agent {
                 }
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
-                    output::step_start(step + 1, "Executing");
+                    // The descriptive step line ("📝 Step N → <action>") is printed
+                    // inside execute_step_internal once the model's response is known;
+                    // a generic "Executing" here would just be uninformative noise.
                     if let Some(task_id) =
                         self.current_checkpoint.as_ref().map(|c| c.task_id.clone())
                     {
