@@ -31,6 +31,10 @@ fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         // Repeated fake-complete on a mutation task: the model has demonstrated it
         // will not edit; auto-recovery nudges just multiply the cost (observed 10×).
         || msg.contains("FAKE_COMPLETE_LOOP")
+        // NONTERM hard-stop: intended as a terminal abort, but it was neither in
+        // this list nor matched by is_no_action_error, so self-healing "recovered"
+        // it and retried at the same frozen step ~7× (LOOP-NONTERM-NOTFATAL).
+        || msg.contains("NONTERM_PROSE_NO_TOOL")
 }
 
 impl Agent {
@@ -1204,6 +1208,9 @@ mod tests {
         // Regression: repeated fake-completes must be terminal, not re-nudged 10×.
         assert!(is_fatal_loop_error(&anyhow::anyhow!(
             "FAKE_COMPLETE_LOOP: completion gate rejected 4 final answers"
+        )));
+        assert!(is_fatal_loop_error(&anyhow::anyhow!(
+            "NONTERM_PROSE_NO_TOOL: mutation-required task produced 6 consecutive no-tool turns"
         )));
         assert!(!is_fatal_loop_error(&anyhow::anyhow!(
             "temporary API failure"
