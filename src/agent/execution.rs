@@ -514,13 +514,25 @@ impl Agent {
             }
             self.readonly_no_tool_streak += 1;
             if self.readonly_no_tool_streak >= 6 && self.last_assistant_response.len() >= 40 {
-                info!(
-                    "Read-only task: force-finalizing after {} no-tool turns",
-                    self.readonly_no_tool_streak
-                );
-                let best = self.last_assistant_response.clone();
-                output::final_answer(&best);
-                return Ok(true);
+                // Prefer to force-finalize only when the completion gate is
+                // satisfied — otherwise we would emit a capability-disclaimer or a
+                // response missing a required tool as the "final answer" (found and
+                // fixed by GLM-5.2's own cycle-2 self-improvement pass; folded in).
+                // But keep a higher hard cap so a gate that keeps rejecting can't
+                // spin the read-only task to MAX_ITERATIONS — termination is still
+                // guaranteed as a last resort.
+                let gate_ok = self.check_completion_gate().await.is_none();
+                if gate_ok || self.readonly_no_tool_streak >= 12 {
+                    info!(
+                        "Read-only task: force-finalizing after {} no-tool turns (gate_ok={})",
+                        self.readonly_no_tool_streak, gate_ok
+                    );
+                    let best = self.last_assistant_response.clone();
+                    output::final_answer(&best);
+                    return Ok(true);
+                }
+                // Gate rejected and under the hard cap — fall through so the gate's
+                // rejection nudge is injected and the model can correct.
             }
             // else: fall through to the existing completion/fallback handling.
         }

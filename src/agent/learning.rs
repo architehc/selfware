@@ -15,6 +15,15 @@ impl Agent {
             "bug_fix"
         } else if task_lower.contains("document") || task_lower.contains("readme") {
             "documentation"
+        } else if [
+            "implement", "create", "add ", "edit", "modify", "update", "make ", "write ",
+        ]
+        .iter()
+        .any(|k| task_lower.contains(k))
+        {
+            // Previously fell into "general", coarsening prompt-stats for the most
+            // common (code-writing) task class (LEARN-TYPE-GENERAL).
+            "implementation"
         } else {
             "general"
         }

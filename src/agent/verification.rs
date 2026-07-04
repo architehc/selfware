@@ -120,6 +120,24 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         return false;
     }
 
+    // Whitelist recap/summary lead-ins: these ARE final answers, not descriptions
+    // of pending work (GATE-INCOMPLETE-FP). "Let me summarize: parse_port now
+    // returns Result." must not be rejected just because it opens with "let me".
+    const SUMMARY_LEADINS: &[&str] = &[
+        "let me summarize",
+        "let me recap",
+        "let me explain",
+        "let me describe",
+        "let me walk you through",
+        "to summarize",
+        "in summary",
+        "here is a summary",
+        "here's a summary",
+    ];
+    if SUMMARY_LEADINS.iter().any(|p| lower.starts_with(p)) {
+        return false;
+    }
+
     // A response that ends by announcing a next action (trailing colon) is a
     // lead-in, not a final answer — e.g. "Now let me check which module …:".
     if lower.ends_with(':') {
@@ -1133,6 +1151,14 @@ mod tests {
         // A genuine final answer is NOT flagged.
         assert!(!is_incomplete_action_response(
             "The two files are duplicates. shell_exec is the registered tool; shell.rs is unused."
+        ));
+        // GATE-INCOMPLETE-FP: recap/summary lead-ins are final answers, not
+        // descriptions of pending work.
+        assert!(!is_incomplete_action_response(
+            "Let me summarize: parse_port now returns Result<u16, String> and main exits on error."
+        ));
+        assert!(!is_incomplete_action_response(
+            "To summarize, the fix changes the return type and updates the caller."
         ));
     }
 
