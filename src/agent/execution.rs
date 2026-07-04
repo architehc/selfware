@@ -474,7 +474,10 @@ impl Agent {
                 self.last_assistant_response = clean;
                 return Ok(true);
             }
-            if clean.len() > self.last_assistant_response.len() {
+            // Track the LATEST substantial answer, not the longest ever seen — a
+            // later corrected answer must not be discarded in favor of an earlier,
+            // longer, wrong one (GATE-FORCE-FINALIZE).
+            if clean.len() >= 40 {
                 self.last_assistant_response = clean.clone();
             }
             self.readonly_no_tool_streak += 1;

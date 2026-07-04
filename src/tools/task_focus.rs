@@ -171,6 +171,28 @@ impl std::fmt::Display for TaskType {
 }
 
 /// Classify a task description into a task type.
+/// True if `word` appears in `haystack` as a whole word (bounded by non-
+/// alphanumeric characters on both sides). Prevents substring false positives
+/// like "ship" inside "relationship" or "page" inside a longer identifier.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let mut from = 0;
+    while let Some(pos) = haystack[from..].find(word) {
+        let abs = from + pos;
+        let before_ok = abs == 0
+            || !haystack[..abs]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let after = &haystack[abs + word.len()..];
+        let after_ok = !after.chars().next().is_some_and(|c| c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        from = abs + word.len();
+    }
+    false
+}
+
 pub fn classify_task(task: &str) -> TaskType {
     let t = task.to_lowercase();
 
@@ -199,11 +221,13 @@ pub fn classify_task(task: &str) -> TaskType {
     }
 
     // Ship/deploy — check first because "commit" could appear in edit tasks
-    if t.contains("commit") && (t.contains("push") || t.contains("ship") || t.contains("deploy"))
+    // Word-boundary matches so "ship"/"release" don't fire inside "relationship",
+    // "membership", "township", etc. (CLS-SHIP-SUBSTRING).
+    if t.contains("commit") && (t.contains("push") || contains_word(&t, "ship") || t.contains("deploy"))
         || t.contains("deploy")
-        || t.contains("release")
+        || contains_word(&t, "release")
         || t.contains("merge to main")
-        || t.contains("ship")
+        || contains_word(&t, "ship")
     {
         return TaskType::Ship;
     }
@@ -215,8 +239,10 @@ pub fn classify_task(task: &str) -> TaskType {
         || t.contains("vision_analyze")
         || t.contains("vision_compare")
         || t.contains("website")
-        || t.contains("page")
-        || t.contains("css")
+        // Word-boundary so "page"/"css" don't fire inside longer identifiers
+        // (CLS-VISUAL-SUBSTRING).
+        || contains_word(&t, "page")
+        || contains_word(&t, "css")
         || t.contains("ui look")
         || t.contains(".png")
         || t.contains(".jpg")
@@ -358,6 +384,23 @@ pub fn reorder_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_classify_word_boundary_no_substring_false_positives() {
+        // "ship" inside "relationship" must not route to Ship (CLS-SHIP-SUBSTRING).
+        assert_eq!(
+            classify_task("Fix the relationship manager bug"),
+            TaskType::Edit
+        );
+        // "page"/"css" as substrings of identifiers must not route to Visual.
+        assert_eq!(
+            classify_task("Refactor the pagerank scorer in ranker.rs"),
+            TaskType::Refactor
+        );
+        // Genuine whole-word matches still classify as before.
+        assert_eq!(classify_task("Ship the v2 release"), TaskType::Ship);
+        assert_eq!(classify_task("The login page is broken, fix it"), TaskType::Visual);
+    }
 
     #[test]
     fn test_classify_do_not_edit_is_read_only() {
