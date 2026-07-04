@@ -45,6 +45,8 @@ from harness_recovery import (
     write_recovery_config,
 )
 
+from repo_templates import load_repo_template
+
 from small_model_adapter import (
     _build_focused_test_oracle,
     _context_budgets,
@@ -1151,6 +1153,13 @@ def build_plan_prompt(instance: dict[str, Any]) -> str:
     """Build a very short prompt that asks the model for a fix plan."""
     tests = load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
+    repo = instance.get("repo", "")
+    repo_template = load_repo_template(repo)
+    template_section = (
+        f"\n\nRepo-specific instructions:\n{repo_template}"
+        if repo_template
+        else ""
+    )
     return (
         "You are a planning assistant. Given the issue below, identify the source files "
         "that need to be read/edited and describe the fix strategy in one sentence.\n\n"
@@ -1163,6 +1172,7 @@ def build_plan_prompt(instance: dict[str, Any]) -> str:
         "Reply exactly in this format (no markdown, no extra text):\n"
         "FILES: <comma-separated list of source file paths relative to the repo root>\n"
         "FIX: <one-sentence fix strategy>"
+        f"{template_section}"
     )
 
 

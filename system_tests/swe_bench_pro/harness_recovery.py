@@ -14,6 +14,8 @@ from typing import Any
 
 import tomli_w
 
+from repo_templates import load_repo_template
+
 from small_model_adapter import (
     _is_strong_identifier,
     _tokenize_problem,
@@ -272,6 +274,14 @@ def build_recovery_prompt(
     return "\n\n".join(parts)
 
 
+def _extract_repo_from_prompt(prompt_text: str) -> str:
+    """Pull an ``owner/name`` repo identifier from the prompt header."""
+    match = re.search(r"Repo:\s+(?:[^\s(]+\s+\()?([^@\s)]+)", prompt_text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
 def build_diff_fallback_prompt(
     prompt_text: str,
     ranked_files: list[str],
@@ -318,6 +328,16 @@ def build_diff_fallback_prompt(
         else "- Do NOT rewrite whole files or invent functions/types that are not already in the source snippets above.\n"
     )
 
+    repo = _extract_repo_from_prompt(prompt_text)
+    repo_template = load_repo_template(repo)
+    template_section: list[str] = []
+    if repo_template:
+        template_section = [
+            "Repo-specific instructions:",
+            repo_template,
+            "",
+        ]
+
     parts = [
         "[ONE-SHOT DIFF FALLBACK]",
         "",
@@ -330,6 +350,7 @@ def build_diff_fallback_prompt(
         "Top relevant source files (use these as the ground truth; do not invent code that does not match the files below):",
         snippets,
         "",
+        *template_section,
         "YOUR TASK:",
         "Output exactly ONE unified git diff (starting with `diff --git a/... b/...`) "
         "that fixes the issue above.",
