@@ -307,19 +307,16 @@ def build_diff_fallback_prompt(
     )
 
     example = (
-        "diff --git a/lib/auth/grpcserver.go b/lib/auth/grpcserver.go\n"
-        "index d569ceaa1e..e752edd8c4 100644\n"
-        "--- a/lib/auth/grpcserver.go\n"
-        "+++ b/lib/auth/grpcserver.go\n"
-        "@@ -104,7 +104,7 @@ func readHeaderAndPayload(reader io.Reader) (*MessageHeader, []byte, error) {\n"
+        "diff --git a/src/example.py b/src/example.py\n"
+        "--- a/src/example.py\n"
+        "+++ b/src/example.py\n"
+        "@@ -1,5 +1,5 @@\n"
+        " def limit():\n"
+        "-    return 16\n"
+        "+    return 48\n"
         " \n"
-        "     // Max BSON document size is 16MB\n"
-        "     // https://www.mongodb.com/docs/manual/reference/limits/#mongodb-limit-BSON-Document-Size\n"
-        "-    if length-headerSizeBytes >= 16*1024*1024 {\n"
-        "+    if length-headerSizeBytes >= 48*1024*1024 {\n"
-        "         return nil, nil, trace.BadParameter(\"exceeded the maximum document size, got length: %d\", length)\n"
-        "     }\n"
-        " \n"
+        " def unchanged():\n"
+        "     return True\n"
     )
 
     full_file_rule = (
@@ -351,17 +348,24 @@ def build_diff_fallback_prompt(
         snippets,
         "",
         *template_section,
+        "VALID DIFF CONTRACT:",
+        "- Output only unified diff text. Do not use markdown fences or explanations.",
+        "- The first line must be `diff --git a/<path> b/<path>`.",
+        "- Every file section must include `--- a/<path>`, `+++ b/<path>`, and at least one `@@ ... @@` hunk header.",
+        "- Omit `index ...` lines unless you copied them from an actual git diff. Do not invent fake SHA values.",
+        "- Do not repeat a `diff --git` section for the same file or duplicate a hunk.",
+        "- Stop immediately after the final hunk line.",
+        "",
         "YOUR TASK:",
         "Output exactly ONE unified git diff (starting with `diff --git a/... b/...`) "
         "that fixes the issue above.",
         "- Use 3 lines of context around each change and keep hunks small.",
         "- Modify source files only. Do NOT edit tests, configs, docs, or unrelated code.",
         full_file_rule,
-        "- Do not output explanations, markdown fences (```diff ... ```), or any text outside the diff.",
         "- The line numbers shown in the snippets are for reference only; do not include them in the diff.",
         "- The diff must apply cleanly with `git apply --check`.",
         "",
-        "Example format:",
+        "Valid minimal example format:",
         example,
     ]
     return "\n".join(parts)

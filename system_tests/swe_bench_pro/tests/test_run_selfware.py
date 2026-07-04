@@ -694,6 +694,41 @@ def test_call_chat_endpoint_length_finish_respects_context_window(monkeypatch):
     assert len(requests) == 1
 
 
+def test_call_chat_endpoint_can_disable_length_growth(monkeypatch):
+    """One-shot fallback calls can return a truncated response instead of expanding output."""
+    monkeypatch.setenv("SELFWARE_API_KEY", "test-key")
+
+    requests: list[dict[str, Any]] = []
+
+    def fake_urlopen(req, **_kwargs):
+        payload = json.loads(req.data.decode("utf-8"))
+        requests.append(payload)
+        return _FakeResponse({
+            "choices": [{"message": {"content": "trunc"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 6000},
+        })
+
+    monkeypatch.setattr("run_selfware.urllib.request.urlopen", fake_urlopen)
+
+    config = {
+        "endpoint": "http://test/v1",
+        "model": "glm-5.2",
+        "max_tokens": 6000,
+        "agent": {"context_window": 32000},
+    }
+    result = call_chat_endpoint(
+        config,
+        "prompt",
+        30,
+        logging.getLogger("test"),
+        allow_token_growth=False,
+    )
+
+    assert result == "trunc"
+    assert len(requests) == 1
+    assert requests[0]["max_tokens"] == 6000
+
+
 class _FakeResponse:
     def __init__(self, payload: dict[str, Any]):
         self._payload = payload
@@ -746,7 +781,10 @@ def test_run_diff_fallback_extracts_valid_unified_diff(tmp_path, monkeypatch):
         "+new\n"
     )
 
-    def _fake_chat(config, prompt, timeout, logger):
+    calls: list[dict[str, Any]] = []
+
+    def _fake_chat(config, prompt, timeout, logger, **kwargs):
+        calls.append(kwargs)
         return diff_text
 
     monkeypatch.setattr("run_selfware.call_chat_endpoint", _fake_chat)
@@ -764,7 +802,7 @@ def test_run_diff_fallback_extracts_valid_unified_diff(tmp_path, monkeypatch):
         instance,
         "prompt",
         ["foo.py"],
-        {},
+        {"max_tokens": 16384},
         args,
         log_dir,
         logging.getLogger("test"),
@@ -773,6 +811,62 @@ def test_run_diff_fallback_extracts_valid_unified_diff(tmp_path, monkeypatch):
     assert patch.strip()
     assert "+new" in patch
     assert "-old" in patch
+    assert calls[0]["max_tokens"] == 6000
+    assert calls[0]["allow_token_growth"] is False
+
+
+def test_run_diff_fallback_filters_bad_test_hunk_before_apply(tmp_path, monkeypatch):
+    """A malformed test hunk should not discard an applyable source hunk."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "foo.py").write_text("old\n", encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_foo.py").write_text("def test_foo(): pass\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    response = (
+        "diff --git a/foo.py b/foo.py\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+        "diff --git a/tests/test_foo.py b/tests/test_foo.py\n"
+        "@@ -1 +1,2 @@\n"
+        "+malformed without file headers\n"
+    )
+
+    monkeypatch.setattr(
+        "run_selfware.call_chat_endpoint",
+        lambda cfg, prompt, timeout, logger, **kwargs: response,
+    )
+
+    instance = {
+        "instance_id": "inst-filter-test-hunk",
+        "base_commit": "HEAD",
+        "test_patch": "",
+    }
+    args = argparse.Namespace(patch_timeout=30)
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    patch = run_diff_fallback(
+        repo,
+        instance,
+        "prompt",
+        ["foo.py", "tests/test_foo.py"],
+        {},
+        args,
+        log_dir,
+        logging.getLogger("test"),
+        "name",
+    )
+
+    assert "+new" in patch
+    assert "tests/test_foo.py" not in patch
+    assert (repo / "foo.py").read_text(encoding="utf-8") == "new\n"
 
 
 def test_run_diff_fallback_rejects_partial_search_replace(tmp_path, monkeypatch):
@@ -800,7 +894,10 @@ def test_run_diff_fallback_rejects_partial_search_replace(tmp_path, monkeypatch)
         ">>>>>>> REPLACE\n"
     )
 
-    monkeypatch.setattr("run_selfware.call_chat_endpoint", lambda cfg, prompt, timeout, logger: response)
+    monkeypatch.setattr(
+        "run_selfware.call_chat_endpoint",
+        lambda cfg, prompt, timeout, logger, **kwargs: response,
+    )
 
     instance = {
         "instance_id": "inst-partial-fallback",
@@ -851,7 +948,10 @@ def test_diff_recovery_rejects_partial_search_replace(tmp_path, monkeypatch):
         ">>>>>>> REPLACE\n"
     )
 
-    monkeypatch.setattr("run_selfware.call_chat_endpoint", lambda cfg, prompt, timeout, logger: response)
+    monkeypatch.setattr(
+        "run_selfware.call_chat_endpoint",
+        lambda cfg, prompt, timeout, logger, **kwargs: response,
+    )
 
     output_dir = tmp_path / "out"
     output_dir.mkdir()

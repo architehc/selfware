@@ -465,6 +465,24 @@ def test_build_diff_fallback_prompt_allows_full_file_replacement():
     assert "Do NOT rewrite whole files" not in prompt
 
 
+def test_build_diff_fallback_prompt_has_strict_diff_contract():
+    """The one-shot fallback prompt discourages malformed model diffs."""
+    from harness_recovery import build_diff_fallback_prompt
+
+    prompt = build_diff_fallback_prompt(
+        "Issue:\nfix bug\n",
+        ["a.py"],
+        "/tmp",
+        max_chars=100,
+        allow_full_file_replacement=True,
+    )
+    assert "VALID DIFF CONTRACT:" in prompt
+    assert "Do not invent fake SHA values" in prompt
+    assert "Do not repeat a `diff --git` section" in prompt
+    example = prompt.split("Valid minimal example format:", 1)[1]
+    assert "\nindex " not in example
+
+
 def test_build_diff_fallback_prompt_caps_snippet_length(tmp_path):
     """max_chars is respected in the generated prompt."""
     from harness_recovery import build_diff_fallback_prompt

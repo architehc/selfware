@@ -108,6 +108,7 @@ CONTAINER_SELFWARE_BIN = "/usr/local/bin/selfware"
 CONTAINER_CONFIG_PATH = "/tmp/selfware_config.toml"
 CONTAINER_PROMPT_PATH = "/tmp/task_prompt.txt"
 CONTAINER_REPO_DIR = "/app"
+DEFAULT_DIFF_FALLBACK_MAX_TOKENS = 6000
 
 # Repo root used for git provenance. run_selfware.py lives under
 # system_tests/swe_bench_pro/, so three parents point at the project root.
@@ -860,6 +861,7 @@ def call_chat_endpoint(
     *,
     max_tokens: int | None = None,
     temperature: float | None = None,
+    allow_token_growth: bool = True,
 ) -> str:
     """Send a single-turn prompt to the configured chat endpoint."""
     endpoint = normalize_endpoint(config.get("endpoint", DEFAULT_CHAT_ENDPOINT))
@@ -942,6 +944,14 @@ def call_chat_endpoint(
                 # budget so reasoning-heavy models (e.g. Gemini 2.5 Pro) have
                 # enough headroom to emit the actual code patch.
                 if finish_reason in ("length", "MAX_TOKENS", "max_tokens") and attempt < max_retries:
+                    if not allow_token_growth:
+                        logger.warning(
+                            "Chat response hit token limit (finish_reason=%s, completion_tokens=%s); "
+                            "token growth disabled for this call, returning truncated content",
+                            finish_reason,
+                            completion_tokens,
+                        )
+                        return content
                     next_max_tokens = min(effective_max_tokens * 2, absolute_max_tokens)
                     context_window = config.get("agent", {}).get("context_window") if config.get("agent") else None
                     prompt_tokens = usage.get("prompt_tokens")
@@ -1345,6 +1355,25 @@ def build_patch_prompt(
     return "\n".join(sections)
 
 
+def _filter_prediction_patch_for_instance(
+    instance: dict[str, Any],
+    patch: str,
+) -> str:
+    """Drop tests/docs/config noise from a candidate prediction patch."""
+    official_patch = instance.get("patch", "") or ""
+    official_fix_paths = set(_changed_files_from_patch(official_patch)) | set(
+        _new_files_from_patch(official_patch)
+    )
+    test_patch = instance.get("test_patch", "") or ""
+    extra_allowed = set(_new_files_from_patch(test_patch))
+    return filter_patch_to_source_files(
+        patch,
+        extra_allowed=extra_allowed,
+        official_fix_paths=official_fix_paths,
+        test_patch_paths=paths_from_patch(test_patch),
+    )
+
+
 def run_diff_fallback(
     host_repo_dir: Path,
     instance: dict[str, Any],
@@ -1362,10 +1391,18 @@ def run_diff_fallback(
     # Cap source snippets so the full fallback prompt fits inside the model's
     # context window after reserving space for the output and prompt overhead.
     context_window = patch_config.get("agent", {}).get("context_window") or 0
-    max_tokens = patch_config.get("max_tokens") or 4096
+    max_tokens = int(patch_config.get("max_tokens") or 4096)
+    try:
+        configured_fallback_max_tokens = int(
+            patch_config.get("diff_fallback_max_tokens")
+            or DEFAULT_DIFF_FALLBACK_MAX_TOKENS
+        )
+    except (TypeError, ValueError):
+        configured_fallback_max_tokens = DEFAULT_DIFF_FALLBACK_MAX_TOKENS
+    fallback_max_tokens = max(1, min(max_tokens, configured_fallback_max_tokens))
     prompt_tokens = _estimate_input_tokens(prompt_text)
     if context_window:
-        available_tokens = context_window - max_tokens - prompt_tokens - 300
+        available_tokens = context_window - fallback_max_tokens - prompt_tokens - 300
         max_snippet_chars = max(2000, min(16000, available_tokens * 3))
     else:
         max_snippet_chars = 8000
@@ -1381,10 +1418,11 @@ def run_diff_fallback(
         fallback_prompt, encoding="utf-8"
     )
     logger.info(
-        "Running diff fallback for %s (context_window=%s max_tokens=%s prompt_tokens=%s max_snippet_chars=%s)",
+        "Running diff fallback for %s (context_window=%s max_tokens=%s fallback_max_tokens=%s prompt_tokens=%s max_snippet_chars=%s)",
         instance_id,
         context_window,
         max_tokens,
+        fallback_max_tokens,
         prompt_tokens,
         max_snippet_chars,
     )
@@ -1394,12 +1432,29 @@ def run_diff_fallback(
         fallback_prompt,
         args.patch_timeout,
         logger,
+        max_tokens=fallback_max_tokens,
+        allow_token_growth=False,
     )
     (log_dir / f"{name}.diff_fallback.response.md").write_text(
         response, encoding="utf-8"
     )
 
     diff_text = extract_diff(response)
+    if diff_text:
+        filtered_diff = _filter_prediction_patch_for_instance(instance, diff_text)
+        if not filtered_diff.strip():
+            logger.warning(
+                "Diff fallback for %s was filtered to empty before apply",
+                instance_id,
+            )
+            diff_text = ""
+        elif filtered_diff != diff_text:
+            logger.info(
+                "Diff fallback for %s dropped non-source/test/config hunks before apply",
+                instance_id,
+            )
+            diff_text = filtered_diff
+
     if diff_text:
         if _apply_diff_with_check(host_repo_dir, diff_text, logger):
             logger.info("Diff fallback applied unified diff for %s", instance_id)
@@ -1437,6 +1492,7 @@ def run_diff_fallback(
         base_commit=instance.get("base_commit"),
         test_patch_paths=paths_from_patch(instance.get("test_patch", "") or ""),
     )
+    patch = _filter_prediction_patch_for_instance(instance, patch)
     if patch.strip():
         logger.info("Diff fallback produced a non-empty patch for %s", instance_id)
     else:
