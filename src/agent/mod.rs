@@ -361,7 +361,7 @@ struct FailedToolAttempt {
     error_preview: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct FileReadState {
     content_hash: u64,
     total_lines: usize,

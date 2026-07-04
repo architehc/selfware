@@ -184,6 +184,30 @@ impl Agent {
         blocked
     }
 
+    /// True when the tool batch contains at least one write and EVERY write
+    /// targets a file the agent has already read. Such an edit is not "blind"
+    /// (the read established which file changes), so the FILES: checklist guard
+    /// should not block it. Returns false if there are no writes, or any write
+    /// targets a file that was never read (a genuinely blind edit / new file).
+    fn writes_target_only_read_files(&self, tool_calls: &[CollectedToolCall]) -> bool {
+        let mut saw_write = false;
+        for (name, args_str, _) in tool_calls {
+            if !super::tool_dispatch::tool_call_counts_as_state_change(name, args_str) {
+                continue;
+            }
+            saw_write = true;
+            let target_read = serde_json::from_str::<serde_json::Value>(args_str)
+                .ok()
+                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                .map(|p| self.file_tracker.read_state.contains_key(&p))
+                .unwrap_or(false);
+            if !target_read {
+                return false;
+            }
+        }
+        saw_write
+    }
+
     /// True if `line` looks like a `FILES:` checklist header.
     ///
     /// Tolerant of leading markdown decoration and case, because capable hosted
@@ -805,6 +829,20 @@ impl Agent {
             self.consecutive_read_only_steps += 1;
         }
 
+        // A write to a file the agent has ALREADY READ is not a blind edit — the
+        // read already established which file changes, so the FILES: checklist
+        // ceremony is redundant. Treat such a write as satisfying the checklist.
+        // Without this, the guard silently discarded a capable model's first
+        // (correct) edit; the model then believed it had already edited and
+        // stalled to FAKE_COMPLETE with 0 files changed (the "doable task" bug).
+        if has_write_tool
+            && !self.files_checklist_seen
+            && self.writes_target_only_read_files(&tool_calls)
+        {
+            info!("Allowing edit to already-read file(s) — FILES: checklist satisfied by prior read");
+            self.files_checklist_seen = true;
+        }
+
         // P2.1: require a FILES: checklist before the first mutating edit.
         // Force-mutation recovery bypasses this once: after the progress guard
         // has explicitly demanded an immediate edit, do not block the edit for
@@ -812,9 +850,11 @@ impl Agent {
         if self.check_files_guard(has_write_tool) {
             info!("Blocked premature edit: no FILES: checklist yet");
             self.messages.push(crate::api::types::Message::user(
-                "Before editing, identify which files need to change. \
-                 Read or search the relevant source files, then list them in a FILES: line. \
-                 After that, perform the edits."
+                "Your edit was NOT applied and has been discarded — no FILES: checklist was \
+                 provided yet. First output a line `FILES: <path>` naming the file(s) you will \
+                 change, then RE-ISSUE the file_edit/file_write tool call (send it again — the \
+                 previous one did not run). Do not claim the edit is done until a tool result \
+                 confirms it."
                     .to_string(),
             ));
             return Ok(false);
@@ -1816,6 +1856,41 @@ mod tests {
     // =========================================================================
     // FILES: checklist guard tests
     // =========================================================================
+
+    #[tokio::test]
+    async fn test_edit_to_already_read_file_satisfies_files_guard() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let write = vec![(
+            "file_write".to_string(),
+            r#"{"path":"src/main.rs","content":"x"}"#.to_string(),
+            None,
+        )];
+        // Editing a file that was never read is a blind edit — not exempted.
+        assert!(
+            !agent.writes_target_only_read_files(&write),
+            "unread target must not be exempt from the FILES guard"
+        );
+        // After the file has been read, the same edit is exempt (regression: the
+        // guard used to discard this write on the doable parse_port task).
+        agent.file_tracker.read_state.insert(
+            "src/main.rs".to_string(),
+            super::super::FileReadState::default(),
+        );
+        assert!(
+            agent.writes_target_only_read_files(&write),
+            "edit to an already-read file should satisfy the FILES guard"
+        );
+        // A read-only batch has no writes → not exempt (nothing to exempt).
+        let read_only = vec![(
+            "file_read".to_string(),
+            r#"{"path":"src/main.rs"}"#.to_string(),
+            None,
+        )];
+        assert!(!agent.writes_target_only_read_files(&read_only));
+    }
 
     #[tokio::test]
     async fn test_force_mutation_bypasses_files_guard() {
