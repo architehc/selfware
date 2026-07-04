@@ -13,9 +13,12 @@
 
 pub mod coordinator;
 pub mod multiagent;
+pub mod parallel;
+pub mod planning;
 pub mod scratchpad;
 pub mod swarm;
 pub mod visual_loop;
+pub mod workflow_dsl;
 pub mod workflows;
 
 // Re-export coordinator types
