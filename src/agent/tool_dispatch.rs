@@ -41,7 +41,10 @@ async fn summarize_and_spill(
     let spill_file = spill_dir.join(format!(
         "{}_{}.json",
         tool_name,
-        &call_id[..call_id.len().min(12)]
+        // Char-safe truncation: byte-slicing `&call_id[..12]` panics if a
+        // non-ASCII tool_call_id from the API has a multi-byte char across byte 12
+        // (found by GLM-5.2 reviewing tool_dispatch.rs; verified + fixed by Claude).
+        call_id.chars().take(12).collect::<String>()
     ));
     let spill_path = spill_file.display().to_string();
     if let Err(e) = tokio::fs::write(&spill_file, raw).await {
@@ -166,15 +169,13 @@ fn summarize_file_read(raw: &str) -> String {
         .cloned()
         .collect::<Vec<_>>()
         .join("\n");
-    let tail: String = if lines.len() > 150 {
-        lines
-            .iter()
-            .rev()
-            .take(50)
-            .rev()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n")
+    // Tail: show the trailing lines for any file over 100 lines (capped to the
+    // last 50), starting at line 100. The old `> 150` guard emitted NO tail for
+    // 101–150 line files, silently dropping lines 101..=end even though they don't
+    // overlap the head (found by GLM-5.2 reviewing tool_dispatch.rs).
+    let tail_start = lines.len().saturating_sub(50).max(100);
+    let tail: String = if lines.len() > 100 {
+        lines[tail_start..].join("\n")
     } else {
         String::new()
     };
@@ -186,7 +187,7 @@ fn summarize_file_read(raw: &str) -> String {
     if !tail.is_empty() {
         summary.push_str(&format!(
             "\n\n--- Last 50 lines (lines {}–{}) ---\n{}",
-            lines.len() - 50,
+            tail_start,
             lines.len(),
             tail
         ));
@@ -4070,6 +4071,26 @@ mod tests {
         let raw = serde_json::json!({"total_lines": 0, "content": ""});
         let summary = summarize_file_read(&serde_json::to_string(&raw).unwrap());
         assert!(summary.contains("0 total lines"));
+    }
+
+    #[test]
+    fn test_summarize_file_read_150_boundary_no_silent_drop() {
+        // Regression: files of 101–150 lines used to show only the first 100 and
+        // silently drop the rest (the tail required > 150). Ensure lines 101–150
+        // now appear and nothing is marked omitted (found by GLM-5.2).
+        let lines: String = (0..150)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw = serde_json::json!({"total_lines": 150, "content": lines});
+        let summary = summarize_file_read(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("line 0"), "head present");
+        assert!(summary.contains("line 149"), "last line must not be dropped");
+        assert!(summary.contains("line 120"), "mid-tail line must be present");
+        assert!(
+            !summary.contains("lines omitted"),
+            "nothing is actually omitted at 150 lines"
+        );
     }
 
     // =========================================================================
