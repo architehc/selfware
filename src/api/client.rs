@@ -538,7 +538,13 @@ impl ApiClient {
 
                         debug!("API response body ({} chars)", body_text.len());
                         if self.config.debug.should_log_responses() {
-                            eprintln!("=== RAW API RESPONSE ===\n{}\n=== END RAW ===", body_text);
+                            // Some OpenAI-compatible gateways (OpenRouter
+                            // included) echo the offending API key back in
+                            // error/response bodies -- redact before
+                            // printing, same as maybe_log_request_body does
+                            // for the request side.
+                            let redacted = crate::observability::telemetry::redact_secrets(&body_text);
+                            eprintln!("=== RAW API RESPONSE ===\n{}\n=== END RAW ===", redacted);
                         }
 
                         let chat_response: ChatResponse = serde_json::from_str(&body_text)

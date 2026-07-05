@@ -157,6 +157,79 @@ pub fn redact_secrets(input: &str) -> String {
     result
 }
 
+/// A [`tracing_subscriber::fmt::MakeWriter`] that redacts likely-secret
+/// substrings (see [`redact_secrets`]) from every formatted log line before
+/// it reaches the underlying writer.
+///
+/// This is applied to *both* the stderr and persistent-file log layers in
+/// [`init_tracing_with_filter`] so redaction isn't something individual
+/// `warn!`/`error!`/`debug!` call sites have to remember to do themselves --
+/// a raw server error body echoing back an API key on an auth failure, for
+/// example, is redacted here regardless of which call site logged it.
+struct RedactingMakeWriter<M> {
+    inner: M,
+}
+
+impl<M> RedactingMakeWriter<M> {
+    fn new(inner: M) -> Self {
+        Self { inner }
+    }
+}
+
+impl<'a, M> tracing_subscriber::fmt::MakeWriter<'a> for RedactingMakeWriter<M>
+where
+    M: tracing_subscriber::fmt::MakeWriter<'a>,
+{
+    type Writer = RedactingWriter<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingWriter {
+            inner: self.inner.make_writer(),
+            buf: Vec::new(),
+        }
+    }
+}
+
+/// Buffers every `write()` call for a single formatted event (the fmt layer
+/// calls `make_writer()` once per event, per its own documented contract, and
+/// writes the event's fields via several small `write_str`/`write_fmt` calls
+/// against that one instance) and redacts the *complete* line on flush/drop.
+/// Redacting per-`write()`-call instead would risk missing a secret whose
+/// bytes happen to fall across two of those small writes.
+struct RedactingWriter<W: std::io::Write> {
+    inner: W,
+    buf: Vec<u8>,
+}
+
+impl<W: std::io::Write> RedactingWriter<W> {
+    fn flush_redacted(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            let text = String::from_utf8_lossy(&self.buf);
+            let redacted = redact_secrets(&text);
+            self.inner.write_all(redacted.as_bytes())?;
+            self.buf.clear();
+        }
+        self.inner.flush()
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for RedactingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flush_redacted()
+    }
+}
+
+impl<W: std::io::Write> Drop for RedactingWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush_redacted();
+    }
+}
+
 /// Initialize global tracing subscriber with configurable output
 /// By default, only enables tracing if RUST_LOG is explicitly set
 pub fn init_tracing() {
@@ -190,7 +263,7 @@ pub fn init_tracing_with_filter(filter: &str) {
             .with_line_number(false)
             .with_level(true)
             .compact()
-            .with_writer(std::io::stderr); // Write to stderr, not stdout
+            .with_writer(RedactingMakeWriter::new(std::io::stderr)); // Write to stderr, not stdout
 
         // Implement Log Rotation with daily rolling
         let log_dir = dirs::data_local_dir()
@@ -204,7 +277,7 @@ pub fn init_tracing_with_filter(filter: &str) {
         let _ = TRACING_GUARD.set(Mutex::new(Some(guard)));
 
         let file_layer = tracing_subscriber::fmt::layer()
-            .with_writer(non_blocking)
+            .with_writer(RedactingMakeWriter::new(non_blocking))
             .with_ansi(false)
             .with_file(true)
             .with_line_number(true);
@@ -1072,6 +1145,76 @@ mod tests {
         let result = redact_secrets(input);
         assert!(!result.contains("mysecret"));
         assert!(result.contains("[REDACTED]"));
+    }
+
+    use std::io::Write as _;
+    use tracing_subscriber::fmt::MakeWriter as _;
+
+    /// A `Write` sink that hands out clones sharing one `Arc<Mutex<Vec<u8>>>`,
+    /// so a test can inspect what was actually written after the `MakeWriter`
+    /// call and its returned `Writer` are done being used.
+    #[derive(Clone, Default)]
+    struct SharedBuf(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+        type Writer = SharedBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn redacting_writer_redacts_a_secret_split_across_two_write_calls() {
+        let sink = SharedBuf::default();
+        let make_writer = RedactingMakeWriter::new(sink.clone());
+        {
+            let mut writer = make_writer.make_writer();
+            // Simulate a formatter emitting the line via several small
+            // write_str calls, with the secret pattern split across two of
+            // them -- "Bearer " in one write, the token in the next.
+            writer.write_all(b"401 Unauthorized: Authorization: Bearer ").unwrap();
+            writer
+                .write_all(b"sk-live-abcdefghijklmnopqrstuvwxyz\n")
+                .unwrap();
+            // Dropped at end of scope -- must flush+redact here.
+        }
+        let written = sink.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&written);
+        assert!(
+            !text.contains("sk-live-abcdefghijklmnopqrstuvwxyz"),
+            "secret leaked into log output: {text}"
+        );
+        assert!(text.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacting_writer_passes_through_flush_explicitly() {
+        let sink = SharedBuf::default();
+        let make_writer = RedactingMakeWriter::new(sink.clone());
+        let mut writer = make_writer.make_writer();
+        writer
+            .write_all(b"password=hunter2 connecting...\n")
+            .unwrap();
+        writer.flush().unwrap();
+        // Already flushed explicitly; nothing further should be written on drop.
+        drop(writer);
+
+        let written = sink.0.lock().unwrap();
+        let text = String::from_utf8_lossy(&written);
+        assert!(!text.contains("hunter2"));
+        assert!(text.contains("[REDACTED]"));
+        // Exactly one copy of the (redacted) line, not duplicated by drop.
+        assert_eq!(text.matches("[REDACTED]").count(), 1);
     }
 
     #[test]
