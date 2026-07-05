@@ -285,6 +285,58 @@ impl ResourceReservation {
 mod tests {
     use super::*;
 
+    // ---- ResourceManager construction/wiring tests ----
+    //
+    // Prior to this fix, nothing in the codebase ever constructed a
+    // ResourceManager or ticked its monitor loop outside these tests
+    // themselves, so GPU/memory/disk threshold protection never actually ran.
+
+    #[tokio::test]
+    async fn test_resource_manager_new_succeeds_without_gpu_present() {
+        // Nvml::init() gracefully returns None when no GPU/driver is
+        // present -- construction must not fail on a GPU-less machine (e.g.
+        // this CI/test environment).
+        let config = ResourcesConfig::default();
+        let manager = ResourceManager::new(&config).await;
+        assert!(
+            manager.is_ok(),
+            "ResourceManager::new should succeed without a GPU present: {:?}",
+            manager.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resource_manager_update_usage_reports_real_memory() {
+        let config = ResourcesConfig::default();
+        let manager = ResourceManager::new(&config).await.unwrap();
+        manager.update_usage().await;
+        let usage = manager.get_usage().await;
+        assert!(
+            usage.memory_total_bytes > 0,
+            "expected real system memory stats after update_usage, got {:?}",
+            usage
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resource_manager_pressure_computation_does_not_panic() {
+        let config = ResourcesConfig::default();
+        let manager = ResourceManager::new(&config).await.unwrap();
+        manager.update_usage().await;
+        // Whatever this machine's actual usage is, this must return some
+        // valid pressure variant without panicking (e.g. divide-by-zero on
+        // a machine with gpu_memory_total_bytes == 0 is guarded already).
+        let _pressure = manager.get_resource_pressure().await;
+    }
+
+    #[tokio::test]
+    async fn test_resource_manager_shared_pressure_handle_starts_at_none() {
+        let config = ResourcesConfig::default();
+        let manager = ResourceManager::new(&config).await.unwrap();
+        let handle = manager.shared_pressure();
+        assert_eq!(*handle.read().unwrap(), ResourcePressure::None);
+    }
+
     // ---- ResourcePressure tests ----
 
     #[test]

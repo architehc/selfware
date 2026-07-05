@@ -477,6 +477,42 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Start the resource monitor for unattended (Yolo/Daemon) runs: without
+    // this, `[resources]` config (GPU temperature/memory thresholds, memory
+    // warning/critical/emergency thresholds, disk max_usage_percent) is
+    // parsed but nothing ever constructs a ResourceManager or ticks its
+    // monitor loop, so the OOM circuit breaker, GPU overheat throttle, and
+    // disk-full guard never actually run -- an operator configuring
+    // conservative thresholds for a long autonomous run gets no protection
+    // at all. `_resource_monitor_shutdown_tx` must stay bound (not
+    // `_`-dropped) for the duration of `run()`: monitor_loop's select! loop
+    // busy-spins once every sender is dropped (tokio::watch::Receiver::changed()
+    // resolves immediately with an error, but the loop only checks the
+    // *value*, not sender liveness).
+    let _resource_monitor_shutdown_tx = if matches!(
+        config.execution_mode,
+        ExecutionMode::Yolo | ExecutionMode::Daemon
+    ) {
+        match crate::resource::ResourceManager::new(&config.resources).await {
+            Ok(manager) => {
+                let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                tokio::spawn(async move {
+                    manager.monitor_loop(shutdown_rx).await;
+                });
+                tracing::info!(
+                    "Resource monitor started (GPU/memory/disk thresholds now enforced)"
+                );
+                Some(shutdown_tx)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to start resource monitor: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Apply UI settings from config file first
     config.apply_ui_settings();
 
