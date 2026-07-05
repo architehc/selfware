@@ -56,9 +56,17 @@ impl AgentLoop {
 
     pub fn next_state(&mut self) -> Option<AgentState> {
         if self.iteration >= self.max_iterations {
-            return Some(AgentState::Failed {
+            // Keep internal state consistent with the returned state. Previously
+            // this returned Some(Failed) without updating self.state, so
+            // current_state_label()/transition_to saw stale state (e.g. still
+            // "executing") after a max-iterations failure (found by GLM-5.2
+            // reviewing loop_control.rs; verified + fixed by Claude — minimal fix,
+            // no sticky-terminal guard, which broke lifecycle tests in an earlier
+            // unsupervised attempt).
+            self.state = AgentState::Failed {
                 reason: "Max iterations exceeded".to_string(),
-            });
+            };
+            return Some(self.state.clone());
         }
         self.iteration += 1;
         Some(self.state.clone())
