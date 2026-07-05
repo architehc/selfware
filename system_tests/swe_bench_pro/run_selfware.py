@@ -732,14 +732,30 @@ def prepare_effective_config(
     overrides endpoint and clears the API key for local servers.
     """
     config_path = Path(args.config_dir) / f"openrouter_{args.model_profile}.toml"
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
+    yaml_config_path = (
+        Path(args.small_model_config_dir) / f"{args.model_profile}.yaml"
+    )
+    if config_path.exists():
+        config = load_config(config_path)
+    elif yaml_config_path.exists():
+        yaml_config = load_small_model_config(
+            args.model_profile, args.small_model_config_dir, logger
+        )
+        if yaml_config is None:
+            raise FileNotFoundError(f"Config not found: {config_path} or {yaml_config_path}")
+        config = yaml_config
+        logger.info(
+            "Loaded small-model YAML config for '%s' from %s",
+            args.model_profile,
+            yaml_config_path,
+        )
+    else:
+        raise FileNotFoundError(f"Config not found: {config_path} or {yaml_config_path}")
 
-    config = load_config(config_path)
     patched = False
 
     # Prefer small-model YAML overrides when agentless routing is selected.
-    if should_use_agentless(args, config):
+    if config_path.exists() and should_use_agentless(args, config):
         yaml_config = load_small_model_config(
             args.model_profile, args.small_model_config_dir, logger
         )
@@ -749,7 +765,7 @@ def prepare_effective_config(
             logger.info(
                 "Merged small-model YAML config for '%s' from %s",
                 args.model_profile,
-                Path(args.small_model_config_dir) / f"{args.model_profile}.yaml",
+                yaml_config_path,
             )
 
     if args.local_endpoint:
