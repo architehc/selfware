@@ -229,3 +229,18 @@ def test_format_target_api_section_includes_pathfile_path():
     section = _format_target_api_section(INTERFACE_PATHFILE_TEXT)
     assert "open_url" in section
     assert "qutebrowser/browser/commands.py" in section
+
+
+def test_format_target_api_section_handles_entries_without_name():
+    section = _format_target_api_section(
+        """\
+Type: Function
+
+Path: qutebrowser/browser/commands.py
+
+Description: Command target without a structured Name field.
+"""
+    )
+
+    assert "qutebrowser/browser/commands.py" in section
+    assert "Command target without a structured Name field" in section

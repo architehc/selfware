@@ -278,6 +278,10 @@ def _resolve_safe_path(repo_dir: Path, rel_path: str) -> Path | None:
     rel = rel_path.strip()
     if not rel:
         return None
+    if any(ch in rel for ch in "\r\n\0"):
+        return None
+    if len(rel) > 512:
+        return None
     p = Path(rel)
     if p.is_absolute():
         return None
@@ -306,7 +310,7 @@ def _parse_edit_blocks(response: str) -> list[_EditBlock]:
     cleaned = re.sub(r"\n```\s*$", "", cleaned)
     cleaned = _normalize_edit_response(cleaned)
     pattern = re.compile(
-        r"###\s*FILE:\s*[`\"]?(?P<path>.+?)[`\"]?\s*\n"
+        r"###\s*FILE:\s*[`\"]?(?P<path>[^\r\n]+?)[`\"]?\s*\n"
         r"<<<<<<<\s*(?:SEARCH)?\s*\n"
         r"(?P<old>.*?)\n?"
         r"=======\s*\n"
@@ -501,6 +505,12 @@ def apply_edits_with_missing(
     failed: set[str] = set()
 
     blocks = _parse_edit_blocks(response)
+    if not blocks and re.search(r"###\s*(?:FILE|PATH)\b", response, re.IGNORECASE):
+        if "<<<<<<<" in response or ">>>>>>>" in response:
+            failed.add("<malformed edit block>")
+            if logger is not None:
+                logger.warning("Rejecting malformed SEARCH/REPLACE edit block")
+            return False, missing, failed
 
     # Validate paths before doing any work.
     safe_blocks: list[tuple[_EditBlock, Path]] = []

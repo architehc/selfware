@@ -1452,7 +1452,7 @@ def _format_target_api_section(interface_text: str | None) -> str:
     lines = ["Target API (functions/classes you may need to modify):"]
     for entry in entries:
         api_type = entry.get("type", "API")
-        name = entry["name"]
+        name = entry.get("name") or entry.get("path") or "(unnamed API)"
         path = entry.get("path", "(unknown path)")
         input_sig = entry.get("input", "")
         output_sig = entry.get("output", "")
@@ -2070,5 +2070,4 @@ def build_small_model_prompt(
             repair_feedback,
         ])
     return "\n".join(sections)
-
 

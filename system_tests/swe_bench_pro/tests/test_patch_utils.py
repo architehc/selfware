@@ -563,9 +563,33 @@ def test_resolve_safe_path_rejects_traversal_and_absolute(tmp_path):
     assert _resolve_safe_path(repo, "../outside.txt") is None
     assert _resolve_safe_path(repo, "foo/../../outside.txt") is None
     assert _resolve_safe_path(repo, "/etc/passwd") is None
+    assert _resolve_safe_path(repo, "src/file.py\npackage main") is None
+    assert _resolve_safe_path(repo, "src/file.py\0") is None
+    assert _resolve_safe_path(repo, "a" * 513) is None
     assert _resolve_safe_path(repo, "") is None
     assert _resolve_safe_path(repo, ".") is None
     assert _resolve_safe_path(repo, "src/file.py") == (repo / "src/file.py").resolve()
+
+
+def test_parse_edit_blocks_rejects_multiline_file_header(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "file.py").write_text("old\n", encoding="utf-8")
+    response = (
+        "### FILE: file.py\n"
+        "package main\n"
+        "<<<<<<< SEARCH\n"
+        "old\n"
+        "=======\n"
+        "new\n"
+        ">>>>>>> REPLACE\n"
+    )
+
+    applied, missing, failed = apply_edits_with_missing(repo, response, None)
+
+    assert applied is False
+    assert failed
+    assert (repo / "file.py").read_text(encoding="utf-8") == "old\n"
 
 
 def test_apply_edits_rejects_path_traversal(tmp_path):
