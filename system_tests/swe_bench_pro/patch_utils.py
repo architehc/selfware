@@ -5,8 +5,9 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 # Paths that are part of the harness, agent workspace, or common build
@@ -23,6 +24,59 @@ _DIFF_EXCLUDED_PREFIXES = (
     "*.orig",
     "*.bak",
 )
+
+
+_SOURCE_CODE_EXTENSIONS = {
+    ".py",
+    ".go",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".rs",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".swift",
+    ".kt",
+    ".kts",
+    ".scala",
+    ".rb",
+    ".php",
+    ".cs",
+    ".fs",
+    ".fsx",
+    ".clj",
+    ".cljs",
+    ".erl",
+    ".hrl",
+    ".ex",
+    ".exs",
+    ".lua",
+    ".pl",
+    ".pm",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".ps1",
+    ".sql",
+}
+
+
+_CONFIG_SUFFIXES = {".json", ".yaml", ".yml", ".toml", ".lock"}
+_CONFIG_BASENAMES = {
+    "setup.py",
+    "setup.cfg",
+    "pyproject.toml",
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "requirements.txt",
+    "pipfile",
+    "tox.ini",
+    "pytest.ini",
+}
 
 
 def _extract_diff_path(line: str) -> str | None:
@@ -61,7 +115,7 @@ def _is_excluded_diff_hunk(hunk_lines: list[str]) -> bool:
 def _trim_trailing_text(diff_text: str) -> str:
     r"""Return ``diff_text`` truncated after the last unified-diff hunk line.
 
-    Keeps the trailing newline that belongs to the final `` ``, ``+``, ``-``,
+    Keeps the trailing newline that belongs to the final `` `` , ``+``, ``-``,
     or ``\ No newline at end of file`` line so ``git apply`` does not see a
     malformed patch.
     """
@@ -215,6 +269,63 @@ def _normalize_edit_response(text: str) -> str:
     return "\n".join(out)
 
 
+def _resolve_safe_path(repo_dir: Path, rel_path: str) -> Path | None:
+    """Resolve ``rel_path`` under ``repo_dir`` and ensure it stays inside.
+
+    Rejects absolute paths, parent references, and any target that resolves
+    outside of ``repo_dir`` (including via symlinks).
+    """
+    rel = rel_path.strip()
+    if not rel:
+        return None
+    p = Path(rel)
+    if p.is_absolute():
+        return None
+    if any(part == ".." for part in p.parts):
+        return None
+    try:
+        base = repo_dir.resolve()
+        target = (repo_dir / rel).resolve()
+        if target == base:
+            return None
+        target.relative_to(base)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return target
+
+
+class _EditBlock(NamedTuple):
+    rel_path: str
+    old: str
+    new: str
+
+
+def _parse_edit_blocks(response: str) -> list[_EditBlock]:
+    """Parse all SEARCH/REPLACE edit blocks from ``response``."""
+    cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
+    cleaned = re.sub(r"\n```\s*$", "", cleaned)
+    cleaned = _normalize_edit_response(cleaned)
+    pattern = re.compile(
+        r"###\s*FILE:\s*[`\"]?(?P<path>.+?)[`\"]?\s*\n"
+        r"<<<<<<<\s*(?:SEARCH)?\s*\n"
+        r"(?P<old>.*?)\n?"
+        r"=======\s*\n"
+        r"(?P<new>.*?)\n?"
+        r">>>>>>>\s*(?:REPLACE)?",
+        re.DOTALL,
+    )
+    blocks: list[_EditBlock] = []
+    for m in pattern.finditer(cleaned):
+        blocks.append(_EditBlock(m.group("path").strip(), m.group("old"), m.group("new")))
+    return blocks
+
+
+def _has_patch_markers(t: str) -> bool:
+    return any(
+        line.startswith(("<<<<<<<", "=======", ">>>>>>>")) for line in t.splitlines()
+    )
+
+
 def _normalize_blank_lines(lines: list[str]) -> list[str]:
     """Collapse multiple blank lines to a single empty string."""
     out: list[str] = []
@@ -226,6 +337,128 @@ def _normalize_blank_lines(lines: list[str]) -> list[str]:
         out.append("" if is_blank else line)
         prev_blank = is_blank
     return out
+
+
+def _normalize_blank_lines_with_map(
+    lines: list[str],
+) -> tuple[list[str], list[int], list[int]]:
+    """Collapse consecutive blanks while preserving original line mapping.
+
+    Returns ``(normalized_lines, start_indices, lengths)`` where each
+    normalized line maps back to the original line range it represents.
+    """
+    norm: list[str] = []
+    starts: list[int] = []
+    lengths: list[int] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        if lines[i].strip() == "":
+            start = i
+            while i < n and lines[i].strip() == "":
+                i += 1
+            norm.append("")
+            starts.append(start)
+            lengths.append(i - start)
+        else:
+            norm.append(lines[i])
+            starts.append(i)
+            lengths.append(1)
+            i += 1
+    return norm, starts, lengths
+
+
+def _find_exact_line_range(
+    text_lines: list[str], old_lines: list[str]
+) -> tuple[int, int] | None:
+    """Return [start, end) line indices of an exact full-line match."""
+    n = len(old_lines)
+    m = len(text_lines)
+    if n == 0 or m < n:
+        return None
+    for i in range(m - n + 1):
+        if all(old_lines[j].rstrip() == text_lines[i + j].rstrip() for j in range(n)):
+            return i, i + n
+    return None
+
+
+def _find_blank_line_range(
+    text_lines: list[str], old_lines: list[str]
+) -> tuple[int, int] | None:
+    """Return [start, end) line indices of a blank-line-tolerant match."""
+    norm_old, _, _ = _normalize_blank_lines_with_map(old_lines)
+    norm_text, starts, lengths = _normalize_blank_lines_with_map(text_lines)
+    n = len(norm_old)
+    m = len(norm_text)
+    if n == 0 or m < n:
+        return None
+    for i in range(m - n + 1):
+        if all(norm_old[j].rstrip() == norm_text[i + j].rstrip() for j in range(n)):
+            start = starts[i]
+            end = starts[i + n - 1] + lengths[i + n - 1]
+            return start, end
+    return None
+
+
+def _line_range_to_char_range(
+    text_lines: list[str], start: int, end: int
+) -> tuple[int, int]:
+    """Convert a [start, end) line range into character positions."""
+    pos = 0
+    start_char = 0
+    end_char = 0
+    for idx, line in enumerate(text_lines):
+        if idx == start:
+            start_char = pos
+        if idx == end:
+            end_char = pos
+            break
+        pos += len(line) + 1
+    else:
+        if end == len(text_lines):
+            end_char = pos
+    return start_char, end_char
+
+
+def _find_block_char_range(text: str, old: str) -> tuple[int, int] | None:
+    """Find the [start, end) character range of ``old`` in ``text``.
+
+    Tries exact substring first, then full-line matches (with gutter and
+    trailing-space tolerance), then blank-line-normalized matching.  All
+    returned indices refer to ``text`` itself so callers can replace the
+    matched region atomically.
+    """
+    old = old.replace("\r\n", "\n")
+    if old == "":
+        return 0, 0
+    if old in text:
+        start = text.index(old)
+        return start, start + len(old)
+
+    text_lines = text.splitlines()
+    old_lines = _strip_line_number_gutter(old).splitlines()
+    n = len(old_lines)
+    if n == 0 or n > len(text_lines):
+        return None
+
+    text_lines_stripped = [_strip_line_number_gutter(line) for line in text_lines]
+    old_lines_stripped = _strip_line_number_gutter(old).splitlines()
+
+    strategies = [
+        (old_lines, text_lines),
+        (old_lines_stripped, text_lines),
+        (old_lines, text_lines_stripped),
+        (old_lines_stripped, text_lines_stripped),
+    ]
+
+    for oln, tln in strategies:
+        rng = _find_exact_line_range(tln, oln)
+        if rng is not None:
+            return _line_range_to_char_range(text_lines, *rng)
+        rng = _find_blank_line_range(tln, oln)
+        if rng is not None:
+            return _line_range_to_char_range(text_lines, *rng)
+    return None
 
 
 def _fuzzy_replace(text: str, old: str, new: str) -> str | None:
@@ -242,53 +475,11 @@ def _fuzzy_replace(text: str, old: str, new: str) -> str | None:
     replacement text verbatim, corrupting the file (e.g., indenting a whole
     function body).
     """
-    text_lines = text.splitlines()
-    old_lines = _strip_line_number_gutter(old).splitlines()
-    new_lines = _strip_line_number_gutter(new).splitlines()
-    n = len(old_lines)
-    if n == 0:
+    rng = _find_block_char_range(text, old)
+    if rng is None:
         return None
-
-    strategies: list[tuple[list[str], list[str]]] = [
-        (old_lines, text_lines),
-        (_strip_line_number_gutter(old).splitlines(), text_lines),
-        (old_lines, [_strip_line_number_gutter(line) for line in text_lines]),
-        (_strip_line_number_gutter(old).splitlines(),
-         [_strip_line_number_gutter(line) for line in text_lines]),
-    ]
-
-    def _try_match(oln: list[str], tln: list[str]) -> int | None:
-        """Full-line equality (trailing-whitespace tolerant)."""
-        m = len(tln)
-        if m < len(oln):
-            return None
-        for i in range(m - len(oln) + 1):
-            if all(oln[j].rstrip() == tln[i + j].rstrip() for j in range(len(oln))):
-                return i
-        return None
-
-    def _try_blank_match(oln: list[str], tln: list[str]) -> int | None:
-        """Ignore extra blank lines while preserving indentation."""
-        norm_old = _normalize_blank_lines(oln)
-        norm_text = _normalize_blank_lines(tln)
-        if len(norm_text) < len(norm_old):
-            return None
-        for i in range(len(norm_text) - len(norm_old) + 1):
-            if all(norm_old[j].rstrip() == norm_text[i + j].rstrip() for j in range(len(norm_old))):
-                return i
-        return None
-
-    for oln, tln in strategies:
-        idx = _try_match(oln, tln)
-        if idx is not None:
-            return "\n".join(tln[:idx] + new_lines + tln[idx + len(oln):])
-
-    for oln, tln in strategies:
-        idx = _try_blank_match(oln, tln)
-        if idx is not None:
-            return "\n".join(tln[:idx] + new_lines + tln[idx + len(oln):])
-
-    return None
+    start, end = rng
+    return text[:start] + new + text[end:]
 
 
 def apply_edits_with_missing(
@@ -300,97 +491,127 @@ def apply_edits_with_missing(
       * ``applied`` - whether at least one edit was applied successfully.
       * ``missing`` - file paths referenced by the model that do not exist.
       * ``failed`` - existing files whose SEARCH block could not be matched
-        (exactly or with fuzzy normalization).  Callers should treat a
-        non-empty ``failed`` set the same as a missing file: the patch is
-        incomplete and must be retried.
+        (exactly or with fuzzy normalization), or files with unsafe paths or
+        overlapping edit blocks.  Callers should treat a non-empty ``failed``
+        set the same as a missing file: the patch is incomplete and must be
+        retried.
     """
-    # Strip markdown code fences so wrapped blocks still parse.
-    cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
-    cleaned = re.sub(r"\n```\s*$", "", cleaned)
-
-    # Tolerate sloppy formatting from small models before parsing the blocks.
-    cleaned = _normalize_edit_response(cleaned)
-
-    # Allow empty SEARCH/REPLACE blocks even when the model omits the blank
-    # line between the marker and the next delimiter.  The optional \n? after
-    # the captured text lets the parser accept both:
-    #   <<<<<<< SEARCH\n=======\n  and  <<<<<<< SEARCH\n\n=======\n
-    pattern = re.compile(
-        r"###\s*FILE:\s*[`\"]?(?P<path>.+?)[`\"]?\s*\n"
-        r"<<<<<<<\s*(?:SEARCH)?\s*\n"
-        r"(?P<old>.*?)\n?"
-        r"=======\s*\n"
-        r"(?P<new>.*?)\n?"
-        r">>>>>>>\s*(?:REPLACE)?",
-        re.DOTALL,
-    )
-    def _has_patch_markers(t: str) -> bool:
-        return any(
-            line.startswith(("<<<<<<<", "=======", ">>>>>>>")) for line in t.splitlines()
-        )
-
     applied = False
     missing: set[str] = set()
     failed: set[str] = set()
-    for m in pattern.finditer(cleaned):
-        rel_path = m.group("path").strip()
-        old = _strip_line_number_gutter(m.group("old"))
-        new = _strip_line_number_gutter(m.group("new"))
-        path = repo_dir / rel_path
-        if not path.exists():
-            # Allow creation of new files when the SEARCH block is empty.
-            if old.strip() == "":
-                new_text = new.replace("\r\n", "\n")
-                if _has_patch_markers(new_text):
-                    if logger is not None:
-                        logger.warning("Refusing to create %s: content contains patch markers", rel_path)
-                    missing.add(rel_path)
-                    continue
-                try:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(new_text, encoding="utf-8")
-                    applied = True
-                    if logger is not None:
-                        logger.info("Created new file %s", rel_path)
-                    continue
-                except Exception as exc:
-                    if logger is not None:
-                        logger.error("Failed to create new file %s: %s", rel_path, exc)
-                    missing.add(rel_path)
-                    continue
+
+    blocks = _parse_edit_blocks(response)
+
+    # Validate paths before doing any work.
+    safe_blocks: list[tuple[_EditBlock, Path]] = []
+    for block in blocks:
+        safe_path = _resolve_safe_path(repo_dir, block.rel_path)
+        if safe_path is None:
             if logger is not None:
-                logger.warning("Skipping edit to non-existent file: %s", rel_path)
-            missing.add(rel_path)
+                logger.warning("Rejecting unsafe path in edit block: %s", block.rel_path)
+            failed.add(block.rel_path)
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-            # Normalize Windows-style line endings to avoid mismatch on repos
-            # that mix LF/CRLF.
-            text = text.replace("\r\n", "\n")
-            old = old.replace("\r\n", "\n")
-            new = new.replace("\r\n", "\n")
-            if old not in text:
-                fuzzy = _fuzzy_replace(text, old, new)
-                if fuzzy is None:
-                    if logger is not None:
-                        logger.warning(
-                            "Search block not found in %s (exact and whitespace-normalized)", rel_path
-                        )
-                    failed.add(rel_path)
-                    continue
-                text = fuzzy
-            else:
-                text = text.replace(old, new, 1)
-            # Reject edits that leave patch markers behind; they are almost always
-            # malformed model output and would corrupt the file.
-            if _has_patch_markers(text) and not _has_patch_markers(
-                path.read_text(encoding="utf-8")
-            ):
+        safe_blocks.append((block, safe_path))
+
+    # Group by resolved file path so multi-block edits can be verified atomically.
+    grouped: dict[Path, list[_EditBlock]] = defaultdict(list)
+    for block, safe_path in safe_blocks:
+        grouped[safe_path].append(block)
+
+    for safe_path, file_blocks in grouped.items():
+        rel_path = file_blocks[0].rel_path
+
+        if not safe_path.exists():
+            create_blocks = [
+                b for b in file_blocks if _strip_line_number_gutter(b.old).strip() == ""
+            ]
+            if not create_blocks:
                 if logger is not None:
-                    logger.warning("Refusing edit to %s: result contains patch markers", rel_path)
+                    logger.warning("Skipping edit to non-existent file: %s", rel_path)
+                missing.add(rel_path)
+                continue
+            if len(create_blocks) > 1 or len(file_blocks) > 1:
+                if logger is not None:
+                    logger.warning("Refusing ambiguous creation of %s", rel_path)
                 failed.add(rel_path)
                 continue
-            path.write_text(text, encoding="utf-8")
+            new_text = create_blocks[0].new.replace("\r\n", "\n")
+            if _has_patch_markers(new_text):
+                if logger is not None:
+                    logger.warning(
+                        "Refusing to create %s: content contains patch markers", rel_path
+                    )
+                missing.add(rel_path)
+                continue
+            try:
+                safe_path.parent.mkdir(parents=True, exist_ok=True)
+                safe_path.write_text(new_text, encoding="utf-8")
+                applied = True
+                if logger is not None:
+                    logger.info("Created new file %s", rel_path)
+            except Exception as exc:
+                if logger is not None:
+                    logger.error("Failed to create new file %s: %s", rel_path, exc)
+                missing.add(rel_path)
+            continue
+
+        try:
+            text = safe_path.read_text(encoding="utf-8").replace("\r\n", "\n")
+        except Exception as exc:
+            if logger is not None:
+                logger.error("Failed to read %s: %s", rel_path, exc)
+            failed.add(rel_path)
+            continue
+
+        original_text = text
+        original_has_markers = _has_patch_markers(original_text)
+
+        replacements: list[tuple[int, int, str]] = []
+        match_failed = False
+        for block in file_blocks:
+            old = _strip_line_number_gutter(block.old).replace("\r\n", "\n")
+            new = _strip_line_number_gutter(block.new).replace("\r\n", "\n")
+            rng = _find_block_char_range(text, old)
+            if rng is None:
+                if logger is not None:
+                    logger.warning(
+                        "Search block not found in %s (exact and whitespace-normalized)",
+                        rel_path,
+                    )
+                failed.add(rel_path)
+                match_failed = True
+                break
+            start, end = rng
+            replacements.append((start, end, new))
+
+        if match_failed:
+            continue
+
+        # Verify all matched regions are pairwise disjoint.
+        replacements_sorted = sorted(replacements, key=lambda x: x[0])
+        overlapped = False
+        for i in range(1, len(replacements_sorted)):
+            if replacements_sorted[i][0] < replacements_sorted[i - 1][1]:
+                overlapped = True
+                break
+        if overlapped:
+            if logger is not None:
+                logger.warning("Overlapping SEARCH/REPLACE blocks in %s", rel_path)
+            failed.add(rel_path)
+            continue
+
+        # Apply atomically from back to front so earlier indices stay valid.
+        for start, end, new in reversed(replacements_sorted):
+            text = text[:start] + new + text[end:]
+
+        if not original_has_markers and _has_patch_markers(text):
+            if logger is not None:
+                logger.warning("Refusing edit to %s: result contains patch markers", rel_path)
+            failed.add(rel_path)
+            continue
+
+        try:
+            safe_path.write_text(text, encoding="utf-8")
             applied = True
             if logger is not None:
                 logger.info("Applied edit to %s", rel_path)
@@ -398,6 +619,7 @@ def apply_edits_with_missing(
             if logger is not None:
                 logger.error("Failed to apply edit to %s: %s", rel_path, exc)
             failed.add(rel_path)
+
     return applied, missing, failed
 
 
@@ -417,45 +639,113 @@ def verify_edits_apply(repo_dir: Path, response: str, logger: Any) -> bool:
     This checks against the files on disk without modifying them, so a failed
     prompt can be retried with more exact context.
     """
-    cleaned = re.sub(r"```[a-zA-Z]*\n", "", response)
-    cleaned = re.sub(r"\n```\s*$", "", cleaned)
-    cleaned = _normalize_edit_response(cleaned)
-    pattern = re.compile(
-        r"###\s*FILE:\s*[`<\"]?(?P<path>.+?)[`\"]?\s*\n"
-        r"<<<<<<<\s*(?:SEARCH)?\s*\n"
-        r"(?P<old>.*?)\n?"
-        r"=======\s*\n"
-        r"(?P<new>.*?)\n?"
-        r">>>>>>>\s*(?:REPLACE)?",
-        re.DOTALL,
-    )
-    for m in pattern.finditer(cleaned):
-        rel_path = m.group("path").strip()
-        old = m.group("old").replace("\r\n", "\n")
-        path = repo_dir / rel_path
-        if not path.exists():
+    blocks = _parse_edit_blocks(response)
+
+    # Validate paths before checking content.
+    safe_blocks: list[tuple[_EditBlock, Path]] = []
+    for block in blocks:
+        safe_path = _resolve_safe_path(repo_dir, block.rel_path)
+        if safe_path is None:
+            if logger is not None:
+                logger.warning("verify_edits_apply: unsafe path %s", block.rel_path)
+            return False
+        safe_blocks.append((block, safe_path))
+
+    grouped: dict[Path, list[_EditBlock]] = defaultdict(list)
+    for block, safe_path in safe_blocks:
+        grouped[safe_path].append(block)
+
+    for safe_path, file_blocks in grouped.items():
+        rel_path = file_blocks[0].rel_path
+        if not safe_path.exists():
             # Empty SEARCH block means the model wants to create the file.
-            if old.strip() == "":
+            if all(_strip_line_number_gutter(b.old).strip() == "" for b in file_blocks):
                 continue
             if logger is not None:
                 logger.warning("verify_edits_apply: file does not exist: %s", rel_path)
             return False
         try:
-            text = path.read_text(encoding="utf-8").replace("\r\n", "\n")
+            text = safe_path.read_text(encoding="utf-8").replace("\r\n", "\n")
         except Exception as exc:
             if logger is not None:
                 logger.warning("verify_edits_apply: cannot read %s: %s", rel_path, exc)
             return False
-        if old not in text and _fuzzy_replace(text, old, "") is None:
-            if logger is not None:
-                logger.warning("verify_edits_apply: search block not found in %s", rel_path)
-            return False
+
+        ranges: list[tuple[int, int]] = []
+        for block in file_blocks:
+            old = _strip_line_number_gutter(block.old).replace("\r\n", "\n")
+            rng = _find_block_char_range(text, old)
+            if rng is None:
+                if logger is not None:
+                    logger.warning(
+                        "verify_edits_apply: search block not found in %s", rel_path
+                    )
+                return False
+            ranges.append(rng)
+
+        ranges_sorted = sorted(ranges, key=lambda x: x[0])
+        for i in range(1, len(ranges_sorted)):
+            if ranges_sorted[i][0] < ranges_sorted[i - 1][1]:
+                if logger is not None:
+                    logger.warning(
+                        "verify_edits_apply: overlapping blocks in %s", rel_path
+                    )
+                return False
+
     # If no edit blocks were found, the response cannot be applied as edits.
-    return bool(pattern.search(cleaned))
+    return bool(blocks)
+
+
+def _diff_paths_are_safe(repo_dir: Path, diff_text: str) -> bool:
+    """Return True when every path mentioned in ``diff_text`` stays under repo_dir."""
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git"):
+            path = _extract_diff_path(line)
+            if path is None:
+                return False
+            if _resolve_safe_path(repo_dir, path) is None:
+                return False
+    return True
+
+
+def _filter_edit_blocks_to_source_files(
+    response: str,
+    extra_allowed: set[str] | None = None,
+    test_patch_paths: set[str] | None = None,
+    official_fix_paths: set[str] | None = None,
+) -> str:
+    """Drop edit blocks for tests, docs, build artifacts, and unrelated configs."""
+    allowed = (extra_allowed or set()) | (official_fix_paths or set())
+    test_patch_paths = test_patch_paths or set()
+    blocks = _parse_edit_blocks(response)
+    kept: list[str] = []
+    for block in blocks:
+        path = block.rel_path
+        if path in test_patch_paths:
+            continue
+        if _is_rejected_file(path):
+            continue
+        if path not in allowed and not _is_likely_source_file(path):
+            continue
+        kept.append(
+            f"### FILE: {path}\n"
+            f"<<<<<<< SEARCH\n"
+            f"{block.old}\n"
+            f"=======\n"
+            f"{block.new}\n"
+            f">>>>>>> REPLACE"
+        )
+    return "\n".join(kept)
 
 
 def apply_model_response_with_missing(
-    repo_dir: Path, response: str, logger: Any
+    repo_dir: Path,
+    response: str,
+    logger: Any,
+    *,
+    extra_allowed: set[str] | None = None,
+    test_patch_paths: set[str] | None = None,
+    official_fix_paths: set[str] | None = None,
 ) -> tuple[bool, set[str]]:
     """Try to apply the model response as a diff, then as edits.
 
@@ -464,9 +754,24 @@ def apply_model_response_with_missing(
     be matched (exactly or fuzzily).
     """
     diff = extract_diff(response)
-    if diff and apply_patch(repo_dir, diff, logger):
-        return True, set()
-    applied, missing, failed = apply_edits_with_missing(repo_dir, response, logger)
+    if diff:
+        diff = filter_patch_to_source_files(
+            diff,
+            extra_allowed=extra_allowed,
+            test_patch_paths=test_patch_paths,
+            official_fix_paths=official_fix_paths,
+        )
+        if diff and _diff_paths_are_safe(repo_dir, diff) and apply_patch(repo_dir, diff, logger):
+            return True, set()
+
+    # Filter edit blocks to source files and validate paths before applying.
+    filtered_response = _filter_edit_blocks_to_source_files(
+        response,
+        extra_allowed=extra_allowed,
+        test_patch_paths=test_patch_paths,
+        official_fix_paths=official_fix_paths,
+    )
+    applied, missing, failed = apply_edits_with_missing(repo_dir, filtered_response, logger)
     unapplied = missing | failed
     if applied:
         return True, unapplied
@@ -479,16 +784,31 @@ def apply_model_response_with_missing(
     return False, unapplied
 
 
-def apply_model_response(repo_dir: Path, response: str, logger: Any) -> bool:
+def apply_model_response(
+    repo_dir: Path,
+    response: str,
+    logger: Any,
+    *,
+    extra_allowed: set[str] | None = None,
+    test_patch_paths: set[str] | None = None,
+    official_fix_paths: set[str] | None = None,
+) -> bool:
     """Try to apply the model response as a diff, then as edits."""
-    applied, _ = apply_model_response_with_missing(repo_dir, response, logger)
+    applied, _ = apply_model_response_with_missing(
+        repo_dir,
+        response,
+        logger,
+        extra_allowed=extra_allowed,
+        test_patch_paths=test_patch_paths,
+        official_fix_paths=official_fix_paths,
+    )
     return applied
 
 
 def is_truncated_diff(response: str) -> bool:
     """Return True if the response looks like a truncated diff block.
 
-    This happens when the model runs out of output tokens inside a `` ```diff ``
+    This happens when the model runs out of output tokens inside a `` ```diff ```
     block.  A truncated response is not applyable as-is.
     """
     original_ends_newline = response.endswith("\n")
@@ -690,40 +1010,51 @@ def filter_patch_excluding_paths(diff: str, excluded_paths: set[str]) -> str:
     return "".join(kept).rstrip("\n") + "\n" if kept else ""
 
 
-# Path patterns that are never source files we want in a prediction.
-_REJECTED_PATH_PATTERNS = (
-    "_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx",
-    "test_", "/tests/", "/test/",
-    ".md", ".mdx",
-    "Dockerfile", ".dockerignore", ".gitignore", ".github/",
-    "docs/", "doc/", "documentation/",
-    "Makefile",
-    ".bak", ".orig", "~",
-)
-
-# Config / metadata files that are legitimate only when the official fix patch
-# also edits them (passed via ``extra_allowed`` / ``official_fix_paths``).
-_CONFIG_PATH_PATTERNS = (
-    ".json", ".yaml", ".yml", ".toml", ".lock",
-    "setup.py", "setup.cfg", "pyproject.toml", "package.json",
-    "package-lock.json", "yarn.lock", "requirements.txt", "Pipfile",
-)
-
-
-def _path_matches_any(path: str, patterns: tuple[str, ...]) -> bool:
-    """Return True when ``path`` matches any substring or suffix pattern."""
-    lower = path.lower()
-    return any(lower.endswith(pat) for pat in patterns) or any(pat in lower for pat in patterns)
-
-
 def _is_rejected_file(path: str) -> bool:
     """Return True for tests, docs, and build artifacts that are never allowed."""
-    return _path_matches_any(path, _REJECTED_PATH_PATTERNS)
+    p = Path(path)
+    name = p.name.lower()
+    suffix = p.suffix.lower()
+    parts = [part.lower() for part in p.parts]
+
+    # Directory components that mark tests or documentation.
+    if any(part in ("tests", "test") for part in parts):
+        return True
+    if any(part in ("docs", "doc", "documentation") for part in parts):
+        return True
+    if ".github" in parts:
+        return True
+
+    # Common test-file basenames.  Restrict the ``test_`` prefix to root-level
+    # files so legitimate helpers like ``src/test_helpers.py`` are preserved.
+    if name.startswith("test_") and len(p.parts) == 1 and suffix in _SOURCE_CODE_EXTENSIONS:
+        return True
+    if name.endswith(("_test.go", "_test.py", "_test.js", "_test.ts", "_test.tsx")):
+        return True
+
+    # Documentation and build artifacts.
+    if suffix in (".md", ".mdx"):
+        return True
+    if name in ("dockerfile", ".dockerignore", ".gitignore"):
+        return True
+    if name == "makefile":
+        return True
+    if suffix in (".bak", ".orig") or name.endswith("~"):
+        return True
+
+    return False
 
 
 def _is_config_or_metadata(path: str) -> bool:
     """Return True for package metadata and config files."""
-    return _path_matches_any(path, _CONFIG_PATH_PATTERNS)
+    p = Path(path)
+    name = p.name.lower()
+    suffix = p.suffix.lower()
+    if suffix in _CONFIG_SUFFIXES:
+        return True
+    if name in _CONFIG_BASENAMES:
+        return True
+    return False
 
 
 def _is_likely_source_file(path: str) -> bool:

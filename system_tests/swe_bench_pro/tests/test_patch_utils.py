@@ -10,6 +10,10 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from patch_utils import (
+    _filter_edit_blocks_to_source_files,
+    _is_config_or_metadata,
+    _is_rejected_file,
+    _resolve_safe_path,
     extract_partial_diff,
     filter_patch_excluding_paths,
     filter_patch_to_source_files,
@@ -242,6 +246,8 @@ from patch_utils import (
     _strip_line_number_gutter,
     apply_edits,
     apply_edits_with_missing,
+    apply_model_response_with_missing,
+    verify_edits_apply,
 )
 
 
@@ -544,3 +550,280 @@ def test_apply_edits_strips_blank_line_gutters(tmp_path):
     )
     assert apply_edits(tmp_path, response, None) is True
     assert target.read_text() == "a\n\nchanged\n"
+
+
+# -----------------------------------------------------------------------------
+# Security and robustness tests
+# -----------------------------------------------------------------------------
+
+
+def test_resolve_safe_path_rejects_traversal_and_absolute(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _resolve_safe_path(repo, "../outside.txt") is None
+    assert _resolve_safe_path(repo, "foo/../../outside.txt") is None
+    assert _resolve_safe_path(repo, "/etc/passwd") is None
+    assert _resolve_safe_path(repo, "") is None
+    assert _resolve_safe_path(repo, ".") is None
+    assert _resolve_safe_path(repo, "src/file.py") == (repo / "src/file.py").resolve()
+
+
+def test_apply_edits_rejects_path_traversal(tmp_path):
+    """Paths that escape the repo directory must not be read or written."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+
+    response = (
+        "### FILE: ../outside.txt\n"
+        "<<<<<<< SEARCH\n"
+        "secret\n"
+        "=======\n"
+        "changed\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(repo, response, None) is False
+    assert outside.read_text(encoding="utf-8") == "secret\n"
+
+    response_abs = (
+        "### FILE: /etc/passwd\n"
+        "<<<<<<< SEARCH\n"
+        "root\n"
+        "=======\n"
+        "other\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(repo, response_abs, None) is False
+
+
+def test_apply_edits_rejects_path_traversal_creation(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.txt"
+    response = (
+        "### FILE: ../../outside.txt\n"
+        "<<<<<<< SEARCH\n"
+        "=======\n"
+        "created\n"
+        ">>>>>>> REPLACE\n"
+    )
+    applied, missing, failed = apply_edits_with_missing(repo, response, None)
+    assert outside.exists() is False
+    assert not applied
+    assert failed or missing
+
+
+def test_verify_edits_apply_rejects_unsafe_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "file.py").write_text("x = 1\n", encoding="utf-8")
+    response = (
+        "### FILE: ../outside.txt\n"
+        "<<<<<<< SEARCH\n"
+        "x = 1\n"
+        "=======\n"
+        "x = 2\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert verify_edits_apply(repo, response, None) is False
+
+
+# -----------------------------------------------------------------------------
+# Blank-line fuzzy replacement
+# -----------------------------------------------------------------------------
+
+
+def test_fuzzy_replace_blank_lines_maps_to_original_indices(tmp_path):
+    """Extra blank lines must not shift the replacement location."""
+    target = tmp_path / "file.py"
+    target.write_text("start\n\na\n\n\nb\n", encoding="utf-8")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "a\n"
+        "\n"
+        "b\n"
+        "=======\n"
+        "a\n"
+        "CHANGED\n"
+        "b\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text(encoding="utf-8") == "start\n\na\nCHANGED\nb"
+
+
+# -----------------------------------------------------------------------------
+# Source-file filtering
+# -----------------------------------------------------------------------------
+
+
+def test_is_rejected_file_uses_precise_matching():
+    assert _is_rejected_file("src/test_helpers.py") is False
+    assert _is_rejected_file("my.json_parser.py") is False
+    assert _is_rejected_file("test_widget.py") is True
+    assert _is_rejected_file("tests/foo.py") is True
+    assert _is_rejected_file("docs/readme.md") is True
+    assert _is_rejected_file("README.md") is True
+    assert _is_rejected_file("widget.py.bak") is True
+    assert _is_rejected_file("widget.py.orig") is True
+
+
+def test_is_config_or_metadata_uses_exact_suffix_and_basename():
+    assert _is_config_or_metadata("package.json") is True
+    assert _is_config_or_metadata("config/settings.yaml") is True
+    assert _is_config_or_metadata("pyproject.toml") is True
+    assert _is_config_or_metadata("my.json_parser.py") is False
+    assert _is_config_or_metadata("src/parser.py") is False
+
+
+def test_filter_patch_to_source_files_keeps_legitimate_source_files():
+    diff = """\
+diff --git a/src/test_helpers.py b/src/test_helpers.py
+--- a/src/test_helpers.py
++++ b/src/test_helpers.py
+@@ -1 +1 @@
+-old
++new
+
+diff --git a/my.json_parser.py b/my.json_parser.py
+--- a/my.json_parser.py
++++ b/my.json_parser.py
+@@ -1 +1 @@
+-old
++new
+
+diff --git a/widget.py.bak b/widget.py.bak
+--- a/widget.py.bak
++++ b/widget.py.bak
+@@ -1 +1 @@
+-old
++new
+
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+"""
+    result = filter_patch_to_source_files(diff)
+    assert "src/test_helpers.py" in result
+    assert "my.json_parser.py" in result
+    assert "widget.py.bak" not in result
+    assert "README.md" not in result
+
+
+def test_filter_edit_blocks_to_source_files_drops_non_source():
+    response = (
+        "### FILE: src/widget.py\n"
+        "<<<<<<< SEARCH\n"
+        "x = 1\n"
+        "=======\n"
+        "x = 2\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: test_widget.py\n"
+        "<<<<<<< SEARCH\n"
+        "y = 1\n"
+        "=======\n"
+        "y = 2\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: README.md\n"
+        "<<<<<<< SEARCH\n"
+        "old\n"
+        "=======\n"
+        "new\n"
+        ">>>>>>> REPLACE\n"
+    )
+    filtered = _filter_edit_blocks_to_source_files(response)
+    assert "src/widget.py" in filtered
+    assert "test_widget.py" not in filtered
+    assert "README.md" not in filtered
+
+
+def test_apply_model_response_filters_edits_to_source_files(tmp_path):
+    """Raw SEARCH/REPLACE edits on test/doc files must be ignored before apply."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = repo / "src" / "widget.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+    test_file = repo / "test_widget.py"
+    test_file.write_text("y = 1\n", encoding="utf-8")
+    readme = repo / "README.md"
+    readme.write_text("old\n", encoding="utf-8")
+
+    response = (
+        "### FILE: src/widget.py\n"
+        "<<<<<<< SEARCH\n"
+        "x = 1\n"
+        "=======\n"
+        "x = 2\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: test_widget.py\n"
+        "<<<<<<< SEARCH\n"
+        "y = 1\n"
+        "=======\n"
+        "y = 2\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: README.md\n"
+        "<<<<<<< SEARCH\n"
+        "old\n"
+        "=======\n"
+        "new\n"
+        ">>>>>>> REPLACE\n"
+    )
+    applied, unapplied = apply_model_response_with_missing(repo, response, None)
+    assert applied is True
+    assert source.read_text(encoding="utf-8") == "x = 2\n"
+    assert test_file.read_text(encoding="utf-8") == "y = 1\n"
+    assert readme.read_text(encoding="utf-8") == "old\n"
+
+
+# -----------------------------------------------------------------------------
+# Overlapping edit blocks
+# -----------------------------------------------------------------------------
+
+
+def test_apply_edits_rejects_overlapping_blocks(tmp_path):
+    target = tmp_path / "file.py"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "a\n"
+        "b\n"
+        "=======\n"
+        "x\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "b\n"
+        "=======\n"
+        "y\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is False
+    assert target.read_text(encoding="utf-8") == "a\nb\nc\n"
+
+
+def test_apply_edits_allows_disjoint_blocks(tmp_path):
+    target = tmp_path / "file.py"
+    target.write_text("a\nb\nc\n", encoding="utf-8")
+    response = (
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "a\n"
+        "=======\n"
+        "x\n"
+        ">>>>>>> REPLACE\n"
+        "### FILE: file.py\n"
+        "<<<<<<< SEARCH\n"
+        "c\n"
+        "=======\n"
+        "z\n"
+        ">>>>>>> REPLACE\n"
+    )
+    assert apply_edits(tmp_path, response, None) is True
+    assert target.read_text(encoding="utf-8") == "x\nb\nz\n"

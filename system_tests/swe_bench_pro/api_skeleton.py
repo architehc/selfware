@@ -27,6 +27,22 @@ MAX_FILE_SIZE = 500_000
 DOCSTRING_MAX_LEN = 120
 
 
+def _resolve_safe_repo_path(repo_dir: Path, rel_path: str) -> Path | None:
+    """Resolve ``rel_path`` against ``repo_dir`` and reject paths that escape.
+
+    Candidate paths come from the instance and may contain ``../`` or absolute
+    components. This helper treats any path whose resolved location is outside
+    ``repo_dir`` as invalid, preventing directory-traversal reads.
+    """
+    try:
+        repo_root = repo_dir.resolve()
+        candidate = (repo_dir / rel_path).resolve()
+        candidate.relative_to(repo_root)
+    except (ValueError, RuntimeError, OSError):
+        return None
+    return candidate
+
+
 def _is_private_name(name: str) -> bool:
     """Return True for ordinary private names but keep dunder special names."""
     if not name.startswith("_"):
@@ -99,8 +115,8 @@ def _extract_file_skeleton(
     keep_private: bool,
 ) -> str | None:
     """Build a compact API skeleton for a single Python file."""
-    path = repo_dir / rel_path
-    if not path.is_file() or path.stat().st_size > MAX_FILE_SIZE:
+    path = _resolve_safe_repo_path(repo_dir, rel_path)
+    if path is None or not path.is_file() or path.stat().st_size > MAX_FILE_SIZE:
         return None
     if path.suffix.lower() != ".py":
         return None
@@ -242,18 +258,21 @@ def _candidate_files(
 
     candidates: list[str] = []
     seen: set[str] = set()
+    repo_root = repo_dir.resolve()
     for raw in tests + fail_to_pass + ranked:
         # SWE-bench Pro sometimes stores pytest nodeids like
         # ``tests/unit/test_x.py::TestClass::test_method``.
         file_part = raw.split("::")[0]
         if not file_part.endswith(".py"):
             continue
-        if file_part in seen:
+        candidate_path = _resolve_safe_repo_path(repo_dir, file_part)
+        if candidate_path is None or not candidate_path.is_file():
             continue
-        seen.add(file_part)
-        if not (repo_dir / file_part).is_file():
+        safe_rel = candidate_path.relative_to(repo_root).as_posix()
+        if safe_rel in seen:
             continue
-        candidates.append(file_part)
+        seen.add(safe_rel)
+        candidates.append(safe_rel)
 
     return candidates
 

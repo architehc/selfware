@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from api_skeleton import (
+    _candidate_files,
+    _resolve_safe_repo_path,
     extract_api_skeleton,
     inject_api_skeleton,
     should_inject_api_skeleton,
@@ -302,3 +304,58 @@ def test_inject_api_skeleton_no_candidates_returns_original(tmp_path, caplog):
         result = inject_api_skeleton(repo, instance, original, logger)
     assert result == original
     assert "no candidate Python files found" in caplog.text
+
+
+def test_resolve_safe_repo_path_rejects_traversal(tmp_path):
+    """Paths that escape the repo root must be rejected."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "secret.py").write_text("secret", encoding="utf-8")
+
+    assert _resolve_safe_repo_path(repo, "../secret.py") is None
+    assert _resolve_safe_repo_path(repo, "foo/../../secret.py") is None
+    assert _resolve_safe_repo_path(repo, "/tmp/secret.py") is None
+
+
+def test_resolve_safe_repo_path_accepts_internal_paths(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "widget.py").write_text("x = 1", encoding="utf-8")
+
+    resolved = _resolve_safe_repo_path(repo, "widget.py")
+    assert resolved is not None
+    assert resolved.is_file()
+
+
+def test_extract_api_skeleton_does_not_read_outside_repo(tmp_path):
+    """A crafted ``../secret.py`` candidate must not leak files outside the repo."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "secret.py").write_text("SECRET_VALUE = 1", encoding="utf-8")
+    (repo / "widget.py").write_text("def widget():\n    return 2\n", encoding="utf-8")
+
+    skeleton = extract_api_skeleton(repo, ["../secret.py", "widget.py"])
+    assert "SECRET_VALUE" not in skeleton
+    assert "def widget():" in skeleton
+
+
+def test_candidate_files_rejects_traversal_paths(tmp_path):
+    """_candidate_files must drop paths that escape the repo root."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "secret.py").write_text("secret", encoding="utf-8")
+    (repo / "tests" / "unit").mkdir(parents=True)
+    (repo / "tests" / "unit" / "test_widget.py").write_text("class TestWidget:\n    pass\n", encoding="utf-8")
+
+    instance = {
+        "repo": "qutebrowser/qutebrowser",
+        "problem_statement": "Fix widget.",
+        "selected_test_files_to_run": [
+            "../secret.py::test_x",
+            "tests/unit/test_widget.py::TestWidget",
+        ],
+        "fail_to_pass": [],
+    }
+    candidates = _candidate_files(repo, instance)
+    assert "../secret.py" not in candidates
+    assert "tests/unit/test_widget.py" in candidates

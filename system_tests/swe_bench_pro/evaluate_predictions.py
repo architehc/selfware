@@ -175,6 +175,7 @@ def _prepull_images(images: set[str], logger: logging.Logger) -> None:
     max_workers = min(4, len(images))
     pulled = 0
     failed: list[str] = []
+    lock = threading.Lock()
 
     def _pull_one(image: str) -> tuple[str, bool]:
         return image, _pull_image(image, logger)
@@ -184,9 +185,11 @@ def _prepull_images(images: set[str], logger: logging.Logger) -> None:
         for future in as_completed(future_to_image):
             image, ok = future.result()
             if ok:
-                pulled += 1
+                with lock:
+                    pulled += 1
             else:
-                failed.append(image)
+                with lock:
+                    failed.append(image)
                 logger.warning(
                     "Pre-pull failed for %s; per-instance logic will retry if needed",
                     image,
@@ -354,7 +357,15 @@ def _build_entryscript(instance: dict[str, Any]) -> str:
         "if [ ! -f /workspace/output.json ]; then\n"
         "  echo '{\"tests\": []}' > /workspace/output.json\n"
         "fi\n"
+        "exit $run_status\n"
     )
+
+
+def _coerce_test_list(tests: Any) -> list[dict[str, Any]]:
+    """Defensively coerce parsed test output to a list of dicts."""
+    if not isinstance(tests, list):
+        return []
+    return [t for t in tests if isinstance(t, dict)]
 
 
 def _score_output(output: dict[str, Any], instance: dict[str, Any]) -> dict[str, Any]:
@@ -363,7 +374,7 @@ def _score_output(output: dict[str, Any], instance: dict[str, Any]) -> dict[str,
     pass_to_pass = _load_list_field(instance.get("pass_to_pass", []))
 
     status_map: dict[str, str] = {}
-    for test in output.get("tests", []):
+    for test in _coerce_test_list(output.get("tests", [])):
         name = test.get("name", "")
         status = test.get("status", "")
         if name:
@@ -411,7 +422,7 @@ def _no_tests_were_executed(score: dict[str, Any], output: dict[str, Any]) -> bo
     This catches empty outputs, parser-level sentinel failures, and cases
     where every expected test is missing from the parsed output.
     """
-    tests = output.get("tests", [])
+    tests = _coerce_test_list(output.get("tests", []))
     if not tests:
         return True
     if all(test.get("name") == "NO_TESTS_FOUND_OR_PARSING_ERROR" for test in tests):
@@ -531,6 +542,7 @@ def evaluate_instance(
 
     if not container_ready:
         result["error"] = last_error or "failed to start container"
+        stop_and_remove_container(name, logger)
         return result
 
     try:
@@ -719,7 +731,8 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         "empty_patch_count": sum(
             1
             for r in results
-            if r.get("error") == "empty patch" or _is_patch_empty(r.get("patch", ""))
+            if r.get("error") == "empty patch"
+            or (r.get("error") is None and _is_patch_empty(r.get("patch", "")))
         ),
         "compile_gate_rejected_count": sum(
             1
@@ -809,18 +822,6 @@ def _write_report(output_dir: Path, results: list[dict[str, Any]]) -> dict[str, 
         f"- Empty patch: **{counters['empty_patch_count']}**",
         f"- Compile gate rejected: **{counters['compile_gate_rejected_count']}**",
         f"- Compile gate skipped (missing host toolchain): **{counters['compile_gate_skipped_count']}**",
-        f"- Recovery fired: **{counters['recovery_fired_count']}**",
-        f"- Recovery succeeded: **{counters['recovery_succeeded_count']}**",
-        f"- Patch applied but changed no files: **{counters['applied_no_op_count']}**",
-        f"- Patch applied but no tests executed: **{counters['applied_compile_failed_count']}**",
-        f"- Fail-to-pass failed: **{counters['applied_f2p_failed_count']}**",
-        f"- Pass-to-pass regressed: **{counters['applied_p2p_regressed_count']}**",
-        "",
-        "## Diagnostic counters",
-        "",
-        f"- Missing prediction: **{counters['missing_prediction_count']}**",
-        f"- Empty patch: **{counters['empty_patch_count']}**",
-        f"- Compile gate rejected: **{counters['compile_gate_rejected_count']}**",
         f"- Recovery fired: **{counters['recovery_fired_count']}**",
         f"- Recovery succeeded: **{counters['recovery_succeeded_count']}**",
         f"- Patch applied but changed no files: **{counters['applied_no_op_count']}**",

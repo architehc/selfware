@@ -23,11 +23,14 @@ from run_selfware import (
     _parse_context_limit_from_error,
     _reset_repo,
     _run_diff_recovery,
+    _verify_patch_applies,
     apply_adaptive_overrides,
     call_chat_endpoint,
+    extract_repo_from_image,
     load_config,
     load_existing_predictions,
     main,
+    parse_args,
     prepare_effective_config,
     run_agentless,
     run_diff_fallback,
@@ -1780,3 +1783,168 @@ def test_check_host_toolchains_passes_when_required_binaries_present(monkeypatch
         {"instance_id": "ts-inst", "repo_language": "typescript"},
     ]
     assert _check_host_toolchains(instances, logger) is True
+
+
+# -----------------------------------------------------------------------------
+# Regression tests for review fixes (recovery gating, error_code isolation,
+# repo extraction concurrency, and end-of-run sanity check).
+# -----------------------------------------------------------------------------
+
+
+def test_parse_args_initializes_derived_attributes(monkeypatch):
+    """parse_args() must provide defaults for attributes normally set in main()."""
+    monkeypatch.setattr(sys, "argv", ["run_selfware.py", "--model-profile", "test"])
+    args = parse_args()
+    assert args.patch_config == {}
+    assert args.plan_config is None
+    assert args.critic_config is None
+    assert args.repair_feedback_map == {}
+
+
+def test_verify_patch_applies_restores_repo_when_stash_pop_fails(
+    tmp_path, monkeypatch
+):
+    """If 'git stash pop' fails, the repo must still be restored to its original state."""
+    import run_selfware
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "file.py").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    # Working-tree change that must survive patch verification.
+    (repo / "file.py").write_text("working\n", encoding="utf-8")
+
+    patch = _make_patch("file.py", "base", "patched")
+
+    real_run_cmd = run_selfware.run_cmd
+    pop_calls: list[list[str]] = []
+
+    def fake_run_cmd(cmd, **kwargs):
+        if len(cmd) >= 2 and cmd[-2:] == ["stash", "pop"]:
+            pop_calls.append(cmd)
+
+            class _R:
+                returncode = 1
+                stderr = "fake stash pop conflict"
+
+            return _R()
+        return real_run_cmd(cmd, **kwargs)
+
+    monkeypatch.setattr("run_selfware.run_cmd", fake_run_cmd)
+
+    assert _verify_patch_applies(repo, patch, "HEAD", logging.getLogger("test")) is True
+    assert pop_calls
+    # The working-tree change should have been restored.
+    assert (repo / "file.py").read_text(encoding="utf-8") == "working\n"
+
+
+def test_extract_repo_from_image_uses_per_instance_directory(tmp_path, monkeypatch):
+    """Repo extraction must not use a fixed shared directory across instances."""
+    output_dir = tmp_path / "out"
+
+    def fake_start_container(image, name, logger, timeout=120):
+        return True
+
+    def fake_stop_and_remove_container(name, logger):
+        pass
+
+    monkeypatch.setattr("run_selfware.start_container", fake_start_container)
+    monkeypatch.setattr(
+        "run_selfware.stop_and_remove_container", fake_stop_and_remove_container
+    )
+
+    class _FakeStdout:
+        def close(self):
+            pass
+
+    def fake_popen(cmd, **kwargs):
+        class _P:
+            returncode = 0
+            stdout = _FakeStdout() if cmd[0] == "podman" else kwargs.get("stdout")
+
+            def communicate(self, timeout=None):
+                if cmd[0] == "tar":
+                    try:
+                        idx = cmd.index("-C")
+                        host_dir = Path(cmd[idx + 1])
+                    except ValueError:
+                        host_dir = output_dir / "repos" / "repo"
+                    (host_dir / ".git").mkdir(parents=True, exist_ok=True)
+                return b"", b""
+
+        return _P()
+
+    monkeypatch.setattr("run_selfware.subprocess.Popen", fake_popen)
+
+    dir_a = extract_repo_from_image(
+        "img:1", "name-a", "/app", output_dir, logging.getLogger("test")
+    )
+    dir_b = extract_repo_from_image(
+        "img:2", "name-b", "/app", output_dir, logging.getLogger("test")
+    )
+
+    assert dir_a is not None
+    assert dir_b is not None
+    assert dir_a != dir_b
+    assert dir_a.parent == output_dir / "repos"
+    assert dir_b.parent == output_dir / "repos"
+    assert dir_a.name.startswith("repo_")
+    assert dir_b.name.startswith("repo_")
+
+
+def test_main_clean_run_does_not_fail_sanity_check(tmp_path, monkeypatch):
+    """A clean run with zero recovery attempts must not be counted as a failure."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    config_dir = str(Path(__file__).parent / "fake_config")
+
+    fake_config = tmp_path / "openrouter_test-profile.toml"
+    fake_config.write_text("[agent]\n", encoding="utf-8")
+
+    manifest = {
+        "model_profile": "test-profile",
+        "config_dir": config_dir,
+        "config_files": [str(fake_config)],
+        "sample_file": None,
+        "harness_sha": "current-sha",
+        "runtime_flags": _runtime_flags(),
+    }
+    (output_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _fake_prepare_effective_config(args, logger):
+        return fake_config
+
+    monkeypatch.setattr(
+        "run_selfware.prepare_effective_config", _fake_prepare_effective_config
+    )
+    monkeypatch.setattr("run_selfware.load_config", lambda path: {"model": "test-model"})
+    monkeypatch.setattr("run_selfware._get_harness_sha", lambda: "current-sha")
+    monkeypatch.setenv("SELFWARE_API_KEY", "test-key")
+
+    # Ten instances that all succeed on the first attempt.
+    instances = [{"instance_id": f"inst-{i}", "base_commit": "HEAD"} for i in range(10)]
+
+    def _fake_process_instance(instance, args, config_path, logger):
+        save_prediction(
+            Path(args.output_dir),
+            instance["instance_id"],
+            "diff --git a/file.py b/file.py\n+fix",
+            logger,
+            {},
+        )
+        return True
+
+    monkeypatch.setattr("run_selfware.process_instance", _fake_process_instance)
+    monkeypatch.setattr(
+        "run_selfware.parse_args",
+        lambda: _make_base_args(output_dir, resume=True),
+    )
+    monkeypatch.setattr(
+        "run_selfware.select_instances", lambda dataset, args, existing, logger: instances
+    )
+
+    rc = main()
+    assert rc == 0

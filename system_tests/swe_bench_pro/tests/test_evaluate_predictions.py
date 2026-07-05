@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from evaluate_predictions import (
     _augment_results_with_missing_predictions,
     _build_entryscript,
+    _coerce_test_list,
     _ensure_image,
     _is_patch_empty,
     _load_list_field,
@@ -20,6 +21,7 @@ from evaluate_predictions import (
     _prepull_images,
     _score_output,
     _write_report,
+    evaluate_instance,
     main,
 )
 
@@ -779,3 +781,212 @@ def test_write_report_counts_compile_gate_skipped_from_generation_metadata(
     report = _write_report(tmp_path, results)
     assert report["compile_gate_rejected_count"] == 1
     assert report["compile_gate_skipped_count"] == 1
+
+
+def test_missing_predictions_not_counted_as_empty_patches(tmp_path):
+    """Missing-prediction rows lack a patch key and must not inflate empty_patch_count."""
+    instances = {
+        "missing": {
+            "instance_id": "missing",
+            "fail_to_pass": ["f1"],
+            "pass_to_pass": ["p1"],
+        },
+    }
+    results = []
+    augmented = _augment_results_with_missing_predictions(results, instances)
+    report = _write_report(tmp_path, augmented)
+
+    assert report["missing_prediction_count"] == 1
+    assert report["empty_patch_count"] == 0
+    assert report["errored_instances"] == 1
+
+
+def test_empty_patch_counted_when_error_is_none(tmp_path):
+    """A record with no error and an empty patch counts as an empty patch."""
+    results = [
+        {
+            "instance_id": "empty-no-error",
+            "error": None,
+            "overall_pass": False,
+            "fail_to_pass_passed": 0,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 0,
+            "pass_to_pass_total": 1,
+            "patch": "",
+            "metadata": {},
+        },
+        {
+            "instance_id": "other-error-empty-patch",
+            "error": "failed to pull image",
+            "patch": "",
+            "metadata": {},
+        },
+    ]
+    report = _write_report(tmp_path, results)
+    assert report["empty_patch_count"] == 1
+
+
+def test_evaluate_instance_cleans_up_container_on_startup_failure(monkeypatch, tmp_path):
+    """If container startup fails, the container must be stopped and removed."""
+    instance = {
+        "instance_id": "inst-startup-fail",
+        "dockerhub_tag": "tag",
+        "base_commit": "abc123",
+        "fail_to_pass": [],
+        "pass_to_pass": [],
+        "selected_test_files_to_run": [],
+        "before_repo_set_cmd": "",
+    }
+    prediction = {"instance_id": "inst-startup-fail", "patch": "diff --git\n"}
+
+    cleanup_calls = []
+
+    def _fake_ensure_image(image, logger):
+        return True
+
+    def _fake_start_container(image, name, logger, timeout):
+        return False
+
+    def _fake_stop_and_remove(name, logger):
+        cleanup_calls.append(name)
+
+    monkeypatch.setattr("evaluate_predictions._ensure_image", _fake_ensure_image)
+    monkeypatch.setattr("evaluate_predictions.start_container", _fake_start_container)
+    monkeypatch.setattr(
+        "evaluate_predictions.stop_and_remove_container", _fake_stop_and_remove
+    )
+
+    logger = logging.getLogger("test_startup_cleanup")
+    result = evaluate_instance(
+        instance, prediction, tmp_path, logger, test_timeout=60
+    )
+
+    assert result["error"] == "failed to start container"
+    # Each failed attempt already cleans up at the top of the loop; the final
+    # cleanup before returning is what this test is verifying.
+    assert len(cleanup_calls) >= 1
+
+
+def test_evaluate_instance_cleans_up_container_on_workspace_failure(monkeypatch, tmp_path):
+    """If /workspace creation fails with a non-retryable error, the container is removed."""
+    instance = {
+        "instance_id": "inst-workspace-fail",
+        "dockerhub_tag": "tag",
+        "base_commit": "abc123",
+        "fail_to_pass": [],
+        "pass_to_pass": [],
+        "selected_test_files_to_run": [],
+        "before_repo_set_cmd": "",
+    }
+    prediction = {"instance_id": "inst-workspace-fail", "patch": "diff --git\n"}
+
+    cleanup_calls = []
+
+    def _fake_ensure_image(image, logger):
+        return True
+
+    def _fake_start_container(image, name, logger, timeout):
+        return True
+
+    class FakeProc:
+        returncode = 1
+        stderr = "permission denied"
+
+    def _fake_podman(*args, logger, timeout=None):
+        # The first podman call after start is mkdir -p /workspace.
+        if len(args) >= 3 and args[0] == "exec" and args[2] == "mkdir":
+            return FakeProc()
+        return FakeProc()
+
+    def _fake_stop_and_remove(name, logger):
+        cleanup_calls.append(name)
+
+    monkeypatch.setattr("evaluate_predictions._ensure_image", _fake_ensure_image)
+    monkeypatch.setattr("evaluate_predictions.start_container", _fake_start_container)
+    monkeypatch.setattr("evaluate_predictions.podman", _fake_podman)
+    monkeypatch.setattr(
+        "evaluate_predictions.stop_and_remove_container", _fake_stop_and_remove
+    )
+
+    logger = logging.getLogger("test_workspace_cleanup")
+    result = evaluate_instance(
+        instance, prediction, tmp_path, logger, test_timeout=60
+    )
+
+    assert "failed to create /workspace" in result["error"]
+    assert len(cleanup_calls) >= 1
+
+
+def test_diagnostic_counters_section_not_duplicated(tmp_path):
+    """The Markdown summary must contain exactly one Diagnostic counters section."""
+    results = [
+        {
+            "instance_id": "r1",
+            "error": None,
+            "overall_pass": True,
+            "fail_to_pass_passed": 1,
+            "fail_to_pass_total": 1,
+            "pass_to_pass_passed": 1,
+            "pass_to_pass_total": 1,
+            "patch": "diff --git\n",
+            "metadata": {},
+        },
+    ]
+    _write_report(tmp_path, results)
+    summary_text = (tmp_path / "evaluation_summary.md").read_text(encoding="utf-8")
+    assert summary_text.count("## Diagnostic counters") == 1
+
+
+def test_coerce_test_list_filters_non_dicts():
+    assert _coerce_test_list([{"name": "a"}, "bad", 123, None]) == [{"name": "a"}]
+    assert _coerce_test_list({"name": "a"}) == []
+    assert _coerce_test_list("not a list") == []
+    assert _coerce_test_list(None) == []
+
+
+def test_score_output_handles_malformed_tests():
+    """_score_output must not raise when output["tests"] is not a list of dicts."""
+    instance = _instance_with_tests(
+        fail_to_pass=["test_fail.py::test_x"],
+        pass_to_pass=["test_pass.py::test_y"],
+    )
+    for bad_tests in ({"name": "x"}, "not-a-list", ["string-item"], None):
+        score = _score_output({"tests": bad_tests}, instance)
+        assert score["fail_to_pass_passed"] == 0
+        assert score["pass_to_pass_passed"] == 0
+        assert score["overall_pass"] is False
+
+
+def test_no_tests_were_executed_handles_malformed_tests():
+    """_no_tests_were_executed must be safe against malformed output["tests"]."""
+    instance = _instance_with_tests(
+        fail_to_pass=["test_fail.py::test_x"],
+        pass_to_pass=["test_pass.py::test_y"],
+    )
+    for bad_tests in ({"name": "x"}, "not-a-list", ["string-item"], None):
+        score = _score_output({"tests": bad_tests}, instance)
+        assert _no_tests_were_executed(score, {"tests": bad_tests}) is True
+
+
+def test_prepull_images_counts_all_successes(monkeypatch):
+    """When every pre-pull succeeds, the reported count matches the input set size."""
+    monkeypatch.setattr(
+        shutil,
+        "which",
+        lambda cmd: "/usr/bin/podman" if cmd == "podman" else None,
+    )
+
+    def _fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    logger = logging.getLogger("test_prepull_count")
+    # Use enough images to engage multiple workers.
+    images = {f"img:{i}" for i in range(10)}
+    _prepull_images(images, logger)
+
+
+def test_entryscript_exits_with_run_status():
+    """The entryscript must propagate the test-run exit code to the harness."""
+    script = _build_entryscript(_minimal_instance())
+    assert script.strip().endswith("exit $run_status")

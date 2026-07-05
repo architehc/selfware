@@ -76,7 +76,7 @@ def _repo_is(repo: str, target: str) -> bool:
     if not repo:
         return False
     normalized = repo.replace("__", "/").lower()
-    return normalized == target.lower() or normalized.endswith(f"/{target.lower()}")
+    return normalized == target.lower()
 
 
 def _format_test_command(
@@ -1623,11 +1623,8 @@ def build_agentless_prompt(
         top_k=top_k * 3,
     )
     # Agentless is source-only; drop test files so the model edits implementation
-    # files rather than tests.
-    def _is_test_file(rel: str) -> bool:
-        name = rel.lower()
-        return name.endswith("_test.go") or name.startswith("test_") or name.endswith("_test.py")
-
+    # files rather than tests. Reuse the module-level helper so all conventions
+    # (e.g. ``_test.js``, ``_test.ts``, ``tests/`` layouts) are covered.
     source_ranked = [f for f in ranked if not _is_test_file(f)]
     if len(source_ranked) < top_k:
         source_ranked = ranked[:top_k]
@@ -1834,10 +1831,6 @@ def build_agentless_retry_prompt(
         test_names=tests + fail_to_pass,
         top_k=top_k * 3,
     )
-
-    def _is_test_file(rel: str) -> bool:
-        name = rel.lower()
-        return name.endswith("_test.go") or name.startswith("test_") or name.endswith("_test.py")
 
     source_ranked = [f for f in ranked if not _is_test_file(f)]
     if len(source_ranked) < top_k:

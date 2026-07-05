@@ -570,7 +570,14 @@ def parse_args() -> argparse.Namespace:
         help="Inject current public API skeletons for repos prone to API-drift hallucinations (e.g., qutebrowser). "
              "Use --no-inject-api-skeleton to disable. (default: true)",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Provide sensible defaults for attributes that are normally attached in
+    # main() so process_instance and other helpers can be exercised directly.
+    args.patch_config = getattr(args, "patch_config", {})
+    args.plan_config = getattr(args, "plan_config", None)
+    args.critic_config = getattr(args, "critic_config", None)
+    args.repair_feedback_map = getattr(args, "repair_feedback_map", {})
+    return args
 
 
 def setup_logging(output_dir: Path) -> logging.Logger:
@@ -2603,11 +2610,12 @@ def extract_repo_from_image(
     if not start_container(image, name, logger, timeout=120):
         return None
 
-    # Use a short fixed directory name inside the per-run output_dir so the
-    # tar extraction path does not hit filesystem name-length limits.
-    host_repo_dir = output_dir / "repos" / "repo"
-    # Remove any previously-extracted repo state so tar does not leave stale
-    # untracked files from earlier instances in this run.
+    # Use a per-instance extraction directory so concurrent runs that share an
+    # output directory do not race on the same fixed path.
+    name_hash = hashlib.md5(name.encode("utf-8")).hexdigest()[:8]
+    host_repo_dir = output_dir / "repos" / f"repo_{name_hash}"
+    # Remove any previously-extracted repo state for this instance so tar does
+    # not leave stale untracked files from earlier runs.
     if host_repo_dir.exists():
         shutil.rmtree(host_repo_dir, ignore_errors=True)
     host_repo_dir.mkdir(parents=True, exist_ok=True)
@@ -2794,7 +2802,8 @@ def _verify_patch_applies(repo_dir: Path, patch: str, base_commit: str | None, l
     """Check whether a captured patch applies cleanly on a reset base commit.
 
     Returns True if the patch can be applied, False otherwise.  The repo is
-    restored to its current state afterwards.
+    restored to its current state afterwards; if restoration fails an error is
+    raised so callers do not continue with a corrupted working tree.
     """
     if not patch.strip():
         return False
@@ -2802,13 +2811,29 @@ def _verify_patch_applies(repo_dir: Path, patch: str, base_commit: str | None, l
     # Write the patch outside the repo so it survives "git stash -u".
     patch_file = Path(tempfile.gettempdir()) / f"selfware_verify_{repo_dir.name}_{os.getpid()}.diff"
     patch_file.write_text(patch, encoding="utf-8")
+
+    def _restore_state() -> None:
+        """Best-effort restore of the stashed working tree."""
+        run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", commit], logger=logger)
+        apply_proc = run_cmd(["git", "-C", str(repo_dir), "stash", "apply"], logger=logger)
+        if apply_proc.returncode != 0:
+            logger.error(
+                "Could not re-apply verification stash for %s: %s",
+                repo_dir,
+                apply_proc.stderr.strip(),
+            )
+            raise RuntimeError(
+                f"Failed to restore repo state after patch verification in {repo_dir}"
+            )
+        run_cmd(["git", "-C", str(repo_dir), "stash", "drop"], logger=logger)
+
     try:
         # Reset to base, try apply, then restore.
         run_cmd(["git", "-C", str(repo_dir), "stash", "push", "-u", "-m", "verify"], logger=logger)
         reset_proc = run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", commit], logger=logger)
         if reset_proc.returncode != 0:
             logger.warning("Failed to reset for patch verification: %s", reset_proc.stderr.strip())
-            run_cmd(["git", "-C", str(repo_dir), "stash", "pop"], logger=logger)
+            _restore_state()
             return False
         check = run_cmd(["git", "-C", str(repo_dir), "apply", "--check", str(patch_file)], logger=logger)
         applies = check.returncode == 0
@@ -2817,7 +2842,12 @@ def _verify_patch_applies(repo_dir: Path, patch: str, base_commit: str | None, l
         run_cmd(["git", "-C", str(repo_dir), "reset", "--hard", commit], logger=logger)
         stash_proc = run_cmd(["git", "-C", str(repo_dir), "stash", "pop"], logger=logger)
         if stash_proc.returncode != 0:
-            logger.warning("Failed to restore repo after patch verification: %s", stash_proc.stderr.strip())
+            logger.warning(
+                "Failed to pop verification stash for %s: %s; attempting manual restore",
+                repo_dir,
+                stash_proc.stderr.strip(),
+            )
+            _restore_state()
         return applies
     finally:
         patch_file.unlink(missing_ok=True)
@@ -3488,6 +3518,7 @@ def process_instance(
         # unified diff before spending time on recovery retries.
         # ------------------------------------------------------------------
         if not patch.strip() and args.early_diff_fallback:
+            error_code = None
             stderr_path = log_dir / f"{instance_id}.selfware.stderr.log"
             failure_class = classify_failure(stderr_path)
             if failure_class in (JSON_PARSE_ERROR, MAX_ITERATIONS):
@@ -3521,21 +3552,31 @@ def process_instance(
                     )
                     if early_patch.strip():
                         patch = early_patch
-                        language = (instance.get("repo_language") or "").lower()
-                        if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
+                        if not _verify_patch_applies(
+                            host_repo_dir, patch, instance.get("base_commit"), logger
+                        ):
                             logger.warning(
-                                "Early diff fallback patch for %s failed compile gate; treating as empty",
+                                "Early diff fallback patch for %s does not apply; treating as empty",
                                 instance_id,
                             )
                             patch = ""
-                            error_code = "compile_gate_rejected"
-                            metadata["compile_gate_rejected"] = True
+                        if patch.strip():
+                            language = (instance.get("repo_language") or "").lower()
+                            if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
+                                logger.warning(
+                                    "Early diff fallback patch for %s failed compile gate; treating as empty",
+                                    instance_id,
+                                )
+                                patch = ""
+                                error_code = "compile_gate_rejected"
+                                metadata["compile_gate_rejected"] = True
                         save_prediction(
                             output_dir, instance_id, patch, logger, metadata,
                             error_code=error_code, provider=provider, model_profile=model_profile,
                         )
                         success = bool(patch.strip())
-                        logger.info("Early diff fallback succeeded for %s", instance_id)
+                        if success:
+                            logger.info("Early diff fallback succeeded for %s", instance_id)
 
         # ------------------------------------------------------------------
         # Failure-recovery loop: classify the failure, escalate the config,
@@ -3554,6 +3595,9 @@ def process_instance(
 
             for attempt in range(1, args.max_retries + 1):
                 metadata["recovery_attempts"] = metadata.get("recovery_attempts", 0) + 1
+                # Do not let a failure code from a previous attempt/fallback
+                # leak into the current recovery attempt.
+                error_code = None
                 if not should_retry(failure_class, attempt, args.max_retries):
                     logger.info(
                         "No further recovery retries for %s (class=%s)",
@@ -3638,7 +3682,6 @@ def process_instance(
                         prompt_suffix=prompt_suffix,
                         metadata=metadata,
                     )
-                    success = bool(patch.strip())
                 else:
                     recovery_prompt = build_recovery_prompt(
                         prompt_text,
@@ -3675,17 +3718,46 @@ def process_instance(
                         base_commit=instance.get("base_commit"),
                         test_patch_paths=test_patch_paths,
                     )
+
+                # Gate recovery patches on quality: must be non-empty, apply on
+                # the base commit, and pass the lightweight compile/type-check.
+                if patch.strip():
+                    if not _verify_patch_applies(
+                        host_repo_dir, patch, instance.get("base_commit"), logger
+                    ):
+                        logger.warning(
+                            "Recovery patch for %s attempt %s does not apply; treating as empty",
+                            instance_id,
+                            attempt,
+                        )
+                        patch = ""
+                if patch.strip():
+                    language = (instance.get("repo_language") or "").lower()
+                    if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
+                        logger.warning(
+                            "Recovery patch for %s attempt %s failed compile gate; treating as empty",
+                            instance_id,
+                            attempt,
+                        )
+                        patch = ""
+                        error_code = "compile_gate_rejected"
+                        metadata["compile_gate_rejected"] = True
+
                 save_prediction(
                     output_dir, instance_id, patch, logger, metadata,
                     error_code=error_code, provider=provider, model_profile=model_profile,
                 )
 
-                if success and patch.strip():
+                if patch.strip():
                     logger.info(
                         "Recovery attempt %s succeeded for %s", attempt, instance_id
                     )
                     metadata["recovery_succeeded"] = True
                     break
+
+                # Reset repo before the next attempt so failed edits do not
+                # accumulate and influence the next recovery prompt.
+                _reset_repo(host_repo_dir, instance["base_commit"], logger)
 
                 # Re-classify for the next attempt. If the patch is still empty,
                 # keep EMPTY_PATCH so we keep trying the agentless recovery path.
@@ -3706,6 +3778,7 @@ def process_instance(
         # retries) produced no patch, ask the model for a unified diff directly.
         # ------------------------------------------------------------------
         if not patch.strip() and args.diff_fallback:
+            error_code = None
             logger.warning(
                 "Running one-shot diff fallback for %s", instance_id
             )
@@ -3739,21 +3812,31 @@ def process_instance(
                 )
                 if fallback_patch.strip():
                     patch = fallback_patch
-                    language = (instance.get("repo_language") or "").lower()
-                    if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
+                    if not _verify_patch_applies(
+                        host_repo_dir, patch, instance.get("base_commit"), logger
+                    ):
                         logger.warning(
-                            "Diff fallback patch for %s failed compile gate; treating as empty",
+                            "Diff fallback patch for %s does not apply; treating as empty",
                             instance_id,
                         )
                         patch = ""
-                        error_code = "compile_gate_rejected"
-                        metadata["compile_gate_rejected"] = True
+                    if patch.strip():
+                        language = (instance.get("repo_language") or "").lower()
+                        if not _check_patch_builds(host_repo_dir, patch, language, logger, metadata):
+                            logger.warning(
+                                "Diff fallback patch for %s failed compile gate; treating as empty",
+                                instance_id,
+                            )
+                            patch = ""
+                            error_code = "compile_gate_rejected"
+                            metadata["compile_gate_rejected"] = True
                     save_prediction(
                         output_dir, instance_id, patch, logger, metadata,
                         error_code=error_code, provider=provider, model_profile=model_profile,
                     )
                     success = bool(patch.strip())
-                    logger.info("Diff fallback succeeded for %s", instance_id)
+                    if success:
+                        logger.info("Diff fallback succeeded for %s", instance_id)
 
         if not patch.strip():
             metadata["empty_patch"] = True
@@ -3776,10 +3859,12 @@ def process_instance(
                 host_repo_dir,
                 instance,
                 patch,
+                args.patch_config,
                 critic_config,
                 args,
                 log_dir,
                 logger,
+                name,
                 metadata=metadata,
             )
             save_prediction(
@@ -4008,7 +4093,9 @@ def main() -> int:
     # Sanity check: if recovery is requested for a non-trivial run, at least
     # one instance should have triggered a recovery step.  Zero recoveries
     # across many instances means the escalation path is misconfigured or
-    # bypassed (e.g. agentless mode returns before the recovery loop).
+    # bypassed (e.g. agentless mode returns before the recovery loop).  This
+    # is informational only: a strong model that solves every instance on the
+    # first attempt is a clean run and must not be treated as a failure.
     if args.retry_failures and len(instances) >= 10:
         recovery_fired = 0
         predictions_path = output_dir / "predictions.jsonl"
@@ -4022,17 +4109,25 @@ def main() -> int:
                     continue
                 if rec.get("metadata", {}).get("recovery_attempts", 0) > 0:
                     recovery_fired += 1
-        if recovery_fired == 0:
-            logger.error(
-                "SANITY CHECK FAILED: --retry-failures is enabled but "
-                "recovery_fired_count=0 across %s instances. The recovery "
-                "escalation path is likely bypassed; check agentless routing.",
+
+        agentless_routing_active = (
+            args.agentless is True or args.auto_agentless is not False
+        )
+        if recovery_fired == 0 and agentless_routing_active:
+            logger.warning(
+                "No recovery attempts recorded across %s instances. "
+                "Agentless routing may have bypassed the recovery escalation path; "
+                "verify that --retry-failures is configured as intended.",
                 len(instances),
             )
-            failures += 1
+        elif recovery_fired == 0:
+            logger.info(
+                "No recovery attempts needed across %s instances (clean first-attempt run).",
+                len(instances),
+            )
         else:
             logger.info(
-                "SANITY CHECK PASSED: recovery fired for %s/%s instances",
+                "Recovery fired for %s/%s instances",
                 recovery_fired,
                 len(instances),
             )
