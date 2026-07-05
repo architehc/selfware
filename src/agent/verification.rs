@@ -167,7 +167,8 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         return true;
     }
 
-    let strong_markers = [
+    // Intent markers are inherently forward-looking → always signal incompleteness.
+    let intent_markers = [
         "i need to read",
         "i need to inspect",
         "i need to review",
@@ -176,6 +177,18 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         "before making changes",
         "before i can fix",
         "before i can implement",
+    ];
+    if intent_markers.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+
+    // Tool-name markers only indicate PENDING work when paired with a
+    // forward-looking cue. Checked with `contains`, a bare "file_read(" also
+    // matches a past-tense summary of completed work — e.g. "I used file_read()
+    // to find the bug and fixed it" — which must NOT be treated as incomplete
+    // (false positive found by GLM-5.2 reviewing this file). Requiring a forward
+    // cue keeps "next I'll call file_read(...)" flagged while clearing past tense.
+    let tool_markers = [
         "file_read(",
         "file_read:",
         "file_edit(",
@@ -185,8 +198,19 @@ pub(super) fn is_incomplete_action_response(content: &str) -> bool {
         "shell_exec(",
         "shell_exec:",
     ];
-
-    strong_markers.iter().any(|marker| lower.contains(marker))
+    let forward_cue = [
+        "i need to",
+        "i'll ",
+        "i will ",
+        "i'm going to",
+        "going to",
+        "next i",
+        "i should ",
+        "first i",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue));
+    forward_cue && tool_markers.iter().any(|marker| lower.contains(marker))
 }
 
 fn truncate_visual_note(input: &str, max_chars: usize) -> String {
@@ -1159,6 +1183,19 @@ mod tests {
         ));
         assert!(!is_incomplete_action_response(
             "To summarize, the fix changes the return type and updates the caller."
+        ));
+        // Past-tense tool mentions describe COMPLETED work — not incomplete
+        // (found by GLM-5.2 reviewing verification.rs: bare "file_read(" via
+        // `contains` false-positived past-tense summaries).
+        assert!(!is_incomplete_action_response(
+            "I used file_read() to examine the module, found the off-by-one bug, and fixed it."
+        ));
+        assert!(!is_incomplete_action_response(
+            "The shell_exec() call confirmed the tests pass; the change is complete."
+        ));
+        // But a forward-looking plan to call a tool IS still incomplete.
+        assert!(is_incomplete_action_response(
+            "Next I'll call file_read( to inspect the registration before editing."
         ));
     }
 
