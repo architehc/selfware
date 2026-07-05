@@ -523,6 +523,10 @@ pub struct Agent {
     /// nudges (that reset is what previously let this loop burn 100 iterations);
     /// reset only at task start and on a real mutating tool call.
     mutation_gate_rejections: usize,
+    /// Consecutive StaleVerification rejections (edit done, not yet verified) where
+    /// the model produced a tool-less answer instead of running the test. Used to
+    /// auto-run verification and break the churn.
+    consecutive_stale_verification: usize,
     /// Lifetime total of no-action prompts across the entire task.
     /// Unlike the consecutive counter, this is NOT reset when the model produces
     /// a non-intent response. It provides a hard abort ceiling.
@@ -1125,6 +1129,7 @@ To call a tool, use this EXACT XML structure:
             consecutive_no_action_prompts: 0,
             readonly_no_tool_streak: 0,
             mutation_gate_rejections: 0,
+            consecutive_stale_verification: 0,
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             permission_store,
@@ -2073,6 +2078,7 @@ To call a tool, use this EXACT XML structure:
         self.mutating_tool_call_count = 0;
         self.total_tool_call_count = 0;
         self.mutation_gate_rejections = 0;
+        self.consecutive_stale_verification = 0;
         self.progress_guard_fire_count = 0;
         self.mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
@@ -2089,6 +2095,7 @@ To call a tool, use this EXACT XML structure:
         self.mutating_tool_call_count += 1;
         self.mutation_sequence += 1;
         self.mutation_gate_rejections = 0;
+        self.consecutive_stale_verification = 0;
         self.last_failed_verification_summary = None;
         self.post_edit_observational_shell_count = 0;
     }

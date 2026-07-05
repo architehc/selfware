@@ -751,6 +751,40 @@ impl Agent {
                         );
                     }
                 }
+                // Churn breaker: the edit is done but verification hasn't passed and
+                // the model keeps answering instead of running the test
+                // (StaleVerification). After a couple of these, run the verification
+                // ourselves so the run converges instead of wasting turns/tokens.
+                let is_stale_verification = tool_calls.is_empty()
+                    && self.mutating_tool_call_count() > 0
+                    && (gate_msg.contains("StaleVerification")
+                        || gate_msg.contains("verification has not passed")
+                        || gate_msg.contains("FailingTestsAccepted"));
+                if is_stale_verification {
+                    self.consecutive_stale_verification += 1;
+                    let is_rust = super::current_project_root().join("Cargo.toml").exists();
+                    if self.consecutive_stale_verification >= 2
+                        && is_rust
+                        && self.tools.get("cargo_check").is_some()
+                    {
+                        info!("Auto-running cargo_check to break StaleVerification churn");
+                        self.consecutive_stale_verification = 0;
+                        self.tools.activate("cargo_check");
+                        let batch: Vec<CollectedToolCall> =
+                            vec![("cargo_check".to_string(), "{}".to_string(), None)];
+                        self.execute_tool_batch(batch).await?;
+                        self.messages.push(crate::api::types::Message::user(
+                            "<selfware_system_directive>\n\
+                             cargo_check was run automatically. If it passed, give your final \
+                             answer now; if it reported errors, fix them and re-verify.\n\
+                             </selfware_system_directive>"
+                                .to_string(),
+                        ));
+                        return Ok(false);
+                    }
+                } else {
+                    self.consecutive_stale_verification = 0;
+                }
                 // Refine the previously-written turn artifact: this turn ended
                 // with a gate refusal, not a plain "no tool call".
                 self.write_turn_artifact(
