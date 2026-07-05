@@ -27,6 +27,11 @@ EXPECTED_SMALL_MODEL_PROFILES = frozenset({
     "lfm-2.5-1.2b-thinking-free-sweap",
     "nova-lite",
     "poolside-laguna-xs.2-free-sweap",
+    "tencent-hy3-preview",
+    "stepfun-step-3.7-flash",
+    "minimax-minimax-m3",
+    "qwen-qwen3.7-plus",
+    "deepseek-deepseek-v4-flash",
 })
 
 
