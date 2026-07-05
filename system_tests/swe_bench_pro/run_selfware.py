@@ -87,10 +87,10 @@ from patch_utils import (
     _apply_diff_with_check,
 )
 
-from critic import (
-    build_critic_prompt,
-    run_critic_loop,
-)
+try:
+    from critic import run_critic_loop
+except ModuleNotFoundError:
+    run_critic_loop = None
 
 try:
     from datasets import load_dataset
@@ -3903,6 +3903,12 @@ def main() -> int:
         logger.info("Using repair config: %s", repair_config_path)
 
     if args.critic_iterations > 0:
+        if run_critic_loop is None:
+            logger.error(
+                "--critic-iterations requires system_tests/swe_bench_pro/critic.py, "
+                "but that module is not available in this checkout"
+            )
+            return 1
         if args.critic_model_profile:
             critic_config_path = Path(args.config_dir) / f"openrouter_{args.critic_model_profile}.toml"
             if not critic_config_path.exists():
