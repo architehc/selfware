@@ -91,6 +91,24 @@ impl AgentLoop {
         }
     }
 
+    /// The iteration-limit warning band currently reached: 0 (none), 80, or 90.
+    /// Lets the loop push each threshold warning exactly once instead of every
+    /// iteration past 80% (which accumulated duplicate system messages —
+    /// found by GLM-5.2 reviewing task_runner.rs).
+    pub fn approaching_limit_band(&self) -> u8 {
+        if self.max_iterations == 0 {
+            return 0;
+        }
+        let pct = (self.iteration * 100) / self.max_iterations;
+        if pct >= 90 {
+            90
+        } else if pct >= 80 {
+            80
+        } else {
+            0
+        }
+    }
+
     fn is_valid_transition(current: &AgentState, next: &AgentState) -> bool {
         matches!(
             (current, next),

@@ -504,6 +504,12 @@ impl Agent {
 
     /// Continue execution from current state (for resuming tasks)
     pub async fn continue_execution(&mut self) -> Result<()> {
+        // Reset the wall-clock budget baseline to the resume point. Without this,
+        // the loop's max-seconds timeout is measured from the ORIGINAL run_task
+        // start (or agent creation if resumed in a fresh process), so a task
+        // resumed after any real pause could time out immediately (found by
+        // GLM-5.2 reviewing task_runner.rs; verified + fixed by Claude).
+        self.task_start_time = std::time::Instant::now();
         let task_description = self
             .current_checkpoint
             .as_ref()
@@ -559,9 +565,17 @@ impl Agent {
             "Resume"
         };
 
+        // Push each iteration-limit warning band (80%, 90%) at most once, instead
+        // of every iteration past the threshold (which piled up duplicate system
+        // messages and wasted context — GLM-5.2 finding on task_runner.rs).
+        let mut last_warned_band = 0u8;
         while let Some(state) = self.loop_control.next_state() {
-            if let Some(warning) = self.loop_control.approaching_limit_warning() {
-                self.messages.push(Message::system(warning));
+            let band = self.loop_control.approaching_limit_band();
+            if band > last_warned_band {
+                if let Some(warning) = self.loop_control.approaching_limit_warning() {
+                    self.messages.push(Message::system(warning));
+                }
+                last_warned_band = band;
             }
             self.trim_message_history();
 
