@@ -278,7 +278,11 @@ pub fn classify_task(task: &str) -> TaskType {
     }
 
     // Read/analyze/explain/diagnose — no mutation implied
-    if t.contains("read")
+    // Short words use whole-word matching: bare contains("read") also matched
+    // "thread"/"already", contains("list") matched "enlist"/"playlist", and
+    // contains("count") matched "account"/"discount" — so "Update the thread
+    // pool" was misclassified as Read (found by GLM-5.2 reviewing task_focus.rs).
+    if contains_word(&t, "read")
         || t.contains("explain")
         || t.contains("describe")
         || t.contains("analyze")
@@ -287,8 +291,8 @@ pub fn classify_task(task: &str) -> TaskType {
         || t.contains("what is")
         || t.contains("show me")
         || t.contains("tell me")
-        || t.contains("list")
-        || t.contains("count")
+        || contains_word(&t, "list")
+        || contains_word(&t, "count")
         || t.contains("summarize")
         || t.contains("why")
         || t.contains("crash")
@@ -397,9 +401,17 @@ mod tests {
             classify_task("Refactor the pagerank scorer in ranker.rs"),
             TaskType::Refactor
         );
+        // "read" inside "thread", "list" inside identifiers, "count" inside
+        // "account" must not route to Read (found by GLM-5.2 reviewing task_focus).
+        assert_eq!(classify_task("Update the thread pool size"), TaskType::Edit);
+        assert_eq!(
+            classify_task("Fix the account balance calculation"),
+            TaskType::Edit
+        );
         // Genuine whole-word matches still classify as before.
         assert_eq!(classify_task("Ship the v2 release"), TaskType::Ship);
         assert_eq!(classify_task("The login page is broken, fix it"), TaskType::Visual);
+        assert_eq!(classify_task("Read the config module and explain it"), TaskType::Read);
     }
 
     #[test]
