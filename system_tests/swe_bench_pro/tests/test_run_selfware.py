@@ -21,6 +21,7 @@ from run_selfware import (
     _check_run_manifest,
     _estimate_input_tokens,
     _parse_context_limit_from_error,
+    _reset_repo,
     _run_diff_recovery,
     apply_adaptive_overrides,
     call_chat_endpoint,
@@ -755,6 +756,24 @@ def _init_git_repo(repo: Path) -> None:
         ["git", "-C", str(repo), "config", "user.name", "Test User"],
         check=True,
     )
+
+
+def test_reset_repo_removes_untracked_files(tmp_path):
+    """Recovery reset must remove files created by a previously applied test patch."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "tracked.py").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    untracked = repo / "tests" / "new_test.py"
+    untracked.parent.mkdir()
+    untracked.write_text("created by test patch\n", encoding="utf-8")
+    assert untracked.exists()
+
+    assert _reset_repo(repo, "HEAD", logging.getLogger("test")) is True
+    assert not untracked.exists()
 
 
 def test_run_diff_fallback_extracts_valid_unified_diff(tmp_path, monkeypatch):

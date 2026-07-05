@@ -1634,13 +1634,20 @@ def should_use_agentless(args: argparse.Namespace, config: dict[str, Any]) -> bo
 
 
 def _reset_repo(host_repo_dir: Path, base_commit: str, logger: logging.Logger) -> bool:
-    """Reset the host repo to the base commit."""
+    """Reset the host repo to the base commit and remove untracked files."""
     proc = run_cmd(
         ["git", "-C", str(host_repo_dir), "reset", "--hard", base_commit],
         logger=logger,
     )
     if proc.returncode != 0:
         logger.error("Failed to reset repo to %s: %s", base_commit, proc.stderr.strip())
+        return False
+    clean = run_cmd(
+        ["git", "-C", str(host_repo_dir), "clean", "-fd"],
+        logger=logger,
+    )
+    if clean.returncode != 0:
+        logger.error("Failed to clean repo after reset: %s", clean.stderr.strip())
         return False
     return True
 
