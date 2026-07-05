@@ -55,6 +55,8 @@
 pub mod agent;
 pub mod api;
 pub mod cli;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod computer;
 pub mod concurrency;
 pub mod concurrent_queue;

@@ -714,6 +714,9 @@ mod tests {
 
     #[test]
     fn test_estimate_action_cost_nonexistent() {
+        // fits_in_budget reads the global budget atomics; hold+reset them so a
+        // concurrent budget-mutating test can't perturb the result.
+        let _budget = crate::test_support::BudgetGuard::hold();
         let est = estimate_action_cost(
             ContextAction::ReadFull,
             Path::new("/nonexistent/file.rs"),
@@ -726,6 +729,7 @@ mod tests {
 
     #[test]
     fn test_estimate_action_cost_fusion_scaling() {
+        let _budget = crate::test_support::BudgetGuard::hold();
         let binary = estimate_action_cost(
             ContextAction::ReadFull,
             Path::new("/nonexistent/file.rs"),
@@ -764,6 +768,7 @@ mod tests {
 
     #[test]
     fn test_update_and_read_budget() {
+        let _budget = crate::test_support::BudgetGuard::hold();
         update_budget(50_000, 200_000, 10);
         let (used, total, files) = read_budget();
         assert_eq!(used, 50_000);

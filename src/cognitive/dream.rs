@@ -993,17 +993,22 @@ mod tests {
 
     #[test]
     fn test_memory_store_prune_stale() {
-        let content = r#"# Project Memory
+        // Dates are computed relative to today so the test is not a time-bomb:
+        // a hardcoded "recent" date eventually ages past the 90-day threshold and
+        // the test starts failing on wall-clock alone (observed 2026-07: a
+        // 2026-03-31 fixture became 96 days old and was pruned unexpectedly).
+        let old_date = (chrono::Local::now() - chrono::Duration::days(200))
+            .format("%Y-%m-%d")
+            .to_string();
+        let recent_date = (chrono::Local::now() - chrono::Duration::days(10))
+            .format("%Y-%m-%d")
+            .to_string();
+        let content = format!(
+            "# Project Memory\n\n## Facts (consolidated)\n- [{}] Very old fact\n- [{}] Recent fact\n\n## Preferences (user-defined)\n- Always use spaces\n",
+            old_date, recent_date
+        );
 
-## Facts (consolidated)
-- [2020-01-01] Very old fact
-- [2026-03-31] Recent fact
-
-## Preferences (user-defined)
-- Always use spaces
-"#;
-
-        let mut store = MemoryStore::parse(content);
+        let mut store = MemoryStore::parse(&content);
         let removed = store.prune_stale(90);
         assert_eq!(removed, 1);
         assert_eq!(store.entries.len(), 2);

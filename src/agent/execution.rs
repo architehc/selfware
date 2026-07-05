@@ -1437,19 +1437,19 @@ mod tests {
     /// Anything with another source file must report ≥ 1.
     #[tokio::test]
     async fn count_source_files_skips_scaffold_target_and_excluded_dirs() {
-        // Save + restore cwd so we don't poison sibling tests.
-        let saved = std::env::current_dir().unwrap();
+        // Serialize + restore cwd so we don't race/poison sibling tests.
+        let cwd = crate::test_support::CwdGuard::hold();
 
         // 1. Genuinely empty workdir → 0
         let empty = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(empty.path()).unwrap();
+        cwd.switch_to(empty.path());
         assert_eq!(count_source_files_in_workdir(5).await, 0);
 
         // 2. SAB-style: only src/lib.rs → 0 (the scaffold target itself doesn't count)
         let sab = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(sab.path().join("src")).unwrap();
         std::fs::write(sab.path().join("src/lib.rs"), "// empty\n").unwrap();
-        std::env::set_current_dir(sab.path()).unwrap();
+        cwd.switch_to(sab.path());
         assert_eq!(count_source_files_in_workdir(5).await, 0);
 
         // 3. Real Rust codebase: tests/foo.rs alongside src/lib.rs → 1
@@ -1467,7 +1467,7 @@ mod tests {
             "// dep\n",
         )
         .unwrap();
-        std::env::set_current_dir(go_repo.path()).unwrap();
+        cwd.switch_to(go_repo.path());
         assert_eq!(count_source_files_in_workdir(5).await, 0);
 
         // 5. Real non-Rust codebase: a top-level .go file → 1 (must NOT scaffold)
@@ -1479,10 +1479,9 @@ mod tests {
         for i in 0..10 {
             std::fs::write(many.path().join(format!("f{i}.py")), "x = 1\n").unwrap();
         }
-        std::env::set_current_dir(many.path()).unwrap();
+        cwd.switch_to(many.path());
         assert_eq!(count_source_files_in_workdir(3).await, 3);
-
-        std::env::set_current_dir(saved).unwrap();
+        // cwd restored on drop of `cwd`.
     }
 
     // =========================================================================
@@ -2721,18 +2720,9 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         // Create a temp directory without a Cargo.toml and chdir into it
+        // (serialized + auto-restored, incl. on panic).
         let tmp = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
-
-        // Ensure CWD is restored even on panic
-        struct CwdGuard(std::path::PathBuf);
-        impl Drop for CwdGuard {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.0);
-            }
-        }
-        let _guard = CwdGuard(original_dir);
+        let _guard = crate::test_support::CwdGuard::enter(tmp.path());
 
         // Task with file_write in a non-Rust project — a successful test/build
         // command (e.g. pytest) should satisfy the verification gate.
@@ -2823,17 +2813,8 @@ mod tests {
         let nested = tmp.path().join("crates").join("worker");
         std::fs::create_dir_all(&nested).unwrap();
 
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&nested).unwrap();
-
-        // Ensure CWD is restored even on panic
-        struct CwdGuard(std::path::PathBuf);
-        impl Drop for CwdGuard {
-            fn drop(&mut self) {
-                let _ = std::env::set_current_dir(&self.0);
-            }
-        }
-        let _guard = CwdGuard(original_dir);
+        // Serialized chdir, auto-restored even on panic.
+        let _guard = crate::test_support::CwdGuard::enter(&nested);
 
         let mut agent = Agent::new(config).await.unwrap();
 
@@ -4020,6 +4001,10 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_mutation_task_rejects_long_prose_without_tools_before_completion_gate() {
+        // The completion gate resolves current_project_root() and runs `git diff`
+        // in the process cwd; hold the cwd lock so a concurrent cwd-mutating test
+        // can't perturb the gate's decision.
+        let _cwd = crate::test_support::CwdGuard::hold();
         let long_prose = format!(
             "I analyzed the bug and will now explain the intended fix.\n{}",
             "This is still only prose, not a tool call. ".repeat(40)
@@ -4095,9 +4080,8 @@ mod tests {
 
     #[tokio::test]
     async fn extract_code_and_path_rust_fallback_requires_cargo_toml() {
-        let saved = std::env::current_dir().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
+        let _guard = crate::test_support::CwdGuard::enter(dir.path());
 
         let content = r#"```rust
 pub fn answer() -> i32 {
@@ -4114,7 +4098,7 @@ pub fn other() -> i32 {
 
         let (path, _) = extract_code_and_path(content).await.unwrap();
         assert_eq!(path, "src/lib.rs");
-        std::env::set_current_dir(saved).unwrap();
+        // cwd restored on drop of `_guard`.
     }
 
     #[tokio::test]
