@@ -64,6 +64,11 @@ from small_model_adapter import (
     truncate_file_reads,
 )
 
+from api_skeleton import (
+    inject_api_skeleton,
+    should_inject_api_skeleton,
+)
+
 from small_model_configs import (
     DEFAULT_SMALL_MODEL_CONFIG_DIR,
     load_small_model_config,
@@ -557,6 +562,13 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=16384,
         help="Maximum tokens for each critic model API call (default: 16384).",
+    )
+    parser.add_argument(
+        "--inject-api-skeleton",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Inject current public API skeletons for repos prone to API-drift hallucinations (e.g., qutebrowser). "
+             "Use --no-inject-api-skeleton to disable. (default: true)",
     )
     return parser.parse_args()
 
@@ -1906,6 +1918,15 @@ def run_agentless(
         expand_to_package=expand_to_package,
     )
 
+    if getattr(args, "inject_api_skeleton", True) and should_inject_api_skeleton(instance):
+        agentless_prompt = inject_api_skeleton(
+            host_repo_dir,
+            instance,
+            agentless_prompt,
+            logger,
+            max_total_chars=min(12_000, context_window),
+        )
+
     tests = load_list_field(instance.get("selected_test_files_to_run", []))
     fail_to_pass = load_list_field(instance.get("fail_to_pass", []))
     search_text = instance.get("problem_statement", "") or ""
@@ -1988,6 +2009,16 @@ def run_agentless(
         context_window=context_window,
         expand_to_package=expand_to_package,
     )
+
+    if getattr(args, "inject_api_skeleton", True) and should_inject_api_skeleton(instance):
+        retry_prompt = inject_api_skeleton(
+            host_repo_dir,
+            instance,
+            retry_prompt,
+            logger,
+            max_total_chars=min(12_000, context_window),
+        )
+
     patch, ok, _ = _attempt(retry_prompt, ".retry", allow_retry=False)
     if patch.strip():
         return patch
@@ -3333,6 +3364,17 @@ def process_instance(
                 repo_path=host_repo_dir,
                 ranked_files=ranked_files,
             )
+
+        context_window = patch_config.get("agent", {}).get("context_window", 32768) or 32768
+        if getattr(args, "inject_api_skeleton", True) and should_inject_api_skeleton(instance):
+            prompt_text = inject_api_skeleton(
+                host_repo_dir,
+                instance,
+                prompt_text,
+                logger,
+                max_total_chars=min(12_000, context_window),
+            )
+
         log_dir.mkdir(parents=True, exist_ok=True)
         (log_dir / f"{name}.prompt.txt").write_text(
             prompt_text, encoding="utf-8"
