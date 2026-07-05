@@ -616,7 +616,17 @@ impl Agent {
         // Keep: system message + last 4 messages.
         let keep_recent = 4;
         if self.messages.len() > keep_recent + 1 {
-            let system_msg = self.messages.first().cloned();
+            // Preserve the ACTUAL system message by role, not just the first
+            // message. If the first message isn't the system prompt, taking
+            // first() kept the wrong message as "system" and silently discarded
+            // the real system prompt during compression (found by GLM-5.2
+            // reviewing context_management.rs; verified + fixed by Claude).
+            let system_msg = self
+                .messages
+                .iter()
+                .find(|m| m.role == "system")
+                .cloned()
+                .or_else(|| self.messages.first().cloned());
             let messages_before = self.messages.len();
             let recent: Vec<_> = self
                 .messages
