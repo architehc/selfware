@@ -486,6 +486,29 @@ impl Agent {
             return Ok(false);
         }
 
+        // Gate-satisfied completion: if the completion gate is ALREADY satisfied
+        // (for a mutation task: edits made + verification passed) and the model
+        // returns a substantial, non-confused tool-less answer, accept it now.
+        // The completion gate is the authority on "done"; without this, a valid
+        // summary answer that happens to contain an intent phrase ("let me ...",
+        // "I'll ...") gets re-classified by maybe_prompt_for_action as "describing
+        // intent" → ForceFallback, and since edits are done no fake-complete guard
+        // trips, so the loop spins empty steps to MAX_ITERATIONS even though the
+        // code compiles and tests pass (observed on multi-file tasks).
+        if tool_calls.is_empty() {
+            let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+            if clean.len() >= 40
+                && !super::verification::is_confused_response(&content)
+                && !super::verification::is_incomplete_action_response(&content)
+                && self.check_completion_gate().await.is_none()
+            {
+                info!("Completion gate satisfied — accepting substantial final answer");
+                output::final_answer(&clean);
+                self.last_assistant_response = clean;
+                return Ok(true);
+            }
+        }
+
         // Read-only completion gate. For a non-mutating task (code review /
         // analysis / question) that returns no tool call, accept a substantial
         // final answer immediately; and if the model instead keeps narrating
