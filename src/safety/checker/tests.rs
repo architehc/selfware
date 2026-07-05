@@ -211,6 +211,23 @@ fn test_git_push_force_blocked() {
     assert!(checker.check_tool_call(&call).is_err());
 }
 
+#[test]
+fn test_git_push_protected_branch_blocked() {
+    let config = SafetyConfig::default(); // protected_branches: ["main", "master"]
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("git_push", r#"{"remote": "origin", "branch": "main"}"#);
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("protected branch"));
+}
+
+#[test]
+fn test_git_push_non_protected_branch_allowed() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("git_push", r#"{"remote": "origin", "branch": "feature-x"}"#);
+    assert!(checker.check_tool_call(&call).is_ok());
+}
+
 // ── Container operations ────────────────────────────────────────────────
 
 #[test]

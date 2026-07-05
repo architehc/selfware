@@ -4744,9 +4744,36 @@ mod tests {
 
     #[tokio::test]
     async fn yolo_gate_denies_git_push_when_disallowed() {
+        // Push to a non-protected branch so this exercises the YOLO gate's
+        // own git-push handling specifically, not the separate
+        // protected_branches check (covered below).
         let server = MockLlmServer::builder().with_response("done").build().await;
         let mut config = test_config(format!("{}/v1", server.url()));
         config.yolo.allow_git_push = false;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![(
+                "git_push".to_string(),
+                r#"{"branch":"feature-branch"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let last = agent.messages.last().expect("expected a skip message");
+        assert!(last.content.text().contains("unattended session"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn git_push_to_protected_branch_is_blocked_even_with_git_push_allowed() {
+        // protected_branches is a hard block, distinct from (and checked
+        // before) the YOLO allow_git_push toggle -- allowing git_push in
+        // general must not bypass it.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.yolo.allow_git_push = true;
         let mut agent = Agent::new(config).await.unwrap();
 
         agent
@@ -4759,7 +4786,7 @@ mod tests {
             .unwrap();
 
         let last = agent.messages.last().expect("expected a skip message");
-        assert!(last.content.text().contains("unattended session"));
+        assert!(last.content.text().contains("protected branch"));
         server.stop().await;
     }
 }

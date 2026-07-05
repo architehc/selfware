@@ -574,6 +574,17 @@ impl Tool for GitPush {
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
 
+        if let Some(ref safety_config) = self.safety_config {
+            if safety_config.protected_branches.iter().any(|b| b == &branch) {
+                anyhow::bail!(
+                    "Push to protected branch '{}' is blocked by the safety checker \
+                     (protected_branches: {:?}).",
+                    branch,
+                    safety_config.protected_branches
+                );
+            }
+        }
+
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("push").arg("--").arg(remote).arg(&branch);
 
@@ -976,6 +987,40 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert_eq!(output["success"], false);
+    }
+
+    #[tokio::test]
+    async fn test_git_push_execute_blocks_protected_branch() {
+        let safety_config = crate::config::SafetyConfig {
+            protected_branches: vec!["main".to_string()],
+            ..Default::default()
+        };
+        let tool = GitPush::with_safety_config(safety_config);
+        let args = serde_json::json!({
+            "remote": "nonexistent_remote_test",
+            "branch": "main"
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("protected branch"));
+    }
+
+    #[tokio::test]
+    async fn test_git_push_execute_allows_non_protected_branch() {
+        let safety_config = crate::config::SafetyConfig {
+            protected_branches: vec!["main".to_string()],
+            ..Default::default()
+        };
+        let tool = GitPush::with_safety_config(safety_config);
+        let args = serde_json::json!({
+            "remote": "nonexistent_remote_test",
+            "branch": "some-other-branch"
+        });
+        let result = tool.execute(args).await;
+        // Not blocked by protected_branches; fails later since the remote
+        // doesn't exist, same as the un-configured case above.
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap()["success"], false);
     }
 
     // Tests for validate_tag_name function

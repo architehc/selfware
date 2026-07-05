@@ -266,6 +266,12 @@ pub enum SafetyError {
     #[error("Force push is blocked for safety. Use --no-force or confirm manually")]
     BlockedForcePush,
 
+    #[error("Push to protected branch '{branch}' is blocked by the safety checker (protected_branches: {protected:?})")]
+    BlockedProtectedBranchPush {
+        branch: String,
+        protected: Vec<String>,
+    },
+
     // Tool registration errors
     #[error("Unregistered tool '{tool}' blocked by safety checker. Register it in checker.rs to allow execution")]
     UnregisteredTool { tool: String },

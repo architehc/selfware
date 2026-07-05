@@ -81,6 +81,25 @@ impl SafetyChecker {
                 if force {
                     return Err(SelfwareError::Safety(SafetyError::BlockedForcePush));
                 }
+                // Only checkable here when the branch is explicit in the call --
+                // when omitted the tool pushes whatever branch is currently
+                // checked out, which GitPush::execute() itself re-checks
+                // after resolving it (see src/tools/git.rs).
+                if let Some(branch) = args.get("branch").and_then(|v| v.as_str()) {
+                    if self
+                        .config
+                        .protected_branches
+                        .iter()
+                        .any(|b| b == branch)
+                    {
+                        return Err(SelfwareError::Safety(
+                            SafetyError::BlockedProtectedBranchPush {
+                                branch: branch.to_string(),
+                                protected: self.config.protected_branches.clone(),
+                            },
+                        ));
+                    }
+                }
             }
             "container_exec" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
