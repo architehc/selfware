@@ -334,6 +334,24 @@ impl SafetyChecker {
             }
         }
 
+        // The dedicated git_push tool enforces protected_branches, but an
+        // agent can bypass that entirely by invoking git directly through
+        // shell_exec/container_exec -- catch explicit protected-branch
+        // targets here too (see git_push_protected_branch_target's doc
+        // comment for what this does and doesn't catch).
+        for part in split_shell_commands(&normalized) {
+            if let Some(branch) =
+                git_push_protected_branch_target(part.trim(), &self.config.protected_branches)
+            {
+                return Err(SelfwareError::Safety(
+                    SafetyError::BlockedProtectedBranchPush {
+                        branch,
+                        protected: self.config.protected_branches.clone(),
+                    },
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -700,6 +718,65 @@ pub fn split_shell_commands(cmd: &str) -> Vec<&str> {
     }
 
     parts
+}
+
+/// Detect `git push` invocations (via shell_exec/container_exec, not the
+/// dedicated git_push tool) that explicitly target a protected branch, and
+/// return the offending branch name if found.
+///
+/// Only catches an *explicit* branch argument (`git push origin main`,
+/// `git push origin --delete main`, `git push origin :main`,
+/// `git push --force-with-lease origin main`, etc.). A bare `git push` with
+/// no branch argument pushes whatever the current branch's configured
+/// upstream is, which can't be determined from the command string alone --
+/// that case isn't caught here.
+fn git_push_protected_branch_target(cmd: &str, protected_branches: &[String]) -> Option<String> {
+    if protected_branches.is_empty() {
+        return None;
+    }
+    let tokens = shlex::split(cmd)?;
+    let git_pos = tokens.iter().position(|t| t == "git")?;
+    let rest = &tokens[git_pos + 1..];
+    let push_pos = rest.iter().position(|t| t == "push")?;
+    let args = &rest[push_pos + 1..];
+
+    let mut delete_next = false;
+    let mut candidates: Vec<&str> = Vec::new();
+    for arg in args {
+        if delete_next {
+            candidates.push(arg.as_str());
+            delete_next = false;
+            continue;
+        }
+        if arg == "--delete" || arg == "-d" {
+            delete_next = true;
+            continue;
+        }
+        if let Some(stripped) = arg.strip_prefix(':') {
+            // `git push origin :branch` (delete-by-refspec syntax)
+            candidates.push(stripped);
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue; // other flags: --force, --force-with-lease, -u, etc.
+        }
+        candidates.push(arg.as_str());
+    }
+
+    // The remaining non-flag tokens are typically [remote] [branch[:refspec]].
+    // Check both sides of a local:remote refspec against protected_branches.
+    for candidate in candidates {
+        let (local, remote) = match candidate.split_once(':') {
+            Some((l, r)) => (l, Some(r)),
+            None => (candidate, None),
+        };
+        for name in [Some(local), remote].into_iter().flatten() {
+            if protected_branches.iter().any(|b| b == name) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Check if an IP is private or internal

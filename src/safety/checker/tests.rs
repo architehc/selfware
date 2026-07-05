@@ -228,6 +228,85 @@ fn test_git_push_non_protected_branch_allowed() {
     assert!(checker.check_tool_call(&call).is_ok());
 }
 
+// ── git push via shell_exec (bypassing the git_push tool) ──────────────
+
+#[test]
+fn test_shell_exec_git_push_protected_branch_blocked() {
+    let config = SafetyConfig::default(); // protected_branches: ["main", "master"]
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "git push origin main"}"#);
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("protected branch"));
+}
+
+#[test]
+fn test_shell_exec_git_push_force_with_lease_protected_branch_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "git push --force-with-lease origin main"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
+fn test_shell_exec_git_push_delete_flag_protected_branch_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "git push origin --delete main"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
+fn test_shell_exec_git_push_delete_refspec_protected_branch_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "git push origin :main"}"#);
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
+fn test_shell_exec_git_push_chained_command_protected_branch_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "echo hi && git push origin main"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
+fn test_shell_exec_git_push_non_protected_branch_allowed() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "git push origin feature-x"}"#);
+    assert!(checker.check_tool_call(&call).is_ok());
+}
+
+#[test]
+fn test_shell_exec_bare_git_push_not_flagged() {
+    // Documented limitation: a bare `git push` (no explicit branch) can't
+    // be resolved to a target branch from the command string alone, so it
+    // isn't caught here -- just confirm it doesn't false-positive-block.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "git push"}"#);
+    assert!(checker.check_tool_call(&call).is_ok());
+}
+
+#[test]
+fn test_container_exec_git_push_protected_branch_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("container_exec", r#"{"command": "git push origin main"}"#);
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
 // ── Container operations ────────────────────────────────────────────────
 
 #[test]
