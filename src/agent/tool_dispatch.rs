@@ -1742,6 +1742,19 @@ impl Agent {
                 continue;
             }
 
+            // Same gate the sequential path runs (YOLO forbidden-ops/protected-path/
+            // container-mount checks, plus a confirmation prompt for anything that
+            // still needs one). Without this, tools in the parallel-safe list were
+            // silently exempt from the YOLO gate entirely -- e.g. a file_read of a
+            // YOLO-protected path would be Block-ed in the sequential path but ran
+            // unchecked here just because it happened to land in a >=2-tool batch.
+            if !self
+                .confirm_tool_execution(&name, &args_str, &call_id, use_native_fc)
+                .await?
+            {
+                continue;
+            }
+
             // Fire PreToolUse hooks (may skip execution)
             let pre_ctx = HookContext::pre_tool(&name, &args_str);
             if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
@@ -4695,6 +4708,58 @@ mod tests {
 
         let last = agent.messages.last().expect("expected a skip message");
         assert!(last.content.text().contains("Blocked by YOLO safety gate"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn yolo_gate_applies_in_parallel_batch_too() {
+        // Regression test: execute_parallel_tools (used when 2+ tools in a
+        // batch are in PARALLEL_SAFE_TOOLS) never called
+        // confirm_tool_execution at all, so the YOLO gate silently didn't
+        // apply to any tool executed that way -- a file_read of a
+        // YOLO-protected path would be Block-ed via the sequential path but
+        // ran unchecked here just because a second parallel-safe call
+        // happened to land in the same batch. Uses two file_read calls
+        // (file_read is parallel-safe) to force the parallel path.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![
+                // /etc/hostname (not /etc/passwd -- that one's already
+                // caught by an earlier, narrower hardcoded dangerous-files
+                // list in path_validator.rs, which would pass regardless of
+                // this fix and defeat the point of this test).
+                (
+                    "file_read".to_string(),
+                    r#"{"path":"/etc/hostname"}"#.to_string(),
+                    None,
+                ),
+                (
+                    "file_read".to_string(),
+                    r#"{"path":"Cargo.toml"}"#.to_string(),
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let all_text: String = agent
+            .messages
+            .iter()
+            .map(|m| m.content.text())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        assert!(
+            all_text.contains("Blocked by YOLO safety gate"),
+            "expected the /etc/hostname read to be blocked; got: {all_text}"
+        );
+        // The unrelated, unprotected read should have gone through untouched.
+        assert!(
+            all_text.contains("[package]"),
+            "expected the Cargo.toml read to succeed; got: {all_text}"
+        );
         server.stop().await;
     }
 
