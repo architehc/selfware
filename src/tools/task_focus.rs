@@ -215,7 +215,16 @@ pub fn classify_task(task: &str) -> TaskType {
         || t.contains("without editing")
         || t.contains("without modifying")
         || t.contains("read-only")
-        || t.contains("read only"))
+        || t.contains("read only")
+        // Review / audit / inspect are read-only intents. Catch them here,
+        // before the Test/Edit classifiers, so a review whose target or wording
+        // happens to contain "spec"(ific), "test", or "bug" is not mis-typed as
+        // a mutation task and handed a "write code / run tests" workflow it can
+        // never satisfy (found debugging a review of verification.rs → Testing).
+        || contains_word(&t, "review")
+        || contains_word(&t, "reviewing")
+        || contains_word(&t, "audit")
+        || contains_word(&t, "inspect"))
     {
         return TaskType::Read;
     }
@@ -257,7 +266,10 @@ pub fn classify_task(task: &str) -> TaskType {
     if t.contains("test")
         || t.contains("coverage")
         || t.contains("regression")
-        || t.contains("spec")
+        // Whole-word so "spec"(ification), "spec"(ific), "e"spec"ially",
+        // "in"spec"t", "re"spec"t" don't false-positive a task into Testing
+        // (same substring-match class as the earlier "thread"->"read" bug).
+        || contains_word(&t, "spec")
     {
         // Distinguish "write tests" (Test) from "fix the test" (Edit)
         if t.contains("fix") || t.contains("repair") || t.contains("broken") {
@@ -432,6 +444,39 @@ mod tests {
         assert_eq!(
             classify_task("Fix the bug in parser.rs, but do not edit the tests."),
             TaskType::Edit
+        );
+    }
+
+    #[test]
+    fn test_classify_review_intent_is_read_not_test_or_edit() {
+        // Regression: "specific" contains "spec" and the file is named
+        // verification.rs — previously mis-typed as Testing, which handed the
+        // model a write-code/run-tests workflow it could never satisfy on a
+        // read-only review (livelock). Review intent must win → Read.
+        assert_eq!(
+            classify_task(
+                "Review the file src/agent/verification.rs for any real bugs with specific line references"
+            ),
+            TaskType::Read
+        );
+        assert_eq!(
+            classify_task("Audit the auth module for issues"),
+            TaskType::Read
+        );
+        assert_eq!(
+            classify_task("Inspect config.rs and report code smells"),
+            TaskType::Read
+        );
+        // "specific" alone must not pull a non-review task into Testing.
+        assert_ne!(
+            classify_task("Explain the specific ownership rules in mod.rs"),
+            TaskType::Test
+        );
+        // A genuine test-writing task is still Test (review override needs the
+        // review verb, which this lacks).
+        assert_eq!(
+            classify_task("Write tests for the tier allocator"),
+            TaskType::Test
         );
     }
 
