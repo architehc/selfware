@@ -559,8 +559,16 @@ impl Agent {
 
         let step_count = self.loop_control.current_step();
         let min_steps = self.config.agent.min_completion_steps;
-        let skip_min_steps_for_read_only = !self.current_task_context.is_empty()
+        // A read-only task (review / analysis / answer) has nothing to write or
+        // verify, so it must NOT be held to the mutation-oriented "write code /
+        // run a verification tool" gates below. Applying them livelocks review
+        // tasks whose answers legitimately quote code: `contains_unwritten_code`
+        // flags the quoted snippet and the gate demands `file_write`, which a
+        // read-only task correctly never does — so it can never complete (found
+        // running a 10k-step read-only code review that churned to the step cap).
+        let is_read_only = !self.current_task_context.is_empty()
             && !super::tool_dispatch::task_requires_mutation(self.learning_context());
+        let skip_min_steps_for_read_only = is_read_only;
 
         if step_count < min_steps && !skip_min_steps_for_read_only {
             // Tailor the message: don't mention cargo for non-Rust tasks
@@ -604,7 +612,7 @@ impl Agent {
         // Reject completion if the last assistant response contains code that
         // should have been written to a file. This catches the common pattern
         // where models output code as text instead of using file_write/file_edit.
-        if super::execution::contains_unwritten_code(&self.last_assistant_response) {
+        if !is_read_only && super::execution::contains_unwritten_code(&self.last_assistant_response) {
             return Some(
                 "Your response contains code that was NOT written to any file. \
                  Use file_write to save it to a file, then verify with a relevant test/build command. \
@@ -641,7 +649,7 @@ impl Agent {
         // Reject completion when the task requires code changes but no source files
         // were written at all. This catches the "context insufficient" early-quit
         // pattern where the model gives a text-only answer without doing any work.
-        if self.config.agent.require_verification_before_completion {
+        if !is_read_only && self.config.agent.require_verification_before_completion {
             let has_any_file_write = self
                 .messages
                 .iter()
@@ -676,7 +684,7 @@ impl Agent {
             }
         }
 
-        if self.config.agent.require_verification_before_completion {
+        if !is_read_only && self.config.agent.require_verification_before_completion {
             // Only require a verification tool call when the task is not
             // exclusively using read-only / non-code tools (browser, vision,
             // HTTP, desktop control, etc.). If no checkpoint exists yet, or if
@@ -1302,6 +1310,44 @@ mod tests {
             assert!(
                 result.is_some(),
                 "completion should be rejected when the only verification attempt failed"
+            );
+        }
+
+        // Regression: a READ-ONLY review whose answer legitimately quotes code
+        // must be allowed to complete. Before the read-only guard, the code in
+        // the answer tripped `contains_unwritten_code`, the gate demanded a
+        // `file_write` the task should never do, and the task livelocked to the
+        // step cap (reproduced on a 10k-step read-only code review).
+        #[tokio::test]
+        async fn read_only_review_completes_even_when_answer_quotes_code() {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            agent.current_task_context =
+                "Review this module and report any bugs you find".to_string();
+            agent.has_written_any_file = false;
+            agent.last_assistant_response = "Review complete. One real bug in `foo`:\n\
+                 ```rust\nfn foo() { let x: i32 = parse(); use_it(x); }\n```\n\
+                 `parse()` can fail and the error is ignored. That is my full assessment."
+                .to_string();
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "a read-only review that quotes code must complete, not livelock on a file_write demand"
+            );
+        }
+
+        // Contrast: the same unwritten-code answer on a MUTATION task must still
+        // be rejected — the read-only guard must not loosen the edit-task gate.
+        #[tokio::test]
+        async fn mutation_task_still_rejects_unwritten_code() {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            agent.current_task_context =
+                "Fix the bug in foo() and implement the missing error handling".to_string();
+            agent.has_written_any_file = false;
+            agent.last_assistant_response = "Here is the fix:\n\
+                 ```rust\nfn foo() { let x = parse().unwrap_or(0); use_it(x); }\n```"
+                .to_string();
+            assert!(
+                agent.check_completion_gate().await.is_some(),
+                "a mutation task that only pastes code as text must still be rejected"
             );
         }
     }
