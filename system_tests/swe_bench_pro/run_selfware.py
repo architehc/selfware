@@ -1548,12 +1548,15 @@ def _run_diff_recovery(
     name: str,
     attempt: int,
     metadata: dict[str, Any],
+    save_prediction_record: bool = True,
 ) -> str:
     """Run the one-shot diff fallback as an EMPTY_PATCH recovery step.
 
     Resets the repo, re-applies the official test patch, asks the model for a
-    raw unified diff, and runs the compile gate.  On success the prediction is
-    saved and ``recovery_succeeded`` is recorded in ``metadata``.
+    raw unified diff, and runs the compile gate.  On success
+    ``recovery_succeeded`` is recorded in ``metadata``.  Direct unit callers
+    can keep the historical behavior of saving here; the main recovery loop
+    disables that so each attempt writes exactly one prediction record.
     """
     instance_id = instance["instance_id"]
     base_commit = instance["base_commit"]
@@ -1611,7 +1614,8 @@ def _run_diff_recovery(
 
     logger.info("Diff recovery succeeded for %s attempt %s", instance_id, attempt)
     metadata["recovery_succeeded"] = True
-    save_prediction(output_dir, instance_id, fallback_patch, logger, metadata)
+    if save_prediction_record:
+        save_prediction(output_dir, instance_id, fallback_patch, logger, metadata)
     return fallback_patch
 
 
@@ -3555,17 +3559,28 @@ def process_instance(
                     logger=logger,
                 )
                 if reset_proc.returncode == 0:
-                    early_patch = run_diff_fallback(
+                    if not _apply_test_patch(
                         host_repo_dir,
-                        instance,
-                        prompt_text,
-                        ranked_files,
-                        args.patch_config,
-                        args,
-                        log_dir,
+                        instance.get("test_patch", "") or "",
                         logger,
-                        f"{name}_early",
-                    )
+                    ):
+                        logger.error(
+                            "Failed to apply test_patch for early diff fallback %s",
+                            instance_id,
+                        )
+                        early_patch = ""
+                    else:
+                        early_patch = run_diff_fallback(
+                            host_repo_dir,
+                            instance,
+                            prompt_text,
+                            ranked_files,
+                            args.patch_config,
+                            args,
+                            log_dir,
+                            logger,
+                            f"{name}_early",
+                        )
                     if early_patch.strip():
                         patch = early_patch
                         if not _verify_patch_applies(
@@ -3671,7 +3686,35 @@ def process_instance(
                     f"{name}_attempt{attempt}",
                 )
 
-                if recovery_result.get(AGENTLESS_MODE_KEY):
+                if failure_class == EMPTY_PATCH and args.diff_fallback:
+                    logger.info(
+                        "Switching to direct unified-diff recovery for %s attempt %s",
+                        instance_id,
+                        attempt,
+                    )
+                    logger.info(
+                        "RECOVERY_ESCALATION instance=%s attempt=%s diff_recovery=%s",
+                        instance_id,
+                        attempt,
+                        True,
+                    )
+                    recovery_patch_config = load_config(recovery_path)
+                    patch = _run_diff_recovery(
+                        host_repo_dir,
+                        instance,
+                        prompt_text,
+                        ranked_files,
+                        recovery_patch_config,
+                        args,
+                        log_dir,
+                        output_dir,
+                        logger,
+                        name,
+                        attempt,
+                        metadata,
+                        save_prediction_record=False,
+                    )
+                elif recovery_result.get(AGENTLESS_MODE_KEY):
                     logger.info(
                         "Switching to agentless SEARCH/REPLACE recovery for %s attempt %s",
                         instance_id,
@@ -3813,6 +3856,15 @@ def process_instance(
                 logger.error(
                     "Failed to reset repo for diff fallback: %s",
                     reset_proc.stderr.strip(),
+                )
+            elif not _apply_test_patch(
+                host_repo_dir,
+                instance.get("test_patch", "") or "",
+                logger,
+            ):
+                logger.error(
+                    "Failed to apply test_patch for diff fallback %s",
+                    instance_id,
                 )
             else:
                 fallback_patch = run_diff_fallback(

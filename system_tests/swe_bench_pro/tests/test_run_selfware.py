@@ -1091,6 +1091,67 @@ def test_diff_recovery_saves_prediction_on_empty_patch(tmp_path, monkeypatch):
     assert records[0]["metadata"]["diff_recovery_fired"] is True
 
 
+def test_diff_recovery_can_return_patch_without_saving_prediction(tmp_path, monkeypatch):
+    """The main recovery loop saves once after diff recovery returns."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    (repo / "foo.py").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "foo.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base", "-q"], check=True)
+
+    expected_patch = (
+        "diff --git a/foo.py b/foo.py\n"
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    monkeypatch.setattr(
+        "run_selfware.run_diff_fallback",
+        lambda *args, **kwargs: expected_patch,
+    )
+    monkeypatch.setattr(
+        "run_selfware._check_patch_builds",
+        lambda repo_dir, patch, language, logger, metadata=None: True,
+    )
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    metadata: dict[str, Any] = {}
+    instance = {
+        "instance_id": "inst-recovery-no-save",
+        "base_commit": "HEAD",
+        "test_patch": "",
+        "repo_language": "python",
+    }
+    args = argparse.Namespace(patch_timeout=30, patch_config={})
+
+    patch = _run_diff_recovery(
+        repo,
+        instance,
+        "prompt",
+        ["foo.py"],
+        {},
+        args,
+        log_dir,
+        output_dir,
+        logging.getLogger("test"),
+        "name",
+        1,
+        metadata,
+        save_prediction_record=False,
+    )
+
+    assert patch == expected_patch
+    assert metadata.get("recovery_succeeded") is True
+    assert not (output_dir / "predictions.jsonl").exists()
+
+
 # -----------------------------------------------------------------------------
 # Atomic patch-application tests for agentless and plan-then-patch paths
 # -----------------------------------------------------------------------------
