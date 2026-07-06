@@ -161,6 +161,14 @@ impl SessionLogger {
 
     pub fn log(&self, mut event: SessionLogEvent) {
         event.session_id = self.session_id.clone();
+        // Every SessionLogEvent flows through here before it's kept in the
+        // in-memory `recent` ring buffer (printed verbatim by
+        // print_session_debug_log) and before it's persisted to the on-disk
+        // JSONL file -- redact once, here, rather than relying on every
+        // call site that builds a SessionLogEvent to remember to do it. A
+        // tool `result` (e.g. reading a .env file, or a subprocess echoing
+        // an Authorization header) would otherwise be persisted raw.
+        redact_session_log_event(&mut event);
         if let Ok(mut recent) = self.recent.lock() {
             if recent.len() == RECENT_EVENT_LIMIT {
                 recent.pop_front();
@@ -199,6 +207,45 @@ impl SessionLogger {
         }
 
         debug!("Session log writer exited for {:?}", path);
+    }
+}
+
+/// Redact likely-secret substrings from every text-bearing field of a
+/// `SessionLogEvent` in place. See `SessionLogger::log`'s call site.
+fn redact_session_log_event(event: &mut SessionLogEvent) {
+    use crate::observability::telemetry::redact_secrets;
+
+    if let Some(s) = event.input.as_mut() {
+        *s = redact_secrets(s);
+    }
+    if let Some(s) = event.arguments.as_mut() {
+        *s = redact_secrets(s);
+    }
+    if let Some(s) = event.result.as_mut() {
+        *s = redact_secrets(s);
+    }
+    if let Some(details) = event.details.as_mut() {
+        redact_json_value_strings(details);
+    }
+}
+
+/// Recursively redact every string leaf in a JSON value in place.
+fn redact_json_value_strings(value: &mut serde_json::Value) {
+    use crate::observability::telemetry::redact_secrets;
+
+    match value {
+        serde_json::Value::String(s) => *s = redact_secrets(s),
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                redact_json_value_strings(v);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for v in obj.values_mut() {
+                redact_json_value_strings(v);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -829,6 +876,58 @@ mod tests {
         assert_eq!(events[1].event_type, SessionEventType::ToolCall);
         assert_eq!(events[1].tool_name.as_deref(), Some("shell_exec"));
         assert_eq!(events[1].session_id, "session-test");
+    }
+
+    #[tokio::test]
+    async fn session_logger_redacts_secrets_in_tool_call_fields() {
+        let dir = tempdir().unwrap();
+        let logger = SessionLogger::new_in("session-redact-test", dir.path().to_path_buf())
+            .await
+            .unwrap();
+        let path = logger.path().to_path_buf();
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::ToolCall,
+            task_id: Some("task-1".to_string()),
+            tool_name: Some("shell_exec".to_string()),
+            input: Some("Authorization: Bearer sk-live-abcdefghijklmnop".to_string()),
+            arguments: Some(
+                r#"{"command":"curl -H 'Authorization: Bearer sk-live-abcdefghijklmnop' https://api.example.com"}"#
+                    .to_string(),
+            ),
+            result: Some(r#"{"error":"password=hunter2 invalid"}"#.to_string()),
+            success: Some(false),
+            duration_ms: Some(12),
+            details: Some(json!({"raw_response": "token-abcdefghijklmnop leaked here"})),
+        });
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Check both the in-memory ring buffer (recent_events) and what
+        // actually landed on disk -- both flow through the same `log()`.
+        for events in [
+            logger.recent_events(10),
+            SessionLogger::read_recent(&path, 10).await.unwrap(),
+        ] {
+            assert_eq!(events.len(), 1);
+            let event = &events[0];
+            let input = event.input.as_deref().unwrap();
+            let arguments = event.arguments.as_deref().unwrap();
+            let result = event.result.as_deref().unwrap();
+            let details = event.details.as_ref().unwrap().to_string();
+
+            assert!(!input.contains("sk-live-abcdefghijklmnop"), "{input}");
+            assert!(!arguments.contains("sk-live-abcdefghijklmnop"), "{arguments}");
+            assert!(!result.contains("hunter2"), "{result}");
+            assert!(!details.contains("token-abcdefghijklmnop"), "{details}");
+
+            assert!(input.contains("[REDACTED]"));
+            assert!(arguments.contains("[REDACTED]"));
+            assert!(result.contains("[REDACTED]"));
+            assert!(details.contains("[REDACTED]"));
+        }
     }
 
     #[test]
