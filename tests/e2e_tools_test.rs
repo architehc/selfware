@@ -508,11 +508,17 @@ async fn test_e2e_localhost_http_and_browser_fetch_round_trip() {
 #[tokio::test]
 async fn test_e2e_browser_screenshot_round_trip() {
     let _env_lock = BROWSER_ENV_LOCK.lock().await;
+    // Skip cleanly when no browser is installed, consistent with the
+    // browser_eval / page_control e2e tests. The post-hoc maybe_skip_browser_error
+    // path below does not catch every no-Chrome failure mode, so without this
+    // guard the test hard-fails on machines that have no browser.
+    let Some(chrome_path) = find_chrome_executable() else {
+        eprintln!("skipping browser_screenshot E2E test: Chrome not available");
+        return;
+    };
     let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
     env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
-    if let Some(chrome_path) = find_chrome_executable() {
-        env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", chrome_path);
-    }
+    env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", chrome_path);
 
     let body = "<html><head><title>chart shot</title></head><body><main style='width:100%;height:100%;background:#f5e7d8'><h1>chart shot</h1></main></body></html>".to_string();
     let (server, base_url) = spawn_static_response_server(body, "text/html").await;

@@ -4002,9 +4002,12 @@ mod tests {
     )]
     async fn test_mutation_task_rejects_long_prose_without_tools_before_completion_gate() {
         // The completion gate resolves current_project_root() and runs `git diff`
-        // in the process cwd; hold the cwd lock so a concurrent cwd-mutating test
-        // can't perturb the gate's decision.
-        let _cwd = crate::test_support::CwdGuard::hold();
+        // in the process cwd. Run in an isolated empty temp dir (not the real
+        // repo) so that decision is deterministic and can't be perturbed by
+        // ambient repo git state or concurrent git activity — the source of a
+        // prior contention flake that only surfaced under heavy parallel load.
+        let _cwd_dir = tempfile::tempdir().unwrap();
+        let _cwd = crate::test_support::CwdGuard::enter(_cwd_dir.path());
         let long_prose = format!(
             "I analyzed the bug and will now explain the intended fix.\n{}",
             "This is still only prose, not a tool call. ".repeat(40)

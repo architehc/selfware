@@ -1282,9 +1282,15 @@ mod tests {
 
     #[test]
     fn test_config_checks_default_endpoint_local() {
-        // A default Config has localhost endpoint and no api_key — should NOT
-        // fail (treated as local).
-        let cfg = crate::config::Config::default();
+        // A localhost endpoint with no api_key should NOT fail (treated as
+        // local). Constructed explicitly because the default endpoint is now
+        // the remote OpenRouter GLM-5.2 stack, which DOES require a key (that
+        // path is covered by test_config_checks_remote_no_api_key_fails).
+        let cfg = crate::config::Config {
+            endpoint: "http://127.0.0.1:1234/v1".to_string(),
+            api_key: None,
+            ..crate::config::Config::default()
+        };
         let checks = config_checks(&cfg);
         // endpoint URL should pass
         assert!(checks
