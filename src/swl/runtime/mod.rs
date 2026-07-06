@@ -244,6 +244,25 @@ pub struct SwlRuntime {
     max_tool_iterations: usize,
     /// Workflow name for state persistence
     workflow_name: Option<String>,
+    /// Gates every workflow-step tool call the same way the CLI/TUI agent
+    /// loop and MCP server do. See `execute_tool_call`.
+    safety: crate::safety::SafetyChecker,
+}
+
+/// Load the safety config for an SWL runtime. Falls back to defaults (which
+/// are already conservative) if no config file is found or it fails to
+/// parse, rather than refusing to construct the runtime entirely.
+fn load_swl_safety_config() -> crate::config::SafetyConfig {
+    match crate::config::Config::load(None) {
+        Ok(config) => config.safety,
+        Err(e) => {
+            tracing::warn!(
+                "SWL runtime: failed to load selfware config ({}), using default safety settings",
+                e
+            );
+            crate::config::SafetyConfig::default()
+        }
+    }
 }
 
 impl SwlRuntime {
@@ -258,6 +277,7 @@ impl SwlRuntime {
             last_workflow_duration_ms: AtomicU64::new(0),
             max_tool_iterations: 50,
             workflow_name: None,
+            safety: crate::safety::SafetyChecker::new(&load_swl_safety_config()),
         }
     }
 
@@ -271,6 +291,7 @@ impl SwlRuntime {
             last_workflow_duration_ms: AtomicU64::new(0),
             max_tool_iterations: 50,
             workflow_name: None,
+            safety: crate::safety::SafetyChecker::new(&load_swl_safety_config()),
         }
     }
 
@@ -288,6 +309,7 @@ impl SwlRuntime {
             last_workflow_duration_ms: AtomicU64::new(0),
             max_tool_iterations: 50,
             workflow_name: None,
+            safety: crate::safety::SafetyChecker::new(&config.safety),
         }
     }
 
@@ -307,6 +329,7 @@ impl SwlRuntime {
             last_workflow_duration_ms: AtomicU64::new(0),
             max_tool_iterations: 50,
             workflow_name: Some(workflow_name.to_string()),
+            safety: crate::safety::SafetyChecker::new(&load_swl_safety_config()),
         })
     }
 
@@ -864,6 +887,12 @@ Wait for tool results before proceeding. When done, respond with plain text only
             );
         }
 
+        // Same gate the CLI/TUI agent loop and MCP server apply -- without
+        // this, an SWL workflow step could invoke shell_exec/file_delete/
+        // git_push (or anything else registered) with none of the checks in
+        // src/safety/ applied.
+        self.safety.check_tool_call(tool_call)?;
+
         // Parse arguments
         let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
 
@@ -1053,6 +1082,46 @@ mod tests {
         // Test get_agent_trace returns empty for non-existent agent
         let agent_trace = runtime.get_agent_trace("test_agent").await;
         assert!(agent_trace.is_empty());
+    }
+
+    #[tokio::test]
+    async fn execute_tool_call_blocks_dangerous_shell_command() {
+        // Regression test: an SWL workflow step used to be able to invoke
+        // shell_exec (or any other registered tool) with none of the
+        // src/safety/ checks applied at all.
+        let runtime = SwlRuntime::new_dry_run();
+        let call = crate::api::types::ToolCall {
+            id: "t1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: "shell_exec".to_string(),
+                arguments: r#"{"command":"rm -rf /"}"#.to_string(),
+            },
+        };
+        let available = vec!["shell_exec".to_string()];
+
+        let err = runtime
+            .execute_tool_call(&call, &available)
+            .await
+            .expect_err("dangerous shell command must be blocked");
+        assert!(err.to_string().contains("Dangerous command"));
+    }
+
+    #[tokio::test]
+    async fn execute_tool_call_allows_safe_shell_command() {
+        let runtime = SwlRuntime::new_dry_run();
+        let call = crate::api::types::ToolCall {
+            id: "t2".to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: "shell_exec".to_string(),
+                arguments: r#"{"command":"echo hello"}"#.to_string(),
+            },
+        };
+        let available = vec!["shell_exec".to_string()];
+
+        let result = runtime.execute_tool_call(&call, &available).await;
+        assert!(result.is_ok(), "expected safe command to run: {result:?}");
     }
 
     #[tokio::test]

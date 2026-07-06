@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tracing::{debug, info};
 
+use crate::safety::SafetyChecker;
 use crate::tools::ToolRegistry;
 
 // ---------------------------------------------------------------------------
@@ -145,11 +146,33 @@ pub struct McpServer {
     project_root: PathBuf,
     /// Whether the server has been initialized.
     initialized: bool,
+    /// Gates every tools/call the same way the CLI/TUI agent loop does --
+    /// without this, an MCP client (any external AI tool speaking the
+    /// protocol) could invoke any registered tool, including shell_exec/
+    /// file_delete/git_push, with none of the checks in src/safety/ applied.
+    safety: SafetyChecker,
 }
 
 impl Default for McpServer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Load the safety config for the MCP server. Falls back to defaults (which
+/// are already conservative -- allowed_paths=["./**"], the standard
+/// denied_paths/require_confirmation lists) if no config file is found or it
+/// fails to parse, rather than refusing to start the server entirely.
+fn load_mcp_safety_config() -> crate::config::SafetyConfig {
+    match crate::config::Config::load(None) {
+        Ok(config) => config.safety,
+        Err(e) => {
+            tracing::warn!(
+                "MCP server: failed to load selfware config ({}), using default safety settings",
+                e
+            );
+            crate::config::SafetyConfig::default()
+        }
     }
 }
 
@@ -161,6 +184,7 @@ impl McpServer {
             registry: ToolRegistry::new(),
             project_root,
             initialized: false,
+            safety: SafetyChecker::new(&load_mcp_safety_config()),
         }
     }
 
@@ -170,6 +194,7 @@ impl McpServer {
             registry: ToolRegistry::new(),
             project_root,
             initialized: false,
+            safety: SafetyChecker::new(&load_mcp_safety_config()),
         }
     }
 
@@ -317,6 +342,27 @@ impl McpServer {
             .unwrap_or(serde_json::json!({}));
 
         debug!("tools/call: {} with args: {}", tool_name, arguments);
+
+        let fake_call = crate::api::types::ToolCall {
+            id: "mcp".to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: tool_name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        };
+        if let Err(e) = self.safety.check_tool_call(&fake_call) {
+            let response = serde_json::json!({
+                "content": [
+                    {
+                        "type": "text",
+                        "text": format!("Blocked by safety checker: {}", e)
+                    }
+                ],
+                "isError": true
+            });
+            return (Some(response), None);
+        }
 
         match self.registry.execute(tool_name, arguments).await {
             Ok(result) => {
@@ -902,6 +948,57 @@ mod tests {
         // Tool errors are returned as isError content, not JSON-RPC errors
         let result = response.result.unwrap();
         assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_blocks_dangerous_shell_command() {
+        // Regression test: an MCP client (any external tool speaking the
+        // protocol) used to be able to invoke any registered tool, including
+        // shell_exec, with none of the src/safety/ checks applied at all.
+        let mut server = McpServer::new();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(7)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "shell_exec",
+                "arguments": {"command": "rm -rf /"}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("Blocked by safety checker"),
+            "expected the dangerous command to be blocked, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_allows_safe_shell_command() {
+        let mut server = McpServer::new();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(8)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "shell_exec",
+                "arguments": {"command": "echo hello"}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !text.contains("Blocked by safety checker"),
+            "expected the safe command to run, got: {text}"
+        );
     }
 
     #[tokio::test]
