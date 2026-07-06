@@ -90,6 +90,25 @@ impl AppliedFields {
 /// wins.  Keep more-specific patterns before more-general ones.
 pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
     vec![
+        // GLM-5.2 (z-ai) — the project's default model.  Card-recommended
+        // reasoning-mode sampling: temperature=1.0, top_p=0.95, with the
+        // model's thinking enabled via the chat template.  selfware parses the
+        // resulting reasoning_content automatically, so no client change is
+        // needed.  Provider pinning (full 1M context) stays in user config.
+        ModelDefaultsProfile {
+            name: "glm-5.2",
+            pattern: "*glm-5.2*",
+            native_function_calling: Some(true),
+            streaming: None,
+            temperature: Some(1.0),
+            max_tokens: Some(65536),
+            extra_body: json!({
+                "top_p": 0.95,
+                "chat_template_kwargs": {
+                    "enable_thinking": true,
+                },
+            }),
+        },
         // Qwen 3.6 — needs the high presence_penalty / min_p kit and the
         // SGLang `preserve_thinking` template knob to produce its best
         // function-calling output.  Without these, SWE-bench Pro hovers
@@ -312,6 +331,28 @@ mod tests {
     fn glob_handles_question_mark() {
         assert!(glob_matches("gpt-?", "gpt-4"));
         assert!(!glob_matches("gpt-?", "gpt-44"));
+    }
+
+    #[test]
+    fn match_profile_picks_glm52_for_openrouter_glm_model() {
+        // config.model is the OpenRouter id "z-ai/glm-5.2".
+        let p = match_profile("z-ai/glm-5.2").expect("should match");
+        assert_eq!(p.name, "glm-5.2");
+        assert_eq!(p.temperature, Some(1.0));
+        assert_eq!(p.max_tokens, Some(65536));
+        assert_eq!(p.native_function_calling, Some(true));
+        let eb = p.extra_body.as_object().expect("extra_body is object");
+        assert_eq!(eb.get("top_p"), Some(&json!(0.95)));
+        assert_eq!(
+            eb.get("chat_template_kwargs")
+                .and_then(|k| k.get("enable_thinking")),
+            Some(&json!(true))
+        );
+        // dated snapshot ids still match via the trailing wildcard.
+        assert_eq!(
+            match_profile("z-ai/glm-5.2-20260616").map(|p| p.name),
+            Some("glm-5.2")
+        );
     }
 
     #[test]

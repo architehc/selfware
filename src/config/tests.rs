@@ -1790,11 +1790,11 @@ fn test_config_load_empty_file() {
     let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
     assert_eq!(config.model, "z-ai/glm-5.2");
-    // The default model "z-ai/glm-5.2" has no built-in profile (only qwen3.5-*
-    // ships as a bundled profile), so no profile override is applied and
-    // max_tokens stays the hard-coded default (65536).
+    // The default model "z-ai/glm-5.2" matches the built-in glm-5.2 profile,
+    // which fills reasoning-mode defaults (temperature=1.0, max_tokens=65536,
+    // top_p=0.95, enable_thinking) for any field the empty config omits.
     assert_eq!(config.max_tokens, 65536);
-    assert_eq!(config.matched_profile.as_deref(), None);
+    assert_eq!(config.matched_profile.as_deref(), Some("glm-5.2"));
     assert!(config.models.contains_key("default"));
 }
 
