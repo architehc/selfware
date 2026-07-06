@@ -776,6 +776,72 @@ mod tests {
     }
 
     // =====================================================================
+    // compress_to_structured_summary  (compaction end-to-end)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_structured_compression_compacts_and_keeps_system_and_recent() {
+        let server = MockLlmServer::builder().build().await;
+        let mut agent = make_test_agent(&server).await;
+
+        // Deliberately put a NON-system message first and the real system prompt
+        // SECOND, to exercise the by-role preservation fix.
+        agent.messages.clear();
+        agent
+            .messages
+            .push(Message::user("stale bootstrap line that should be compressed away"));
+        agent
+            .messages
+            .push(Message::system("SYSTEM_PROMPT_SENTINEL: obey the rules"));
+        for i in 0..10 {
+            agent.messages.push(Message::user(&format!(
+                "history message {i} with enough words to cost some tokens for the estimator"
+            )));
+            agent
+                .messages
+                .push(Message::assistant(&format!("reply {i} acknowledging the work is progressing")));
+        }
+        let before = agent.messages.len();
+        let recent_marker = "reply 9 acknowledging the work is progressing";
+
+        // target far below current usage → compression must fire.
+        agent.compress_to_structured_summary(1);
+
+        let after = agent.messages.len();
+        let joined: String = agent.messages.iter().map(|m| m.content.text_all()).collect::<Vec<_>>().join("\n");
+
+        assert!(after < before, "compaction must reduce message count ({before} -> {after})");
+        assert!(
+            joined.contains("SYSTEM_PROMPT_SENTINEL"),
+            "the real system prompt must survive even when it wasn't first"
+        );
+        assert!(
+            joined.contains("STRUCTURED SUMMARY"),
+            "compacted history is replaced by a structured summary block"
+        );
+        assert!(joined.contains(recent_marker), "the most recent turn must be kept verbatim");
+        assert!(
+            !joined.contains("stale bootstrap line"),
+            "the non-system first message must be compressed away, not mistaken for the system prompt"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_structured_compression_noop_when_under_target() {
+        let server = MockLlmServer::builder().build().await;
+        let mut agent = make_test_agent(&server).await;
+        agent.messages.clear();
+        agent.messages.push(Message::system("sys"));
+        agent.messages.push(Message::user("short"));
+        let before = agent.messages.len();
+        // huge target → nothing to compress.
+        agent.compress_to_structured_summary(1_000_000);
+        assert_eq!(agent.messages.len(), before, "no compaction below the target");
+        server.stop().await;
+    }
+
+    // =====================================================================
     // format_file_size  (pure static method -- no Agent needed)
     // =====================================================================
 
