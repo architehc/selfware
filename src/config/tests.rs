@@ -20,8 +20,8 @@ use std::path::PathBuf;
 #[test]
 fn test_config_default() {
     let config = Config::default();
-    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
-    assert_eq!(config.model, "qwen3.5-27b");
+    assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
+    assert_eq!(config.model, "z-ai/glm-5.2");
     assert_eq!(config.max_tokens, 65536);
     assert!((config.temperature - 1.0).abs() < f32::EPSILON);
     assert!(config.api_key.is_none());
@@ -61,7 +61,7 @@ fn test_config_load_no_path_uses_defaults() {
     // When no config file exists in the specific path, it should return an error
     // Or wait, if we want to test default config values, just use Config::default()
     let config = Config::default();
-    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
+    assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn test_config_partial_deserialization() {
         "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.endpoint, "http://custom:1234/v1");
-    assert_eq!(config.model, "qwen3.5-27b"); // default
+    assert_eq!(config.model, "z-ai/glm-5.2"); // default
     assert_eq!(config.max_tokens, 65536); // default
 }
 
@@ -437,8 +437,8 @@ fn test_config_full_roundtrip() {
 fn test_empty_config_uses_all_defaults() {
     let toml_str = "";
     let config: Config = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
-    assert_eq!(config.model, "qwen3.5-27b");
+    assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
+    assert_eq!(config.model, "z-ai/glm-5.2");
     assert_eq!(config.max_tokens, 65536);
     assert!(!config.yolo.enabled);
 }
@@ -463,7 +463,7 @@ fn test_context_length_default() {
         "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(
-        config.context_length, 131072,
+        config.context_length, 1048576,
         "context_length should use default when not specified"
     );
 }
@@ -625,8 +625,8 @@ fn test_config_empty_protected_branches() {
 
 #[test]
 fn test_default_helpers() {
-    assert_eq!(default_endpoint(), "http://127.0.0.1:1234/v1");
-    assert_eq!(default_model(), "qwen3.5-27b");
+    assert_eq!(default_endpoint(), "https://openrouter.ai/api/v1");
+    assert_eq!(default_model(), "z-ai/glm-5.2");
     assert_eq!(default_max_tokens(), 65536);
     assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
     assert_eq!(default_max_iterations(), 100);
@@ -1348,7 +1348,7 @@ fn test_model_profile_defaults() {
     assert_eq!(profile.max_tokens, 65536);
     assert!((profile.temperature - 1.0).abs() < f32::EPSILON);
     assert_eq!(profile.modalities, vec!["text"]);
-    assert_eq!(profile.context_length, 131072);
+    assert_eq!(profile.context_length, 1048576);
 }
 
 #[test]
@@ -1420,7 +1420,7 @@ fn test_default_modalities_fn() {
 
 #[test]
 fn test_default_context_length_fn() {
-    assert_eq!(default_context_length(), 131072);
+    assert_eq!(default_context_length(), 1048576);
 }
 
 // ---- ExecutionMode tests ----
@@ -1635,8 +1635,8 @@ temperature = 0.3
     assert_eq!(config.endpoint, "http://localhost:9999/v1");
     assert_eq!(config.model, "loaded-model");
     assert_eq!(config.max_tokens, 2048);
-    // token_budget defaults to context_length * 3 / 5 = 131072 * 3 / 5 = 78643
-    assert_eq!(config.agent.token_budget, 131072 * 3 / 5);
+    // token_budget defaults to context_length * 3 / 5 = 1048576 * 3 / 5 = 629145
+    assert_eq!(config.agent.token_budget, 1048576 * 3 / 5);
     // default safety_margin (8192) < token_budget, so no clamping
     assert_eq!(config.agent.token_safety_margin, 8192);
     assert!((config.temperature - 0.3).abs() < f32::EPSILON);
@@ -1694,8 +1694,8 @@ max_tokens = 4096
     std::env::remove_var("SELFWARE_MAX_TOKENS");
 
     assert_eq!(config.max_tokens, 8192);
-    // token_budget defaults to context_length * 3 / 5 = 131072 * 3 / 5 = 78643
-    assert_eq!(config.agent.token_budget, 131072 * 3 / 5);
+    // token_budget defaults to context_length * 3 / 5 = 1048576 * 3 / 5 = 629145
+    assert_eq!(config.agent.token_budget, 1048576 * 3 / 5);
     // default safety_margin (8192) < token_budget, so no clamping
     assert_eq!(config.agent.token_safety_margin, 8192);
 }
@@ -1788,13 +1788,13 @@ fn test_config_load_empty_file() {
     write!(file, "").unwrap();
 
     let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
-    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
-    assert_eq!(config.model, "qwen3.5-27b");
-    // The default model "qwen3.5-27b" matches the built-in qwen3.5-* profile,
-    // which applies max_tokens=32768.  Without the profile this would be the
-    // hard-coded default (65536).
-    assert_eq!(config.max_tokens, 32768);
-    assert_eq!(config.matched_profile.as_deref(), Some("qwen3.5"));
+    assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
+    assert_eq!(config.model, "z-ai/glm-5.2");
+    // The default model "z-ai/glm-5.2" has no built-in profile (only qwen3.5-*
+    // ships as a bundled profile), so no profile override is applied and
+    // max_tokens stays the hard-coded default (65536).
+    assert_eq!(config.max_tokens, 65536);
+    assert_eq!(config.matched_profile.as_deref(), None);
     assert!(config.models.contains_key("default"));
 }
 

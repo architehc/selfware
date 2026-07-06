@@ -112,13 +112,13 @@ pub fn validate_extra_body(
 
 // Re-export default functions used by other config submodules via `super::`.
 pub fn default_context_length() -> usize {
-    131072
+    1048576
 }
 pub fn default_endpoint() -> String {
-    "http://127.0.0.1:1234/v1".to_string()
+    "https://openrouter.ai/api/v1".to_string()
 }
 pub fn default_model() -> String {
-    "qwen3.5-27b".to_string()
+    "z-ai/glm-5.2".to_string()
 }
 pub fn default_max_tokens() -> usize {
     65536
