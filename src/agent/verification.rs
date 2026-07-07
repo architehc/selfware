@@ -584,7 +584,12 @@ impl Agent {
             ));
         }
 
-        if is_incomplete_action_response(&self.last_assistant_response) {
+        // For read-only deliverables, a review/analysis that suggests
+        // improvements ("consider…", "should refactor…") is the RESULT, not
+        // pending work — don't let the incomplete-action heuristic reject it and
+        // loop the task (found comparing review configs: all churned on repeated
+        // "incomplete" rejections until FAKE_COMPLETE). Mutation tasks still gated.
+        if !is_read_only && is_incomplete_action_response(&self.last_assistant_response) {
             return Some(
                 "Your response describes work you still need to do instead of a completed result. \
                  Do NOT stop to narrate your next step. Call the needed tool now and continue."
@@ -1331,6 +1336,31 @@ mod tests {
             assert!(
                 agent.check_completion_gate().await.is_none(),
                 "a read-only review that quotes code must complete, not livelock on a file_write demand"
+            );
+        }
+
+        // Regression: a read-only REVIEW's suggestions ("I need to note X should
+        // be refactored") trip is_incomplete_action_response, which used to reject
+        // completion and loop the task to FAKE_COMPLETE. A review's suggestions
+        // ARE the deliverable, so read-only must complete anyway.
+        #[tokio::test]
+        async fn read_only_review_completes_despite_incomplete_action_language() {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            agent.current_task_context = "Review this module and report code smells".to_string();
+            agent.has_written_any_file = false;
+            agent.last_assistant_response =
+                "Let me flag the code smells I found. The classifier at L307 should be \
+                 consolidated with the one at L640, and the nested block at L720 should be \
+                 flattened. That is my full assessment."
+                    .to_string();
+            // sanity: this phrasing really does trip the incomplete-action heuristic
+            assert!(
+                is_incomplete_action_response(&agent.last_assistant_response),
+                "test precondition: the review wording must trigger is_incomplete_action"
+            );
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "a read-only review that suggests improvements must complete, not loop on 'incomplete'"
             );
         }
 

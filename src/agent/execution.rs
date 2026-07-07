@@ -520,9 +520,15 @@ impl Agent {
         // mutation tasks are unaffected (the FAKE_COMPLETE edit gate stays intact).
         if tool_calls.is_empty() && !self.current_task_requires_mutation() {
             let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
-            let looks_final = clean.len() >= 40
-                && !super::verification::is_incomplete_action_response(&content)
-                && !super::verification::is_confused_response(&content);
+            // For a read-only deliverable (review / analysis), do NOT let
+            // is_incomplete_action_response block completion: a code review
+            // legitimately uses forward-looking language ("consider refactoring",
+            // "should consolidate X") that the heuristic reads as "work still to
+            // do", which made substantial reviews loop until FAKE_COMPLETE.
+            // Pure content-free narration is still caught by the force-finalize
+            // path below (it tracks the latest substantial answer and bails).
+            let looks_final =
+                clean.len() >= 40 && !super::verification::is_confused_response(&content);
             if looks_final && self.check_completion_gate().await.is_none() {
                 info!("Read-only task: accepting substantial final answer");
                 output::final_answer(&clean);
