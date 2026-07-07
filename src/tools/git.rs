@@ -731,6 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_status_execute() {
+        let _g = crate::test_support::CwdGuard::hold();
         let tool = GitStatus::new();
         let args = serde_json::json!({});
 
@@ -744,6 +745,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_diff_execute_unstaged() {
+        let _g = crate::test_support::CwdGuard::hold();
         let tool = GitDiff::new();
         let args = serde_json::json!({"staged": false});
 
@@ -756,6 +758,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_diff_execute_staged() {
+        let _g = crate::test_support::CwdGuard::hold();
         let tool = GitDiff::new();
         let args = serde_json::json!({"staged": true});
 
@@ -763,8 +766,24 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    fn isolated_git_repo() -> (crate::test_support::CwdGuard, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let guard = crate::test_support::CwdGuard::enter(dir.path());
+        fn git(args: &[&str]) {
+            std::process::Command::new("git").args(args).status().unwrap();
+        }
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        (guard, dir)
+    }
+
     #[tokio::test]
     async fn test_git_commit_with_message() {
+        let _iso = isolated_git_repo();
         let tool = GitCommit::new();
         // This test creates a real commit - only check that it handles the case
         // when there's nothing to commit gracefully
@@ -781,6 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_checkpoint_execute() {
+        let _iso = isolated_git_repo();
         let tool = GitCheckpoint::new();
         let args = serde_json::json!({
             "message": "Test checkpoint"
@@ -847,6 +867,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_status_with_explicit_current_dir() {
+        let _g = crate::test_support::CwdGuard::hold();
         let tool = GitStatus::new();
         let args = serde_json::json!({
             "repo_path": "."  // Explicit current dir
@@ -859,6 +880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_diff_with_specific_path() {
+        let _g = crate::test_support::CwdGuard::hold();
         let tool = GitDiff::new();
         let args = serde_json::json!({
             "path": ".",
@@ -876,6 +898,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_commit_with_specific_files() {
+        let _iso = isolated_git_repo();
         let tool = GitCommit::new();
         let args = serde_json::json!({
             "message": "Test specific files",
@@ -890,6 +913,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_checkpoint_with_tag() {
+        let _iso = isolated_git_repo();
         let tool = GitCheckpoint::new();
         let args = serde_json::json!({
             "message": "Test checkpoint with tag",
@@ -903,6 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_checkpoint_disable_auto_branch() {
+        let _iso = isolated_git_repo();
         let tool = GitCheckpoint::new();
         let args = serde_json::json!({
             "message": "Test no auto branch",
