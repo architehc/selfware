@@ -378,12 +378,15 @@ impl Agent {
         false
     }
 
-    fn diff_paths_for_completion_gate(&self) -> Option<Vec<String>> {
+    async fn diff_paths_for_completion_gate(&self) -> Option<Vec<String>> {
         let root = super::current_project_root();
-        let output = std::process::Command::new("git")
+        // Async process spawn — this runs inside the async check_completion_gate,
+        // so a blocking std::process::Command would stall a tokio worker thread.
+        let output = tokio::process::Command::new("git")
             .args(["diff", "--name-only", "HEAD", "--"])
             .current_dir(root)
             .output()
+            .await
             .ok()?;
         if !output.status.success() {
             return None;
@@ -456,12 +459,12 @@ impl Agent {
         )
     }
 
-    fn mutation_completion_gate(&self) -> Option<String> {
+    async fn mutation_completion_gate(&self) -> Option<String> {
         if !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification()) {
             return None;
         }
 
-        if let Some(paths) = self.diff_paths_for_completion_gate() {
+        if let Some(paths) = self.diff_paths_for_completion_gate().await {
             if paths.is_empty() {
                 return Some(
                     "EmptyDiff: this task requires a code change, but `git diff` is empty. \
@@ -626,7 +629,7 @@ impl Agent {
             return Some(msg);
         }
 
-        if let Some(msg) = self.mutation_completion_gate() {
+        if let Some(msg) = self.mutation_completion_gate().await {
             return Some(msg);
         }
 

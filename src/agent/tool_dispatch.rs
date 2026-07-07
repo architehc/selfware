@@ -790,6 +790,12 @@ pub(super) fn shell_command_is_verification(command: &str) -> bool {
     if normalized.is_empty() {
         return false;
     }
+    // A compile-/collect-only invocation ("cargo test --no-run",
+    // "pytest --collect-only") does not actually run the tests, so it must not
+    // count as verification.
+    if command_is_noop_verification(&normalized) {
+        return false;
+    }
 
     let verification_prefixes = [
         "cargo check",
@@ -855,9 +861,28 @@ fn command_contains_at_boundary(command: &str, prefix: &str) -> bool {
     false
 }
 
+/// True for verification INVOCATIONS that do not actually run anything —
+/// `cargo test --no-run` (compiles but runs 0 tests), `pytest --collect-only`,
+/// `--dry-run`, `go test -run=^$`, etc. These must NOT satisfy the verification
+/// gate: they type-check or enumerate but never execute the tests.
+pub(super) fn command_is_noop_verification(text: &str) -> bool {
+    let c = text.to_lowercase();
+    [
+        "--no-run",
+        "--collect-only",
+        "--collectonly",
+        "--dry-run",
+        "-run=^$",
+        "-run '^$'",
+        "-run \"^$\"",
+    ]
+    .iter()
+    .any(|flag| c.contains(flag))
+}
+
 pub(super) fn tool_call_is_verification(name: &str, args_str: &str) -> bool {
     match name {
-        "cargo_check" | "cargo_test" | "cargo_clippy" => true,
+        "cargo_check" | "cargo_test" | "cargo_clippy" => !command_is_noop_verification(args_str),
         "shell_exec" => serde_json::from_str::<Value>(args_str)
             .ok()
             .and_then(|args| {

@@ -650,9 +650,32 @@ impl Agent {
                 .saturating_sub(recent.len())
                 .saturating_sub(usize::from(system_msg.is_some()));
 
+            // Preserve the ORIGINAL TASK so compression down to "system + last 4 +
+            // summary" doesn't drop the objective and make the model lose the plot
+            // on long runs. The task is the first USER message AFTER the system
+            // prompt (a user message before the system prompt is bootstrap noise).
+            // Skip if it's already within the recent window.
+            let system_idx = self.messages.iter().position(|m| m.role == "system");
+            let original_task = self
+                .messages
+                .iter()
+                .enumerate()
+                .find(|(i, m)| m.role == "user" && system_idx.is_none_or(|s| *i > s))
+                .map(|(_, m)| m.clone());
             self.messages.clear();
             if let Some(sys) = system_msg {
                 self.messages.push(sys);
+            }
+            if let Some(task) = original_task {
+                if !recent
+                    .iter()
+                    .any(|r| r.content.text() == task.content.text())
+                {
+                    self.messages.push(crate::api::types::Message::user(format!(
+                        "[ORIGINAL TASK]:\n{}",
+                        task.content.text()
+                    )));
+                }
             }
             self.messages.push(crate::api::types::Message::user(format!(
                 "[STRUCTURED SUMMARY — {} earlier messages compressed]\n{}",
