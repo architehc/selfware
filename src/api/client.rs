@@ -183,29 +183,58 @@ impl ApiClient {
             stop,
         };
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json");
-
-        if let Some(ref key) = self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key.expose()));
-        }
-
-        let response = request.json(&req).send().await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(ApiError::HttpStatus {
-                status: status.as_u16(),
-                message: text,
+        // Retry transient failures (429/5xx/network) with exponential backoff,
+        // matching the chat/stream paths. The FIM completion path previously gave
+        // up on the first transient error.
+        let max_attempts = self.retry_config.max_retries + 1;
+        let mut delay_ms = self.retry_config.initial_delay_ms;
+        for attempt in 1..=max_attempts {
+            let mut request = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json");
+            if let Some(ref key) = self.config.api_key {
+                request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
-            .into());
-        }
 
-        let resp: CompletionResponse = response.json().await?;
-        Ok(resp)
+            match request.json(&req).send().await {
+                Ok(response) if response.status().is_success() => {
+                    let resp: CompletionResponse = response.json().await?;
+                    return Ok(resp);
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text().await.unwrap_or_default();
+                    if Self::is_retryable_status(status) && attempt < max_attempts {
+                        warn!(
+                            "completion retryable error {} (attempt {}/{}); retrying after {}ms",
+                            status, attempt, max_attempts, delay_ms
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                        continue;
+                    }
+                    return Err(ApiError::HttpStatus {
+                        status: status.as_u16(),
+                        message: text,
+                    }
+                    .into());
+                }
+                Err(e) => {
+                    if attempt < max_attempts {
+                        warn!(
+                            "completion network error {} (attempt {}/{}); retrying after {}ms",
+                            e, attempt, max_attempts, delay_ms
+                        );
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+        Err(ApiError::Network("completion: retries exhausted".to_string()).into())
     }
 
     pub async fn chat(

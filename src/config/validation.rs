@@ -168,6 +168,28 @@ impl Config {
             }
         }
 
+        // --- extra_body sampling parameters ---
+        // Catch out-of-range sampling values here rather than letting the
+        // provider reject them mid-run. top_p/top_k/min_p are probabilities.
+        if let Some(extra) = &self.extra_body {
+            for key in ["top_p", "min_p"] {
+                if let Some(v) = extra.get(key).and_then(|v| v.as_f64()) {
+                    if !(0.0..=1.0).contains(&v) {
+                        bail!(
+                            "Config error: extra_body.{} must be in [0.0, 1.0], got: {}",
+                            key,
+                            v
+                        );
+                    }
+                }
+            }
+            if let Some(v) = extra.get("top_k").and_then(|v| v.as_i64()) {
+                if v < 0 {
+                    bail!("Config error: extra_body.top_k must be >= 0, got: {}", v);
+                }
+            }
+        }
+
         Ok(())
     }
 }
