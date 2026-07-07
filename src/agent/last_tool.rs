@@ -36,8 +36,14 @@ impl super::Agent {
     /// Long outputs are truncated to bounded sizes so the agent struct cannot
     /// grow without limit when a tool returns a huge response.
     pub fn store_last_tool_output(&mut self, mut output: LastToolOutput) {
-        output.full_output.truncate(MAX_FULL_OUTPUT_LEN);
-        output.summary.truncate(MAX_SUMMARY_LEN);
+        fn truncate_on_char_boundary(s: &mut String, max: usize) {
+            if s.len() <= max { return; }
+            let mut b = max;
+            while b > 0 && !s.is_char_boundary(b) { b -= 1; }
+            s.truncate(b);
+        }
+        truncate_on_char_boundary(&mut output.full_output, MAX_FULL_OUTPUT_LEN);
+        truncate_on_char_boundary(&mut output.summary, MAX_SUMMARY_LEN);
         self.last_tool_output = Some(output);
     }
 
@@ -91,5 +97,36 @@ mod tests {
         let stored = agent.retrieve_last_tool_output().unwrap();
         assert_eq!(stored.summary.len(), MAX_SUMMARY_LEN);
         assert_eq!(stored.full_output.len(), MAX_FULL_OUTPUT_LEN);
+    }
+
+    // Regression: the byte-index `String::truncate` panics when the limit lands
+    // mid-UTF-8-char. "✿" is 3 bytes, so a 16_384-byte cut of 6_000 of them falls
+    // inside a character — this stored output must truncate on a char boundary
+    // instead of panicking (crashed a live review before the fix).
+    #[tokio::test]
+    async fn storing_long_multibyte_output_does_not_panic() {
+        let config = crate::config::Config {
+            endpoint: "http://localhost:0/v1".to_string(),
+            model: "mock-model".to_string(),
+            context_length: 500_000,
+            max_tokens: 8192,
+            execution_mode: crate::config::ExecutionMode::Yolo,
+            ..Default::default()
+        };
+        let mut agent = crate::agent::Agent::new(config).await.expect("agent creation");
+        let output = LastToolOutput {
+            tool_name: "shell_exec".to_string(),
+            summary: "é".repeat(MAX_SUMMARY_LEN),
+            full_output: "✿".repeat(6_000),
+            success: true,
+            exit_code: Some(0),
+            duration_ms: 1,
+        };
+        agent.store_last_tool_output(output); // must not panic
+        let stored = agent.retrieve_last_tool_output().unwrap();
+        assert!(stored.full_output.len() <= MAX_FULL_OUTPUT_LEN);
+        assert!(stored.summary.len() <= MAX_SUMMARY_LEN);
+        // Still valid UTF-8 (would be impossible if we cut mid-character).
+        assert!(std::str::from_utf8(stored.full_output.as_bytes()).is_ok());
     }
 }
