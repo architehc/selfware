@@ -12,7 +12,9 @@ pub struct DiskManager {
     config: DiskConfig,
     checkpoints_path: PathBuf,
     logs_path: PathBuf,
-    _models_path: PathBuf,
+    models_path: PathBuf,
+    /// Cache for models directory size: (calculated_at, size_in_bytes)
+    models_size_cache: std::sync::Mutex<Option<(std::time::SystemTime, u64)>>,
 }
 
 /// Disk usage statistics
@@ -75,7 +77,8 @@ impl DiskManager {
             config: config.clone(),
             checkpoints_path,
             logs_path,
-            _models_path: models_path,
+            models_path,
+            models_size_cache: std::sync::Mutex::new(None),
         })
     }
 
@@ -277,35 +280,100 @@ impl DiskManager {
         }
     }
 
-    /// Get total size of models directory (STUB - HARDCODED VALUE)
+    /// Get total size of models directory.
     ///
-    /// # ⚠️ WARNING - STUB IMPLEMENTATION
+    /// Recursively calculates the total file size under the models directory.
+    /// Results are cached for a short TTL to avoid repeated expensive traversals.
     ///
-    /// This function returns a **HARDCODED 10GB placeholder value**.
-    /// It does NOT actually calculate the directory size.
+    /// # Behavior
     ///
-    /// ## Why This Is a Stub
-    ///
-    /// - Calculating directory size recursively is expensive for large model directories
-    /// - Models may be stored in various locations (local, cache, external drives)
-    /// - This value is used for storage estimation, not actual enforcement
-    ///
-    /// ## TODO
-    /// - Implement async recursive directory size calculation
-    /// - Cache results to avoid repeated expensive operations
-    /// - Support multiple model directories
-    /// - Handle symlinks and mount points correctly
+    /// - If the models directory exists, its size is calculated by walking the
+    ///   directory tree and summing regular file sizes.
+    /// - Symlinks are **skipped** to avoid counting mount points twice or
+    ///   entering cycles.
+    /// - If the directory does not exist or cannot be read, a fallback estimate
+    ///   of 10 GB is returned so that storage planning is not blocked.
+    /// - Results are cached for 60 seconds to amortize the cost of repeated
+    ///   calls during a single estimation pass.
     ///
     /// # Returns
     ///
-    /// Hardcoded value of 10GB (10_000_000_000 bytes) for storage estimation purposes.
+    /// Total size in bytes of all regular files under the models directory,
+    /// or a 10 GB fallback (`10_000_000_000`) when the directory is absent.
     fn get_models_size(&self) -> u64 {
-        warn!(
-            "STUB: get_models_size() returning hardcoded 10GB placeholder. \
-             This does NOT reflect actual model directory size at {:?}.",
-            self._models_path
-        );
-        10_000_000_000 // STUB: 10GB placeholder - NOT ACTUAL DIRECTORY SIZE
+        const CACHE_TTL: Duration = Duration::from_secs(60);
+        const FALLBACK_SIZE: u64 = 10_000_000_000;
+
+        // Return cached value if still fresh
+        if let Ok(cache) = self.models_size_cache.lock() {
+            if let Some((cached_at, cached_size)) = *cache {
+                if cached_at.elapsed().unwrap_or(CACHE_TTL * 2) < CACHE_TTL {
+                    debug!(size = cached_size, "Returning cached models directory size");
+                    return cached_size;
+                }
+            }
+        }
+
+        // Calculate actual directory size
+        let size = self.calculate_dir_size(&self.models_path);
+
+        let size = if size == 0 && !self.models_path.exists() {
+            warn!(
+                path = %self.models_path.display(),
+                "Models directory does not exist, returning 10GB fallback estimate"
+            );
+            FALLBACK_SIZE
+        } else {
+            debug!(
+                size,
+                path = %self.models_path.display(),
+                "Calculated models directory size"
+            );
+            size
+        };
+
+        // Update cache
+        if let Ok(mut cache) = self.models_size_cache.lock() {
+            *cache = Some((std::time::SystemTime::now(), size));
+        }
+
+        size
+    }
+
+    /// Recursively calculate the total size of all regular files under `path`.
+    ///
+    /// Symlinks are skipped to avoid cycles and double-counting across mount
+    /// points.  Errors on individual entries are silently skipped so that a
+    /// single unreadable file does not abort the entire traversal.
+    fn calculate_dir_size(&self, path: &PathBuf) -> u64 {
+        let mut total = 0u64;
+
+        let entries = match std::fs::read_dir(path) {
+            Ok(e) => e,
+            Err(_) => return 0,
+        };
+
+        for entry in entries.flatten() {
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+
+            // Skip symlinks to avoid cycles and double-counting mount points
+            if file_type.is_symlink() {
+                continue;
+            }
+
+            if file_type.is_file() {
+                if let Ok(metadata) = entry.metadata() {
+                    total += metadata.len();
+                }
+            } else if file_type.is_dir() {
+                total += self.calculate_dir_size(&entry.path());
+            }
+        }
+
+        total
     }
 
     /// Get available space
@@ -407,7 +475,8 @@ mod tests {
             config: config.clone(),
             checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
             logs_path: PathBuf::from("/tmp/test_logs"),
-            _models_path: PathBuf::from("/tmp/test_models"),
+            models_path: PathBuf::from("/tmp/test_models"),
+            models_size_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -417,9 +486,10 @@ mod tests {
         let dm = make_test_disk_manager(&config);
         let estimate = dm.estimate_storage_needs(1);
 
-        // 1 day: 500MB checkpoints + 100MB logs + 10GB models + 1GB buffer
+        // 1 day: 500MB checkpoints + 100MB logs + 10GB models (fallback) + 1GB buffer
         assert_eq!(estimate.checkpoints, 500 * 1024 * 1024);
         assert_eq!(estimate.logs, 100 * 1024 * 1024);
+        // models: fallback 10GB because /tmp/test_models does not exist
         assert_eq!(estimate.models, 10_000_000_000);
         assert_eq!(estimate.buffer, 500 * 1024 * 1024 * 2); // 2-day buffer
     }
@@ -469,6 +539,7 @@ mod tests {
         let dm = make_test_disk_manager(&config);
         // estimate_storage_needs calls get_models_size internally
         let estimate = dm.estimate_storage_needs(1);
+        // Fallback 10GB because /tmp/test_models does not exist
         assert_eq!(estimate.models, 10_000_000_000);
     }
 
@@ -478,5 +549,73 @@ mod tests {
         assert!(config.max_usage_percent > 0.0 && config.max_usage_percent <= 1.0);
         assert!(config.maintenance_interval_seconds > 0);
         assert!(config.compress_after_days > 0);
+    }
+
+    // ---- get_models_size actual calculation tests ----
+
+    #[test]
+    fn test_get_models_size_calculates_real_directory() {
+        // Create a temporary directory with known file sizes
+        let temp_dir = std::env::temp_dir().join("selfware_test_models_calc");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        // Write files with known sizes
+        let file_a = temp_dir.join("model_a.bin");
+        let file_b = temp_dir.join("model_b.bin");
+        std::fs::write(&file_a, vec![0u8; 1024]).unwrap();
+        std::fs::write(&file_b, vec![0u8; 2048]).unwrap();
+
+        // Create a subdirectory with another file
+        let subdir = temp_dir.join("sub");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("model_c.bin"), vec![0u8; 4096]).unwrap();
+
+        let config = DiskConfig::default();
+        let dm = DiskManager {
+            config: config.clone(),
+            checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
+            logs_path: PathBuf::from("/tmp/test_logs"),
+            models_path: temp_dir.clone(),
+            models_size_cache: std::sync::Mutex::new(None),
+        };
+
+        let estimate = dm.estimate_storage_needs(1);
+        // 1024 + 2048 + 4096 = 7168 bytes
+        assert_eq!(estimate.models, 7168);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_get_models_size_caches_result() {
+        let temp_dir = std::env::temp_dir().join("selfware_test_models_cache");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        std::fs::write(temp_dir.join("model.bin"), vec![0u8; 512]).unwrap();
+
+        let config = DiskConfig::default();
+        let dm = DiskManager {
+            config: config.clone(),
+            checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
+            logs_path: PathBuf::from("/tmp/test_logs"),
+            models_path: temp_dir.clone(),
+            models_size_cache: std::sync::Mutex::new(None),
+        };
+
+        // First call calculates
+        let estimate1 = dm.estimate_storage_needs(1);
+        assert_eq!(estimate1.models, 512);
+
+        // Add another file after the first calculation
+        std::fs::write(temp_dir.join("model2.bin"), vec![0u8; 256]).unwrap();
+
+        // Second call should return cached value (512), not 768
+        let estimate2 = dm.estimate_storage_needs(1);
+        assert_eq!(estimate2.models, 512);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

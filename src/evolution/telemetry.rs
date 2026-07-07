@@ -221,12 +221,275 @@ fn parse_folded_stacks(path: &Path) -> Result<Vec<CpuHotspot>, TelemetryError> {
 }
 
 fn capture_allocation_profile(
-    _repo_root: &Path,
-    _bench_name: &str,
+    repo_root: &Path,
+    bench_name: &str,
 ) -> Result<Vec<AllocationHotspot>, TelemetryError> {
-    // TODO: Integrate DHAT or a custom global allocator that tracks allocation sites
-    // For now, return empty — this is a P2 feature
+    // Strategy 1: Look for DHAT output produced by running the benchmark
+    // under `dhat` (e.g. `cargo bench --features dhat`).
+    if let Some(hotspots) = try_parse_dhat_output(repo_root)? {
+        return Ok(hotspots);
+    }
+
+    // Strategy 2: Fall back to the lightweight tracking allocator that
+    // is always available (no external tool required).
+    let stats = global_alloc_stats();
+    if stats.total_allocs() > 0 {
+        let live = stats.current_live_bytes();
+        // Update peak if current exceeds it.
+        stats.update_peak(live);
+        return Ok(vec![AllocationHotspot {
+            function: "<global>".to_string(),
+            allocs_per_call: stats.total_allocs(),
+            total_bytes: stats.total_bytes_allocated(),
+            peak_live_bytes: stats.peak_live_bytes(),
+        }]);
+    }
+
+    // No allocation data available — nothing was profiled.
     Ok(vec![])
+}
+
+// ---------------------------------------------------------------------------
+// DHAT output parsing
+// ---------------------------------------------------------------------------
+
+/// Attempt to read and parse a DHAT JSON profile from the repository.
+/// DHAT writes files like `dhat-heap.json` or `dhat.out` when the program
+/// is run under the `dhat` heap profiler.
+fn try_parse_dhat_output(
+    repo_root: &Path,
+) -> Result<Option<Vec<AllocationHotspot>>, TelemetryError> {
+    // Common DHAT output locations
+    let candidates = [
+        repo_root.join("dhat.out"),
+        repo_root.join("dhat-heap.json"),
+        repo_root.join("target").join("dhat.out"),
+        repo_root.join("target").join("dhat-heap.json"),
+    ];
+
+    for path in &candidates {
+        if path.exists() {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                if let Some(hotspots) = parse_dhat_json(&content) {
+                    return Ok(Some(hotspots));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Parse a DHAT JSON profile into allocation hotspots.
+///
+/// DHAT's JSON format includes a `"heap_stats"` object and a `"alloc_fns"`
+/// array. We extract per-function allocation counts and byte totals.
+fn parse_dhat_json(content: &str) -> Option<Vec<AllocationHotspot>> {
+    // DHAT JSON is a single object. We do a lightweight parse without
+    // pulling in a JSON dependency — extract fields via simple string search.
+    let mut hotspots = Vec::new();
+
+    // Look for the "alloc_fns" array entries of the form:
+    // { "fns": [{ "n": <count>, "tb": <total_bytes>, "pb": <peak_bytes>, ... }] }
+    // Each function block is a JSON object with descriptive fields.
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // DHAT groups entries; we look for lines containing allocation
+        // function names and extract numeric fields heuristically.
+        if let Some(func) = extract_json_string_field(trimmed, "desc") {
+            let allocs = extract_json_uint_field(trimmed, "n").unwrap_or(0);
+            let total_bytes = extract_json_uint_field(trimmed, "tb").unwrap_or(0);
+            let peak_bytes = extract_json_uint_field(trimmed, "pb").unwrap_or(0);
+
+            if allocs > 0 || total_bytes > 0 {
+                hotspots.push(AllocationHotspot {
+                    function: func,
+                    allocs_per_call: allocs,
+                    total_bytes,
+                    peak_live_bytes: peak_bytes,
+                });
+            }
+        }
+    }
+
+    if hotspots.is_empty() {
+        None
+    } else {
+        // Sort by total bytes descending
+        hotspots.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+        Some(hotspots)
+    }
+}
+
+fn extract_json_string_field(line: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\"", field);
+    let idx = line.find(&needle)?;
+    let rest = &line[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after = &rest[colon + 1..];
+    let quote_start = after.find('"')?;
+    let value_start = &after[quote_start + 1..];
+    let quote_end = value_start.find('"')?;
+    Some(value_start[..quote_end].to_string())
+}
+
+fn extract_json_uint_field(line: &str, field: &str) -> Option<u64> {
+    let needle = format!("\"{}\"", field);
+    let idx = line.find(&needle)?;
+    let rest = &line[idx + needle.len()..];
+    let colon = rest.find(':')?;
+    let after = rest[colon + 1..].trim_start();
+    let end = after
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(after.len());
+    after[..end].parse::<u64>().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight tracking allocator (no external dependencies)
+// ---------------------------------------------------------------------------
+
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Global allocation statistics tracked by `TrackingAllocator`.
+/// A single static instance is shared so that any code path can read
+/// cumulative allocation data without coordination.
+static GLOBAL_ALLOC_STATS: AllocStats = AllocStats::new();
+
+/// A wrapper around the system allocator that counts allocations,
+/// deallocations, and tracks live/peak bytes.
+///
+/// To enable tracking, set this as the global allocator:
+/// ```ignore
+/// #[global_allocator]
+/// static GLOBAL: TrackingAllocator = TrackingAllocator::system();
+/// ```
+pub struct TrackingAllocator<A: GlobalAlloc = System> {
+    inner: A,
+}
+
+impl TrackingAllocator<System> {
+    pub const fn system() -> Self {
+        TrackingAllocator {
+            inner: System,
+        }
+    }
+}
+
+unsafe impl<A: GlobalAlloc> GlobalAlloc for TrackingAllocator<A> {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = self.inner.alloc(layout);
+        if !ptr.is_null() {
+            GLOBAL_ALLOC_STATS.record_alloc(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        GLOBAL_ALLOC_STATS.record_dealloc(layout.size());
+        self.inner.dealloc(ptr, layout);
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = self.inner.alloc_zeroed(layout);
+        if !ptr.is_null() {
+            GLOBAL_ALLOC_STATS.record_alloc(layout.size());
+        }
+        ptr
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // Treat realloc as dealloc + alloc for accounting simplicity
+        GLOBAL_ALLOC_STATS.record_dealloc(layout.size());
+        let new_ptr = self.inner.realloc(ptr, layout, new_size);
+        if !new_ptr.is_null() {
+            GLOBAL_ALLOC_STATS.record_alloc(new_size);
+        }
+        new_ptr
+    }
+}
+
+/// Cumulative allocation statistics, updated atomically.
+pub struct AllocStats {
+    total_allocs: AtomicU64,
+    total_deallocs: AtomicU64,
+    total_bytes_allocated: AtomicU64,
+    total_bytes_deallocated: AtomicU64,
+    current_live_bytes: AtomicU64,
+    peak_live_bytes: AtomicU64,
+}
+
+impl AllocStats {
+    const fn new() -> Self {
+        AllocStats {
+            total_allocs: AtomicU64::new(0),
+            total_deallocs: AtomicU64::new(0),
+            total_bytes_allocated: AtomicU64::new(0),
+            total_bytes_deallocated: AtomicU64::new(0),
+            current_live_bytes: AtomicU64::new(0),
+            peak_live_bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn record_alloc(&self, size: usize) {
+        self.total_allocs.fetch_add(1, Ordering::Relaxed);
+        self.total_bytes_allocated
+            .fetch_add(size as u64, Ordering::Relaxed);
+        let live = self
+            .current_live_bytes
+            .fetch_add(size as u64, Ordering::Relaxed)
+            + size as u64;
+        self.update_peak(live);
+    }
+
+    fn record_dealloc(&self, size: usize) {
+        self.total_deallocs.fetch_add(1, Ordering::Relaxed);
+        self.total_bytes_deallocated
+            .fetch_add(size as u64, Ordering::Relaxed);
+        self.current_live_bytes
+            .fetch_sub(size as u64, Ordering::Relaxed);
+    }
+
+    fn update_peak(&self, live: u64) {
+        let mut current_peak = self.peak_live_bytes.load(Ordering::Relaxed);
+        while live > current_peak {
+            match self.peak_live_bytes.compare_exchange_weak(
+                current_peak,
+                live,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_peak = actual,
+            }
+        }
+    }
+
+    /// Access the global allocation statistics.
+    pub fn total_allocs(&self) -> u64 {
+        self.total_allocs.load(Ordering::Relaxed)
+    }
+    pub fn total_deallocs(&self) -> u64 {
+        self.total_deallocs.load(Ordering::Relaxed)
+    }
+    pub fn total_bytes_allocated(&self) -> u64 {
+        self.total_bytes_allocated.load(Ordering::Relaxed)
+    }
+    pub fn total_bytes_deallocated(&self) -> u64 {
+        self.total_bytes_deallocated.load(Ordering::Relaxed)
+    }
+    pub fn current_live_bytes(&self) -> u64 {
+        self.current_live_bytes.load(Ordering::Relaxed)
+    }
+    pub fn peak_live_bytes(&self) -> u64 {
+        self.peak_live_bytes.load(Ordering::Relaxed)
+    }
+}
+
+/// Retrieve a reference to the global allocation statistics.
+pub fn global_alloc_stats() -> &'static AllocStats {
+    &GLOBAL_ALLOC_STATS
 }
 
 fn capture_benchmark_deltas(repo_root: &Path) -> Result<Vec<BenchmarkDelta>, TelemetryError> {
