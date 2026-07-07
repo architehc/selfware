@@ -169,6 +169,35 @@ impl Agent {
         Ok(())
     }
 
+    /// Lifetime abort for a mutation-required task that keeps producing tool-less
+    /// turns with ZERO mutating tool calls — the model narrates "done" (or gets
+    /// auto-recovered by the fallback) without ever editing. Both the
+    /// ForceFallback path and the completion-gate-rejection path funnel through
+    /// here so there is ONE owner: one counter (`mutation_gate_rejections`) and
+    /// one threshold. Previously each path incremented the same counter but
+    /// checked it against a different limit (8 vs 4), so the higher one was
+    /// effectively dead and the abort point was hard to reason about. The counter
+    /// is immune to the per-turn "fallback succeeded" reset — it clears only on a
+    /// real mutating call (`note_mutating_tool_call`) — and aborts ~10× cheaper
+    /// than letting the loop burn all iterations.
+    fn note_mutation_zero_edit_stall(&mut self, diagnosis: &str) -> Result<()> {
+        if !(self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0) {
+            return Ok(());
+        }
+        const MAX_MUTATION_ZERO_EDIT_STALLS: usize = 4;
+        self.mutation_gate_rejections += 1;
+        if self.mutation_gate_rejections >= MAX_MUTATION_ZERO_EDIT_STALLS {
+            bail!(
+                "FAKE_COMPLETE_LOOP: {} no-tool turns on a mutation-required task with 0 mutating \
+                 tool calls ({}) — the model is not converging to an edit; aborting early instead \
+                 of burning iterations",
+                self.mutation_gate_rejections,
+                diagnosis
+            );
+        }
+        Ok(())
+    }
+
     /// P2.1 FILES: checklist guard. Returns true when a write tool should be
     /// blocked because no files checklist has been seen and no prior write has
     /// succeeded. When force-mutation recovery is pending, the guard is bypassed
@@ -577,18 +606,7 @@ impl Agent {
                 // to MAX_ITERATIONS (observed at $4–$22/run). This counter is immune
                 // to that reset — it clears only on a real mutating call — and aborts
                 // early with the same FAKE_COMPLETE diagnosis, ~10× cheaper.
-                if self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0 {
-                    self.mutation_gate_rejections += 1;
-                    const MAX_MUTATION_FALLBACK_STALLS: usize = 8;
-                    if self.mutation_gate_rejections >= MAX_MUTATION_FALLBACK_STALLS {
-                        bail!(
-                            "FAKE_COMPLETE_LOOP: {} no-tool turns auto-recovered by fallback on a \
-                             mutation-required task with 0 mutating tool calls — the model is not \
-                             converging to an edit; aborting early instead of burning iterations",
-                            self.mutation_gate_rejections
-                        );
-                    }
-                }
+                self.note_mutation_zero_edit_stall("no-tool turns auto-recovered by fallback")?;
 
                 // If the only fallback is directory_tree (nothing new to load),
                 // the model is stuck and should just answer with what it has.
@@ -762,18 +780,7 @@ impl Agent {
                 // gate rejection → read-only tool} resets every consecutive counter and
                 // previously burned all 100 iterations (observed: $4–$22 per run before
                 // MAX_ITERATIONS). This lifetime counter is immune to those resets.
-                if self.current_task_requires_mutation() && self.mutating_tool_call_count() == 0 {
-                    self.mutation_gate_rejections += 1;
-                    const MAX_MUTATION_GATE_REJECTIONS: usize = 4;
-                    if self.mutation_gate_rejections >= MAX_MUTATION_GATE_REJECTIONS {
-                        bail!(
-                            "FAKE_COMPLETE_LOOP: completion gate rejected {} final answers on a \
-                             mutation-required task with 0 mutating tool calls — the model is not \
-                             converging to an edit; aborting early instead of burning iterations",
-                            self.mutation_gate_rejections
-                        );
-                    }
-                }
+                self.note_mutation_zero_edit_stall("completion gate rejected the final answer")?;
                 // Churn breaker: the edit is done but verification hasn't passed and
                 // the model keeps answering instead of running the test
                 // (StaleVerification). After a couple of these, run the verification
