@@ -128,7 +128,7 @@ impl Agent {
         // every iteration. Use estimate_message_tokens for per-message breakdown.
         use super::context::estimate_message_tokens;
         let token_counts: Vec<usize> = self.messages.iter().map(estimate_message_tokens).collect();
-        let pinned_critical: std::collections::HashSet<usize> = self
+        let mut pinned_critical: std::collections::HashSet<usize> = self
             .messages
             .iter()
             .enumerate()
@@ -137,6 +137,14 @@ impl Agent {
             .take(20)
             .map(|(idx, _)| idx)
             .collect();
+
+        // Always pin the FIRST user message — the original task. pinned_critical
+        // above only keeps the 20 most-recent criticals, so on a long run the
+        // original objective is neither system nor recent-critical and gets
+        // evicted oldest-first, making the model lose the plot. Protect it.
+        if let Some(first_user) = self.messages.iter().position(|m| m.role == "user") {
+            pinned_critical.insert(first_user);
+        }
 
         // Walk non-system messages oldest-first and mark them for removal until
         // the total fits within budget. Prefer removing non-critical messages
@@ -1496,28 +1504,41 @@ mod tests {
             .filter(|m| m.role == "user")
             .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
             .sum();
-        let system_tokens: usize = agent
+        // Budget precisely, with the SAME estimator the eviction uses, sized to drop
+        // exactly SECOND + THIRD (the oldest non-pinned messages). FIRST is pinned
+        // as the original task and FOURTH is most recent, so both survive.
+        use crate::agent::context::estimate_message_tokens as emt;
+        let total: usize = agent.messages.iter().map(emt).sum();
+        let second_tokens = emt(agent
             .messages
             .iter()
-            .filter(|m| m.role == "system")
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
-            .sum();
-
-        // Set budget to exactly system tokens + tokens for the last 2 user messages.
-        // This forces the first 2 user messages to be evicted but keeps the recent ones.
-        let single_user_tokens = user_msg_tokens / 4;
-        agent.max_context_tokens = system_tokens + single_user_tokens * 2 + 1;
+            .find(|m| m.content.text().contains("SECOND message"))
+            .unwrap());
+        let third_tokens = emt(agent
+            .messages
+            .iter()
+            .find(|m| m.content.text().contains("THIRD message"))
+            .unwrap());
+        agent.max_context_tokens = total - second_tokens - third_tokens;
+        let _ = user_msg_tokens;
 
         agent.trim_message_history();
 
         // The oldest non-system messages should be gone, most recent should survive.
         let contents: Vec<&str> = agent.messages.iter().map(|m| m.content.text()).collect();
 
-        // "FIRST" should have been dropped.
+        // "FIRST" is the original task — now pinned, so it survives long-run trims.
         let has_first = contents.iter().any(|c| c.contains("FIRST oldest message"));
         assert!(
-            !has_first,
-            "the oldest user message should have been trimmed; remaining: {:?}",
+            has_first,
+            "the first user message (original task) must be pinned, not trimmed; remaining: {:?}",
+            contents
+        );
+        // A middle message is evicted for budget instead (the original is protected).
+        let has_second = contents.iter().any(|c| c.contains("SECOND message"));
+        assert!(
+            !has_second,
+            "a middle user message should be trimmed for budget; remaining: {:?}",
             contents
         );
 
@@ -1573,10 +1594,12 @@ mod tests {
             .is_some_and(|calls| calls.iter().any(|call| call.id == "call_1"))));
         assert!(agent.messages.iter().any(|message| message.role == "tool"
             && message.content.text().contains("critical tool result")));
+        // "older filler" is the first user message → now pinned as the original
+        // task. A later non-critical filler is the one evicted for budget instead.
         assert!(!agent
             .messages
             .iter()
-            .any(|message| message.content.text().contains("older filler")));
+            .any(|message| message.content.text().contains("newer filler")));
 
         server.stop().await;
     }

@@ -130,8 +130,16 @@ impl Agent {
         thinking: ThinkingMode,
         content: &str,
         reasoning: &Option<String>,
-        _tool_calls: &Option<Vec<ToolCall>>,
+        tool_calls: &Option<Vec<ToolCall>>,
     ) {
+        // Never cache a response that carried tool calls: the cache stores only
+        // text (content + reasoning) and a later cache hit returns None for tool
+        // calls, so it would silently replace a needed tool invocation with stale
+        // prose. Only pure-text responses are safe to serve from cache.
+        if tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) {
+            return;
+        }
+
         let prompt = Self::messages_to_prompt(messages);
         let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
 

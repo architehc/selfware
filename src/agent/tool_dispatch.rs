@@ -598,12 +598,51 @@ pub(super) fn task_requires_mutation(task_context: &str) -> bool {
     // so it never mis-classifies an `improve`/edit task as read-only. Without
     // this, "Create a thorough code review …" hit the mutation FAKE_COMPLETE
     // gate and churned (found confirming the review-completion fix).
+    // Read-only PROSE deliverables — "explain how X works", "create a summary",
+    // "write a report on Y" — produce text, not code, but would otherwise hit the
+    // "create"/"write" mutation keywords below and get force-written/scaffolded.
+    // Detect unambiguous prose commands + prose-output nouns, but exclude requests
+    // that name a code artifact (a report GENERATOR, a summary FUNCTION, a .rs
+    // file), which are genuine mutation tasks.
+    let prose_command = [
+        "explain ",
+        "summarize ",
+        "describe ",
+        "analyze ",
+        "list the ",
+        "what is ",
+        "how does ",
+        "how do ",
+    ]
+    .iter()
+    .any(|p| lower.starts_with(p));
+    let names_code_artifact = [
+        "function",
+        "struct",
+        "impl ",
+        ".rs",
+        "generator",
+        "parser",
+        "endpoint",
+        "the code",
+    ]
+    .iter()
+    .any(|c| lower.contains(c));
+    let prose_output = (lower.contains("a summary")
+        || lower.contains("a report")
+        || lower.contains("an explanation")
+        || lower.contains("an analysis")
+        || lower.contains("a write-up")
+        || lower.contains("a writeup"))
+        && !names_code_artifact;
     let is_review_deliverable = lower.contains("code review")
         || lower.contains("review the code")
         || lower.contains("review this code")
         || lower.contains("review src/")
         || lower.contains("audit the")
-        || (lower.contains("review") && lower.contains("line reference"));
+        || (lower.contains("review") && lower.contains("line reference"))
+        || prose_command
+        || prose_output;
     let has_edit_verb = ["fix ", "implement ", "refactor ", "rename ", "delete ", "modify ", "edit the"]
         .iter()
         .any(|v| lower.contains(v));
@@ -4295,6 +4334,22 @@ mod tests {
         ));
         // And an ordinary "create a tool" stays a mutation task.
         assert!(task_requires_mutation("Create a new benchmark tool"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_prose_deliverable_is_read_only() {
+        // Prose deliverables are read-only despite the create/write verbs.
+        assert!(!task_requires_mutation("Create a summary of the auth flow"));
+        assert!(!task_requires_mutation("Write a report on the test coverage"));
+        assert!(!task_requires_mutation(
+            "Explain how the completion gate works"
+        ));
+        assert!(!task_requires_mutation("Summarize the recent changes"));
+        // But naming a code artifact makes it a genuine mutation task.
+        assert!(task_requires_mutation("Write a report generator function"));
+        assert!(task_requires_mutation(
+            "Create a summary parser in parser.rs"
+        ));
     }
 
     #[test]
