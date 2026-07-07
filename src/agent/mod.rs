@@ -2068,7 +2068,7 @@ To call a tool, use this EXACT XML structure:
     /// Used by `FailureMode::classify` to flag suspicious natural-completion
     /// runs where the model wrote zero files but claimed success.
     pub fn current_task_requires_mutation(&self) -> bool {
-        tool_dispatch::task_requires_mutation(&self.current_task_context)
+        tool_dispatch::task_requires_mutation(self.task_context_for_classification())
     }
 
     /// Reset all per-task failure-mode counters. Called when starting or

@@ -457,7 +457,7 @@ impl Agent {
     }
 
     fn mutation_completion_gate(&self) -> Option<String> {
-        if !super::tool_dispatch::task_requires_mutation(self.learning_context()) {
+        if !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification()) {
             return None;
         }
 
@@ -567,7 +567,7 @@ impl Agent {
         // read-only task correctly never does — so it can never complete (found
         // running a 10k-step read-only code review that churned to the step cap).
         let is_read_only = !self.current_task_context.is_empty()
-            && !super::tool_dispatch::task_requires_mutation(self.learning_context());
+            && !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification());
         let skip_min_steps_for_read_only = is_read_only;
 
         if step_count < min_steps && !skip_min_steps_for_read_only {
@@ -1348,6 +1348,30 @@ mod tests {
             assert!(
                 agent.check_completion_gate().await.is_some(),
                 "a mutation task that only pastes code as text must still be rejected"
+            );
+        }
+
+        // #11: the injected "requires these tools" appendix lists tool names like
+        // `file_edit`; its "edit" substring must NOT flip a read-only task to
+        // mutation. Classification strips the appendix first.
+        #[tokio::test]
+        async fn tool_requirement_appendix_does_not_flip_readonly_to_mutation() {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            agent.current_task_context = "Summarize the auth module\n\n\
+                 This task explicitly requires these tools before answering:\n\
+                 - `file_edit`\n\
+                 Do not answer until each required tool has been called successfully."
+                .to_string();
+            assert_eq!(
+                agent.task_context_for_classification(),
+                "Summarize the auth module",
+                "the tool-requirement appendix must be stripped before classification"
+            );
+            assert!(
+                !crate::agent::tool_dispatch::task_requires_mutation(
+                    agent.task_context_for_classification()
+                ),
+                "a read-only task must stay read-only despite a file_edit tool appendix"
             );
         }
     }

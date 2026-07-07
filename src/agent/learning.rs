@@ -63,6 +63,20 @@ impl Agent {
         }
     }
 
+    /// The task context with the injected "requires these tools" appendix
+    /// stripped, for MUTATION CLASSIFICATION only. `task_learning_context`
+    /// appends lines like `` - `file_edit` `` when a task declares required
+    /// tools; the "edit" substring in that appendix would otherwise flip an
+    /// otherwise read-only task to mutation-required, mis-gating read-only
+    /// reviews/analyses into the edit-completion path (churn).
+    pub(super) fn task_context_for_classification(&self) -> &str {
+        let ctx = self.learning_context();
+        match ctx.find("\n\nThis task explicitly requires these tools") {
+            Some(i) => ctx[..i].trim_end(),
+            None => ctx,
+        }
+    }
+
     pub(super) fn start_learning_session(&mut self, session_id: &str, task_context: &str) {
         self.current_task_context = task_context.to_string();
         self.self_improvement.start_session(session_id);
