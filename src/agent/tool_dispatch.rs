@@ -591,6 +591,25 @@ fn mention_is_unnegated(lower: &str, needle: &str) -> bool {
 
 pub(super) fn task_requires_mutation(task_context: &str) -> bool {
     let lower = task_context.to_lowercase();
+    // A read-only code-review / audit deliverable must not be classified as a
+    // mutation task just because it says "Create a code review" (matches
+    // "create") — the output is prose, not code. Kept deliberately TIGHT (only
+    // strong review-deliverable phrasings, and only when there is no edit verb)
+    // so it never mis-classifies an `improve`/edit task as read-only. Without
+    // this, "Create a thorough code review …" hit the mutation FAKE_COMPLETE
+    // gate and churned (found confirming the review-completion fix).
+    let is_review_deliverable = lower.contains("code review")
+        || lower.contains("review the code")
+        || lower.contains("review this code")
+        || lower.contains("review src/")
+        || lower.contains("audit the")
+        || (lower.contains("review") && lower.contains("line reference"));
+    let has_edit_verb = ["fix ", "implement ", "refactor ", "rename ", "delete ", "modify ", "edit the"]
+        .iter()
+        .any(|v| lower.contains(v));
+    if is_review_deliverable && !has_edit_verb {
+        return false;
+    }
     [
         "fix",
         "implement",
@@ -4261,6 +4280,21 @@ mod tests {
     #[test]
     fn test_task_requires_mutation_create() {
         assert!(task_requires_mutation("Create a new tool"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_review_deliverable_is_read_only() {
+        // "Create a code review" is read-only despite the word "create".
+        assert!(!task_requires_mutation(
+            "Create a thorough code review of src/agent/verification.rs with line references"
+        ));
+        assert!(!task_requires_mutation("Audit the auth module for issues"));
+        // But a review paired with a real edit verb is still a mutation task.
+        assert!(task_requires_mutation(
+            "Review the code and fix the bug in parser.rs"
+        ));
+        // And an ordinary "create a tool" stays a mutation task.
+        assert!(task_requires_mutation("Create a new benchmark tool"));
     }
 
     #[test]
