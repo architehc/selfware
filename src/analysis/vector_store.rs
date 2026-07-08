@@ -369,10 +369,9 @@ pub struct VectorCollection {
     pub name: String,
     /// Collection scope
     pub scope: CollectionScope,
-    /// Chunks in this collection
-    #[serde(skip)]
+    /// Chunks in this collection (persisted so RAG survives restarts)
     chunks: Vec<CodeChunk>,
-    /// Index of chunk IDs to positions
+    /// Index of chunk IDs to positions — rebuilt after deserialization
     #[serde(skip)]
     id_index: HashMap<String, usize>,
     /// File path to chunk IDs index
@@ -483,6 +482,17 @@ impl VectorCollection {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+        }
+    }
+
+    /// Rebuild the `id_index` from the `chunks` vector.
+    ///
+    /// Must be called after deserialization because `id_index` is
+    /// `#[serde(skip)]` — it is derivable from `chunks` but not persisted.
+    pub fn rebuild_id_index(&mut self) {
+        self.id_index.clear();
+        for (i, chunk) in self.chunks.iter().enumerate() {
+            self.id_index.insert(chunk.id.clone(), i);
         }
     }
 
@@ -1836,9 +1846,10 @@ impl VectorStore {
                     .and_then(|s| s.to_str())
                     .ok_or_else(|| anyhow!("Invalid collection file name"))?;
 
-                // Load collection
+                // Load collection — rebuild the skipped id_index from chunks
                 let json = std::fs::read_to_string(&path)?;
-                let collection: VectorCollection = serde_json::from_str(&json)?;
+                let mut collection: VectorCollection = serde_json::from_str(&json)?;
+                collection.rebuild_id_index();
                 self.collections.insert(name.to_string(), collection);
 
                 // Load index
@@ -2519,6 +2530,54 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
             store.load().unwrap();
 
             assert!(store.get_collection("project").is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_vector_store_persistence_chunk_id_resolves() {
+        // Regression test: chunks and id_index used to be #[serde(skip)] so
+        // after save+load, get_chunk() always returned None and RAG was
+        // broken across restarts.  Now chunks are persisted and id_index is
+        // rebuilt on load, so a known chunk id must still resolve.
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let dir = tempdir().unwrap();
+        let storage_path = dir.path().join("vector_store");
+
+        let known_chunk_id = {
+            let mut store = VectorStore::new(provider.clone()).with_storage(&storage_path);
+            let file_path = dir.path().join("persist_test.rs");
+            std::fs::write(&file_path, "pub fn persisted_fn() { let x = 42; }").unwrap();
+
+            store.collection("project", CollectionScope::Project);
+            store.index_file("project", &file_path).await.unwrap();
+            store.save().unwrap();
+
+            // Grab the first chunk id before we drop the store
+            store
+                .get_collection("project")
+                .unwrap()
+                .chunks()
+                .first()
+                .unwrap()
+                .id
+                .clone()
+        };
+
+        // Reload from disk and verify the chunk id resolves
+        {
+            let mut store = VectorStore::new(provider).with_storage(&storage_path);
+            store.load().unwrap();
+
+            let collection = store.get_collection("project").expect("collection missing");
+            assert!(
+                !collection.is_empty(),
+                "chunks should survive save+load"
+            );
+            assert!(
+                collection.get_chunk(&known_chunk_id).is_some(),
+                "known chunk id '{}' should resolve after reload — RAG is broken if it doesn't",
+                known_chunk_id
+            );
         }
     }
 

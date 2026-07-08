@@ -304,8 +304,13 @@ impl McpServer {
     }
 
     /// Handle `tools/call` request.
+    ///
+    /// If the requested tool exists but has not been activated yet (it's
+    /// deferred), it is activated on demand — the same way the agent's tool
+    /// discovery activates tools — so that every tool advertised by
+    /// `tools/list` can actually be called.
     async fn handle_tools_call(
-        &self,
+        &mut self,
         params: &Option<Value>,
     ) -> (Option<Value>, Option<JsonRpcError>) {
         let params = match params {
@@ -362,6 +367,17 @@ impl McpServer {
                 "isError": true
             });
             return (Some(response), None);
+        }
+
+        // If the tool exists but hasn't been activated yet, activate it on
+        // demand so that every tool advertised in tools/list is actually
+        // callable.  This mirrors how the agent's tool discovery activates
+        // deferred tools before first use.
+        if self.registry.get(tool_name).is_some()
+            && self.registry.get_activated(tool_name).is_none()
+        {
+            debug!("tools/call: activating deferred tool '{}' on demand", tool_name);
+            self.registry.activate(tool_name);
         }
 
         match self.registry.execute(tool_name, arguments).await {

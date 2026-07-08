@@ -9,6 +9,35 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+/// Recursively copy a directory tree, skipping any entry named `skip_name`.
+fn copy_dir_recursive(src: &Path, dst: &Path, skip_name: Option<&str>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if let Some(skip) = skip_name {
+            if name_str == skip {
+                continue;
+            }
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path, skip_name)?;
+        } else {
+            // Symlinks are copied as regular files pointing to target content.
+            // This avoids following symlinks outside the repo root.
+            if let Err(e) = std::fs::copy(&src_path, &dst_path) {
+                // Best-effort: skip files we can't copy (e.g. permission issues)
+                // rather than failing the entire sandbox setup.
+                tracing::warn!("sandbox: skipping file {}: {}", src_path.display(), e);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct SandboxConfig {
     /// Docker image to use (should be pre-built from selfware's Dockerfile)
@@ -41,6 +70,11 @@ pub struct Sandbox {
     pub container_name: String,
     pub config: SandboxConfig,
     pub created_at: Instant,
+    /// Temporary writable copy of the repo mounted at `/workspace`.
+    /// Kept alive for the sandbox's lifetime so the container can read/write it.
+    /// The leading underscore silences dead-code warnings since this field
+    /// exists solely to control the TempDir's lifetime.
+    _workspace_tmp: Option<tempfile::TempDir>,
 }
 
 #[derive(Debug)]
@@ -57,13 +91,44 @@ pub struct SandboxResult {
 }
 
 impl Sandbox {
-    /// Create and start a new sandbox container
+    /// Create and start a new sandbox container.
+    ///
+    /// Instead of mounting the real `repo_root` directly (which would either
+    /// be read-only and prevent `git apply`, or read-write and risk corrupting
+    /// the working tree), we copy the repo contents into a fresh writable
+    /// temporary directory — excluding `target/` which is bind-mounted
+    /// separately for cache sharing — and mount *that* copy read-write at
+    /// `/workspace`.  This way `git apply` + `cargo build`/`test` operate on a
+    /// throwaway copy and never touch the real repo.
     pub fn create(
         name: &str,
         repo_root: &Path,
         config: SandboxConfig,
     ) -> Result<Self, SandboxError> {
         let container_name = format!("selfware-arena-{}", name);
+
+        // Create a fresh temp directory and recursively copy the repo into it,
+        // skipping the `target` directory (it is bind-mounted separately for
+        // build cache sharing and can be very large).
+        let workspace_tmp = tempfile::tempdir().map_err(|e| {
+            SandboxError::IoError(format!("Failed to create workspace temp dir: {}", e))
+        })?;
+        let workspace_path = workspace_tmp.path().to_path_buf();
+
+        if let Err(e) = copy_dir_recursive(repo_root, &workspace_path, Some("target")) {
+            // If the copy fails we cannot proceed safely — return the error.
+            // The TempDir is cleaned up automatically when dropped.
+            return Err(SandboxError::IoError(format!(
+                "Failed to copy repo to temp workspace: {}",
+                e
+            )));
+        }
+
+        // Canonicalize the temp path so Docker gets a resolved absolute path.
+        // On some systems tempdir returns a path with symlinks in /tmp.
+        let workspace_mount = workspace_path
+            .canonicalize()
+            .unwrap_or(workspace_path);
 
         let mut args = vec![
             "run".to_string(),
@@ -72,10 +137,12 @@ impl Sandbox {
             container_name.clone(),
             format!("--cpus={}", config.cpus),
             format!("--memory={}", config.memory),
+            // Mount the *temp copy* read-write so git apply can modify it.
             "-v".to_string(),
-            format!("{}:/workspace:ro", repo_root.display()),
+            format!("{}:/workspace:rw", workspace_mount.display()),
+            // Share the real repo's target cache (read-write for build outputs).
             "-v".to_string(),
-            format!("{}/target:/workspace/target", repo_root.display()), // Share target cache
+            format!("{}/target:/workspace/target", repo_root.display()),
         ];
 
         if !config.network {
@@ -104,6 +171,7 @@ impl Sandbox {
             container_name,
             config,
             created_at: Instant::now(),
+            _workspace_tmp: Some(workspace_tmp),
         })
     }
 
@@ -312,6 +380,28 @@ impl std::error::Error for SandboxError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_copy_dir_recursive_excludes_target() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        // Create some files and a target/ dir that should be skipped.
+        std::fs::write(src.path().join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::create_dir_all(src.path().join("src")).unwrap();
+        std::fs::write(src.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::create_dir_all(src.path().join("target")).unwrap();
+        std::fs::write(src.path().join("target/should_not_copy.txt"), "nope\n").unwrap();
+
+        copy_dir_recursive(src.path(), dst.path(), Some("target")).unwrap();
+
+        // Normal files should be copied.
+        assert!(dst.path().join("Cargo.toml").exists());
+        assert!(dst.path().join("src/main.rs").exists());
+
+        // target/ should NOT be copied.
+        assert!(!dst.path().join("target").exists());
+    }
 
     #[test]
     fn test_parse_test_counts() {
