@@ -553,6 +553,13 @@ impl Agent {
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
+        // Ungated hard backstop: count error-recovery entries between successful
+        // tool continuations. Independent of the resilience feature and of the
+        // per-branch recovery paths (context-overflow / visual / generic), so a
+        // recurring error that keeps returning to Executing terminates instead of
+        // burning the entire max_iterations budget.
+        let mut consecutive_error_recoveries = 0u32;
+        const MAX_CONSECUTIVE_ERROR_RECOVERIES: u32 = 12;
 
         let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
         if mode == LoopMode::NewTask {
@@ -693,6 +700,7 @@ impl Agent {
                                 recovery_attempts = 0;
                                 self.reset_self_healing_retry();
                             }
+                            consecutive_error_recoveries = 0;
                         }
                         Ok(PlannedToolExecution::NoToolCalls) => {}
                         Err(e) => {
@@ -844,6 +852,7 @@ impl Agent {
                                 recovery_attempts = 0;
                                 self.reset_self_healing_retry();
                             }
+                            consecutive_error_recoveries = 0;
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 if mode == LoopMode::NewTask {
@@ -945,6 +954,26 @@ impl Agent {
                         message: "Recovering from error...".to_string(),
                     });
                     cli_println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
+
+                    // Hard terminal for recurring errors (any recovery branch).
+                    consecutive_error_recoveries += 1;
+                    if consecutive_error_recoveries >= MAX_CONSECUTIVE_ERROR_RECOVERIES {
+                        warn!(
+                            "Error recovery exhausted: {} consecutive recoveries with no successful progress — failing task",
+                            consecutive_error_recoveries
+                        );
+                        record_state_transition("ErrorRecovery", "Failed");
+                        if let Some(ref mut checkpoint) = self.current_checkpoint {
+                            checkpoint.log_error(0, error.to_string(), false);
+                        }
+                        self.set_loop_state(AgentState::Failed {
+                            reason: format!(
+                                "Error recovery exhausted after {} consecutive attempts: {}",
+                                consecutive_error_recoveries, error
+                            ),
+                        })?;
+                        continue;
+                    }
 
                     #[cfg(feature = "resilience")]
                     let mut recovered = false;

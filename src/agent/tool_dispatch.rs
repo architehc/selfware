@@ -1072,7 +1072,7 @@ impl Agent {
         let block_threshold = if has_written { 16 } else { 6 };
         let escalation_threshold = if has_written { 20 } else { 8 };
 
-        if !task_requires_mutation(self.learning_context())
+        if !task_requires_mutation(self.task_context_for_classification())
             || self.consecutive_read_only_steps <= block_threshold
             || tool_calls.is_empty()
             || !tool_calls
