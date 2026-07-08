@@ -89,6 +89,9 @@ impl Agent {
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
         self.task_start_time = std::time::Instant::now();
         self.last_run_failure_mode = None;
+        // Capture the set of paths already dirty relative to HEAD so the
+        // completion gate can exclude pre-existing uncommitted changes.
+        self.capture_baseline_dirty_paths();
         let task_description = task.to_string();
         let available_tool_names: Vec<String> = self
             .tools
@@ -1173,6 +1176,18 @@ impl Agent {
     async fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());
+        // Wire the classified verdict/advice into the recovery path: set it
+        // as a pending failure hint so the next execution turn (whether from
+        // self-healing recovery, a retry, or a subsequent task) receives the
+        // post-mortem guidance as a system hint.
+        if !mode.advice.is_empty() && mode.advice != "-" {
+            self.pending_failure_hint = Some(format!(
+                "Failure mode guidance [{}]: {} — Advice: {}",
+                mode.kind.tag(),
+                mode.evidence,
+                mode.advice
+            ));
+        }
         // Emit a structured progress event so non-TUI consumers can see the
         // run's terminal state. Successful runs emit `TaskCompleted`; every
         // other classification emits `TaskFailed { reason }`.

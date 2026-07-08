@@ -412,21 +412,31 @@ impl GuardrailEngine {
             };
         }
 
-        // Find the last expression (not a let binding or comment)
-        for line in lines.iter().rev() {
+        // Evaluate every non-let, non-comment line as a boolean condition.
+        // All such lines must pass for the guard to pass; this correctly
+        // handles multi-line Rust conditions rather than only the last line.
+        let mut saw_expression = false;
+        for line in lines.iter() {
             let line = line.trim();
             if line.is_empty() || line.starts_with("//") {
                 continue;
             }
             if line.starts_with("let ") {
-                // Evaluate the assignment
+                // let bindings are not boolean conditions — skip them.
                 continue;
             }
-            // Evaluate as inline expression
-            return self.evaluate_inline_expression(line, context);
+            saw_expression = true;
+            let result = self.evaluate_inline_expression(line, context);
+            if !result.is_pass() {
+                return result;
+            }
         }
 
-        EvaluationResult::Pass
+        if saw_expression {
+            EvaluationResult::Pass
+        } else {
+            EvaluationResult::Pass
+        }
     }
 
     /// Evaluate JSON logic

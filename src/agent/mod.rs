@@ -622,6 +622,10 @@ pub struct Agent {
     last_run_failure_mode: Option<failure_mode::FailureMode>,
     /// Wall-clock start time of the current task.
     task_start_time: std::time::Instant,
+    /// Set of repo paths that were already dirty (uncommitted relative to HEAD)
+    /// when the current task started. The completion gate uses this to exclude
+    /// pre-existing uncommitted changes from the agent's diff.
+    baseline_dirty_paths: std::sync::Mutex<Option<Vec<String>>>,
 }
 
 impl Agent {
@@ -1167,6 +1171,7 @@ To call a tool, use this EXACT XML structure:
             cumulative_token_usage: crate::observability::dashboard::TokenUsage::default(),
             last_run_failure_mode: None,
             task_start_time: Instant::now(),
+            baseline_dirty_paths: std::sync::Mutex::new(None),
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
@@ -2086,6 +2091,45 @@ To call a tool, use this EXACT XML structure:
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;
+    }
+
+    /// Capture the set of paths that are dirty (uncommitted relative to HEAD)
+    /// at the start of a task, so the completion gate can exclude pre-existing
+    /// uncommitted changes from the agent's diff. Best-effort: if `git diff`
+    /// fails the baseline is left as `None`.
+    pub(super) fn capture_baseline_dirty_paths(&self) {
+        let root = self::current_project_root();
+        let output = std::process::Command::new("git")
+            .args(["diff", "--name-only", "HEAD", "--"])
+            .current_dir(root)
+            .output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+                if let Ok(mut guard) = self.baseline_dirty_paths.lock() {
+                    *guard = Some(paths);
+                }
+                return;
+            }
+        }
+        // On failure, store an empty vec so we know we attempted capture.
+        if let Ok(mut guard) = self.baseline_dirty_paths.lock() {
+            *guard = Some(Vec::new());
+        }
+    }
+
+    /// Return the baseline dirty paths captured at task start, or `None` if
+    /// no baseline was captured.
+    pub(super) fn baseline_dirty_paths(&self) -> Option<Vec<String>> {
+        self.baseline_dirty_paths
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 
     /// Increment the mutating-call counter. Called from tool dispatch when

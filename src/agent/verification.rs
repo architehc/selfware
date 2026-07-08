@@ -392,14 +392,24 @@ impl Agent {
             return None;
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        Some(
-            stdout
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-        )
+        let all_paths: Vec<String> = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+
+        // Subtract paths that were already dirty before the task started so
+        // pre-existing uncommitted changes are not counted as the agent's edits.
+        if let Some(baseline) = self.baseline_dirty_paths() {
+            let filtered: Vec<String> = all_paths
+                .into_iter()
+                .filter(|p| !baseline.iter().any(|b| b == p))
+                .collect();
+            Some(filtered)
+        } else {
+            Some(all_paths)
+        }
     }
 
     fn gate_path_is_test(path: &str) -> bool {

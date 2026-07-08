@@ -67,7 +67,7 @@ Repository = "{{repository_url}}"
 Documentation = "{{docs_url}}"
 
 [project.scripts]
-{{project_name}} = "{{module_name}}.cli:main"
+{{project_name}} = "{{module_name}}:main"
 
 [tool.ruff]
 target-version = "py311"

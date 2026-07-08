@@ -14,7 +14,9 @@ use crate::observability::telemetry::{
     record_success,
 };
 use crate::orchestration::workflows::VarValue;
-use crate::swl::parser::ast::{AgentDefinition, SwlDocument, WorkflowDefinition, WorkflowType};
+use crate::swl::parser::ast::{
+    AgentDefinition, ReduceStage, SwlDocument, WorkflowDefinition, WorkflowType,
+};
 use crate::swl::state::{StateBackendType, StateManager};
 use crate::swl::types::schema::StateSchema;
 use crate::tools::ToolRegistry;
@@ -555,11 +557,17 @@ impl SwlRuntime {
         // Map phase: execute in parallel
         let map_result = self.execute_parallel(doc, workflow).await?;
 
-        // Reduce phase: if there's a reduce agent, run it
-        if let Some(reduce_agent_name) = workflow.reduce.as_ref().and_then(|_reduce| {
-            // Parse reduce code to get agent name
-            // For now, simple heuristic: use the last agent as reducer
-            doc.agents.keys().last().map(|s| s.to_string())
+        // Reduce phase: use the configured reduce stage to determine the
+        // reducer agent. For ReduceStage::Aggregate the agent name is
+        // explicit. For ReduceStage::Code (inline code) there is no named
+        // agent, so fall back to the last agent as before.
+        if let Some(reduce_agent_name) = workflow.reduce.as_ref().and_then(|reduce| match reduce {
+            ReduceStage::Aggregate(agg) => Some(agg.agent.clone()),
+            ReduceStage::Code(_) => {
+                // No named agent in a code-only reduce stage; fall back to
+                // the last agent as the reducer.
+                doc.agents.keys().last().map(|s| s.to_string())
+            }
         }) {
             if let Some(agent) = doc.agents.get(&reduce_agent_name) {
                 if !self.dry_run {

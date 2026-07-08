@@ -10,6 +10,10 @@
 //! - Progress tracking
 //! - Adaptive replanning
 
+// This module is not yet wired into the agent runtime — it is future work.
+// Silence dead-code warnings so the implementation can land without callers.
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};

@@ -212,9 +212,39 @@ fn evaluate_hypothesis(
     let tests_total = sandbox_result.tests_total;
 
     // 4. Cleanup
+    let compile_duration = sandbox_result.compile_duration;
+    let peak_memory_bytes = sandbox_result.peak_memory_bytes;
+    let test_duration = sandbox_result.test_duration;
     let _ = sandbox.destroy();
 
-    // 5. Score
+    // 5. Compute fitness metrics from the sandbox result.
+    // Full SAB runs separately for winners, so sab_result stays None here.
+    let timeout_secs = config.timeout.as_secs() as f64;
+    let wall_clock_secs = (compile_duration + test_duration).as_secs_f64();
+    let test_coverage_pct = if tests_total > 0 {
+        (tests_passed as f64 / tests_total as f64) * 100.0
+    } else {
+        0.0
+    };
+    // Derive a provisional SAB score from the test pass ratio (0–100).
+    let sab_score = if compiled { test_coverage_pct } else { 0.0 };
+    let fitness = FitnessMetrics {
+        sab_score,
+        tokens_used: 0,
+        token_budget: 0,
+        wall_clock_secs,
+        timeout_secs,
+        test_coverage_pct,
+        binary_size_mb: (peak_memory_bytes as f64) / (1024.0 * 1024.0),
+        max_binary_size_mb: 1024.0,
+        tests_passed,
+        tests_total,
+        visual_score: 0.0,
+    };
+    // Use the weighted composite as the fitness-derived score.
+    let fitness_composite = config.weights.composite(&fitness);
+
+    // 6. Rating
     let rating = if !compiled {
         GenerationRating::Frost
     } else if tests_passed == tests_total && tests_total > 0 {
@@ -227,9 +257,10 @@ fn evaluate_hypothesis(
         GenerationRating::Frost
     };
 
-    // Composite score (simplified — full version uses SAB)
+    // Composite score: use the weighted fitness composite when available,
+    // falling back to the simple test-ratio score.
     let composite = if compiled {
-        (tests_passed as f64 / tests_total.max(1) as f64) * 100.0
+        fitness_composite.max((tests_passed as f64 / tests_total.max(1) as f64) * 100.0)
     } else {
         0.0
     };
@@ -240,7 +271,7 @@ fn evaluate_hypothesis(
         compiled,
         sandbox_result: Some(sandbox_result),
         sab_result: None, // Full SAB runs separately for winners
-        fitness: None,
+        fitness: Some(fitness),
         composite_score: composite,
         rating,
         patch: hypothesis.patch,
