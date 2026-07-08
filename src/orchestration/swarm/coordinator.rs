@@ -223,12 +223,14 @@ impl Swarm {
             .map(|(id, a)| (id.clone(), a.trust_score))
             .collect();
 
+        let consensus_threshold = self.consensus_threshold;
+
         let decision = self
             .decisions
             .get_mut(decision_id)
             .ok_or_else(|| anyhow!("Decision not found: {}", decision_id))?;
 
-        Ok(decision.resolve(&trust_scores))
+        Ok(decision.resolve_with_threshold(&trust_scores, consensus_threshold))
     }
 
     /// List all decisions
@@ -384,6 +386,12 @@ impl Swarm {
             }
         }
 
+        // Don't mark InProgress if no agents were assigned
+        if assigned.is_empty() {
+            tracing::warn!("No idle agents available for task {}", task_id);
+            return Vec::new();
+        }
+
         task.assigned_agents = assigned.clone();
         task.status = TaskStatus::InProgress;
 
@@ -404,6 +412,19 @@ impl Swarm {
         };
 
         task.results.insert(agent_id.to_string(), result.into());
+
+        // Don't complete a task with no assigned agents
+        if task.assigned_agents.is_empty() {
+            tracing::warn!(
+                "Task {} has no assigned agents, cannot complete",
+                task_id
+            );
+            // Still update the agent status
+            if let Some(agent) = self.agents.get_mut(agent_id) {
+                agent.complete_task(true);
+            }
+            return;
+        }
 
         // Check if all agents have submitted results — done atomically
         // within the same mutable borrow to avoid inconsistent state

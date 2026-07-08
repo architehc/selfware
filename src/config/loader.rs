@@ -277,7 +277,7 @@ impl Config {
 
         // --- API key resolution hierarchy ---
         // 1. Environment variable (highest priority, never persisted to disk)
-        // 2. System keyring via `selfware config set-key`
+        // 2. System keyring (set via SELFWARE_API_KEY or manually in OS keyring)
         // 3. Config file (lowest priority, plaintext on disk -- warn the user)
         let mut api_key_source = ApiKeySource::None;
 
@@ -308,7 +308,7 @@ impl Config {
                     config_path = %cfg_path,
                     "API key loaded from plaintext config file. \
                      For production use, set the SELFWARE_API_KEY environment variable \
-                     or use the system keyring via `selfware config set-key`."
+                     or store it in the OS keyring."
                 );
 
                 // In strict mode, plaintext keys on disk are not tolerated.
@@ -318,7 +318,7 @@ impl Config {
                 if config.safety.strict_permissions || env_strict {
                     bail!(
                         "Plaintext API key in config file is not allowed in strict mode. \
-                         Use SELFWARE_API_KEY environment variable or system keyring via `selfware config set-key`."
+                         Use SELFWARE_API_KEY environment variable or store the key in the OS keyring."
                     );
                 }
             }

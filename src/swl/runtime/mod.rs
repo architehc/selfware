@@ -513,16 +513,19 @@ impl SwlRuntime {
 
         // Collect results
         let mut outputs = HashMap::new();
+        let mut had_failure = false;
         for handle in handles {
             match handle.await {
                 Ok(Ok((name, output))) => {
                     outputs.insert(name, output);
                 }
                 Ok(Err(e)) => {
-                    warn!("Agent failed: {}", e);
+                    error!("Agent failed: {}", e);
+                    had_failure = true;
                 }
                 Err(e) => {
-                    warn!("Agent task panicked: {}", e);
+                    error!("Agent task panicked: {}", e);
+                    had_failure = true;
                 }
             }
         }
@@ -530,7 +533,11 @@ impl SwlRuntime {
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
 
         Ok(ExecutionResult {
-            status: ExecutionStatus::Completed,
+            status: if had_failure {
+                ExecutionStatus::Failed
+            } else {
+                ExecutionStatus::Completed
+            },
             outputs,
             duration_ms,
         })
@@ -597,8 +604,19 @@ impl SwlRuntime {
                 self.execute_agent(first_agent_name, first_agent).await?
             };
 
-            // Simple condition: if output contains "true", proceed
-            if condition_result.to_lowercase().contains("true") {
+            // Evaluate the condition robustly: parse as a boolean rather than
+            // naively checking for a substring "true" (which would match
+            // "untrue", "true_value", etc.).
+            let condition_is_true = {
+                let trimmed = condition_result.trim();
+                // Exact match on common truthy strings
+                trimmed.eq_ignore_ascii_case("true")
+                    || trimmed.eq_ignore_ascii_case("yes")
+                    || trimmed == "1"
+                    || trimmed.eq_ignore_ascii_case("t")
+                    || trimmed.eq_ignore_ascii_case("y")
+            };
+            if condition_is_true {
                 // Execute remaining agents
                 let mut outputs = HashMap::new();
                 for (agent_name, agent) in doc.agents.iter().skip(1) {

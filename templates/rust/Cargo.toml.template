@@ -56,11 +56,11 @@ tempfile = "3.14"
 pretty_assertions = "1.4"
 
 [[bin]]
-name = "{{project_name}}"
+name = "{{module_name}}"
 path = "src/main.rs"
 
 [lib]
-name = "{{project_name}}"
+name = "{{module_name}}"
 path = "src/lib.rs"
 
 [[bench]]

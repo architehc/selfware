@@ -2446,6 +2446,10 @@ mod tests {
     #[test]
     fn test_agent_loop_approaching_limit() {
         let mut lc = AgentLoop::new(10);
+        // Planning doesn't increment, so transition to Executing first.
+        lc.next_state(); // Planning
+        lc.transition_to(super::loop_control::AgentState::Executing { step: 0 })
+            .unwrap();
         for _ in 0..8 {
             lc.next_state();
         }

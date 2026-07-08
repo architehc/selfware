@@ -400,9 +400,25 @@ impl Decision {
 
     /// Resolve the decision
     pub fn resolve(&mut self, trust_scores: &HashMap<String, f32>) -> Option<String> {
+        self.resolve_with_threshold(trust_scores, 0.6)
+    }
+
+    /// Resolve the decision with a custom consensus threshold.
+    ///
+    /// `consensus_threshold` (0.0–1.0) is the minimum fraction of the total
+    /// weighted score the winning option must hold to be declared the winner.
+    /// If no option reaches that fraction (and there are at least two votes),
+    /// the decision is marked as a Conflict.
+    pub fn resolve_with_threshold(
+        &mut self,
+        trust_scores: &HashMap<String, f32>,
+        consensus_threshold: f32,
+    ) -> Option<String> {
         if self.options.is_empty() {
             return None;
         }
+
+        let threshold = consensus_threshold.clamp(0.0, 1.0);
 
         let mut scores: Vec<(String, f32)> = self
             .options
@@ -412,13 +428,29 @@ impl Decision {
 
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Check for conflict (scores too close)
-        if scores.len() >= 2 {
-            let diff = scores[0].1 - scores[1].1;
-            if diff < 0.1 && scores[0].1 > 0.0 {
-                self.status = DecisionStatus::Conflict;
-                return None;
-            }
+        let total_score: f32 = scores.iter().map(|(_, s)| *s).sum();
+
+        // With zero total score there is nothing to resolve.
+        if total_score <= 0.0 {
+            // A single vote with zero trust would land here — don't mark as
+            // Conflict, just pick the top option (all are zero).
+            self.outcome = Some(scores[0].0.clone());
+            self.status = DecisionStatus::Resolved;
+            self.resolved_at = Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            );
+            return self.outcome.clone();
+        }
+
+        // Check for conflict: the winning option must hold at least
+        // `threshold` fraction of the total score. Require at least two
+        // votes before declaring a Conflict.
+        if self.votes.len() >= 2 && scores[0].1 / total_score < threshold {
+            self.status = DecisionStatus::Conflict;
+            return None;
         }
 
         self.outcome = Some(scores[0].0.clone());
@@ -432,7 +464,6 @@ impl Decision {
 
         self.outcome.clone()
     }
-
     /// Check if decision is pending
     pub fn is_pending(&self) -> bool {
         self.status == DecisionStatus::Pending

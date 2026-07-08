@@ -703,7 +703,13 @@ fn test_agent_error_display() {
 fn test_max_iterations_triggers_failure() {
     let mut loop_ctrl = AgentLoop::new(3);
 
-    // Use up all iterations
+    // Planning turn does not consume an iteration slot.
+    loop_ctrl.next_state(); // Planning
+    loop_ctrl
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+
+    // Use up all 3 execution iterations
     loop_ctrl.next_state(); // 1
     loop_ctrl.next_state(); // 2
     loop_ctrl.next_state(); // 3

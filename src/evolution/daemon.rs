@@ -385,6 +385,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
         if hypotheses.is_empty() {
             log_warning("No valid hypotheses generated, retrying...");
+            // Backoff to avoid 100% CPU busy-loop when the LLM returns nothing.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
 
@@ -405,6 +407,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
         if valid.is_empty() {
             log_warning("All hypotheses rejected by safety filter");
+            // Backoff to avoid 100% CPU busy-loop.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             continue;
         }
 

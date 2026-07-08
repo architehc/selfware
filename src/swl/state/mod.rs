@@ -186,11 +186,15 @@ impl StateManager {
         self.cache.insert(key, value);
         self.dirty = true;
 
-        if self.auto_save {
-            // Note: This would need to be called in an async context
-            // For now, we mark dirty and let the runtime handle saves
-        }
+        Ok(())
+    }
 
+    /// Set a state value and persist immediately if auto_save is enabled.
+    pub async fn set_and_save(&mut self, key: String, value: serde_json::Value) -> Result<()> {
+        self.set(key, value)?;
+        if self.auto_save && self.dirty {
+            self.save().await?;
+        }
         Ok(())
     }
 

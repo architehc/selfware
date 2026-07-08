@@ -36,7 +36,7 @@ pub fn load_api_key_from_keyring() -> Result<Option<String>> {
 
 /// Save an API key to the OS system keyring.
 ///
-/// This is the backing implementation for `selfware config set-key`.
+/// This is the backing implementation for storing the API key in the OS keyring.
 pub fn save_api_key_to_keyring(api_key: &str) -> Result<()> {
     let user = whoami::username().unwrap_or_else(|_| "selfware_user".to_string());
     let entry = keyring::Entry::new(KEYRING_SERVICE, &user)

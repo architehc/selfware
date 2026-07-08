@@ -163,8 +163,9 @@ impl Sandbox {
             });
         }
 
-        // Step 2: Run tests
-        let test = self.exec("cd /workspace && cargo test --all-features 2>&1 | tail -20")?;
+        // Step 2: Run tests — capture full output (no `tail` pipe which can
+        // SIGPIPE and drop the `test result:` line).
+        let test = self.exec("cd /workspace && cargo test --all-features 2>&1")?;
 
         let (passed, total) = parse_test_counts(&test.stdout);
 

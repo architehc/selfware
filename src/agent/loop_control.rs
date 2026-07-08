@@ -55,20 +55,19 @@ impl AgentLoop {
     }
 
     pub fn next_state(&mut self) -> Option<AgentState> {
-        if self.iteration >= self.max_iterations {
-            // Keep internal state consistent with the returned state. Previously
-            // this returned Some(Failed) without updating self.state, so
-            // current_state_label()/transition_to saw stale state (e.g. still
-            // "executing") after a max-iterations failure (found by GLM-5.2
-            // reviewing loop_control.rs; verified + fixed by Claude — minimal fix,
-            // no sticky-terminal guard, which broke lifecycle tests in an earlier
-            // unsupervised attempt).
+        // Planning does not consume an iteration slot — only non-Planning
+        // states increment the counter. This gives the caller
+        // `max_iterations` execution turns in addition to the initial
+        // Planning turn.
+        if !matches!(self.state, AgentState::Planning) {
+            self.iteration += 1;
+        }
+        if self.iteration > self.max_iterations {
             self.state = AgentState::Failed {
                 reason: "Max iterations exceeded".to_string(),
             };
             return Some(self.state.clone());
         }
-        self.iteration += 1;
         Some(self.state.clone())
     }
 
@@ -237,12 +236,20 @@ mod tests {
     fn test_agent_loop_max_iterations_exceeded() {
         let mut loop_ctrl = AgentLoop::new(3);
 
-        // First 3 iterations should work
+        // First call is Planning — does not consume an iteration slot.
+        assert!(loop_ctrl.next_state().is_some());
+
+        // Transition to Executing so subsequent calls increment.
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
+
+        // 3 execution iterations should work
         assert!(loop_ctrl.next_state().is_some());
         assert!(loop_ctrl.next_state().is_some());
         assert!(loop_ctrl.next_state().is_some());
 
-        // 4th should fail
+        // 4th execution iteration should fail
         let state = loop_ctrl.next_state();
         assert!(
             matches!(state, Some(AgentState::Failed { reason }) if reason == "Max iterations exceeded")
@@ -310,10 +317,14 @@ mod tests {
     fn test_reset_for_task() {
         let mut loop_ctrl = AgentLoop::new(10);
 
-        // Simulate several iterations
-        loop_ctrl.next_state();
-        loop_ctrl.next_state();
-        loop_ctrl.next_state();
+        // Simulate iterations: Planning turn + execution turns
+        loop_ctrl.next_state(); // Planning — no increment
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
+        loop_ctrl.next_state(); // iteration 1
+        loop_ctrl.next_state(); // iteration 2
+        loop_ctrl.next_state(); // iteration 3
         loop_ctrl.increment_step().unwrap();
         loop_ctrl.increment_step().unwrap();
 
@@ -326,12 +337,16 @@ mod tests {
         assert_eq!(loop_ctrl.current_step(), 0);
         assert!(matches!(loop_ctrl.state, AgentState::Planning));
 
-        // Should be able to iterate fully again
+        // Planning turn + 10 execution turns should all succeed
+        loop_ctrl.next_state(); // Planning — no increment
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
         for _ in 0..10 {
             let state = loop_ctrl.next_state();
             assert!(!matches!(state, Some(AgentState::Failed { .. })));
         }
-        // 11th should fail
+        // 11th execution turn should fail
         let state = loop_ctrl.next_state();
         assert!(matches!(state, Some(AgentState::Failed { .. })));
     }
@@ -359,7 +374,11 @@ mod tests {
     #[test]
     fn test_approaching_limit_warning_none_early() {
         let mut loop_ctrl = AgentLoop::new(100);
-        // Advance to 50% — no warning
+        // Advance to 50% — no warning. Planning doesn't increment, so
+        // transition to Executing first.
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
         for _ in 0..50 {
             loop_ctrl.next_state();
         }
@@ -369,6 +388,9 @@ mod tests {
     #[test]
     fn test_approaching_limit_warning_at_80_pct() {
         let mut loop_ctrl = AgentLoop::new(100);
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
         for _ in 0..80 {
             loop_ctrl.next_state();
         }
@@ -380,6 +402,9 @@ mod tests {
     #[test]
     fn test_approaching_limit_warning_at_90_pct() {
         let mut loop_ctrl = AgentLoop::new(100);
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
         for _ in 0..90 {
             loop_ctrl.next_state();
         }

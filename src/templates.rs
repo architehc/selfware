@@ -1040,6 +1040,7 @@ mod tests {
         // Render with dummy vars first so placeholders don't break parsing
         let mut vars = HashMap::new();
         vars.insert("project_name".into(), "test_project".into());
+        vars.insert("module_name".into(), "test_project".into());
         vars.insert("project_description".into(), "test".into());
         vars.insert("repository_url".into(), "".into());
         vars.insert("project_url".into(), "".into());
