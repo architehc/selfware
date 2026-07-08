@@ -1054,6 +1054,25 @@ impl Agent {
                         );
                         self.messages.push(Message::user(recovery_msg));
                     } else {
+                        // Generic, non-self-recoverable error. Under resilience, once
+                        // recovery attempts are exhausted, stop nudging — a generic
+                        // "try a different approach" just burns the remaining
+                        // iterations to MAX_ITERATIONS. Fail the task instead.
+                        #[cfg(feature = "resilience")]
+                        if recovery_attempts >= self.config.continuous_work.max_recovery_attempts {
+                            warn!(
+                                "Auto-recovery exhausted ({} attempts) on a non-recoverable error — failing task instead of nudging",
+                                self.config.continuous_work.max_recovery_attempts
+                            );
+                            record_state_transition("ErrorRecovery", "Failed");
+                            if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                checkpoint.log_error(0, error.to_string(), false);
+                            }
+                            self.set_loop_state(AgentState::Failed {
+                                reason: format!("Auto-recovery exhausted: {}", error),
+                            })?;
+                            continue;
+                        }
                         let cognitive_summary = self.cognitive_state.summary();
                         self.messages.push(Message::user(format!(
                             "The previous action failed with error: {}. Please try a different approach.\n\n{}",

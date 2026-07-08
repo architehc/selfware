@@ -132,7 +132,19 @@ impl Subagent {
             "Starting subagent execution"
         );
 
-        // Remember original directory and switch to worktree.
+        // Remember original directory and switch to worktree. Restore via an RAII
+        // guard so the parent process's cwd is put back even if the agent run
+        // panics or the future is cancelled (dropped) partway — a manual restore
+        // at the end is skipped on unwind/early-return and would strand the parent
+        // in the worktree directory.
+        struct CwdRestore(PathBuf);
+        impl Drop for CwdRestore {
+            fn drop(&mut self) {
+                if let Err(e) = std::env::set_current_dir(&self.0) {
+                    warn!(error = %e, "Failed to restore original directory");
+                }
+            }
+        }
         let original_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         std::env::set_current_dir(&self.workdir).with_context(|| {
             format!(
@@ -140,6 +152,7 @@ impl Subagent {
                 self.workdir.display()
             )
         })?;
+        let _cwd_restore = CwdRestore(original_dir);
 
         // Prepare config with limited turns.
         let mut config = self.config.clone();
@@ -153,10 +166,8 @@ impl Subagent {
         }
         .await;
 
-        // Restore original directory.
-        if let Err(e) = std::env::set_current_dir(&original_dir) {
-            warn!(error = %e, "Failed to restore original directory");
-        }
+        // (cwd is restored by the CwdRestore guard on scope exit — including on
+        // panic or cancellation.)
 
         // Collect results.
         let success = run_result.is_ok();
