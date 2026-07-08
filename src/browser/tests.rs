@@ -4,7 +4,6 @@
 //! Full integration tests requiring an actual browser are in tests/integration/browser.rs
 
 use super::*;
-use std::time::Duration;
 
 // ============================================================================
 // Configuration Tests
@@ -223,12 +222,55 @@ fn test_build_chrome_config_with_args() {
 
 #[tokio::test]
 async fn test_session_methods_fail_without_browser() {
-    // We can't easily test the actual browser operations without a real browser,
-    // but we can verify the error handling by checking that methods return errors
-    // when the browser is not properly initialized
+    // Browser automation is not implemented; every action method must return
+    // an honest error instead of faking success.
+    let mut session = BrowserSession::new(BrowserConfig::default());
 
-    // Note: BrowserSession::new will fail if Chrome isn't installed,
-    // so we rely on integration tests for full coverage
+    // goto
+    let result = session.goto("https://example.com").await;
+    assert!(result.is_err(), "goto should return Err");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not implemented") || err_msg.contains("not available"),
+        "goto error should explain automation is not implemented: {}",
+        err_msg
+    );
+
+    // screenshot
+    let path = PathBuf::from("/tmp/selfware-test-screenshot.png");
+    let result = session.screenshot(&path).await;
+    assert!(result.is_err(), "screenshot should return Err");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not implemented") || err_msg.contains("not available"),
+        "screenshot error should explain automation is not implemented: {}",
+        err_msg
+    );
+    // Verify no placeholder file was written.
+    assert!(
+        !std::path::Path::new(&path).exists(),
+        "screenshot must not write a placeholder file on error"
+    );
+
+    // click
+    let result = session.click("#button").await;
+    assert!(result.is_err(), "click should return Err");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not implemented") || err_msg.contains("not available"),
+        "click error should explain automation is not implemented: {}",
+        err_msg
+    );
+
+    // fill
+    let result = session.fill("#input", "hello").await;
+    assert!(result.is_err(), "fill should return Err");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not implemented") || err_msg.contains("not available"),
+        "fill error should explain automation is not implemented: {}",
+        err_msg
+    );
 }
 
 // ============================================================================
