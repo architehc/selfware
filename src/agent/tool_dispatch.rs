@@ -1697,6 +1697,11 @@ impl Agent {
         let mut parallel_paths: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Track whether any parallel-safe tool appears AFTER a sequential one in
+        // the original order. Hoisting the parallel batch ahead of the sequential
+        // batch is only safe when all parallel tools precede all sequential ones;
+        // otherwise a read could run before the mutation it depends on.
+        let mut parallel_follows_sequential = false;
         for call in &tool_calls {
             let (name, args_str, _) = call;
             if Self::is_parallel_safe(name) {
@@ -1711,6 +1716,9 @@ impl Agent {
                     if let Some(ref p) = path {
                         parallel_paths.insert(p.clone());
                     }
+                    if !sequential_batch.is_empty() {
+                        parallel_follows_sequential = true;
+                    }
                     parallel_batch.push(call.clone());
                 }
             } else {
@@ -1718,10 +1726,11 @@ impl Agent {
             }
         }
 
-        // Phase 2: Execute parallel-safe tools concurrently.
-        // Phase 2: If fewer than 2 parallel tools, merge back and run everything
-        // sequentially in the original order to preserve execution semantics.
-        if parallel_batch.len() < 2 {
+        // Phase 2: If fewer than 2 parallel tools, OR a parallel tool follows a
+        // sequential one in the original order (so hoisting would reorder a
+        // dependency), run everything sequentially in the original order to
+        // preserve execution semantics.
+        if parallel_batch.len() < 2 || parallel_follows_sequential {
             for (name, args_str, tool_call_id) in tool_calls {
                 if self.is_cancelled() {
                     break;

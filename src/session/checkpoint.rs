@@ -999,8 +999,15 @@ impl CheckpointManager {
         }
 
         // Attempt 2: create a fresh checkpoint so the caller can continue.
+        // This is a lossy fallback: the task description, message history, and
+        // audit trail are gone, and any filesystem changes made before the crash
+        // are now ORPHANED (the fresh checkpoint does not know about them). Surface
+        // that loudly so an operator can reconcile the working tree if needed.
         tracing::warn!(
-            "Creating fresh checkpoint for task '{}' after recovery failure",
+            "DATA LOSS: checkpoint for task '{}' and its backup are both unreadable; \
+             creating a blank fresh checkpoint. Prior messages/audit are lost and any \
+             uncommitted file changes from before the crash are now untracked — review \
+             the working tree manually.",
             task_id
         );
         let fresh = TaskCheckpoint::new(task_id.to_string(), String::new());
