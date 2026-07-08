@@ -380,15 +380,37 @@ impl PathValidator {
         let working_dir_normalized = to_glob_form(&working_dir_canonical);
 
         for pattern in &self.config.allowed_paths {
-            // For relative patterns, expand using the working directory
-            let expanded_pattern = if pattern.starts_with("./") || pattern == "." {
-                let suffix = pattern.strip_prefix("./").unwrap_or("");
-                format!("{}/{}", working_dir_normalized, suffix)
+            // Expand a leading "~" to the user's home directory so that
+            // patterns like "~/project" match the real canonical path.
+            let home_expanded: String = if pattern.starts_with("~/") {
+                if let Some(home) = std::env::var_os("HOME") {
+                    format!("{}/{}", home.to_string_lossy(), &pattern[2..])
+                } else if let Some(home) = dirs::home_dir() {
+                    format!("{}/{}", home.display(), &pattern[2..])
+                } else {
+                    pattern.clone()
+                }
+            } else if pattern == "~" {
+                if let Some(home) = std::env::var_os("HOME") {
+                    home.to_string_lossy().to_string()
+                } else if let Some(home) = dirs::home_dir() {
+                    home.display().to_string()
+                } else {
+                    pattern.clone()
+                }
             } else {
-                to_glob_form(pattern)
+                pattern.clone()
             };
 
-            let pattern_normalized = to_glob_form(pattern);
+            // For relative patterns, expand using the working directory
+            let expanded_pattern = if home_expanded.starts_with("./") || home_expanded == "." {
+                let suffix = home_expanded.strip_prefix("./").unwrap_or("");
+                format!("{}/{}", working_dir_normalized, suffix)
+            } else {
+                to_glob_form(&home_expanded)
+            };
+
+            let pattern_normalized = to_glob_form(&home_expanded);
 
             if glob::Pattern::new(&expanded_pattern)?.matches(&canonical_normalized)
                 || glob::Pattern::new(&pattern_normalized)?.matches(&canonical_normalized)

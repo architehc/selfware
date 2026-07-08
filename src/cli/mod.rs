@@ -705,8 +705,9 @@ pub async fn run() -> Result<()> {
 
             crate::output::set_tui_active(false);
 
-            // Cleanup: await the TUI task without blocking the async runtime
-            let _ = tui_handle.await;
+            // Cleanup: await the TUI task with a bounded timeout so a stuck
+            // TUI thread can never block shutdown indefinitely.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tui_handle).await;
             return Ok(());
         }
     }

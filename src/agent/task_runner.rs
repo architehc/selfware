@@ -110,10 +110,28 @@ impl Agent {
 
         let cancel_token = self.cancel_token();
         let ctrl_c_handle = tokio::spawn(async move {
-            if let Ok(()) = tokio::signal::ctrl_c().await {
-                cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
-                cli_println!("\n🦊 Received shutdown signal. Gracefully stopping agent and saving checkpoint...");
+            // Listen for both SIGINT (Ctrl-C) and SIGTERM (`kill` / systemd
+            // stop) so that either signal triggers a graceful shutdown.
+            let ctrl_c = tokio::signal::ctrl_c();
+
+            #[cfg(unix)]
+            let sigterm = async {
+                use tokio::signal::unix::{signal, SignalKind};
+                match signal(SignalKind::terminate()) {
+                    Ok(mut s) => { s.recv().await; }
+                    Err(_) => { std::future::pending::<()>().await; }
+                }
+            };
+            #[cfg(not(unix))]
+            let sigterm = std::future::pending::<()>();
+
+            tokio::select! {
+                _ = ctrl_c => {}
+                _ = sigterm => {}
             }
+
+            cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
+            cli_println!("\n🦊 Received shutdown signal. Gracefully stopping agent and saving checkpoint...");
         });
 
         struct AbortOnDrop(tokio::task::JoinHandle<()>);

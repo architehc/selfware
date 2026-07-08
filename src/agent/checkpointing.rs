@@ -13,8 +13,12 @@ use crate::self_healing::ErrorOccurrence;
 impl Agent {
     /// Resume a task from a checkpoint
     pub async fn resume(config: Config, task_id: &str) -> Result<Self> {
-        let checkpoint_manager =
-            CheckpointManager::default_path().context("Failed to initialize checkpoint manager")?;
+        // Wrap the sync CheckpointManager::default_path() in spawn_blocking to
+        // avoid stalling the async runtime with blocking fs I/O.
+        let checkpoint_manager = tokio::task::spawn_blocking(CheckpointManager::default_path)
+            .await
+            .context("Checkpoint manager init task panicked")?
+            .context("Failed to initialize checkpoint manager")?;
 
         let checkpoint = checkpoint_manager
             .load(task_id)

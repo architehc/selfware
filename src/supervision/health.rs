@@ -378,9 +378,22 @@ impl HealthCheck for DiskHealthCheck {
     }
 }
 
+/// Global health flag that can be updated by the supervision system.
+/// Defaults to `true` (healthy) so that bare-bones deployments without
+/// supervision still report liveness.
+static GLOBAL_HEALTHY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Update the global health flag used by the HTTP health endpoint.
+pub fn set_global_healthy(healthy: bool) {
+    GLOBAL_HEALTHY.store(healthy, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Start a minimal HTTP health endpoint on the given port.
-/// Responds to any request with "200 OK" and body "healthy\n".
-/// This is designed for Docker HEALTHCHECK and Kubernetes liveness probes.
+///
+/// Returns **200** with body `healthy\n` when the supervised component is
+/// healthy, or **503** with body `unhealthy\n` when it is not.  This is
+/// designed for Docker HEALTHCHECK and Kubernetes liveness probes.
 pub async fn start_health_endpoint(port: u16) -> anyhow::Result<()> {
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpListener;
@@ -391,8 +404,12 @@ pub async fn start_health_endpoint(port: u16) -> anyhow::Result<()> {
 
     loop {
         if let Ok((mut stream, _)) = listener.accept().await {
-            let response =
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\n\r\nhealthy\n";
+            let healthy = GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed);
+            let response = if healthy {
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nhealthy\n"
+            } else {
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 11\r\n\r\nunhealthy\n"
+            };
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = stream.shutdown().await;
         }

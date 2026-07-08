@@ -263,6 +263,16 @@ impl Supervisor {
 
                         if should_restart {
                             if self.should_restart(&child_id, &restart_counts).await {
+                                // Record this restart attempt *before*
+                                // calculating backoff so the exponential
+                                // strategy sees an escalating attempt count.
+                                {
+                                    let mut counts = restart_counts.write().await;
+                                    counts
+                                        .entry(child_id.clone())
+                                        .or_default()
+                                        .push(Instant::now());
+                                }
                                 let backoff =
                                     self.calculate_backoff(&child_id, &restart_counts).await;
                                 warn!(child_id = %child_id, backoff_ms = backoff.as_millis(), "Restarting child");

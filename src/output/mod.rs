@@ -26,6 +26,21 @@ static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// When true, the user requested quiet mode and non-essential output is suppressed.
 static QUIET_MODE: AtomicBool = AtomicBool::new(false);
 
+/// When true, stdout is not a terminal (piped/captured) — strip ANSI and emoji.
+static PLAIN_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Returns true when stdout is not a terminal (piped/captured/redirected).
+fn stdout_is_tty() -> bool {
+    // `IsTerminal` is stable since Rust 1.70.
+    use std::io::IsTerminal;
+    io::stdout().is_terminal()
+}
+
+/// Returns true when output should be plain (no ANSI colors, no emoji).
+pub(crate) fn is_plain_mode() -> bool {
+    PLAIN_MODE.load(Ordering::Relaxed)
+}
+
 /// Set the TUI active flag. Call with `true` when the TUI launches.
 pub fn set_tui_active(active: bool) {
     TUI_ACTIVE.store(active, Ordering::SeqCst);
@@ -62,6 +77,15 @@ pub(crate) fn init(compact: bool, verbose: bool, show_tokens: bool) {
     COMPACT_MODE.store(compact, Ordering::SeqCst);
     VERBOSE_MODE.store(verbose, Ordering::SeqCst);
     SHOW_TOKENS.store(show_tokens, Ordering::SeqCst);
+
+    // Detect whether stdout is a real terminal. When it is not (output is
+    // piped, captured, or redirected), disable ANSI colour codes globally so
+    // that downstream parsers don't see escape sequences, and enable plain
+    // mode to strip emoji glyphs from messages.
+    if !stdout_is_tty() {
+        PLAIN_MODE.store(true, Ordering::SeqCst);
+        colored::control::set_override(false);
+    }
 }
 
 /// Check if compact mode is enabled
@@ -756,12 +780,17 @@ pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let args_preview: String = tool_args.chars().take(80).collect();
-    print!(
-        "\r\x1b[2K  {} {} {}\n",
-        "↪ Auto:".bright_cyan(),
-        tool_name.bright_cyan(),
-        args_preview.dimmed()
-    );
+    if is_plain_mode() {
+        // Plain rendering: no ANSI, no emoji glyph
+        print!("\r  Auto: {} {}\n", tool_name, args_preview);
+    } else {
+        print!(
+            "\r\x1b[2K  {} {} {}\n",
+            "↪ Auto:".bright_cyan(),
+            tool_name.bright_cyan(),
+            args_preview.dimmed()
+        );
+    }
     io::stdout().flush().ok();
 }
 
@@ -771,7 +800,9 @@ pub(crate) fn final_answer(content: &str) {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if is_compact() {
+    if is_plain_mode() {
+        print!("Final answer: {}\n", content);
+    } else if is_compact() {
         print!("\r\x1b[2K{}\n", content);
     } else {
         print!("\r\x1b[2K{} {}\n", "Final answer:".bright_green(), content);
@@ -861,11 +892,19 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
     }
 
     if !diff_lines.is_empty() {
-        println!("\r\x1b[2K  {} {}", "┌─".dimmed(), path.dimmed());
-        for line in &diff_lines {
-            println!("\r\x1b[2K{}", line);
+        if is_plain_mode() {
+            println!("\r  --- {}", path);
+            for line in &diff_lines {
+                println!("\r{}", line);
+            }
+            println!("\r  ---");
+        } else {
+            println!("\r\x1b[2K  {} {}", "┌─".dimmed(), path.dimmed());
+            for line in &diff_lines {
+                println!("\r\x1b[2K{}", line);
+            }
+            println!("\r\x1b[2K  {}", "└─".dimmed());
         }
-        println!("\r\x1b[2K  {}", "└─".dimmed());
         io::stdout().flush().ok();
     }
 }
@@ -882,7 +921,11 @@ pub(crate) fn task_completed() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    println!("{}", "✅ Task completed successfully!".bright_green());
+    if is_plain_mode() {
+        println!("Task completed successfully!");
+    } else {
+        println!("{}", "✅ Task completed successfully!".bright_green());
+    }
 }
 
 /// Print verification report
@@ -900,7 +943,11 @@ pub(crate) fn verification_report(report: &str, passed: bool) {
     } else if !is_compact() {
         // Summary in normal mode
         if passed {
-            print!("\r\x1b[2K{}\r\n", "✓ Verification passed".bright_green());
+            if is_plain_mode() {
+                print!("\rVerification passed\r\n");
+            } else {
+                print!("\r\x1b[2K{}\r\n", "✓ Verification passed".bright_green());
+            }
             io::stdout().flush().ok();
         } else {
             // Always show failures
@@ -1092,11 +1139,20 @@ impl TaskProgress {
             // Verbose: full multi-line progress with all phases
             println!();
             for (i, phase) in self.phases.iter().enumerate() {
-                let (icon, name_color) = match phase.status {
-                    PhaseStatus::Pending => ("○".dimmed(), phase.name.dimmed()),
-                    PhaseStatus::Active => ("●".bright_cyan(), phase.name.bright_white()),
-                    PhaseStatus::Completed => ("✓".bright_green(), phase.name.green()),
-                    PhaseStatus::Failed => ("✗".bright_red(), phase.name.red()),
+                let (icon, name_color): (String, String) = if is_plain_mode() {
+                    match phase.status {
+                        PhaseStatus::Pending => ("o".to_string(), phase.name.clone()),
+                        PhaseStatus::Active => ("*".to_string(), phase.name.clone()),
+                        PhaseStatus::Completed => ("+".to_string(), phase.name.clone()),
+                        PhaseStatus::Failed => ("x".to_string(), phase.name.clone()),
+                    }
+                } else {
+                    match phase.status {
+                        PhaseStatus::Pending => ("○".dimmed().to_string(), phase.name.dimmed().to_string()),
+                        PhaseStatus::Active => ("●".bright_cyan().to_string(), phase.name.bright_white().to_string()),
+                        PhaseStatus::Completed => ("✓".bright_green().to_string(), phase.name.green().to_string()),
+                        PhaseStatus::Failed => ("✗".bright_red().to_string(), phase.name.red().to_string()),
+                    }
                 };
 
                 let progress_str = if phase.status == PhaseStatus::Active && phase.progress > 0.0 {

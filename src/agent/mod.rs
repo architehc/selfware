@@ -942,8 +942,13 @@ To call a tool, use this EXACT XML structure:
 
         let messages = vec![Message::system(final_prompt)];
 
-        // Initialize checkpoint manager if configured
-        let checkpoint_manager = CheckpointManager::default_path().ok();
+        // Initialize checkpoint manager if configured.
+        // Wrapping in spawn_blocking avoids stalling the async runtime with
+        // synchronous fs::create_dir_all inside CheckpointManager::default_path().
+        let checkpoint_manager =
+            tokio::task::spawn_blocking(|| CheckpointManager::default_path().ok())
+                .await
+                .unwrap_or(None);
 
         // Initialize verification gate with project root
         let project_root = current_project_root();
