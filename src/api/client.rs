@@ -450,13 +450,16 @@ impl ApiClient {
                         ));
                     }
 
+                    let retry_after = Self::parse_retry_after(response.headers());
                     let text = response.text().await.unwrap_or_default();
                     if Self::is_retryable_status(status) && attempt < max_attempts {
+                        let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
                         warn!(
-                            "Streaming request retryable error {} (attempt {}/{}); retrying after {}ms",
-                            status, attempt, max_attempts, delay_ms
+                            "Streaming request retryable error {} (attempt {}/{}); retrying after {}ms{}",
+                            status, attempt, max_attempts, sleep_ms,
+                            if retry_after.is_some() { " (server Retry-After)" } else { " (jittered)" }
                         );
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
@@ -468,11 +471,12 @@ impl ApiClient {
                 }
                 Err(e) => {
                     if attempt < max_attempts {
+                        let sleep_ms = self.retry_sleep_ms(delay_ms, None);
                         warn!(
-                            "Streaming request network error: {} (attempt {}/{}); retrying after {}ms",
-                            e, attempt, max_attempts, delay_ms
+                            "Streaming request network error: {} (attempt {}/{}); retrying after {}ms (jittered)",
+                            e, attempt, max_attempts, sleep_ms
                         );
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
@@ -491,6 +495,27 @@ impl ApiClient {
 
     fn is_retryable_status(status: reqwest::StatusCode) -> bool {
         status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    }
+
+    /// Parse a `Retry-After` response header (delta-seconds form) into seconds.
+    fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+        headers
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+    }
+
+    /// Backoff sleep for a retry: honor the server's `Retry-After` (capped at
+    /// max_delay) when present, otherwise the current exponential `delay_ms` with
+    /// ±25% jitter so many clients don't retry in lockstep against a rate-limited
+    /// gateway (thundering herd).
+    fn retry_sleep_ms(&self, delay_ms: u64, retry_after_secs: Option<u64>) -> u64 {
+        if let Some(secs) = retry_after_secs {
+            return secs.saturating_mul(1000).min(self.retry_config.max_delay_ms);
+        }
+        let jitter = rand::random::<f64>() * 0.5 - 0.25; // [-0.25, +0.25]
+        (((delay_ms as f64) * (1.0 + jitter)).max(0.0) as u64)
+            .min(self.retry_config.max_delay_ms)
     }
 
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {

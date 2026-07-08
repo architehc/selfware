@@ -160,14 +160,22 @@ impl Agent {
 
         // RAG: inject relevant code chunks from scanned index
         if let Some(ref rag_engine) = self.rag_engine {
-            // Extract query from the last user message
-            let query = self
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.text().to_string())
-                .unwrap_or_default();
+            // Query from the TASK objective, not the last user message. The most
+            // recent user message is often an injected system directive ("continue
+            // working", a tool result, a stuck-loop nudge), which retrieves chunks
+            // irrelevant to the actual task. Prefer the task context, then the
+            // original (first) user message, then the last user message.
+            let task_ctx = self.task_context_for_classification();
+            let query = if !task_ctx.is_empty() && task_ctx != "general" {
+                task_ctx.to_string()
+            } else {
+                self.messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .or_else(|| self.messages.iter().rev().find(|m| m.role == "user"))
+                    .map(|m| m.content.text().to_string())
+                    .unwrap_or_default()
+            };
 
             if !query.is_empty() {
                 let engine = rag_engine.read().await;
