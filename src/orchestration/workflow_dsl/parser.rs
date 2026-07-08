@@ -151,6 +151,19 @@ impl Parser {
     }
 
     /// Parse step
+    ///
+    /// A step has the form `step <name> = <command>`.
+    ///
+    /// The right-hand side can be:
+    /// - A string literal: `step build = "cargo build"`
+    /// - A function call: `step test = run_tests()`
+    /// - A bare multi-word command: `step build = cargo check`
+    ///
+    /// For the bare-command case the lexer produces consecutive
+    /// `Identifier` tokens (`cargo`, `check`).  The normal expression
+    /// parser only consumes the first identifier, leaving the rest
+    /// unparsed.  We detect this situation and collect the trailing
+    /// identifiers into an `AstNode::Command` so the step is complete.
     fn parse_step(&mut self) -> Result<AstNode, String> {
         self.expect(Token::Step)?;
 
@@ -161,8 +174,23 @@ impl Parser {
 
         self.expect(Token::Equals)?;
 
-        // Parse command (everything until semicolon or newline)
+        // Parse the right-hand side via the normal expression grammar.
+        // This handles string literals and function calls.
         let command = self.parse_expression()?;
+
+        // If the expression is a bare identifier and more identifiers
+        // follow, this is a multi-word shell command like `cargo check`.
+        // Collect all consecutive identifiers into a Command node.
+        let command = if let AstNode::Identifier(ref first) = command {
+            let mut parts = vec![first.clone()];
+            while let Token::Identifier(ref word) = self.current() {
+                parts.push(word.clone());
+                self.advance();
+            }
+            AstNode::Command(parts.join(" "))
+        } else {
+            command
+        };
 
         // Optional semicolon
         if self.check(&Token::Semicolon) {
@@ -729,6 +757,30 @@ mod tests {
             assert_eq!(stages.len(), 3);
         } else {
             panic!("Expected pipeline");
+        }
+    }
+
+    #[test]
+    fn test_parser_step_bare_command() {
+        // `step build = cargo check` should produce a Step whose command
+        // is an AstNode::Command("cargo check"), not just the identifier
+        // "cargo" with "check" left unparsed.
+        let tokens = Lexer::new("step build = cargo check").tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        assert_eq!(ast.len(), 1);
+        match &ast[0] {
+            AstNode::Step { name, command } => {
+                assert_eq!(name, "build");
+                match command.as_ref() {
+                    AstNode::Command(cmd) => {
+                        assert_eq!(cmd, "cargo check");
+                    }
+                    other => panic!("Expected Command node, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Step node, got {:?}", other),
         }
     }
 }

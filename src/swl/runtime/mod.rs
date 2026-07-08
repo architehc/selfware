@@ -2,9 +2,8 @@
 //!
 //! Executes SWL workflows with agent delegation, tool calling, and state management.
 
-// Note: guarded runtime depends on guardrails module which has compilation issues
-// pub mod guarded;
-// pub use guarded::{GuardedRuntimeBuilder, GuardedSwlRuntime};
+pub mod guarded;
+pub use guarded::{GuardedRuntimeBuilder, GuardedSwlRuntime};
 
 use crate::api::tool_calling::extract_tool_calls;
 use crate::api::{ApiClient, Message, ThinkingMode};

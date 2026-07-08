@@ -62,9 +62,12 @@ impl GuardedSwlRuntime {
     }
 
     /// Set the maximum number of tool iterations
-    pub fn with_max_tool_iterations(self, _max: usize) -> Self {
-        // This would need to be implemented on the base runtime
-        self
+    pub fn with_max_tool_iterations(self, max: usize) -> Self {
+        Self {
+            base: self.base.with_max_tool_iterations(max),
+            enforcer: self.enforcer,
+            current_workflow: self.current_workflow,
+        }
     }
 
     /// Register guardrails from an SWL document
@@ -449,20 +452,17 @@ impl GuardedSwlRuntime {
         self.execute_agent_internal(name, agent).await
     }
 
-    /// Internal agent execution (placeholder - would integrate with base runtime)
+    /// Internal agent execution — delegates to the base runtime's real
+    /// agent execution path (the same LLM call + tool-call loop used by
+    /// the non-guarded runtime) so that workflows actually run agents
+    /// instead of returning placeholder strings.
     async fn execute_agent_internal(
         &self,
         name: &str,
         agent: &AgentDefinition,
     ) -> crate::errors::Result<String> {
-        // This is a simplified version
-        // In practice, this would integrate with the base SwlRuntime's
-        // execute_agent method while adding guardrail hooks for tools
-
         info!("Executing agent with guardrails: {}", name);
-
-        // Placeholder implementation
-        Ok(format!("Agent {} output", name))
+        self.base.execute_agent(name, agent).await
     }
 
     /// Get telemetry summary
