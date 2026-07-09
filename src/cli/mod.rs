@@ -716,7 +716,19 @@ pub async fn run() -> Result<()> {
                 let input = tokio::task::block_in_place(|| user_input_rx.recv());
 
                 match input {
-                    Ok(input) if input != "exit" && input != "quit" => {
+                    Ok(ref input) if input == "exit" || input == "quit" => break,
+                    Ok(input) => {
+                        // Slash commands must NOT be sent to the LLM as prompts.
+                        // In TUI dashboard mode the full interactive command
+                        // dispatcher is not available, so we skip LLM routing
+                        // for any input starting with '/'.
+                        if input.starts_with('/') {
+                            warn!(
+                                "Slash command '{}' ignored in TUI mode — use interactive mode for command dispatch",
+                                input
+                            );
+                            continue;
+                        }
                         // Run the task — this will emit events to the TUI through event_tx
                         if let Err(e) = agent.run_task(&input).await {
                             warn!("Agent failed to run task: {}", e);
@@ -727,6 +739,11 @@ pub async fn run() -> Result<()> {
             }
 
             crate::output::set_tui_active(false);
+
+            // Auto-save conversation/session on exit so history isn't lost.
+            if let Err(e) = agent.save_checkpoint("TUI session exit") {
+                warn!("Failed to auto-save session on TUI exit: {}", e);
+            }
 
             // Cleanup: await the TUI task with a bounded timeout so a stuck
             // TUI thread can never block shutdown indefinitely.

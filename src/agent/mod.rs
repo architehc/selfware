@@ -1922,8 +1922,9 @@ To call a tool, use this EXACT XML structure:
         // Check if we're in non-interactive mode
         if !self.is_interactive() {
             return Err(anyhow::anyhow!(
-                "Tool '{}' requires confirmation: {}. \
-                 Run with --yolo flag or change execution mode to allow this operation.",
+                "Tool '{}' requires confirmation in headless mode: {}. \
+                 Re-run with --yolo to auto-approve, or use interactive/TUI mode \
+                 for manual confirmation.",
                 tool_name,
                 reason
             ));

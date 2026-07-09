@@ -2105,6 +2105,11 @@ impl Agent {
             }
         }
 
+        // Auto-save conversation/session on exit so history isn't lost.
+        if let Err(e) = self.save_checkpoint("interactive session exit") {
+            warn!("Failed to auto-save session on exit: {}", e);
+        }
+
         // Clean up any managed background processes before exiting
         crate::tools::process::cleanup_all_processes().await;
 
@@ -2180,7 +2185,17 @@ impl Agent {
             let preview = preview_with_ellipsis(&queued.content, QUEUE_DRAIN_PREVIEW_BYTES);
             println!("{} Queued: {}", "📨".bright_cyan(), preview);
 
-            if let Err(e) = self.run_task(&queued.content).await {
+            if queued.content.starts_with('/') {
+                // Slash commands typed mid-generation must NOT be sent raw
+                // to the LLM.  Skip them here; the user can re-enter them
+                // at the next prompt where the interactive command
+                // dispatcher will handle them properly.
+                println!(
+                    "{} Skipped queued slash command (re-enter at prompt): {}",
+                    "ℹ".bright_yellow(),
+                    preview
+                );
+            } else if let Err(e) = self.run_task(&queued.content).await {
                 println!("{} Error: {}", "❌".bright_red(), e);
             }
 
@@ -3305,6 +3320,11 @@ impl Agent {
                 Ok(_) => {}
                 Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }
+        }
+
+        // Auto-save conversation/session on exit so history isn't lost.
+        if let Err(e) = self.save_checkpoint("interactive basic session exit") {
+            warn!("Failed to auto-save session on exit: {}", e);
         }
 
         // Clean up any managed background processes before exiting

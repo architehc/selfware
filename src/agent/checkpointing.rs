@@ -116,7 +116,7 @@ impl Agent {
     }
 
     /// Save current state to checkpoint
-    pub(super) fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
+    pub(crate) fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
         if let Some(ref manager) = self.checkpoint_manager {
             if !self.should_persist_checkpoint() {
                 debug!("Checkpoint skipped by continuous-work policy");

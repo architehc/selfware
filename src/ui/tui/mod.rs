@@ -99,8 +99,9 @@ pub fn install_signal_handlers() {
     let _ = ctrlc::set_handler(move || {
         SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
         restore_terminal_state();
-        // After restoring terminal, exit cleanly
-        std::process::exit(130); // 128 + SIGINT(2)
+        // Do NOT call std::process::exit here — that would bypass
+        // main.rs graceful shutdown and skip checkpoint saves.
+        // The main event loop checks signal_received() and exits cleanly.
     });
 
     // On Unix, also handle SIGTERM for graceful shutdown (e.g., from `kill`)

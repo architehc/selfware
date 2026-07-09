@@ -9,7 +9,6 @@ use super::*;
 use crate::api::types::Message;
 use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
-use crate::errors::AgentError;
 use crate::hooks::HookContext;
 
 pub(super) const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
@@ -2888,10 +2887,12 @@ impl Agent {
         use tokio::io::AsyncWriteExt;
 
         if !self.is_interactive() {
-            return Err(AgentError::ConfirmationRequired {
-                tool_name: name.to_string(),
-            }
-            .into());
+            return Err(anyhow::anyhow!(
+                "Tool '{}' requires confirmation but cannot prompt in headless mode. \
+                 Re-run with --yolo to auto-approve all tool calls, \
+                 or use interactive/TUI mode for manual confirmation.",
+                name
+            ));
         }
 
         cli_println!(
