@@ -2578,8 +2578,17 @@ async fn handle_command(
             report.print();
             let code = report.exit_code();
             if code != 0 {
-                std::process::exit(code);
+                // Return an error so main.rs can exit gracefully with a
+                // non-zero exit code, instead of calling process::exit
+                // which would skip cleanup (tracing flush, etc.).
+                return Err(anyhow::anyhow!(
+                    "doctor: one or more checks failed (exit code {})",
+                    code
+                ));
             }
+            // Also run the LLM backend probe so `doctor` actually tests
+            // the model.  An unreachable/failing model is a real failure.
+            crate::llm_doctor::run_llm_doctor(&config).await?;
         }
 
         Commands::AutoConfig {

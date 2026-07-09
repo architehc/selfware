@@ -47,6 +47,46 @@ impl LspClientHandle {
             })
             .await
     }
+
+    /// Explicitly shut down all language servers managed by this handle.
+    ///
+    /// After this call, the handle should not be used again (create a new
+    /// one if needed).
+    pub async fn shutdown(&self) -> Result<()> {
+        if let Some(client) = self.client.get() {
+            client.shutdown().await?;
+        }
+        Ok(())
+    }
+}
+
+/// Ensure language-server subprocesses are cleaned up when the handle is
+/// dropped, so they don't leak for the agent's entire lifetime.
+impl Drop for LspClientHandle {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.get() {
+            // Drop runs outside an async context, so we can't call the
+            // async `shutdown()` directly.  Try to use the current tokio
+            // runtime if we're inside one; otherwise create a temporary
+            // one to perform cleanup.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                // We're inside a tokio runtime — use block_in_place to
+                // avoid a nested-runtime panic.
+                let _ = tokio::task::block_in_place(|| {
+                    handle.block_on(client.shutdown())
+                });
+            } else {
+                // No runtime available — create a temporary one to do
+                // the cleanup.  This is safe because we're not inside
+                // any runtime.
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(_) => return,
+                };
+                let _ = rt.block_on(client.shutdown());
+            }
+        }
+    }
 }
 
 /// Create all four LSP tools sharing a single client handle.

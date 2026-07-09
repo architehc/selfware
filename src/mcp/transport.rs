@@ -172,6 +172,13 @@ impl StdioTransport {
             .stdout
             .take()
             .context("Failed to capture MCP server stdout")?;
+        // Take stderr so we can drain it — if we leave it piped but never
+        // read it, a chatty server can fill the OS pipe buffer and block
+        // forever.
+        let stderr = child
+            .stderr
+            .take()
+            .context("Failed to capture MCP server stderr")?;
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -219,6 +226,32 @@ impl StdioTransport {
             }
 
             debug!("MCP stdout reader exited");
+        });
+
+        // Spawn a background task to drain child stderr so it can't fill
+        // the OS pipe buffer and deadlock the server.  Lines are forwarded
+        // to tracing so they are visible for debugging but don't interfere
+        // with the JSON-RPC protocol on stdout.
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            debug!("MCP server stderr: {}", trimmed);
+                        }
+                    }
+                    Err(e) => {
+                        debug!("MCP stderr read error: {}", e);
+                        break;
+                    }
+                }
+            }
+            debug!("MCP stderr drain exited");
         });
 
         Ok(Self {
@@ -295,8 +328,11 @@ impl Transport for StdioTransport {
     async fn shutdown(&self) -> Result<()> {
         info!("Shutting down MCP transport");
 
-        // Try graceful shutdown notification
-        let _ = self.notify("notifications/shutdown", None).await;
+        // Per the MCP spec: send a `shutdown` *request* (the server should
+        // respond with an empty result), then an `exit` *notification*.
+        // The previous code sent a non-standard `notifications/shutdown`.
+        let _ = self.request("shutdown", None).await;
+        let _ = self.notify("notifications/exit", None).await;
 
         // Give server a moment to clean up, then kill
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;

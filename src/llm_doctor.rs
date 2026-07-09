@@ -170,8 +170,13 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                 Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml."),
             );
             println!();
-            // No point continuing — exit non-zero per spec.
-            std::process::exit(1);
+            // No point continuing — return a hard error so the caller
+            // (cli::run) can exit with a non-zero code gracefully.
+            return Err(anyhow::anyhow!(
+                "LLM endpoint `{}` is unreachable: {}",
+                endpoint,
+                e
+            ));
         }
     }
     println!();
@@ -340,7 +345,9 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                 .red()
                 .bold()
         );
-        std::process::exit(1);
+        return Err(anyhow::anyhow!(
+            "llm-doctor: one or more checks failed"
+        ));
     }
 
     Ok(())

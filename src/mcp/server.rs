@@ -61,7 +61,6 @@ impl std::fmt::Display for JsonRpcError {
 
 // Standard JSON-RPC error codes.
 const PARSE_ERROR: i64 = -32700;
-#[allow(dead_code)]
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
@@ -209,6 +208,26 @@ impl McpServer {
             }
         };
 
+        // Gate: methods other than `initialize` and `ping` require the
+        // `initialize` handshake to have been completed first (MCP spec).
+        // Without this, a client could call `tools/call` before initializing.
+        const PRE_INIT_METHODS: &[&str] = &["initialize", "ping", "shutdown"];
+        if !self.initialized && !PRE_INIT_METHODS.contains(&request.method.as_str()) {
+            return Some(JsonRpcResponse {
+                jsonrpc: "2.0",
+                id,
+                result: None,
+                error: Some(JsonRpcError {
+                    code: INVALID_REQUEST,
+                    message: format!(
+                        "Method '{}' requires an 'initialize' request first",
+                        request.method
+                    ),
+                    data: None,
+                }),
+            });
+        }
+
         let (result, error) = match request.method.as_str() {
             "initialize" => self.handle_initialize(&request.params),
             "tools/list" => self.handle_tools_list(&request.params),
@@ -249,6 +268,9 @@ impl McpServer {
                     let request_id = params.get("requestId");
                     debug!("Client cancelled request: {:?}", request_id);
                 }
+            }
+            "notifications/exit" => {
+                info!("MCP client sent exit notification");
             }
             _ => {
                 debug!("Unhandled notification: {}", request.method);
@@ -755,8 +777,9 @@ pub async fn run_mcp_server(_config: &crate::config::Config) -> Result<()> {
             request.method, request.id
         );
 
-        // Check if this is a shutdown request.
-        let is_shutdown = request.method == "shutdown";
+        // Check if this is a shutdown request or exit notification.
+        let is_shutdown = request.method == "shutdown"
+            || request.method == "notifications/exit";
 
         // Handle the request.
         if let Some(response) = server.handle_request(&request).await {
@@ -781,6 +804,17 @@ pub async fn run_mcp_server(_config: &crate::config::Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: initialize a server so post-init methods can be tested.
+    async fn initialize_server(server: &mut McpServer) {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(0)),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        server.handle_request(&req).await;
+    }
 
     #[test]
     fn test_json_rpc_request_parsing() {
@@ -890,6 +924,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_list() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -916,6 +951,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_call_missing_params() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -932,6 +968,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_call_missing_name() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -948,6 +985,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_call_unknown_tool() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -972,6 +1010,7 @@ mod tests {
         // protocol) used to be able to invoke any registered tool, including
         // shell_exec, with none of the src/safety/ checks applied at all.
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -997,6 +1036,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_tools_call_allows_safe_shell_command() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1020,6 +1060,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_list() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1048,6 +1089,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_read_missing_params() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1064,6 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_read_unknown_uri() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1080,6 +1123,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_read_project_files() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1098,6 +1142,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_read_project_structure() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1117,6 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_method_not_found() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1196,6 +1242,7 @@ mod tests {
     #[tokio::test]
     async fn test_handle_resources_read_file_path_escape() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1226,6 +1273,7 @@ mod tests {
     #[tokio::test]
     async fn test_tool_list_has_correct_schema_format() {
         let mut server = McpServer::new();
+        initialize_server(&mut server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1271,6 +1319,94 @@ mod tests {
 
         let response = server.handle_request(&request).await.unwrap();
         assert!(response.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_rejected_before_initialize() {
+        // A client must not be able to call tools/call before the
+        // `initialize` handshake has been completed.
+        let mut server = McpServer::new();
+        assert!(!server.initialized);
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(20)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "shell_exec",
+                "arguments": {"command": "echo hi"}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        assert!(response.error.is_some());
+        assert_eq!(response.error.as_ref().unwrap().code, INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_tools_list_rejected_before_initialize() {
+        let mut server = McpServer::new();
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(21)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        assert!(response.error.is_some());
+        assert_eq!(response.error.as_ref().unwrap().code, INVALID_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_ping_allowed_before_initialize() {
+        let mut server = McpServer::new();
+        assert!(!server.initialized);
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(22)),
+            method: "ping".to_string(),
+            params: None,
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        assert!(response.error.is_none());
+        assert!(response.result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_tools_call_allowed_after_initialize() {
+        let mut server = McpServer::new();
+
+        // Initialize first
+        let init_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(23)),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        server.handle_request(&init_req).await;
+        assert!(server.initialized);
+
+        // Now tools/call should not be rejected with INVALID_REQUEST
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(24)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "nonexistent_tool_xyz",
+                "arguments": {}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        // Should not get INVALID_REQUEST — the error (if any) should be
+        // a tool-not-found content response, not a protocol error.
+        if let Some(err) = &response.error {
+            assert_ne!(err.code, INVALID_REQUEST);
+        }
     }
 
     #[test]

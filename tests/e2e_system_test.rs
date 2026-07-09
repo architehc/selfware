@@ -326,7 +326,7 @@ fn test_tool_registry_has_all_tools() {
 #[tokio::test]
 async fn test_doctor_runs_without_panic() {
     let start = Instant::now();
-    let report = run_doctor().await;
+    let report = run_doctor(None).await;
     let elapsed = start.elapsed();
 
     assert!(
@@ -1423,7 +1423,7 @@ fn test_scenario_multi_language_detection() {
 
 #[tokio::test]
 async fn test_doctor_report_structure() {
-    let report = run_doctor().await;
+    let report = run_doctor(None).await;
 
     // Check that we have checks from multiple categories
     let categories: HashSet<String> = report
