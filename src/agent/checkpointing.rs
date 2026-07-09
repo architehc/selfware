@@ -52,8 +52,15 @@ impl Agent {
 
         // Restore exact loop progress when available.
         // Older checkpoints may not have an iteration value, so keep fallback logic.
+        //
+        // Resume fairness: a task checkpointed near its iteration cap would
+        // immediately fail with "max iterations" on resume. Instead of
+        // restoring the old iteration counter verbatim, we reset it to 0 so
+        // the resumed task gets a full budget of additional iterations. The
+        // step counter is still restored so the agent knows where it left off.
+        // (The wall-clock baseline is reset separately in continue_execution.)
         if checkpoint.current_iteration > 0 {
-            restored_loop.restore_progress(checkpoint.current_step, checkpoint.current_iteration);
+            restored_loop.restore_progress(checkpoint.current_step, 0);
         } else {
             // Backward-compatible restore for legacy checkpoints.
             for _ in 0..checkpoint.current_step {

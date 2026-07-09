@@ -1586,6 +1586,17 @@ To call a tool, use this EXACT XML structure:
     #[inline]
     pub fn set_execution_mode(&mut self, mode: crate::config::ExecutionMode) {
         self.config.execution_mode = mode;
+        // If switching to Yolo/Daemon, ensure the YoloManager's internal
+        // `enabled` flag is also set.  When the agent was constructed with a
+        // non-Yolo config and the mode is changed afterward (e.g.
+        // `selfware run --yolo` where the subcommand flag is only applied
+        // inside `handle_command`), the YoloManager would otherwise stay
+        // disabled and `should_auto_approve` would return
+        // `RequireConfirmation` — denying all tools in headless mode.
+        if matches!(mode, crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon)
+        {
+            self.yolo_manager.enable();
+        }
     }
 
     /// Cycle to next execution mode (Shift+Tab): normal → auto-edit → yolo → daemon → normal

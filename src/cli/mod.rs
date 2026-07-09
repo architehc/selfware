@@ -615,6 +615,24 @@ pub async fn run() -> Result<()> {
 
         let start = std::time::Instant::now();
         let mut agent = Agent::new(config).await?;
+        // Resume named session if --resume-session was provided (headless path)
+        if let Some(ref session_name) = cli.resume_session {
+            match agent.resume_named_session(session_name) {
+                Ok(msg_count) => {
+                    if !cli.quiet && !is_structured {
+                        println!(
+                            "▶ Resumed session '{}' ({} messages)",
+                            session_name, msg_count
+                        );
+                    }
+                }
+                Err(e) => {
+                    if !cli.quiet && !is_structured {
+                        eprintln!("Failed to resume session '{}': {}", session_name, e);
+                    }
+                }
+            }
+        }
         let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
             Vec::new();
         if is_stream_json {
@@ -812,6 +830,11 @@ async fn handle_command(
                 println!("{}", ui::components::render_welcome(ctx));
             }
             let mut agent = Agent::new(config).await?;
+            // If the subcommand --yolo flag was set, ensure the YoloManager
+            // is enabled after construction.
+            if yolo {
+                agent.set_execution_mode(ExecutionMode::Yolo);
+            }
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {
                 match agent.resume_named_session(session_name) {
@@ -866,6 +889,30 @@ async fn handle_command(
 
             let start = std::time::Instant::now();
             let mut agent = Agent::new(config).await?;
+            // If the subcommand --yolo flag was set, ensure the YoloManager
+            // is enabled after construction (covers the case where the
+            // top-level --yolo was not passed but the subcommand flag was).
+            if yolo {
+                agent.set_execution_mode(ExecutionMode::Yolo);
+            }
+            // Resume named session if --resume-session was provided
+            if let Some(ref session_name) = resume_session {
+                match agent.resume_named_session(session_name) {
+                    Ok(msg_count) => {
+                        if !quiet && !is_structured {
+                            println!(
+                                "▶ Resumed session '{}' ({} messages)",
+                                session_name, msg_count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !quiet && !is_structured {
+                            eprintln!("Failed to resume session '{}': {}", session_name, e);
+                        }
+                    }
+                }
+            }
             let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
                 Vec::new();
             if is_stream_json {

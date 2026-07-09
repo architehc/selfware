@@ -582,6 +582,15 @@ impl Agent {
         let mut consecutive_error_recoveries = 0u32;
         const MAX_CONSECUTIVE_ERROR_RECOVERIES: u32 = 12;
 
+        // Bounded guard: track consecutive planning turns that make no progress
+        // (no tool calls / no state transition). Planning does not consume the
+        // iteration budget, so without this guard the model could spin forever
+        // in the Planning state re-entering planning when the LLM returns plain
+        // text with no tool calls. After a small cap, force a transition to
+        // Executing so the normal iteration budget and progress guards apply.
+        let mut consecutive_planning_no_progress = 0u32;
+        const MAX_CONSECUTIVE_PLANNING_NO_PROGRESS: u32 = 4;
+
         let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
         if mode == LoopMode::NewTask {
             progress.start_phase();
@@ -680,6 +689,36 @@ impl Agent {
 
                     if self.is_cancelled() {
                         continue;
+                    }
+
+                    // Bounded planning guard: if planning returned no tool calls,
+                    // count it as a no-progress turn. After a small cap, force a
+                    // transition to Executing instead of re-planning forever
+                    // (Planning does not consume the iteration budget).
+                    if !has_tool_calls {
+                        consecutive_planning_no_progress += 1;
+                        if consecutive_planning_no_progress
+                            >= MAX_CONSECUTIVE_PLANNING_NO_PROGRESS
+                        {
+                            warn!(
+                                "Planning made no progress {} consecutive turns — forcing transition to Executing",
+                                consecutive_planning_no_progress
+                            );
+                            consecutive_planning_no_progress = 0;
+                            // Inject a directive so the model knows to act.
+                            self.messages.push(Message::user(
+                                "<selfware_system_directive>\n\
+                                 Planning has not produced any tool calls after multiple attempts. \
+                                 Stop planning and start executing now: read a file, run a search, \
+                                 or take any concrete action.\n\
+                                 </selfware_system_directive>"
+                                    .to_string(),
+                            ));
+                            // Fall through to the normal Planning→Executing
+                            // transition so the iteration budget applies.
+                        }
+                    } else {
+                        consecutive_planning_no_progress = 0;
                     }
 
                     record_state_transition("Planning", "Executing");
