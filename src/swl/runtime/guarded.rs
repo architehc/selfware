@@ -235,38 +235,10 @@ impl GuardedSwlRuntime {
         let mut outputs = HashMap::new();
 
         for (agent_name, agent) in &doc.agents {
-            // Pre-agent guardrail check
-            let pre_context = self.build_guardrail_context(Some(agent_name), None, None).await;
-            if let Some(blocking) = self
-                .check_guardrails(GuardrailType::PreAgent, &pre_context)
-                .await?
-            {
-                return Err(SelfwareError::Safety(SafetyError::BlockedCommand {
-                    command: format!("Agent '{}' blocked by guardrails", agent_name),
-                    reason: format!("{} violations found", blocking.len()),
-                }));
-            }
-
-            // Execute agent
+            // Agent execution with guardrails is handled inside
+            // execute_agent_with_guardrails (pre/post agent checks).
             let output = self.execute_agent_with_guardrails(agent_name, agent).await?;
-            outputs.insert(agent_name.clone(), output.clone());
-
-            // Post-agent guardrail check
-            let post_context = self
-                .build_guardrail_context(Some(agent_name), Some(&output), None)
-                .await;
-            if let Some(blocking) = self
-                .check_guardrails(GuardrailType::PostAgent, &post_context)
-                .await?
-            {
-                return Err(SelfwareError::Safety(SafetyError::BlockedCommand {
-                    command: format!(
-                        "Agent '{}' output blocked by guardrails",
-                        agent_name
-                    ),
-                    reason: format!("{} violations found", blocking.len()),
-                }));
-            }
+            outputs.insert(agent_name.clone(), output);
         }
 
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
@@ -305,7 +277,8 @@ impl GuardedSwlRuntime {
             }
         }
 
-        // Spawn all agents concurrently
+        // Spawn all agents concurrently.  Pre/post agent guardrail checks
+        // are handled inside execute_agent_with_guardrails.
         let mut handles = Vec::new();
 
         for (agent_name, agent) in &doc.agents {
@@ -317,23 +290,6 @@ impl GuardedSwlRuntime {
                 let output = runtime
                     .execute_agent_with_guardrails(&agent_name, &agent)
                     .await?;
-
-                // Post-agent guardrail check
-                let post_context = runtime
-                    .build_guardrail_context(Some(&agent_name), Some(&output), None)
-                    .await;
-                if let Some(blocking) = runtime
-                    .check_guardrails(GuardrailType::PostAgent, &post_context)
-                    .await?
-                {
-                    return Err(SelfwareError::Safety(SafetyError::BlockedCommand {
-                        command: format!(
-                            "Agent '{}' output blocked by guardrails",
-                            agent_name
-                        ),
-                        reason: format!("{} violations found", blocking.len()),
-                    }));
-                }
 
                 Ok::<(String, String), crate::errors::SelfwareError>((agent_name, output))
             });
@@ -441,15 +397,47 @@ impl GuardedSwlRuntime {
         })
     }
 
-    /// Execute a single agent with guardrails
+    /// Execute a single agent with guardrails.
+    ///
+    /// Pre-agent and post-agent guardrail checks are run around the base
+    /// runtime's agent execution.  If a pre-agent guardrail blocks, the
+    /// agent is not executed and an error is returned.  If a post-agent
+    /// guardrail blocks, the agent's output is rejected.
     async fn execute_agent_with_guardrails(
         &self,
         name: &str,
         agent: &AgentDefinition,
     ) -> crate::errors::Result<String> {
-        // Delegate to base runtime - in a real implementation,
-        // this would also include pre/post tool guardrail checks
-        self.execute_agent_internal(name, agent).await
+        // Pre-agent guardrail check
+        let pre_context = self.build_guardrail_context(Some(name), None, None).await;
+        if let Some(blocking) = self
+            .check_guardrails(GuardrailType::PreAgent, &pre_context)
+            .await?
+        {
+            return Err(SelfwareError::Safety(SafetyError::BlockedCommand {
+                command: format!("Agent '{}' blocked by pre-execution guardrails", name),
+                reason: format!("{} violations found", blocking.len()),
+            }));
+        }
+
+        // Execute the agent via the base runtime
+        let output = self.execute_agent_internal(name, agent).await?;
+
+        // Post-agent guardrail check
+        let post_context = self
+            .build_guardrail_context(Some(name), Some(&output), None)
+            .await;
+        if let Some(blocking) = self
+            .check_guardrails(GuardrailType::PostAgent, &post_context)
+            .await?
+        {
+            return Err(SelfwareError::Safety(SafetyError::BlockedCommand {
+                command: format!("Agent '{}' output blocked by post-execution guardrails", name),
+                reason: format!("{} violations found", blocking.len()),
+            }));
+        }
+
+        Ok(output)
     }
 
     /// Internal agent execution — delegates to the base runtime's real

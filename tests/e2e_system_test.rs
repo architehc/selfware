@@ -1481,7 +1481,7 @@ async fn test_llm_doctor_with_endpoint() {
     let elapsed = start.elapsed();
 
     match result {
-        Ok(()) => {
+        Ok(_) => {
             println!("  LLM doctor completed successfully in {:?}", elapsed);
         }
         Err(e) => {

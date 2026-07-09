@@ -75,13 +75,131 @@ struct ConnectionTestResult {
     tool_calling_works: Option<bool>,
 }
 
+// ── Structured report ────────────────────────────────────────────────────────
+
+/// Status of an individual doctor check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum CheckOutcome {
+    /// Check passed.
+    Pass,
+    /// Check produced a warning.
+    Warn,
+    /// Check failed.
+    Fail,
+    /// Check was skipped (e.g. endpoint unreachable).
+    Skip,
+}
+
+impl From<DoctorCheckStatus> for CheckOutcome {
+    fn from(s: DoctorCheckStatus) -> Self {
+        match s {
+            DoctorCheckStatus::Ok => CheckOutcome::Pass,
+            DoctorCheckStatus::Warning => CheckOutcome::Warn,
+            DoctorCheckStatus::Missing => CheckOutcome::Fail,
+        }
+    }
+}
+
+/// A single check result within the structured doctor report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorCheckResult {
+    /// Human-readable name of the check.
+    pub name: String,
+    /// Outcome (pass / warn / fail / skip).
+    pub status: CheckOutcome,
+    /// Detail message.
+    pub detail: String,
+    /// Optional remediation hint.
+    pub fix_hint: Option<String>,
+}
+
+/// Structured report returned by [`run_llm_doctor`].
+///
+/// Contains the outcome of every probe so callers (e.g. JSON mode, CI
+/// scripts, programmatic consumers) can inspect the results without parsing
+/// human-readable terminal output.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoctorReport {
+    /// Config sanity checks (Step 0).
+    pub config_checks: Vec<DoctorCheckResult>,
+    /// Endpoint reachability check (Step 1).
+    pub endpoint_reachable: Option<DoctorCheckResult>,
+    /// Whether the configured model is available on the endpoint.
+    pub model_available: Option<DoctorCheckResult>,
+    /// Detected backend name (e.g. "vllm", "sglang", "ollama").
+    pub backend: Option<String>,
+    /// Model IDs listed by the endpoint.
+    pub available_models: Vec<String>,
+    /// Connection latency in milliseconds (Step 5).
+    pub latency_ms: Option<u64>,
+    /// Estimated throughput in tokens/second (Step 5).
+    pub tokens_per_second: Option<f64>,
+    /// Whether tool calling produced tool_calls (Step 5).
+    pub tool_calling_works: Option<bool>,
+    /// Capability matrix (Step 7).
+    pub capabilities: Vec<DoctorCheckResult>,
+    /// `true` if any check had a FAIL outcome.
+    pub had_failures: bool,
+}
+
+impl DoctorReport {
+    /// Create an empty report.
+    fn new() -> Self {
+        Self {
+            config_checks: Vec::new(),
+            endpoint_reachable: None,
+            model_available: None,
+            backend: None,
+            available_models: Vec::new(),
+            latency_ms: None,
+            tokens_per_second: None,
+            tool_calling_works: None,
+            capabilities: Vec::new(),
+            had_failures: false,
+        }
+    }
+}
+
 // ── Public entry-point ───────────────────────────────────────────────────────
 
 /// Run the full LLM doctor diagnostic.
 ///
-/// Returns `Ok(())` on success and exits the process with code 1 if any
-/// FAIL-level check is encountered (so the binary can be used in CI / scripts).
-pub async fn run_llm_doctor(config: &Config) -> Result<()> {
+/// Prints human-readable output to stdout for interactive use **and** returns
+/// a structured [`DoctorReport`] so callers (JSON mode, CI, programmatic
+/// consumers) can inspect individual check outcomes without parsing terminal
+/// text.
+///
+/// Returns `Ok(report)` on success and `Err(...)` if any FAIL-level check is
+/// encountered (so the binary can exit with a non-zero code in CI / scripts).
+/// The `DoctorReport` is still attached to the error via [`anyhow::Context`]
+/// when possible, but callers that want the report even on failure can use
+/// [`run_llm_doctor_report`] instead.
+pub async fn run_llm_doctor(config: &Config) -> Result<DoctorReport> {
+    let (report, had_fail) = run_llm_doctor_inner(config).await?;
+    if had_fail {
+        eprintln!(
+            "{}",
+            "  llm-doctor finished with FAILures — see remediation hints above."
+                .red()
+                .bold()
+        );
+        return Err(anyhow::anyhow!("llm-doctor: one or more checks failed"));
+    }
+    Ok(report)
+}
+
+/// Run the full LLM doctor diagnostic and always return the structured
+/// report, even if some checks failed.  The `had_failures` field on the
+/// report indicates whether any FAIL-level check was encountered.
+pub async fn run_llm_doctor_report(config: &Config) -> Result<DoctorReport> {
+    let (report, _) = run_llm_doctor_inner(config).await?;
+    Ok(report)
+}
+
+/// Internal implementation shared by both public entry points.
+async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
+    let mut report = DoctorReport::new();
+    let mut had_fail = false;
     println!();
     println!(
         "{}",
@@ -108,11 +226,16 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
 
     // ── Step 0: Config sanity checks (unified [PASS]/[WARN]/[FAIL] format) ──
     println!("{}", "Step 0: Config Sanity".bold().underline());
-    let mut had_fail = false;
     for c in config_checks(config) {
         let printed_fail =
             print_unified_check(&c.name, c.status, &c.message, c.fix_hint.as_deref());
         had_fail |= printed_fail;
+        report.config_checks.push(DoctorCheckResult {
+            name: c.name,
+            status: c.status.into(),
+            detail: c.message,
+            fix_hint: c.fix_hint,
+        });
     }
     println!();
 
@@ -128,6 +251,14 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                 &format!("{} (backend: {})", det.endpoint, det.backend),
                 None,
             );
+            report.endpoint_reachable = Some(DoctorCheckResult {
+                name: "endpoint reachable".to_string(),
+                status: CheckOutcome::Pass,
+                detail: format!("{} (backend: {})", det.endpoint, det.backend),
+                fix_hint: None,
+            });
+            report.backend = Some(det.backend.to_string());
+            report.available_models = det.models.iter().map(|m| m.id.clone()).collect();
             println!(
                 "  {} Models available: {}",
                 ">>".green(),
@@ -151,6 +282,12 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                     &model_name,
                     None,
                 );
+                report.model_available = Some(DoctorCheckResult {
+                    name: "configured model available".to_string(),
+                    status: CheckOutcome::Pass,
+                    detail: model_name.clone(),
+                    fix_hint: None,
+                });
             } else {
                 had_fail |= print_unified_check(
                     "configured model available",
@@ -160,6 +297,12 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                         "Set selfware.toml `model` to one of the available IDs above, or load that model in your backend.",
                     ),
                 );
+                report.model_available = Some(DoctorCheckResult {
+                    name: "configured model available".to_string(),
+                    status: CheckOutcome::Fail,
+                    detail: format!("`{}` is not listed by the endpoint", model_name),
+                    fix_hint: Some("Set selfware.toml `model` to one of the available IDs above, or load that model in your backend.".to_string()),
+                });
             }
         }
         Err(e) => {
@@ -169,6 +312,13 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                 &format!("could not reach `{}`: {}", endpoint, e),
                 Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml."),
             );
+            report.endpoint_reachable = Some(DoctorCheckResult {
+                name: "endpoint reachable".to_string(),
+                status: CheckOutcome::Fail,
+                detail: format!("could not reach `{}`: {}", endpoint, e),
+                fix_hint: Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml.".to_string()),
+            });
+            report.had_failures = true;
             println!();
             // No point continuing — return a hard error so the caller
             // (cli::run) can exit with a non-zero code gracefully.
@@ -206,6 +356,9 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
     let conn_result = connection_test(&endpoint, &model_name, config).await;
     match &conn_result {
         Ok(res) => {
+            report.latency_ms = Some(res.latency.as_millis() as u64);
+            report.tokens_per_second = res.tokens_per_second;
+            report.tool_calling_works = res.tool_calling_works;
             println!(
                 "  {} Response latency: {:.0}ms",
                 ">>".green(),
@@ -268,89 +421,64 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
         (Some(false), _) | (_, Some(false)) => DoctorCheckStatus::Warning,
         _ => DoctorCheckStatus::Warning,
     };
-    had_fail |= print_unified_check(
-        "tool calling",
-        tools_status,
-        match tools_status {
-            DoctorCheckStatus::Ok => "model honored a calculator tool call",
-            DoctorCheckStatus::Warning => "model did not produce tool_calls",
-            DoctorCheckStatus::Missing => "tool calling probe failed",
-        },
-        if tools_status == DoctorCheckStatus::Ok {
-            None
-        } else {
-            Some("vLLM: pass `--enable-auto-tool-choice --tool-call-parser hermes`. SGLang: ensure a tool-aware chat template. Ollama: upgrade to >= 0.5.0.")
-        },
-    );
-    had_fail |= print_unified_check(
-        "streaming",
-        if caps.streaming.unwrap_or(false) {
-            DoctorCheckStatus::Ok
-        } else {
-            DoctorCheckStatus::Warning
-        },
-        if caps.streaming.unwrap_or(false) {
-            "SSE streaming responded with chunks"
-        } else {
-            "streaming not available or returned no chunks"
-        },
-        if caps.streaming.unwrap_or(false) {
-            None
-        } else {
-            Some("Ensure the backend supports SSE streaming (default for vLLM/SGLang/Ollama). Disable any reverse proxy buffering.")
-        },
-    );
-    had_fail |= print_unified_check(
-        "chat_template_kwargs (thinking)",
-        if caps.thinking.unwrap_or(false) {
-            DoctorCheckStatus::Ok
-        } else {
-            DoctorCheckStatus::Warning
-        },
-        if caps.thinking.unwrap_or(false) {
-            "backend accepts chat_template_kwargs (Qwen-style thinking)"
-        } else {
-            "chat_template_kwargs not supported (or backend ignored it)"
-        },
-        if caps.thinking.unwrap_or(false) {
-            None
-        } else {
-            Some("Required for Qwen3.5 thinking control. Use vLLM/SGLang with a Qwen template, or set `[extra_body] chat_template_kwargs = { enable_thinking = false }` to opt out.")
-        },
-    );
-    had_fail |= print_unified_check(
-        "multimodal (vision)",
-        if caps.multimodal {
-            DoctorCheckStatus::Ok
-        } else {
-            DoctorCheckStatus::Warning
-        },
-        if caps.multimodal {
-            "model name suggests vision-language support"
-        } else {
-            "no vision modality detected for this model"
-        },
-        if caps.multimodal {
-            None
-        } else {
-            Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.")
-        },
-    );
+    let tools_detail = match tools_status {
+        DoctorCheckStatus::Ok => "model honored a calculator tool call",
+        DoctorCheckStatus::Warning => "model did not produce tool_calls",
+        DoctorCheckStatus::Missing => "tool calling probe failed",
+    };
+    let tools_fix = if tools_status == DoctorCheckStatus::Ok {
+        None
+    } else {
+        Some("vLLM: pass `--enable-auto-tool-choice --tool-call-parser hermes`. SGLang: ensure a tool-aware chat template. Ollama: upgrade to >= 0.5.0.")
+    };
+    had_fail |= print_unified_check("tool calling", tools_status, tools_detail, tools_fix);
+    report.capabilities.push(DoctorCheckResult {
+        name: "tool calling".to_string(),
+        status: tools_status.into(),
+        detail: tools_detail.to_string(),
+        fix_hint: tools_fix.map(String::from),
+    });
+
+    let streaming_ok = caps.streaming.unwrap_or(false);
+    let streaming_status = if streaming_ok { DoctorCheckStatus::Ok } else { DoctorCheckStatus::Warning };
+    let streaming_detail = if streaming_ok { "SSE streaming responded with chunks" } else { "streaming not available or returned no chunks" };
+    let streaming_fix = if streaming_ok { None } else { Some("Ensure the backend supports SSE streaming (default for vLLM/SGLang/Ollama). Disable any reverse proxy buffering.") };
+    had_fail |= print_unified_check("streaming", streaming_status, streaming_detail, streaming_fix);
+    report.capabilities.push(DoctorCheckResult {
+        name: "streaming".to_string(),
+        status: streaming_status.into(),
+        detail: streaming_detail.to_string(),
+        fix_hint: streaming_fix.map(String::from),
+    });
+
+    let thinking_ok = caps.thinking.unwrap_or(false);
+    let thinking_status = if thinking_ok { DoctorCheckStatus::Ok } else { DoctorCheckStatus::Warning };
+    let thinking_detail = if thinking_ok { "backend accepts chat_template_kwargs (Qwen-style thinking)" } else { "chat_template_kwargs not supported (or backend ignored it)" };
+    let thinking_fix = if thinking_ok { None } else { Some("Required for Qwen3.5 thinking control. Use vLLM/SGLang with a Qwen template, or set `[extra_body] chat_template_kwargs = { enable_thinking = false }` to opt out.") };
+    had_fail |= print_unified_check("chat_template_kwargs (thinking)", thinking_status, thinking_detail, thinking_fix);
+    report.capabilities.push(DoctorCheckResult {
+        name: "chat_template_kwargs (thinking)".to_string(),
+        status: thinking_status.into(),
+        detail: thinking_detail.to_string(),
+        fix_hint: thinking_fix.map(String::from),
+    });
+
+    let mm_ok = caps.multimodal;
+    let mm_status = if mm_ok { DoctorCheckStatus::Ok } else { DoctorCheckStatus::Warning };
+    let mm_detail = if mm_ok { "model name suggests vision-language support" } else { "no vision modality detected for this model" };
+    let mm_fix = if mm_ok { None } else { Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.") };
+    had_fail |= print_unified_check("multimodal (vision)", mm_status, mm_detail, mm_fix);
+    report.capabilities.push(DoctorCheckResult {
+        name: "multimodal (vision)".to_string(),
+        status: mm_status.into(),
+        detail: mm_detail.to_string(),
+        fix_hint: mm_fix.map(String::from),
+    });
     println!();
 
-    if had_fail {
-        eprintln!(
-            "{}",
-            "  llm-doctor finished with FAILures — see remediation hints above."
-                .red()
-                .bold()
-        );
-        return Err(anyhow::anyhow!(
-            "llm-doctor: one or more checks failed"
-        ));
-    }
+    report.had_failures = had_fail;
 
-    Ok(())
+    Ok((report, had_fail))
 }
 
 // ── Unified output + capability probe helpers ────────────────────────────────

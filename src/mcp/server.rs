@@ -405,6 +405,38 @@ impl McpServer {
 
         debug!("tools/call: {} with args: {}", tool_name, arguments);
 
+        // Validate the provided arguments against the tool's declared input
+        // schema *before* executing.  Without this, a client could call a
+        // tool with missing required fields or wrong argument types and the
+        // tool would receive malformed input, potentially causing confusing
+        // errors or undefined behaviour.  On mismatch we return a proper
+        // JSON-RPC invalid-params error.
+        //
+        // If the tool is not registered, skip validation (the execute call
+        // below will produce a tool-not-found error response).  If the tool
+        // is registered but exposes no usable schema (e.g. schema is not an
+        // object), skip validation for that tool.
+        if let Some(tool) = self.registry.get(tool_name) {
+            let schema = tool.schema();
+            if schema.is_object() {
+                if let Err(e) =
+                    crate::tools::validate_tool_arguments_schema(tool_name, &schema, &arguments)
+                {
+                    return (
+                        None,
+                        Some(JsonRpcError {
+                            code: INVALID_PARAMS,
+                            message: e.to_string(),
+                            data: Some(serde_json::json!({
+                                "tool": tool_name,
+                                "arguments": arguments,
+                            })),
+                        }),
+                    );
+                }
+            }
+        }
+
         let fake_call = crate::api::types::ToolCall {
             id: "mcp".to_string(),
             call_type: "function".to_string(),
