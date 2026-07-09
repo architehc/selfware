@@ -11,6 +11,11 @@ pub(super) use super::recovery::ActionPrompt;
 // Re-export type from tool_collect so existing call sites keep working
 pub(super) use super::tool_collect::CollectedToolCall;
 
+/// Default deadline (in milliseconds) to wait for the ESC listener to
+/// acknowledge a pause request before giving up.  Kept as a `pub` constant
+/// so callers or config layers can reference/override it if needed.
+pub(super) const ESC_PAUSE_DEADLINE_MS: u64 = 250;
+
 /// Read a line from stdin, temporarily pausing the ESC listener so it yields
 /// raw mode and stops competing for stdin events.  This prevents the deadlock
 /// where `io::stdin().read_line()` blocks forever because crossterm raw mode
@@ -19,12 +24,27 @@ pub(super) async fn read_line_pausing_esc(
     esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<String> {
+    read_line_pausing_esc_with_deadline(
+        esc_paused,
+        esc_pause_ack,
+        tokio::time::Duration::from_millis(ESC_PAUSE_DEADLINE_MS),
+    )
+    .await
+}
+
+/// Same as [`read_line_pausing_esc`] but with an explicit ESC-ack deadline,
+/// allowing callers to tune the wait when 250 ms is too short or too long.
+pub(super) async fn read_line_pausing_esc_with_deadline(
+    esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_deadline: tokio::time::Duration,
+) -> std::io::Result<String> {
     use std::sync::atomic::Ordering;
     use tokio::io::AsyncBufReadExt;
 
     // Signal the ESC listener to pause and release raw mode
     esc_paused.store(true, Ordering::Release);
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(250);
+    let deadline = tokio::time::Instant::now() + esc_deadline;
     while !esc_pause_ack.load(Ordering::Acquire) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
     }

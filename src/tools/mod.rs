@@ -528,6 +528,10 @@ impl ToolRegistry {
         // Deferred: Patch apply tool
         registry.register_deferred(PatchApply);
 
+        // Deferred: Hot-reload tool for dynamic plugin loading
+        #[cfg(feature = "hot-reload")]
+        registry.register_deferred(hot_reload::HotReloadTool::new());
+
         registry.rebuild_search_index();
         registry
     }

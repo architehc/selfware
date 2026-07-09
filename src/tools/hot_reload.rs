@@ -6,7 +6,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
 use crate::tools::Tool;
@@ -133,7 +133,7 @@ impl Tool for DynamicTool {
 /// Manages hot-reloading of dynamic tools.
 pub struct HotReloadManager {
     tools: Arc<RwLock<std::collections::HashMap<String, Arc<DynamicTool>>>>,
-    tool_paths: std::collections::HashMap<String, PathBuf>,
+    tool_paths: Arc<std::sync::Mutex<std::collections::HashMap<String, PathBuf>>>,
 }
 
 impl Default for HotReloadManager {
@@ -146,7 +146,7 @@ impl HotReloadManager {
     pub fn new() -> Self {
         Self {
             tools: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            tool_paths: std::collections::HashMap::new(),
+            tool_paths: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -156,6 +156,8 @@ impl HotReloadManager {
         let arc_tool = Arc::new(tool);
 
         self.tool_paths
+            .lock()
+            .unwrap()
             .insert(name.clone(), path.as_ref().to_path_buf());
         self.tools
             .write()
@@ -166,7 +168,11 @@ impl HotReloadManager {
     }
 
     pub async fn reload(&mut self, name: &str) -> Result<Arc<DynamicTool>> {
-        if let Some(path) = self.tool_paths.get(name).cloned() {
+        let path = {
+            let paths = self.tool_paths.lock().unwrap();
+            paths.get(name).cloned()
+        };
+        if let Some(path) = path {
             info!("Hot-reloading tool '{}' from {:?}", name, path);
             let tool = DynamicTool::load(&path)?;
             let arc_tool = Arc::new(tool);
@@ -183,6 +189,136 @@ impl HotReloadManager {
     pub async fn get_tool(&self, name: &str) -> Option<Arc<DynamicTool>> {
         self.tools.read().await.get(name).cloned()
     }
+
+    /// List the names of all currently registered dynamic tools.
+    pub async fn list_tools(&self) -> Vec<String> {
+        self.tools.read().await.keys().cloned().collect()
+    }
+}
+
+/// A `Tool` implementation that wraps a [`HotReloadManager`], allowing the
+/// agent to load, reload, and list dynamic (hot-reloadable) tools at runtime
+/// via normal tool calls.
+///
+/// This is registered into the [`ToolRegistry`](crate::tools::ToolRegistry)
+/// alongside other deferred tools so the LLM can discover and use it.
+pub struct HotReloadTool {
+    manager: Arc<Mutex<HotReloadManager>>,
+}
+
+impl HotReloadTool {
+    /// Create a new hot-reload tool backed by a fresh [`HotReloadManager`].
+    pub fn new() -> Self {
+        Self {
+            manager: Arc::new(Mutex::new(HotReloadManager::new())),
+        }
+    }
+
+    /// Create a hot-reload tool that shares an existing manager (e.g. one
+    /// already wired into other parts of the system).
+    pub fn with_manager(manager: Arc<Mutex<HotReloadManager>>) -> Self {
+        Self { manager }
+    }
+}
+
+impl Default for HotReloadTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for HotReloadTool {
+    fn name(&self) -> &str {
+        "hot_reload"
+    }
+
+    fn description(&self) -> &str {
+        "Load, reload, or list dynamic (hot-reloadable) tools from the \
+         .selfware/plugins/ directory. Actions: \"load\" (register a new \
+         .dylib/.so by path), \"reload\" (re-load a previously registered \
+         tool by name), \"list\" (list currently registered dynamic tools)."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["load", "reload", "list"],
+                    "description": "The hot-reload operation to perform."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Filesystem path to the dynamic library \
+                                   (required for \"load\"). Must be under \
+                                   .selfware/plugins/."
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Name of a previously registered dynamic \
+                                   tool (required for \"reload\")."
+                }
+            },
+            "required": ["action"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        let action = args
+            .get("action")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("missing required field: action"))?;
+
+        match action {
+            "load" => {
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("\"load\" action requires a \"path\" field"))?;
+                let mut mgr = self.manager.lock().await;
+                let tool = mgr.register(path).await?;
+                Ok(serde_json::json!({
+                    "status": "loaded",
+                    "tool_name": tool.name(),
+                    "description": tool.description(),
+                }))
+            }
+            "reload" => {
+                let name = args
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("\"reload\" action requires a \"name\" field"))?;
+                let mut mgr = self.manager.lock().await;
+                let tool = mgr.reload(name).await?;
+                Ok(serde_json::json!({
+                    "status": "reloaded",
+                    "tool_name": tool.name(),
+                    "description": tool.description(),
+                }))
+            }
+            "list" => {
+                let mgr = self.manager.lock().await;
+                let tools = mgr.list_tools().await;
+                Ok(serde_json::json!({
+                    "status": "ok",
+                    "tools": tools,
+                }))
+            }
+            other => Err(anyhow!("unknown action: '{}'", other)),
+        }
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata {
+            read_only: false,
+            destructive: false,
+            risk_level: crate::safety::RiskLevel::High,
+            network_access: false,
+            shell_execution: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -194,14 +330,14 @@ mod tests {
     #[test]
     fn new_creates_empty_tools_map() {
         let mgr = HotReloadManager::new();
-        // tool_paths is a plain HashMap -- verify it starts empty
-        assert!(mgr.tool_paths.is_empty());
+        // tool_paths is wrapped in a Mutex -- verify it starts empty
+        assert!(mgr.tool_paths.lock().unwrap().is_empty());
     }
 
     #[test]
     fn default_is_same_as_new() {
         let mgr = HotReloadManager::default();
-        assert!(mgr.tool_paths.is_empty());
+        assert!(mgr.tool_paths.lock().unwrap().is_empty());
     }
 
     // ── get_tool() returns None for unknown names ────────────────────

@@ -120,6 +120,12 @@ pub(crate) struct Cli {
     /// Maximum wall-clock seconds before stopping
     #[arg(long)]
     pub(crate) max_wall_secs: Option<u64>,
+
+    /// Configuration profile to apply (e.g. `architect`, `swarm-8`, `batch-16`,
+    /// `batch-32`, `visual`, `quick`).  Overrides `max_tokens` and
+    /// `temperature` from the profile's built-in defaults.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) profile: Option<String>,
 }
 
 /// Color theme for terminal output

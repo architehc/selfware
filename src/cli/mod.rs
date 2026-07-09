@@ -392,6 +392,27 @@ pub async fn run() -> Result<()> {
 
     let mut config = Config::load(config_path.as_deref())?;
 
+    // ── Apply named configuration profile (if requested) ──
+    // `--profile architect|swarm-8|batch-16|batch-32|visual|quick` applies
+    // built-in overrides for max_tokens / temperature from `ProfileManager`.
+    if let Some(ref profile_name) = cli.profile {
+        let pm = crate::profiles::ProfileManager::new();
+        match pm.apply_profile(&mut config, profile_name) {
+            Ok(()) => {
+                tracing::info!(
+                    "Applied configuration profile '{}' (max_tokens={}, \
+                     temperature={})",
+                    profile_name,
+                    config.max_tokens,
+                    config.temperature
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Could not apply profile '{}': {}", profile_name, e);
+            }
+        }
+    }
+
     // ── Merge CLI debug flag onto config + re-apply env overrides ──
     // Precedence: defaults < TOML < CLI flag < env vars.  `Config::load`
     // already applied env overrides once after TOML parse; merging CLI on

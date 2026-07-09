@@ -1210,19 +1210,47 @@ To call a tool, use this EXACT XML structure:
     ///
     /// Fails closed: if the TUI never wired up a response channel, or the
     /// channel is disconnected (TUI thread exited), the tool is denied
-    /// rather than silently approved.
+    /// rather than silently approved.  When the channel is disconnected
+    /// (TUI exited / shutting down) the denial is logged explicitly so
+    /// callers can distinguish a shutdown-induced denial from an actual
+    /// user denial.
     async fn await_tui_permission_response(&mut self) -> bool {
         let Some(rx) = self.permission_response_rx.clone() else {
-            warn!("TUI permission prompt requested but no response channel is wired up; denying");
+            warn!(
+                "TUI permission prompt requested but no response channel is \
+                 wired up; denying tool call (fail-closed)"
+            );
             return false;
         };
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             rx.lock()
-                .map(|guard| guard.recv().unwrap_or(false))
-                .unwrap_or(false)
+                .map(|guard| guard.recv())
+                .unwrap_or(Err(std::sync::mpsc::RecvError))
         })
-        .await
-        .unwrap_or(false)
+        .await;
+
+        match result {
+            Ok(Ok(approved)) => approved,
+            // Channel disconnected: TUI thread exited while a prompt was
+            // pending.  Log explicitly so the agent/user knows the denial
+            // is due to shutdown, not a genuine user rejection.
+            Ok(Err(_)) => {
+                warn!(
+                    "TUI permission prompt cancelled due to shutdown: the \
+                     response channel disconnected (TUI thread exited). \
+                     Denying tool call — this is NOT a user denial."
+                );
+                false
+            }
+            Err(_) => {
+                warn!(
+                    "TUI permission prompt task panicked/cancelled during \
+                     shutdown; denying tool call (fail-closed, not a user \
+                     denial)"
+                );
+                false
+            }
+        }
     }
 
     /// Attach an evolution event bus. All existing AgentEvents will be
