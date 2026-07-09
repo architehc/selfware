@@ -26,6 +26,10 @@ static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// When true, the user requested quiet mode and non-essential output is suppressed.
 static QUIET_MODE: AtomicBool = AtomicBool::new(false);
 
+/// When true, output is machine-readable JSON — suppress all human-oriented
+/// stdout (banners, "Final answer:", ANSI escapes) so only valid JSON goes out.
+static JSON_MODE: AtomicBool = AtomicBool::new(false);
+
 /// When true, stdout is not a terminal (piped/captured) — strip ANSI and emoji.
 static PLAIN_MODE: AtomicBool = AtomicBool::new(false);
 
@@ -56,6 +60,17 @@ pub(crate) fn set_quiet(quiet: bool) {
     QUIET_MODE.store(quiet, Ordering::SeqCst);
 }
 
+/// Set the JSON output mode flag.  When true, all human-oriented print
+/// functions become no-ops so that only valid JSON is emitted on stdout.
+pub(crate) fn set_json_mode(json: bool) {
+    JSON_MODE.store(json, Ordering::SeqCst);
+}
+
+/// Returns true when JSON output mode is enabled (json or stream-json).
+pub(crate) fn is_json_mode() -> bool {
+    JSON_MODE.load(Ordering::Relaxed)
+}
+
 /// Returns true when quiet mode is enabled.
 pub(crate) fn is_quiet() -> bool {
     QUIET_MODE.load(Ordering::Relaxed)
@@ -63,7 +78,7 @@ pub(crate) fn is_quiet() -> bool {
 
 /// True when any output-suppressing mode is active.
 pub(crate) fn should_suppress_output() -> bool {
-    is_quiet() || is_tui_active()
+    is_quiet() || is_tui_active() || is_json_mode()
 }
 
 /// Token counters for the session
@@ -132,7 +147,7 @@ pub(crate) fn reset_tokens() {
 
 /// Print token usage summary
 pub(crate) fn print_token_usage(prompt: u64, completion: u64) {
-    if is_quiet() {
+    if is_quiet() || is_json_mode() {
         return;
     }
     if should_show_tokens() {
@@ -662,7 +677,7 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
 
 /// Print safety check failure
 pub(crate) fn safety_blocked(message: &str) {
-    if is_quiet() {
+    if is_quiet() || is_json_mode() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -671,10 +686,7 @@ pub(crate) fn safety_blocked(message: &str) {
 
 /// Print thinking/reasoning output
 pub(crate) fn thinking(text: &str, inline: bool) {
-    // In compact or quiet mode, skip thinking entirely
-    // In normal mode, show thinking
-    // In verbose mode, show full thinking with emphasis
-    if is_compact() || is_quiet() {
+    if is_compact() || is_quiet() || is_json_mode() {
         return;
     }
 
@@ -737,7 +749,7 @@ pub(crate) fn intent_without_action_detail(
     attempt: usize,
     total: usize,
 ) {
-    if is_tui_active() || is_compact() || is_quiet() {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
         return;
     }
     if !is_verbose() {
@@ -775,7 +787,7 @@ pub(crate) fn intent_without_action_detail(
 
 /// Show what the smart fallback decided to do.
 pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
-    if is_tui_active() || is_compact() || is_quiet() {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -813,7 +825,7 @@ pub(crate) fn final_answer(content: &str) {
 /// Display a color-coded diff for file edits/writes.
 /// Shows deleted lines in red and added lines in green.
 pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str) {
-    if is_tui_active() || is_compact() || is_quiet() {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -917,7 +929,7 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
 /// future entry points may still want a generic completion banner.
 #[allow(dead_code)]
 pub(crate) fn task_completed() {
-    if is_quiet() || is_compact() {
+    if is_quiet() || is_compact() || is_json_mode() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());

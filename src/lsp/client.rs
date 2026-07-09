@@ -546,19 +546,42 @@ impl LspClient {
     }
 
     /// Build a `TextDocumentIdentifier` from a file path.
+    ///
+    /// Normalizes the path to an absolute, canonical `file://` URI so that
+    /// LSP servers receive the same identifier regardless of whether the
+    /// caller passed a relative or absolute path.
     fn file_uri(file: &str) -> String {
         if file.starts_with("file://") {
-            file.to_string()
+            return file.to_string();
+        }
+
+        // Resolve to an absolute, canonical path when possible.
+        let abs = if Path::new(file).is_absolute() {
+            // Canonicalize to resolve symlinks and `.`/`..` components.
+            std::fs::canonicalize(file)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| file.to_string())
         } else {
-            let abs = if Path::new(file).is_absolute() {
-                file.to_string()
-            } else {
-                // Best-effort: treat as relative to cwd.
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(file).display().to_string())
-                    .unwrap_or_else(|_| file.to_string())
-            };
-            format!("file://{}", abs)
+            std::env::current_dir()
+                .and_then(|cwd| {
+                    let joined = cwd.join(file);
+                    std::fs::canonicalize(&joined)
+                        .map(|p| p.display().to_string())
+                        .or(Ok(joined.display().to_string()))
+                })
+                .unwrap_or_else(|_| file.to_string())
+        }
+        .replace(' ', "%20");
+
+        // On Windows, absolute paths look like `C:\...`; on Unix, `/...`.
+        // The `file://` scheme expects `file:///path` (three slashes for
+        // Unix) or `file:///C:/...` on Windows (with forward slashes).
+        let normalized = abs.replace('\\', "/");
+        if normalized.starts_with('/') {
+            format!("file://{}", normalized)
+        } else {
+            // Windows drive letter: `C:/...` → `file:///C:/...`
+            format!("file:///{}", normalized)
         }
     }
 
@@ -591,6 +614,33 @@ impl LspClient {
                     "languageId": lang.id(),
                     "version": 1,
                     "text": content,
+                }
+            }),
+        )
+        .await
+    }
+
+    /// Notify the server that a file has been closed.
+    ///
+    /// Sends `textDocument/didClose` so the LSP server can release resources
+    /// associated with the document.  Call this after a `did_open` when the
+    /// caller no longer needs diagnostics / navigation for that file.
+    pub async fn did_close(&self, file: &str) -> Result<()> {
+        let lang = Language::from_path(file)
+            .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
+
+        let uri = Self::file_uri(file);
+        {
+            let mut versions = self.document_versions.lock().await;
+            versions.remove(&uri);
+        }
+
+        let conn = self.connection_for(lang).await?;
+        conn.notify(
+            "textDocument/didClose",
+            serde_json::json!({
+                "textDocument": {
+                    "uri": uri,
                 }
             }),
         )
@@ -632,6 +682,9 @@ impl LspClient {
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
 
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        self.did_open(file, &content).await?;
+
         let result = conn
             .request(
                 "textDocument/definition",
@@ -641,6 +694,9 @@ impl LspClient {
                 }),
             )
             .await?;
+
+        // Close the document so the server doesn't leak it.
+        let _ = self.did_close(file).await;
 
         Self::parse_locations(&result)
     }
@@ -799,11 +855,24 @@ impl LspClient {
             )
             .await?;
 
+        // Close the document so the server doesn't leak it.
+        let _ = self.did_close(file).await;
+
         Self::parse_locations(&result)
     }
 
     /// Gracefully shut down all connected language servers.
     pub async fn shutdown(&self) -> Result<()> {
+        // Close all open documents before shutting down servers.
+        let open_uris: Vec<String> = {
+            let versions = self.document_versions.lock().await;
+            versions.keys().cloned().collect()
+        };
+        for uri in &open_uris {
+            let path = Self::uri_to_path(uri);
+            let _ = self.did_close(&path).await;
+        }
+
         let mut conns = self.connections.lock().await;
         for (lang, conn) in conns.drain() {
             if let Err(e) = conn.shutdown().await {

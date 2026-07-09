@@ -192,14 +192,20 @@ impl Tool for ContainerRun {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-        // Container ID is in stdout when detached
-        let container_id = stdout.trim().to_string();
+        // When detached, docker/podman prints just the container ID (a 64-char
+        // hex string) on stdout.  When NOT detached, stdout is the command's
+        // output and there is no ID to extract — don't pretend it's an ID.
+        let container_id = if detach {
+            stdout.lines().next().unwrap_or("").trim().to_string()
+        } else {
+            String::new()
+        };
 
         Ok(json!({
             "success": output.status.success(),
             "runtime": format!("{:?}", runtime),
             "image": image,
-            "container_id": if container_id.len() >= 12 { Some(&container_id[..12]) } else { Some(container_id.as_str()) },
+            "container_id": if container_id.is_empty() { None } else if container_id.len() >= 12 { Some(&container_id[..12]) } else { Some(container_id.as_str()) },
             "detached": detach,
             "stdout": truncate_output(&stdout, 2000),
             "stderr": truncate_output(&stderr, 1000),
@@ -354,19 +360,32 @@ impl Tool for ContainerList {
             .filter(|line| !line.is_empty())
             .filter_map(|line| {
                 let parts: Vec<&str> = line.split('\t').collect();
-                if parts.len() >= 7 {
-                    Some(ContainerInfo {
-                        id: parts[0].to_string(),
-                        image: parts[1].to_string(),
-                        command: parts[2].to_string(),
-                        created: parts[3].to_string(),
-                        status: parts[4].to_string(),
-                        ports: parts[5].to_string(),
-                        names: parts[6].to_string(),
-                    })
-                } else {
-                    None
+                // The template has 7 fields, but the Command field (index 2)
+                // may itself contain tabs, producing more than 7 parts.  Merge
+                // any extra parts back into the command field so we don't drop
+                // valid rows.
+                if parts.len() < 7 {
+                    // Not enough fields for even the minimum — skip genuinely
+                    // malformed lines, but don't drop rows just because the
+                    // command contained tab characters.
+                    return None;
                 }
+                let (command, names_idx) = if parts.len() > 7 {
+                    // Extra tabs were in the command; rejoin parts[2..len-4]
+                    let cmd = parts[2..parts.len() - 4].join("\t");
+                    (cmd, parts.len() - 1)
+                } else {
+                    (parts[2].to_string(), 6)
+                };
+                Some(ContainerInfo {
+                    id: parts[0].to_string(),
+                    image: parts[1].to_string(),
+                    command,
+                    created: parts[names_idx - 3].to_string(),
+                    status: parts[names_idx - 2].to_string(),
+                    ports: parts[names_idx - 1].to_string(),
+                    names: parts[names_idx].to_string(),
+                })
             })
             .collect();
 

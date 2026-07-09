@@ -486,9 +486,13 @@ fn location_value(symbol: &Symbol) -> Value {
 
 fn symbol_range(symbol: &Symbol) -> Value {
     let line = symbol.line.saturating_sub(1) as u64;
+    // Compute the real column span from the symbol's 1-indexed column and
+    // the length of its name, instead of hardcoding 0..200.
+    let start_char = symbol.column.saturating_sub(1) as u64;
+    let end_char = start_char + symbol.name.len() as u64;
     serde_json::json!({
-        "start": { "line": line, "character": 0 },
-        "end": { "line": line, "character": 200 }
+        "start": { "line": line, "character": start_char },
+        "end": { "line": line, "character": end_char }
     })
 }
 

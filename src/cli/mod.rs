@@ -477,8 +477,8 @@ pub async fn run() -> Result<()> {
         }
     }
 
-    // Start the resource monitor for unattended (Yolo/Daemon) runs: without
-    // this, `[resources]` config (GPU temperature/memory thresholds, memory
+    // Start the resource monitor for all run modes: without this, `[resources]`
+    // config (GPU temperature/memory thresholds, memory
     // warning/critical/emergency thresholds, disk max_usage_percent) is
     // parsed but nothing ever constructs a ResourceManager or ticks its
     // monitor loop, so the OOM circuit breaker, GPU overheat throttle, and
@@ -489,10 +489,7 @@ pub async fn run() -> Result<()> {
     // busy-spins once every sender is dropped (tokio::watch::Receiver::changed()
     // resolves immediately with an error, but the loop only checks the
     // *value*, not sender liveness).
-    let _resource_monitor_shutdown_tx = if matches!(
-        config.execution_mode,
-        ExecutionMode::Yolo | ExecutionMode::Daemon
-    ) {
+    let _resource_monitor_shutdown_tx = {
         match crate::resource::ResourceManager::new(&config.resources).await {
             Ok(manager) => {
                 let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -509,8 +506,6 @@ pub async fn run() -> Result<()> {
                 None
             }
         }
-    } else {
-        None
     };
 
     // Apply UI settings from config file first
@@ -603,6 +598,12 @@ pub async fn run() -> Result<()> {
         let is_json = cli.output_format == HeadlessOutputFormat::Json;
         let is_stream_json = cli.output_format == HeadlessOutputFormat::StreamJson;
         let is_structured = is_json || is_stream_json;
+
+        // In JSON/stream-JSON modes, suppress all human-oriented stdout so
+        // only valid machine-readable JSON is emitted.
+        if is_structured {
+            output::set_json_mode(true);
+        }
 
         if !cli.quiet && !is_structured {
             println!("{}", render_header(&ctx));
@@ -898,6 +899,12 @@ async fn handle_command(
             let is_json = output_format == HeadlessOutputFormat::Json;
             let is_stream_json = output_format == HeadlessOutputFormat::StreamJson;
             let is_structured = is_json || is_stream_json;
+
+            // In JSON/stream-JSON modes, suppress all human-oriented stdout so
+            // only valid machine-readable JSON is emitted.
+            if is_structured {
+                output::set_json_mode(true);
+            }
 
             if !quiet && !is_structured {
                 println!("{}", render_header(ctx));
