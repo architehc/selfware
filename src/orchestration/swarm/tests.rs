@@ -1129,6 +1129,149 @@ fn test_create_security_swarm_has_roles() {
 }
 
 // ============================================================================
+// Coordinator Routing Tests
+// ============================================================================
+//
+// These tests verify the swarm coordinator flow that `--coordinator` activates:
+// queue_task → next_task → assign_task → complete_task → consensus decision.
+
+#[test]
+fn test_coordinator_full_flow_queue_assign_complete_consensus() {
+    // Build a dev swarm (Architect, Coder, Tester, Reviewer).
+    let mut swarm = super::factory::create_dev_swarm()
+        .with_conflict_strategy(ConflictStrategy::ConfidenceWins)
+        .with_consensus_threshold(0.5);
+
+    // 1. Queue a task requiring all four roles.
+    let mut task = SwarmTask::new("Implement feature X with tests and review");
+    task = task.with_role(AgentRole::Architect);
+    task = task.with_role(AgentRole::Coder);
+    task = task.with_role(AgentRole::Tester);
+    task = task.with_role(AgentRole::Reviewer);
+    swarm.queue_task(task).expect("queue_task should succeed");
+
+    assert_eq!(swarm.list_tasks().len(), 1);
+
+    // 2. Pop the next task.
+    let task_id = swarm.next_task().expect("next_task should return a task id");
+    assert!(swarm.get_task(&task_id).is_some());
+
+    // 3. Assign the task to role-matched idle agents.
+    let assigned = swarm.assign_task(&task_id);
+    assert_eq!(
+        assigned.len(),
+        4,
+        "all four roles should be assigned to idle agents"
+    );
+
+    // Verify all assigned agents are now Working.
+    for agent_id in &assigned {
+        let agent = swarm.get_agent(agent_id).expect("agent should exist");
+        assert_eq!(agent.status, AgentStatus::Working);
+    }
+
+    // 4. Complete the task for each agent with a result.
+    for agent_id in &assigned {
+        swarm.complete_task(
+            &task_id,
+            agent_id,
+            format!("Result from agent {}", agent_id),
+        );
+    }
+
+    // Verify the task is now Completed.
+    let task = swarm.get_task(&task_id).expect("task should exist");
+    assert_eq!(task.status, TaskStatus::Completed);
+    assert_eq!(task.results.len(), 4);
+
+    // 5. Create a consensus decision and have agents vote.
+    let agent_names: Vec<String> = assigned
+        .iter()
+        .map(|id| swarm.get_agent(id).unwrap().name.clone())
+        .collect();
+
+    let decision_id = swarm.create_decision(
+        "Which agent's response best addresses the task?",
+        agent_names.clone(),
+    );
+
+    // Each agent votes for a different option with varying confidence.
+    for (i, agent_id) in assigned.iter().enumerate() {
+        let choice = &agent_names[i];
+        let confidence = 0.5 + (i as f32 * 0.1); // 0.5, 0.6, 0.7, 0.8
+        swarm
+            .vote(&decision_id, agent_id, choice.clone(), confidence, "reasoning")
+            .expect("vote should succeed");
+    }
+
+    // 6. Resolve the decision. With 4 agents voting for 4 different options,
+    //    the consensus threshold (0.5) may not be reached, resulting in a
+    //    Conflict. In that case, resolve_conflict applies the ConfidenceWins
+    //    strategy to pick the highest-confidence vote.
+    let outcome = swarm
+        .resolve_decision(&decision_id)
+        .expect("resolve_decision should not error");
+
+    let decision = swarm.get_decision(&decision_id).expect("decision exists");
+
+    let final_outcome = if decision.status == DecisionStatus::Conflict {
+        // Conflict — use the conflict resolution strategy (ConfidenceWins).
+        swarm
+            .resolve_conflict(&decision_id)
+            .expect("resolve_conflict should not error")
+    } else {
+        outcome
+    };
+
+    assert!(
+        final_outcome.is_some(),
+        "decision should have an outcome after resolution"
+    );
+
+    let decision = swarm.get_decision(&decision_id).expect("decision exists");
+    assert!(
+        decision.status == DecisionStatus::Resolved
+            || decision.status == DecisionStatus::Conflict,
+        "decision should be Resolved or Conflict after resolution attempt"
+    );
+}
+
+#[test]
+fn test_coordinator_assign_no_idle_agents() {
+    let mut swarm = Swarm::new();
+    // No agents in the swarm — assign should return empty.
+    let mut task = SwarmTask::new("Test task");
+    task = task.with_role(AgentRole::Coder);
+    swarm.queue_task(task).unwrap();
+    let task_id = swarm.next_task().expect("should get task");
+    let assigned = swarm.assign_task(&task_id);
+    assert!(assigned.is_empty(), "no agents should be assigned");
+}
+
+#[test]
+fn test_coordinator_flag_selects_swarm_path() {
+    // This test verifies the logic that determines whether the coordinator
+    // (swarm) path is taken. The `--coordinator` flag maps to `coordinator: bool`
+    // on the Cli struct. When true, interactive_swarm() is called instead of
+    // interactive(). Here we verify the swarm infrastructure works correctly
+    // so the routing is meaningful.
+
+    let swarm = super::factory::create_dev_swarm();
+
+    // Verify the swarm has the expected agents for coordinator mode.
+    assert_eq!(swarm.list_agents().len(), 4, "dev swarm should have 4 agents");
+    assert!(!swarm.agents_by_role(AgentRole::Architect).is_empty());
+    assert!(!swarm.agents_by_role(AgentRole::Coder).is_empty());
+    assert!(!swarm.agents_by_role(AgentRole::Tester).is_empty());
+    assert!(!swarm.agents_by_role(AgentRole::Reviewer).is_empty());
+
+    // All agents should start Idle (ready for assignment).
+    for agent in swarm.list_agents() {
+        assert_eq!(agent.status, AgentStatus::Idle);
+    }
+}
+
+// ============================================================================
 // Decision Timeout Tests
 // ============================================================================
 

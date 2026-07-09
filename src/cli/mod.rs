@@ -765,6 +765,7 @@ pub async fn run() -> Result<()> {
     handle_command(
         command,
         cli.quiet,
+        cli.coordinator,
         config,
         &ctx,
         exec_mode,
@@ -832,6 +833,7 @@ fn build_session_result(
 async fn handle_command(
     command: Commands,
     quiet: bool,
+    coordinator: bool,
     mut config: Config,
     ctx: &WorkshopContext,
     exec_mode: ExecutionMode,
@@ -876,20 +878,39 @@ async fn handle_command(
             if yolo {
                 config.execution_mode = ExecutionMode::Yolo;
             }
+            // The --coordinator flag selects the swarm coordinator path.
+            // When set, the multi-agent chat is orchestrated through the
+            // Swarm coordinator (queue/assign/consensus) instead of the
+            // plain fan-out.
+            let use_coordinator = coordinator;
             if !quiet {
                 println!("{}", render_header(ctx));
-                println!(
-                    "\n{} {} with {} concurrent streams\n",
-                    Glyphs::gear(),
-                    "Multi-Agent Workshop".workshop_title(),
-                    concurrency.to_string().emphasis()
-                );
+                if use_coordinator {
+                    println!(
+                        "\n{} {} with {} concurrent streams — {}",
+                        Glyphs::gear(),
+                        "Multi-Agent Workshop".workshop_title(),
+                        concurrency.to_string().emphasis(),
+                        "Coordinator (Swarm) Mode".bright_cyan()
+                    );
+                } else {
+                    println!(
+                        "\n{} {} with {} concurrent streams\n",
+                        Glyphs::gear(),
+                        "Multi-Agent Workshop".workshop_title(),
+                        concurrency.to_string().emphasis()
+                    );
+                }
             }
 
             let agent_config =
                 multiagent::MultiAgentConfig::default().with_concurrency(concurrency);
             let mut multi_agent = multiagent::MultiAgentChat::new(&config, agent_config)?;
-            multi_agent.interactive().await?;
+            if use_coordinator {
+                multi_agent.interactive_swarm().await?;
+            } else {
+                multi_agent.interactive().await?;
+            }
         }
 
         Commands::Run { task, yolo } => {
