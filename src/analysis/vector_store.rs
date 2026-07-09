@@ -1680,6 +1680,53 @@ impl VectorStore {
         search_results
     }
 
+    /// Filter-aware search with progressive candidate expansion.
+    ///
+    /// When a [`SearchFilter`] rejects most of the top candidates, a fixed
+    /// `k*2` pool can starve the result set.  This helper starts with a
+    /// pool of `k*2` candidates and doubles it until either enough results
+    /// pass the filter **or** the entire index has been examined.
+    ///
+    /// Returns `(results, all_nan)` where `all_nan` is `true` when every
+    /// raw similarity score from the initial search was `NaN` (a corruption
+    /// indicator that callers can use to trigger an index rebuild).
+    fn search_filtered(
+        index: &VectorIndex,
+        query_embedding: &[f32],
+        k: usize,
+        filter: Option<&SearchFilter>,
+        collection: &VectorCollection,
+    ) -> (Vec<SearchResult>, bool) {
+        let total = index.len();
+        if total == 0 || k == 0 {
+            return (Vec::new(), false);
+        }
+
+        let mut pool = (k * 2).max(k);
+
+        loop {
+            let raw = index.search(query_embedding, pool.min(total));
+
+            // Detect corruption on the initial (smallest) search: if every
+            // score is NaN the index is corrupt and expansion won't help.
+            let all_nan =
+                !raw.is_empty() && raw.iter().all(|(_, score)| score.is_nan());
+            if all_nan {
+                return (Vec::new(), true);
+            }
+
+            let results = Self::build_search_results(collection, raw, k, filter);
+
+            // Enough results, or we've already searched the entire index.
+            if results.len() >= k || pool >= total {
+                return (results, false);
+            }
+
+            // Expand the candidate pool and retry.
+            pool = pool.saturating_mul(2);
+        }
+    }
+
     /// Search across collection.
     ///
     /// If all raw similarity scores are NaN a warning is logged. Callers
@@ -1703,11 +1750,11 @@ impl VectorStore {
             .ok_or_else(|| anyhow!("Index not found: {}", collection_name))?;
 
         let query_embedding = self.provider.embed(query).await?;
-        let raw_results = index.search(&query_embedding, k * 2);
 
-        // Detect corruption: all scores are NaN
-        let all_nan =
-            !raw_results.is_empty() && raw_results.iter().all(|(_, score)| score.is_nan());
+        let (results, all_nan) =
+            Self::search_filtered(index, &query_embedding, k, filter, collection);
+
+        // Detect corruption: all raw similarity scores are NaN
         if all_nan {
             warn!(
                 "All search scores are NaN for collection '{}' — index may be corrupt; \
@@ -1716,12 +1763,7 @@ impl VectorStore {
             );
         }
 
-        Ok(Self::build_search_results(
-            collection,
-            raw_results,
-            k,
-            filter,
-        ))
+        Ok(results)
     }
 
     /// Search with automatic index rebuild on corruption.
@@ -1737,18 +1779,19 @@ impl VectorStore {
     ) -> Result<Vec<SearchResult>> {
         let query_embedding = self.provider.embed(query).await?;
 
-        let raw_results = {
+        let (results, all_nan) = {
             let index = self
                 .indices
                 .get(collection_name)
                 .ok_or_else(|| anyhow!("Index not found: {}", collection_name))?;
-            index.search(&query_embedding, k * 2)
+            let collection = self
+                .collections
+                .get(collection_name)
+                .ok_or_else(|| anyhow!("Collection not found: {}", collection_name))?;
+            Self::search_filtered(index, &query_embedding, k, filter, collection)
         };
 
-        let all_nan =
-            !raw_results.is_empty() && raw_results.iter().all(|(_, score)| score.is_nan());
-
-        let raw_results = if all_nan {
+        let results = if all_nan {
             warn!(
                 "All search scores are NaN for collection '{}' — rebuilding index",
                 collection_name
@@ -1758,22 +1801,18 @@ impl VectorStore {
                 .indices
                 .get(collection_name)
                 .ok_or_else(|| anyhow!("Index not found after rebuild: {}", collection_name))?;
-            index.search(&query_embedding, k * 2)
+            let collection = self
+                .collections
+                .get(collection_name)
+                .ok_or_else(|| anyhow!("Collection not found: {}", collection_name))?;
+            let (results, _) =
+                Self::search_filtered(index, &query_embedding, k, filter, collection);
+            results
         } else {
-            raw_results
+            results
         };
 
-        let collection = self
-            .collections
-            .get(collection_name)
-            .ok_or_else(|| anyhow!("Collection not found: {}", collection_name))?;
-
-        Ok(Self::build_search_results(
-            collection,
-            raw_results,
-            k,
-            filter,
-        ))
+        Ok(results)
     }
 
     /// Save store to disk.
@@ -3145,5 +3184,160 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         let bounded = BoundedVectorStore::with_default_capacity(inner);
         assert_eq!(bounded.max_items(), DEFAULT_MAX_ITEMS);
         assert!(bounded.is_empty());
+    }
+
+    // ── Filter-aware progressive expansion test ─────────────────────
+
+    #[tokio::test]
+    async fn test_vector_store_search_filter_does_not_starve() {
+        // Build a collection + index with 20 chunks where the 5 chunks
+        // MATCHING the filter are ranked LOWER in similarity than at
+        // least k*2 non-matching chunks.  A plain k*2 search would miss
+        // them, but progressive expansion must find them.
+
+        let dim = 4;
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::new(dim)));
+        let mut store = VectorStore::new(provider.clone());
+        let collection_name = "test_filter_starve";
+        store.collection(collection_name, CollectionScope::Project);
+
+        // Embed the query text through the same provider so we know the
+        // exact query embedding the search will use.
+        let query_text = "unique query text";
+        let query_emb = provider.embed(query_text).await.unwrap();
+
+        // Build a decoy embedding that is nearly identical to the query
+        // embedding (high cosine similarity).  We perturb slightly so each
+        // decoy is unique and ranks just below the query direction.
+        let mut decoy_base = query_emb.clone();
+        // Make decoys slightly shorter so cosine sim < 1 but still high
+        decoy_base[0] *= 0.99;
+
+        // 15 "decoy" chunks with high similarity to the query.
+        // chunk_type = Struct so the filter (Function) rejects them.
+        for i in 0..15u32 {
+            let mut emb = decoy_base.clone();
+            // Slightly perturb a later dimension so each embedding is unique
+            emb[3] += (i as f32) * 0.0001;
+
+            let path = PathBuf::from(format!("decoy{}.rs", i));
+            let content = format!("pub struct Decoy{} {{}}", i);
+            let meta = ChunkMetadata::new(
+                path,
+                i as usize * 10 + 1,
+                (i + 1) as usize * 10,
+                ChunkType::Struct, // NOT Function — will be filtered out
+                "rust",
+                &content,
+            );
+            let chunk = CodeChunk::new(content, meta).with_embedding(emb.clone());
+            let chunk_id = chunk.id.clone();
+            store
+                .collections
+                .get_mut(collection_name)
+                .unwrap()
+                .add_chunk(chunk)
+                .unwrap();
+            store
+                .indices
+                .get_mut(collection_name)
+                .unwrap()
+                .add(chunk_id, emb)
+                .unwrap();
+        }
+
+        // 5 "target" chunks with LOW similarity (orthogonal to query).
+        // These are the chunks the filter should match (Function type).
+        for i in 0..5u32 {
+            // Orthogonal direction — cosine similarity ~0 with the query
+            let mut emb = vec![0.0; dim];
+            emb[2] = 1.0;
+            emb[3] = (i as f32) * 0.01;
+
+            let path = PathBuf::from(format!("target{}.rs", i));
+            let content = format!("pub fn target{}() {{}}", i);
+            let meta = ChunkMetadata::new(
+                path,
+                1000 + i as usize * 10,
+                1010 + i as usize * 10,
+                ChunkType::Function, // matches the filter
+                "rust",
+                &content,
+            );
+            let chunk = CodeChunk::new(content, meta).with_embedding(emb.clone());
+            let chunk_id = chunk.id.clone();
+            store
+                .collections
+                .get_mut(collection_name)
+                .unwrap()
+                .add_chunk(chunk)
+                .unwrap();
+            store
+                .indices
+                .get_mut(collection_name)
+                .unwrap()
+                .add(chunk_id, emb)
+                .unwrap();
+        }
+
+        // Verify the collection has 20 chunks
+        assert_eq!(
+            store.get_collection(collection_name).unwrap().len(),
+            20
+        );
+
+        // k = 3, so k*2 = 6.  The top 6 candidates are all decoys (Structs).
+        // The 5 targets (Functions) are ranked below the top 6, so a plain
+        // k*2 search would return 0 results after filtering.
+        let k = 3;
+
+        let filter = SearchFilter::new().with_chunk_type(ChunkType::Function);
+
+        let results = store
+            .search(collection_name, query_text, k, Some(&filter))
+            .await
+            .unwrap();
+
+        // Without progressive expansion, the results would be empty
+        // because the top k*2=6 candidates are all Structs (rejected
+        // by the filter).  With expansion, the search must find the
+        // Function chunks deeper in the index.
+        assert!(
+            !results.is_empty(),
+            "Filter-aware search returned no results — progressive expansion is broken"
+        );
+        assert_eq!(
+            results.len(),
+            k,
+            "Expected {} results, got {} — filter should not starve the result set",
+            k,
+            results.len()
+        );
+
+        // All returned chunks must be Functions (matching the filter).
+        for result in &results {
+            assert_eq!(
+                result.chunk.metadata.chunk_type,
+                ChunkType::Function,
+                "Non-matching chunk type returned: {:?}",
+                result.chunk.metadata.chunk_type
+            );
+        }
+
+        // Sanity: verify that a plain (unfiltered) search with k=6 — no filter —
+        // the top 6 should all be Structs (decoys), proving the Functions are
+        // ranked below the k*2 cutoff.
+        let unfiltered = store
+            .search(collection_name, query_text, 6, None)
+            .await
+            .unwrap();
+        assert_eq!(unfiltered.len(), 6);
+        for result in &unfiltered {
+            assert_eq!(
+                result.chunk.metadata.chunk_type,
+                ChunkType::Struct,
+                "Expected top-6 to be all Structs (decoys)"
+            );
+        }
     }
 }
