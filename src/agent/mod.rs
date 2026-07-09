@@ -1286,50 +1286,93 @@ To call a tool, use this EXACT XML structure:
         self
     }
 
-    /// Apply a resolved [`RecoveryAction`] at runtime.
+    /// Apply a resolved [`RecoveryDirective`] at runtime.
     ///
-    /// Returns `Ok(true)` when the action was applied (the caller should retry
-    /// the operation) or `Ok(false)` when the action was not handled.
+    /// Returns `Ok(true)` when the directive was applied (the caller should
+    /// retry the operation) or `Ok(false)` when the directive was not handled.
     ///
-    /// - `Fallback { target }`: if `target` is non-empty and differs from the
-    ///   current `self.config.endpoint`, the endpoint is switched and the API
-    ///   client is rebuilt.  The progress emitter is re-propagated so HTTP
-    ///   round-trip events continue to flow.
-    /// - `Retry { delay_ms, .. }`: sleeps for `delay_ms` milliseconds.
-    /// - Any other variant: returns `Ok(false)`.
+    /// - `Action(Fallback { target })`: if `target` is non-empty and differs
+    ///   from the current `self.config.endpoint`, the endpoint is switched and
+    ///   the API client is rebuilt.  The progress emitter is re-propagated so
+    ///   HTTP round-trip events continue to flow.
+    /// - `Action(Retry { delay_ms, .. })`: sleeps for `delay_ms` milliseconds.
+    /// - `Action(..)` (any other variant): returns `Ok(false)`.
+    /// - `CompressContext { target_tokens }`: calls
+    ///   `self.compress_to_structured_summary(*target_tokens)`, logs, returns
+    ///   `Ok(true)`.
+    /// - `ReloadCredentials`: obtains a key from `SELFWARE_API_KEY` or the
+    ///   OS keyring, sets `self.config.model_api_key`, rebuilds the client,
+    ///   and returns `Ok(true)`.  If no key is found, returns `Ok(false)`.
     pub(crate) async fn apply_recovery_action(
         &mut self,
-        action: &crate::self_healing::RecoveryAction,
+        directive: &crate::self_healing::RecoveryDirective,
     ) -> anyhow::Result<bool> {
-        use crate::self_healing::RecoveryAction;
-        match action {
-            RecoveryAction::Fallback { target } => {
-                if target.is_empty() || *target == self.config.endpoint {
-                    return Ok(false);
+        use crate::self_healing::{RecoveryAction, RecoveryDirective};
+        match directive {
+            RecoveryDirective::Action(action) => match action {
+                RecoveryAction::Fallback { target } => {
+                    if target.is_empty() || *target == self.config.endpoint {
+                        return Ok(false);
+                    }
+                    let old_endpoint = self.config.endpoint.clone();
+                    self.config.endpoint = target.clone();
+                    // Rebuild the client so it points at the new endpoint.
+                    self.client = crate::api::ApiClient::new(&self.config)?;
+                    // Re-propagate the progress emitter so HTTP round-trip events
+                    // continue to land on the same channel after the rebuild.
+                    self.client.with_progress_emitter(Arc::clone(&self.progress_emitter));
+                    warn!(
+                        "Recovery tree switched endpoint from '{}' to '{}'",
+                        old_endpoint, target
+                    );
+                    info!("Endpoint fallback applied — caller should retry");
+                    Ok(true)
                 }
-                let old_endpoint = self.config.endpoint.clone();
-                self.config.endpoint = target.clone();
-                // Rebuild the client so it points at the new endpoint.
-                self.client = crate::api::ApiClient::new(&self.config)?;
-                // Re-propagate the progress emitter so HTTP round-trip events
-                // continue to land on the same channel after the rebuild.
-                self.client.with_progress_emitter(Arc::clone(&self.progress_emitter));
-                warn!(
-                    "Recovery tree switched endpoint from '{}' to '{}'",
-                    old_endpoint, target
-                );
-                info!("Endpoint fallback applied — caller should retry");
-                Ok(true)
-            }
-            RecoveryAction::Retry { delay_ms, .. } => {
+                RecoveryAction::Retry { delay_ms, .. } => {
+                    tracing::info!(
+                        "Recovery tree applying retry backoff: sleeping {}ms",
+                        delay_ms
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+            RecoveryDirective::CompressContext { target_tokens } => {
                 tracing::info!(
-                    "Recovery tree applying retry backoff: sleeping {}ms",
-                    delay_ms
+                    "Recovery tree compressing context to ~{} tokens",
+                    target_tokens
                 );
-                tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                self.compress_to_structured_summary(*target_tokens);
+                info!("Context compression applied — caller should retry");
                 Ok(true)
             }
-            _ => Ok(false),
+            RecoveryDirective::ReloadCredentials => {
+                tracing::info!("Recovery tree reloading API credentials");
+                // Prefer env var, fall back to keyring.
+                let key = std::env::var("SELFWARE_API_KEY")
+                    .ok()
+                    .filter(|k| !k.is_empty())
+                    .or_else(|| {
+                        crate::config::load_api_key_from_keyring()
+                            .ok()
+                            .flatten()
+                            .filter(|k| !k.is_empty())
+                    });
+                let Some(key) = key else {
+                    warn!("Recovery tree: no credential source available for reload");
+                    return Ok(false);
+                };
+                // Set the key on the top-level Config (where api_key lives as
+                // Option<RedactedString>) so ApiClient::new picks it up.
+                self.config.api_key =
+                    Some(crate::config::RedactedString::new(key));
+                // Rebuild the client with the new credentials.
+                self.client = crate::api::ApiClient::new(&self.config)?;
+                self.client.with_progress_emitter(Arc::clone(&self.progress_emitter));
+                info!("Credentials reloaded and API client rebuilt — caller should retry");
+                Ok(true)
+            }
         }
     }
 

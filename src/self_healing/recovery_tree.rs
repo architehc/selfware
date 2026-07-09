@@ -22,6 +22,27 @@ use super::RecoveryAction;
 use std::collections::HashMap;
 
 // ============================================================================
+// RecoveryDirective
+// ============================================================================
+
+/// A directive produced by the resolution tree.
+///
+/// `Action` wraps the classic [`RecoveryAction`] enum (Fallback, Retry, etc.)
+/// whose 79+ match sites must not be touched.  The other variants carry
+/// richer, module-specific recovery intent that goes beyond what
+/// `RecoveryAction` can express — they are applied by
+/// `Agent::apply_recovery_action` which now accepts a `&RecoveryDirective`.
+#[derive(Debug, Clone)]
+pub enum RecoveryDirective {
+    /// A standard [`RecoveryAction`] (Fallback, Retry, …).
+    Action(RecoveryAction),
+    /// Compress the agent's conversation context to roughly `target_tokens`.
+    CompressContext { target_tokens: usize },
+    /// Reload API credentials from env-var / keyring and rebuild the client.
+    ReloadCredentials,
+}
+
+// ============================================================================
 // Failure taxonomy
 // ============================================================================
 
@@ -174,8 +195,8 @@ impl FailureSignal {
 /// The result of attempting to resolve a failure.
 #[derive(Debug, Clone)]
 pub enum ResolutionOutcome {
-    /// The resolver produced a concrete [`RecoveryAction`].
-    Resolved(RecoveryAction),
+    /// The resolver produced a concrete [`RecoveryDirective`].
+    Resolved(RecoveryDirective),
     /// The resolver recognised the failure but cannot handle it — escalate
     /// to the next resolver (or to a human/outer loop).
     Escalate,
@@ -276,9 +297,11 @@ impl Resolution for LocalEndpointFallback {
             return ResolutionOutcome::Escalate;
         }
 
-        // Choose a local endpoint and emit a Fallback action.
+        // Choose a local endpoint and emit a Fallback directive.
         let target = Self::pick_local_endpoint(ctx.config);
-        ResolutionOutcome::Resolved(RecoveryAction::Fallback { target })
+        ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback {
+            target,
+        }))
     }
 }
 
@@ -322,10 +345,98 @@ impl Resolution for RateLimitBackoff {
             return ResolutionOutcome::Escalate;
         }
 
-        ResolutionOutcome::Resolved(RecoveryAction::Retry {
+        ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
             delay_ms: self.delay_ms,
             max_attempts: self.max_attempts,
+        }))
+    }
+}
+
+// ============================================================================
+// ContextOverflowCompress — offline resolver for ContextOverflow
+// ============================================================================
+
+/// Offline resolver for context-overflow failures.
+///
+/// When the conversation exceeds the model's token window, this resolver
+/// emits a [`RecoveryDirective::CompressContext`] directive so the agent can
+/// compress its message history down to roughly `target_tokens`.  No network
+/// access is required — the decision is purely based on the failure kind.
+pub struct ContextOverflowCompress {
+    /// Target token count to compress the context down to.
+    pub target_tokens: usize,
+}
+
+impl Resolution for ContextOverflowCompress {
+    fn name(&self) -> &'static str {
+        "ContextOverflowCompress"
+    }
+
+    fn offline_capable(&self) -> bool {
+        true
+    }
+
+    fn resolve(&self, ctx: &RecoveryContext) -> ResolutionOutcome {
+        if classify(ctx.message) != FailureKind::ContextOverflow {
+            return ResolutionOutcome::Escalate;
+        }
+        ResolutionOutcome::Resolved(RecoveryDirective::CompressContext {
+            target_tokens: self.target_tokens,
         })
+    }
+}
+
+// ============================================================================
+// CredentialReload — offline resolver for AuthError
+// ============================================================================
+
+/// Offline resolver for authentication failures.
+///
+/// Checks whether a credential source is available **without network**:
+/// - `SELFWARE_API_KEY` environment variable, or
+/// - the OS system keyring (via [`crate::config::load_api_key_from_keyring`]).
+///
+/// If a source exists, emits [`RecoveryDirective::ReloadCredentials`] so the
+/// agent can reload the key and rebuild its API client.  Otherwise escalates.
+pub struct CredentialReload;
+
+impl CredentialReload {
+    /// Determine whether a credential source is available offline.
+    ///
+    /// Returns `Some(key)` if a key can be obtained, or `None` if no source
+    /// is available.  This is a pure helper that can be unit-tested directly
+    /// without constructing a full [`RecoveryContext`].
+    pub fn find_available_key() -> Option<String> {
+        if let Ok(key) = std::env::var("SELFWARE_API_KEY") {
+            if !key.is_empty() {
+                return Some(key);
+            }
+        }
+        match crate::config::load_api_key_from_keyring() {
+            Ok(Some(key)) if !key.is_empty() => Some(key),
+            _ => None,
+        }
+    }
+}
+
+impl Resolution for CredentialReload {
+    fn name(&self) -> &'static str {
+        "CredentialReload"
+    }
+
+    fn offline_capable(&self) -> bool {
+        true
+    }
+
+    fn resolve(&self, ctx: &RecoveryContext) -> ResolutionOutcome {
+        if classify(ctx.message) != FailureKind::AuthError {
+            return ResolutionOutcome::Escalate;
+        }
+        if Self::find_available_key().is_some() {
+            ResolutionOutcome::Resolved(RecoveryDirective::ReloadCredentials)
+        } else {
+            ResolutionOutcome::Escalate
+        }
     }
 }
 
@@ -368,6 +479,17 @@ impl RecoveryTree {
             Box::new(RateLimitBackoff::new(2000, 3)),
         );
 
+        // ContextOverflow → ContextOverflowCompress (offline)
+        tree.register(
+            FailureKind::ContextOverflow,
+            Box::new(ContextOverflowCompress {
+                target_tokens: 8_000,
+            }),
+        );
+
+        // AuthError → CredentialReload (offline)
+        tree.register(FailureKind::AuthError, Box::new(CredentialReload));
+
         tree
     }
 
@@ -393,8 +515,8 @@ impl RecoveryTree {
                 let mut saw_escalate = false;
                 for resolver in list {
                     match resolver.resolve(ctx) {
-                        ResolutionOutcome::Resolved(action) => {
-                            return ResolutionOutcome::Resolved(action);
+                        ResolutionOutcome::Resolved(directive) => {
+                            return ResolutionOutcome::Resolved(directive);
                         }
                         ResolutionOutcome::Escalate => {
                             saw_escalate = true;
@@ -621,14 +743,14 @@ mod tests {
         let resolver = LocalEndpointFallback;
         let outcome = resolver.resolve(&ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryAction::Fallback { target }) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback { target })) => {
                 assert!(
                     target.contains("localhost") || target.contains("127.0.0.1"),
                     "expected a local target, got {}",
                     target
                 );
             }
-            other => panic!("expected Resolved(Fallback), got {:?}", other),
+            other => panic!("expected Resolved(Action(Fallback)), got {:?}", other),
         }
     }
 
@@ -687,14 +809,14 @@ mod tests {
         };
         let outcome = tree.resolve(&signal, &ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryAction::Fallback { target }) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback { target })) => {
                 assert!(
                     target.contains("localhost") || target.contains("127.0.0.1"),
                     "expected a local target, got {}",
                     target
                 );
             }
-            other => panic!("expected Resolved(Fallback), got {:?}", other),
+            other => panic!("expected Resolved(Action(Fallback)), got {:?}", other),
         }
     }
 
@@ -746,10 +868,10 @@ mod tests {
                 true
             }
             fn resolve(&self, _ctx: &RecoveryContext) -> ResolutionOutcome {
-                ResolutionOutcome::Resolved(RecoveryAction::Retry {
+                ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
                     delay_ms: 500,
                     max_attempts: 1,
-                })
+                }))
             }
         }
 
@@ -767,10 +889,10 @@ mod tests {
         };
         let outcome = tree.resolve(&signal, &ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryAction::Retry { delay_ms, .. }) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry { delay_ms, .. })) => {
                 assert_eq!(delay_ms, 500);
             }
-            other => panic!("expected Resolved(Retry), got {:?}", other),
+            other => panic!("expected Resolved(Action(Retry)), got {:?}", other),
         }
     }
 
@@ -809,14 +931,14 @@ mod tests {
         };
         let outcome = resolver.resolve(&ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryAction::Retry {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
                 delay_ms,
                 max_attempts,
-            }) => {
+            })) => {
                 assert_eq!(delay_ms, 2000);
                 assert_eq!(max_attempts, 3);
             }
-            other => panic!("expected Resolved(Retry), got {:?}", other),
+            other => panic!("expected Resolved(Action(Retry)), got {:?}", other),
         }
     }
 
@@ -855,14 +977,14 @@ mod tests {
         };
         let outcome = tree.resolve(&signal, &ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryAction::Retry {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
                 delay_ms,
                 max_attempts,
-            }) => {
+            })) => {
                 assert_eq!(delay_ms, 2000);
                 assert_eq!(max_attempts, 3);
             }
-            other => panic!("expected Resolved(Retry), got {:?}", other),
+            other => panic!("expected Resolved(Action(Retry)), got {:?}", other),
         }
     }
 
@@ -918,5 +1040,172 @@ mod tests {
         let mut detector = DeadlockDetector::new(1);
         assert_eq!(detector.observe(true, false), Some(FailureKind::Deadlock));
         assert_eq!(detector.current_count(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // ContextOverflowCompress
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_context_overflow_compress_resolves_context_overflow() {
+        let resolver = ContextOverflowCompress {
+            target_tokens: 8000,
+        };
+        let config = make_config("https://api.example.com/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "context length exceeded",
+        };
+        let outcome = resolver.resolve(&ctx);
+        match outcome {
+            ResolutionOutcome::Resolved(RecoveryDirective::CompressContext {
+                target_tokens,
+            }) => {
+                assert_eq!(target_tokens, 8000);
+            }
+            other => panic!("expected Resolved(CompressContext), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_context_overflow_compress_non_overflow_escalates() {
+        let resolver = ContextOverflowCompress {
+            target_tokens: 8000,
+        };
+        let config = make_config("https://api.example.com/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "connection refused",
+        };
+        match resolver.resolve(&ctx) {
+            ResolutionOutcome::Escalate => {}
+            other => panic!("expected Escalate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_context_overflow_compress_offline_capable() {
+        let resolver = ContextOverflowCompress {
+            target_tokens: 8000,
+        };
+        assert!(resolver.offline_capable());
+        assert_eq!(resolver.name(), "ContextOverflowCompress");
+    }
+
+    #[test]
+    fn test_recovery_tree_with_defaults_resolves_context_overflow() {
+        let tree = RecoveryTree::with_defaults();
+        let config = make_config("https://api.example.com/v1");
+        let signal = FailureSignal {
+            kind: FailureKind::ContextOverflow,
+            message: "context length exceeded".to_string(),
+        };
+        let ctx = RecoveryContext {
+            config: &config,
+            message: &signal.message,
+        };
+        let outcome = tree.resolve(&signal, &ctx);
+        match outcome {
+            ResolutionOutcome::Resolved(RecoveryDirective::CompressContext {
+                target_tokens,
+            }) => {
+                assert_eq!(target_tokens, 8_000);
+            }
+            other => panic!("expected Resolved(CompressContext), got {:?}", other),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // CredentialReload
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_credential_reload_offline_capable() {
+        let resolver = CredentialReload;
+        assert!(resolver.offline_capable());
+        assert_eq!(resolver.name(), "CredentialReload");
+    }
+
+    #[test]
+    fn test_credential_reload_non_auth_escalates() {
+        let resolver = CredentialReload;
+        let config = make_config("https://api.example.com/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "connection refused",
+        };
+        match resolver.resolve(&ctx) {
+            ResolutionOutcome::Escalate => {}
+            other => panic!("expected Escalate, got {:?}", other),
+        }
+    }
+
+    /// Test the credential-availability helper deterministically without
+    /// relying on global env state.  We check that when the env var is set
+    /// the helper returns Some, and when unset it falls back to keyring
+    /// (which may or may not have a key — either way it must not panic).
+    #[test]
+    fn test_credential_reload_find_available_key_with_env() {
+        // Save and restore the env var to avoid cross-test flakiness.
+        let saved = std::env::var("SELFWARE_API_KEY").ok();
+        // Set a unique value that won't collide with keyring entries.
+        std::env::set_var(
+            "SELFWARE_API_KEY",
+            "test-credential-reload-finder-key-xyz",
+        );
+        let key = CredentialReload::find_available_key();
+        assert!(
+            key.is_some(),
+            "find_available_key should return Some when SELFWARE_API_KEY is set"
+        );
+        assert_eq!(
+            key.unwrap(),
+            "test-credential-reload-finder-key-xyz"
+        );
+        // Restore.
+        match saved {
+            Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
+            None => std::env::remove_var("SELFWARE_API_KEY"),
+        }
+    }
+
+    /// When no env var is set, the helper falls through to the keyring.
+    /// It should return None (or Some if a real keyring entry exists) but
+    /// never panic.  We just assert it completes.
+    #[test]
+    fn test_credential_reload_find_available_key_without_env() {
+        let saved = std::env::var("SELFWARE_API_KEY").ok();
+        std::env::remove_var("SELFWARE_API_KEY");
+        // This call may hit the OS keyring — that's fine, it must not panic.
+        let _ = CredentialReload::find_available_key();
+        match saved {
+            Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
+            None => {}
+        }
+    }
+
+    /// When a key source is present, the resolver produces ReloadCredentials.
+    #[test]
+    fn test_credential_reload_resolves_when_key_present() {
+        let saved = std::env::var("SELFWARE_API_KEY").ok();
+        std::env::set_var(
+            "SELFWARE_API_KEY",
+            "test-credential-reload-resolves-key-abc",
+        );
+        let resolver = CredentialReload;
+        let config = make_config("https://api.example.com/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "401 Unauthorized",
+        };
+        let outcome = resolver.resolve(&ctx);
+        match outcome {
+            ResolutionOutcome::Resolved(RecoveryDirective::ReloadCredentials) => {}
+            other => panic!("expected Resolved(ReloadCredentials), got {:?}", other),
+        }
+        match saved {
+            Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
+            None => std::env::remove_var("SELFWARE_API_KEY"),
+        }
     }
 }

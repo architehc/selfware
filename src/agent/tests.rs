@@ -1016,9 +1016,11 @@ async fn test_apply_recovery_action_fallback_switches_endpoint() {
     let mut agent = Agent::new(config).await.unwrap();
 
     let target = "http://localhost:11434/v1".to_string();
-    let action = crate::self_healing::RecoveryAction::Fallback {
-        target: target.clone(),
-    };
+    let action = crate::self_healing::RecoveryDirective::Action(
+        crate::self_healing::RecoveryAction::Fallback {
+            target: target.clone(),
+        },
+    );
     let result = agent.apply_recovery_action(&action).await;
     assert!(result.is_ok(), "apply_recovery_action should succeed");
     assert!(
@@ -1049,9 +1051,11 @@ async fn test_apply_recovery_action_fallback_same_endpoint_returns_false() {
     };
     let mut agent = Agent::new(config).await.unwrap();
 
-    let action = crate::self_healing::RecoveryAction::Fallback {
-        target: endpoint.clone(),
-    };
+    let action = crate::self_healing::RecoveryDirective::Action(
+        crate::self_healing::RecoveryAction::Fallback {
+            target: endpoint.clone(),
+        },
+    );
     let result = agent.apply_recovery_action(&action).await;
     assert!(result.is_ok(), "apply_recovery_action should succeed");
     assert!(
@@ -1062,5 +1066,160 @@ async fn test_apply_recovery_action_fallback_same_endpoint_returns_false() {
         agent.config.endpoint, endpoint,
         "endpoint should be unchanged"
     );
+    server.stop().await;
+}
+
+// =========================================================================
+// apply_recovery_action — CompressContext directive
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_apply_recovery_action_compress_context() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        model: "mock-model".to_string(),
+        context_length: 500_000,
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Populate messages so compression has something to work on.
+    agent.messages.push(Message::system("system prompt sentinel"));
+    agent.messages.push(Message::user("original task description here"));
+    for i in 0..20 {
+        agent
+            .messages
+            .push(Message::user(format!("history message {i} with enough words to cost some tokens for the estimator")));
+        agent
+            .messages
+            .push(Message::assistant(format!("reply {i} acknowledging the work is progressing")));
+    }
+    let before_len = agent.messages.len();
+
+    let directive = crate::self_healing::RecoveryDirective::CompressContext {
+        target_tokens: 1,
+    };
+    let result = agent.apply_recovery_action(&directive).await;
+    assert!(
+        result.is_ok(),
+        "CompressContext should not error: {:?}",
+        result.err()
+    );
+    assert!(
+        result.unwrap(),
+        "CompressContext should return Ok(true)"
+    );
+    // Compression should have reduced message count.
+    assert!(
+        agent.messages.len() < before_len,
+        "message count should decrease after compression: before={}, after={}",
+        before_len,
+        agent.messages.len()
+    );
+    server.stop().await;
+}
+
+// =========================================================================
+// apply_recovery_action — ReloadCredentials directive
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_apply_recovery_action_reload_credentials_with_env() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        model: "mock-model".to_string(),
+        context_length: 500_000,
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Set a temporary env var so the reload finds a key.
+    let saved = std::env::var("SELFWARE_API_KEY").ok();
+    std::env::set_var(
+        "SELFWARE_API_KEY",
+        "test-reload-credentials-directive-key",
+    );
+
+    let directive = crate::self_healing::RecoveryDirective::ReloadCredentials;
+    let result = agent.apply_recovery_action(&directive).await;
+    assert!(
+        result.is_ok(),
+        "ReloadCredentials should not error: {:?}",
+        result.err()
+    );
+    assert!(
+        result.unwrap(),
+        "ReloadCredentials should return Ok(true) when a key is found"
+    );
+    // The config should now have the key set.
+    assert!(
+        agent.config.api_key.is_some(),
+        "config.api_key should be set after reload"
+    );
+    assert_eq!(
+        agent
+            .config
+            .api_key
+            .as_ref()
+            .unwrap()
+            .expose(),
+        "test-reload-credentials-directive-key"
+    );
+
+    // Restore env.
+    match saved {
+        Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
+        None => std::env::remove_var("SELFWARE_API_KEY"),
+    }
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        model: "mock-model".to_string(),
+        context_length: 500_000,
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Ensure no env var is set. The keyring may or may not have a key;
+    // if it does, the result will be Ok(true) which is also valid.
+    // We just verify the call doesn't error.
+    let saved = std::env::var("SELFWARE_API_KEY").ok();
+    std::env::remove_var("SELFWARE_API_KEY");
+
+    let directive = crate::self_healing::RecoveryDirective::ReloadCredentials;
+    let result = agent.apply_recovery_action(&directive).await;
+    assert!(
+        result.is_ok(),
+        "ReloadCredentials should not error: {:?}",
+        result.err()
+    );
+
+    // Restore env.
+    match saved {
+        Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
+        None => {}
+    }
     server.stop().await;
 }

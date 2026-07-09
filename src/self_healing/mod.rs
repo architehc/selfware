@@ -36,8 +36,9 @@ pub mod recovery_tree;
 
 pub use executor::{ExecutorSummary, RecoveryExecution, RecoveryExecutor};
 pub use recovery_tree::{
-    classify, DeadlockDetector, FailureKind, FailureSignal, LocalEndpointFallback,
-    RecoveryContext, RecoveryTree, Resolution, ResolutionOutcome,
+    classify, ContextOverflowCompress, CredentialReload, DeadlockDetector, FailureKind,
+    FailureSignal, LocalEndpointFallback, RecoveryContext, RecoveryDirective, RecoveryTree,
+    Resolution, ResolutionOutcome,
 };
 
 // ============================================================================

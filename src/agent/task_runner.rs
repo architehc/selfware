@@ -1054,10 +1054,10 @@ impl Agent {
                         };
                         let outcome = crate::self_healing::RecoveryTree::with_defaults()
                             .resolve(&signal, &ctx);
-                        if let crate::self_healing::ResolutionOutcome::Resolved(action) =
+                        if let crate::self_healing::ResolutionOutcome::Resolved(directive) =
                             outcome
                         {
-                            match self.apply_recovery_action(&action).await {
+                            match self.apply_recovery_action(&directive).await {
                                 Ok(true) => {
                                     tracing::info!(
                                         "Recovery tree resolved failure (kind={:?}) — retrying execution",
