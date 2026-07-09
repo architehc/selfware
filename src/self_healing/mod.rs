@@ -32,8 +32,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod executor;
+pub mod recovery_tree;
 
 pub use executor::{ExecutorSummary, RecoveryExecution, RecoveryExecutor};
+pub use recovery_tree::{
+    classify, DeadlockDetector, FailureKind, FailureSignal, LocalEndpointFallback,
+    RecoveryContext, RecoveryTree, Resolution, ResolutionOutcome,
+};
 
 // ============================================================================
 // Configuration
