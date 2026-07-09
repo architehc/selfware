@@ -8,7 +8,7 @@
 //! - Memory statistics for monitoring
 
 use crate::api::types::Message;
-use crate::config::{Config, ConfigSource};
+use crate::config::Config;
 use crate::token_count::estimate_tokens_with_overhead;
 use crate::tools::codemap::update_memory_tokens;
 use anyhow::Result;
@@ -36,6 +36,13 @@ pub struct MemoryEntry {
     pub role: String,
     pub content: String,
     pub token_estimate: usize,
+    /// Tool calls made by the assistant, if any.  Preserved so that
+    /// structured tool-call content is not lost when a message is stored
+    /// in memory.
+    pub tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+    /// Number of image blocks in the original message.  Preserved so
+    /// that multimodal content presence is not lost.
+    pub image_count: usize,
 }
 
 impl MemoryEntry {
@@ -46,6 +53,8 @@ impl MemoryEntry {
             role: msg.role.clone(),
             content: msg.content.text().to_string(),
             token_estimate,
+            tool_calls: msg.tool_calls.clone(),
+            image_count: msg.content.image_count(),
         }
     }
 }
@@ -56,18 +65,12 @@ fn estimate_tokens(content: &str) -> usize {
 
 impl AgentMemory {
     pub fn new(config: &Config) -> Result<Self> {
-        // When the user has not explicitly configured a context_length, the
-        // conservative default (131072) should not silently cap the agent's
-        // memory below the advertised ResourceQuotas budget (1M). Fall back to
-        // the quota so the full advertised context budget is available.
-        let context_length_is_explicit =
-            config.context_length != crate::config::default_context_length()
-                || config.source_of("context_length") != ConfigSource::Default;
-        let memory_token_cap = if context_length_is_explicit {
-            config.context_length
-        } else {
-            config.resources.quotas.max_context_tokens
-        };
+        // Memory must never exceed the real context window.  Derive the cap
+        // from `context_length` (the actual context window the model will
+        // use), bounded by the resource quota as a secondary safety net.
+        let memory_token_cap = config
+            .context_length
+            .min(config.resources.quotas.max_context_tokens);
 
         // Reserve 5 % for tool definitions, formatting, and estimation variance.
         let max_memory_tokens = memory_token_cap.saturating_mul(95) / 100;

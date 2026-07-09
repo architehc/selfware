@@ -648,7 +648,7 @@ impl ContextPruner {
             }
         }
 
-        result
+        Self::ensure_single_system_first(result)
     }
 
     /// Keep first and last messages
@@ -674,7 +674,21 @@ impl ContextPruner {
         }
 
         result.reverse();
-        result
+        Self::ensure_single_system_first(result)
+    }
+
+    /// Ensure the message vector has exactly one system message and it is
+    /// in the first position.  Any extra system messages are removed, and
+    /// the single system message (if any) is moved to the front.
+    fn ensure_single_system_first(
+        mut messages: Vec<crate::api::types::Message>,
+    ) -> Vec<crate::api::types::Message> {
+        if let Some(idx) = messages.iter().position(|m| m.role == "system") {
+            let system_msg = messages.remove(idx);
+            messages.retain(|m| m.role != "system");
+            messages.insert(0, system_msg);
+        }
+        messages
     }
 
     /// Remove tool results but keep tool calls
@@ -682,11 +696,12 @@ impl ContextPruner {
         &self,
         messages: &[crate::api::types::Message],
     ) -> Vec<crate::api::types::Message> {
-        messages
+        let result: Vec<crate::api::types::Message> = messages
             .iter()
             .filter(|msg| msg.role != "tool")
             .cloned()
-            .collect()
+            .collect();
+        Self::ensure_single_system_first(result)
     }
 
     /// Remove system messages except first
@@ -695,7 +710,7 @@ impl ContextPruner {
         messages: &[crate::api::types::Message],
     ) -> Vec<crate::api::types::Message> {
         let mut first_system = true;
-        messages
+        let result: Vec<crate::api::types::Message> = messages
             .iter()
             .filter(|msg| {
                 if msg.role == "system" {
@@ -705,7 +720,8 @@ impl ContextPruner {
                 }
             })
             .cloned()
-            .collect()
+            .collect();
+        Self::ensure_single_system_first(result)
     }
 
     /// Get pruning statistics
@@ -2634,13 +2650,15 @@ mod extended_context_pruner_tests {
             Message::assistant("Last answer"),
         ];
         let result = pruner.prune(&messages);
-        // KeepEnds: pushes first, then last N in reverse, then reverses all.
-        // Result = [Last question, Last answer, System prompt]
+        // KeepEnds: pushes first, then last N in reverse, then reverses all,
+        // then ensure_single_system_first pins the system message to front.
+        // Result = [System prompt, Last question, Last answer]
         assert_eq!(result.len(), 3);
-        // After the reversal, the last 2 come first, then system at end
-        assert_eq!(result[0].content.text(), "Last question");
-        assert_eq!(result[1].content.text(), "Last answer");
-        assert_eq!(result[2].role, "system");
+        // System message must be first and unique
+        assert_eq!(result[0].role, "system");
+        assert_eq!(result[0].content.text(), "System prompt");
+        assert_eq!(result[1].content.text(), "Last question");
+        assert_eq!(result[2].content.text(), "Last answer");
         // Stats should be updated
         let stats = pruner.stats();
         assert_eq!(stats.total_operations, 1);
@@ -2792,6 +2810,56 @@ mod extended_context_pruner_tests {
         let result = pruner.prune(&messages);
         // No pruning needed since 0 tokens < target
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_prune_system_message_first_and_unique_keep_recent() {
+        let config = PruningConfig {
+            target_tokens: 1,
+            strategy: PruningStrategy::KeepRecent,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 2,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System prompt A"),
+            Message::user("First question"),
+            Message::assistant("First answer"),
+            Message::system("Duplicate system B"),
+            Message::user("Second question"),
+            Message::assistant("Second answer"),
+            Message::system("Duplicate system C"),
+        ];
+        let result = pruner.prune(&messages);
+        let system_count = result.iter().filter(|m| m.role == "system").count();
+        assert_eq!(system_count, 1, "KeepRecent: expected exactly 1 system message");
+        assert_eq!(result[0].role, "system", "KeepRecent: system message must be first");
+    }
+
+    #[test]
+    fn test_prune_system_message_first_and_unique_keep_ends() {
+        let config = PruningConfig {
+            target_tokens: 1,
+            strategy: PruningStrategy::KeepEnds,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 2,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System prompt A"),
+            Message::user("First question"),
+            Message::assistant("First answer"),
+            Message::system("Duplicate system B"),
+            Message::user("Second question"),
+            Message::assistant("Second answer"),
+            Message::system("Duplicate system C"),
+        ];
+        let result = pruner.prune(&messages);
+        let system_count = result.iter().filter(|m| m.role == "system").count();
+        assert_eq!(system_count, 1, "KeepEnds: expected exactly 1 system message");
+        assert_eq!(result[0].role, "system", "KeepEnds: system message must be first");
     }
 }
 

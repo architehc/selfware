@@ -82,6 +82,40 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
 
+/// Convert a stored [`TemporalRecord`] back into a [`CollectedItem`] so that
+/// it can be re-compacted by the consolidation pipeline during periodic
+/// re-consolidation.
+fn record_to_collected_item(record: &TemporalRecord) -> CollectedItem {
+    use crate::consolidation::temporal::RecordImportance;
+    let importance: u8 = match record.importance {
+        RecordImportance::Low => 1,
+        RecordImportance::Normal => 2,
+        RecordImportance::High => 3,
+        RecordImportance::Critical => 4,
+    };
+    CollectedItem {
+        source_id: record.id.clone(),
+        source_type: SourceType::Episode,
+        content: record.content.summary.clone(),
+        timestamp: record.created_at,
+        importance,
+        tags: record.tags.clone(),
+        metadata: std::collections::HashMap::new(),
+        related_ids: record.causal_parents.clone(),
+        session_id: record.session_id.clone(),
+        file_refs: record
+            .multimodal_refs
+            .iter()
+            .filter_map(|r| match r {
+                MultimodalRef::Screenshot { path, .. } => {
+                    path.to_str().map(|s| s.to_string())
+                }
+                _ => None,
+            })
+            .collect(),
+    }
+}
+
 /// Main orchestrator for memory consolidation.
 pub struct ConsolidationEngine {
     #[allow(dead_code)]
@@ -207,18 +241,48 @@ impl ConsolidationEngine {
                 tick.tick().await;
                 info!("Periodic consolidation triggered");
 
-                // In periodic mode, we'd need a way to get episodes from the runtime.
-                // For now, this is a placeholder that loads from the store and
-                // reports on the state.
+                // Load existing consolidated records and re-consolidate them
+                // to merge/dedupe and produce higher-level summaries.
                 match engine.store.load_all() {
                     Ok(records) => {
+                        if records.is_empty() {
+                            info!("Periodic check: no records to re-consolidate");
+                            continue;
+                        }
                         info!(
-                            "Periodic check: {} consolidated records in store",
+                            "Periodic check: re-consolidating {} existing records",
                             records.len()
                         );
+
+                        // Convert existing records back to CollectedItems so
+                        // the compactor can merge them.
+                        let items: Vec<CollectedItem> =
+                            records.iter().map(record_to_collected_item).collect();
+                        let batch = engine.collector.assemble_batch(items);
+
+                        match engine.compactor.compact(batch).await {
+                            Ok((new_records, report)) => {
+                                info!(
+                                    "Periodic re-consolidation: {} records -> {} records, {} errors",
+                                    records.len(),
+                                    new_records.len(),
+                                    report.errors.len(),
+                                );
+                                if let Err(e) = engine.store.store(&new_records).await {
+                                    tracing::error!(
+                                        "Periodic consolidation store error: {e}"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Periodic consolidation compaction error: {e}"
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
-                        tracing::error!("Periodic consolidation error: {e}");
+                        tracing::error!("Periodic consolidation load error: {e}");
                     }
                 }
             }
