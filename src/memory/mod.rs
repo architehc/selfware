@@ -160,6 +160,58 @@ impl AgentMemory {
         update_memory_tokens(0);
     }
 
+    /// Add a raw memory entry from checkpoint data (used during resume).
+    ///
+    /// Unlike `add_message`, this accepts pre-serialized fields from a
+    /// `TaskCheckpoint`'s `memory_entries` and restores them directly without
+    /// going through `Message` conversion. This preserves the exact timestamp,
+    /// role, content, and token estimate from the checkpoint.
+    pub fn add_raw_entry(
+        &mut self,
+        timestamp: String,
+        role: String,
+        content: String,
+        token_estimate: usize,
+    ) {
+        // Entry count eviction
+        if self.entries.len() >= MAX_MEMORY_ENTRIES {
+            let remove_count = MAX_MEMORY_ENTRIES / 4;
+            for removed in self.entries.drain(..remove_count) {
+                self.total_tokens = self.total_tokens.saturating_sub(removed.token_estimate);
+            }
+        }
+
+        // Token budget eviction
+        while self.total_tokens + token_estimate > self.max_memory_tokens
+            && !self.entries.is_empty()
+        {
+            if let Some(removed) = self.entries.pop_front() {
+                self.total_tokens = self.total_tokens.saturating_sub(removed.token_estimate);
+            }
+        }
+
+        let entry = MemoryEntry {
+            timestamp,
+            role,
+            content,
+            token_estimate,
+            tool_calls: None,
+            image_count: 0,
+        };
+
+        self.total_tokens = self.total_tokens.saturating_add(token_estimate);
+        self.entries.push_back(entry);
+        update_memory_tokens(self.total_tokens);
+    }
+
+    /// Set the total token count directly (used during checkpoint resume to
+    /// restore the agent's token budget awareness without re-estimating every
+    /// entry).
+    pub fn set_total_tokens(&mut self, tokens: usize) {
+        self.total_tokens = tokens;
+        update_memory_tokens(self.total_tokens);
+    }
+
     /// Get recent entries (last n)
     pub fn recent(&self, n: usize) -> Vec<&MemoryEntry> {
         self.entries.iter().rev().take(n).collect()

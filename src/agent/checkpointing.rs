@@ -80,11 +80,85 @@ impl Agent {
         let mut agent = Self::new(config).await?;
         agent.messages = restored_messages;
         agent.loop_control = restored_loop;
-        agent.current_checkpoint = Some(checkpoint);
+        agent.current_checkpoint = Some(checkpoint.clone());
         agent.checkpoint_manager = Some(checkpoint_manager);
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
+
+        // Restore memory entries from the checkpoint into the agent's memory.
+        // The checkpoint stores MemoryEntry records that were accumulated during
+        // the previous run. Without this, the agent loses all accumulated context
+        // on resume and starts with an empty memory.
+        if !checkpoint.memory_entries.is_empty() {
+            for entry in &checkpoint.memory_entries {
+                agent.memory.add_raw_entry(
+                    entry.timestamp.clone(),
+                    entry.role.clone(),
+                    entry.content.clone(),
+                    entry.token_estimate,
+                );
+            }
+            info!(
+                "Restored {} memory entries from checkpoint",
+                checkpoint.memory_entries.len()
+            );
+        }
+
+        // Restore estimated token count from the checkpoint so the agent's
+        // memory budget awareness matches the pre-checkpoint state.
+        if checkpoint.estimated_tokens > 0 {
+            agent.memory.set_total_tokens(checkpoint.estimated_tokens);
+            info!(
+                "Restored token estimate ({}) from checkpoint",
+                checkpoint.estimated_tokens
+            );
+        }
+
+        // Restore cognitive state from the checkpoint when serialized state is
+        // available. The checkpoint itself does not store the full CognitiveState
+        // (it would require a format migration), but we can restore the episodic
+        // memory lessons by replaying error/tool history. More importantly, we
+        // restore the active plans if they were captured.
+        //
+        // Note: The checkpoint format does not currently serialize the full
+        // CognitiveState (strategic goals, tactical/operational plans, working
+        // memory). Those are re-initialized fresh by Self::new(). What we CAN
+        // restore from the checkpoint:
+        //   - Episodic memory lessons (replayed from error history below)
+        //   - The cognitive phase (set to Do since we're resuming execution)
+        //
+        // Plans and working memory are NOT persisted in the checkpoint format
+        // and will be lost on resume. This is noted but not fixed here to avoid
+        // a checkpoint format migration (which would be a big new subsystem).
+        if !checkpoint.errors.is_empty() {
+            for error in &checkpoint.errors {
+                if error.recovered {
+                    agent
+                        .cognitive_state
+                        .episodic_memory
+                        .what_worked(
+                            "error_recovery",
+                            &format!(
+                                "Recovered from error at step {}: {}",
+                                error.step, error.error
+                            ),
+                        );
+                } else {
+                    agent.cognitive_state.episodic_memory.what_failed(
+                        "task_execution",
+                        &format!(
+                            "Unrecovered error at step {}: {}",
+                            error.step, error.error
+                        ),
+                    );
+                }
+            }
+            info!(
+                "Replayed {} error lessons into episodic memory from checkpoint",
+                checkpoint.errors.len()
+            );
+        }
 
         // Set cognitive state to Do phase since we're resuming execution
         agent.cognitive_state.set_phase(CyclePhase::Do);
@@ -106,6 +180,22 @@ impl Agent {
         checkpoint.set_iteration(self.loop_control.current_iteration());
         checkpoint.set_messages(self.messages.clone());
         checkpoint.set_estimated_tokens(self.memory.total_tokens());
+
+        // Save memory entries so they can be restored on resume.
+        // Convert the agent's internal MemoryEntry format to the checkpoint's
+        // serializable MemoryEntry format.
+        checkpoint.memory_entries = self
+            .memory
+            .recent(self.memory.len())
+            .into_iter()
+            .rev() // restore chronological order
+            .map(|e| crate::checkpoint::MemoryEntry {
+                timestamp: e.timestamp.clone(),
+                role: e.role.clone(),
+                content: e.content.clone(),
+                token_estimate: e.token_estimate,
+            })
+            .collect();
 
         // Capture git state
         if let Ok(cwd) = std::env::current_dir() {
