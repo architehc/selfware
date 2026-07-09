@@ -648,8 +648,13 @@ pub async fn run() -> Result<()> {
         if is_structured {
             let result = build_session_result(&agent, &run_result, duration_ms);
             headless::emit_result(&result);
-        } else if !cli.quiet {
+        } else if !cli.quiet && run_result.is_ok() {
             println!("{}", render_task_complete(start.elapsed()));
+        }
+        if let Err(e) = &run_result {
+            if !cli.quiet && !is_structured {
+                eprintln!("✗ Task failed: {}", e);
+            }
         }
         return run_result;
     }
@@ -729,6 +734,7 @@ pub async fn run() -> Result<()> {
         exec_mode,
         cli.resume_session,
         cli.output_format,
+        config_path,
     )
     .await
 }
@@ -795,6 +801,7 @@ async fn handle_command(
     exec_mode: ExecutionMode,
     resume_session: Option<String>,
     output_format: HeadlessOutputFormat,
+    config_path: Option<String>,
 ) -> Result<()> {
     match command {
         Commands::Chat { yolo } => {
@@ -888,8 +895,13 @@ async fn handle_command(
             if is_structured {
                 let result = build_session_result(&agent, &run_result, duration_ms);
                 headless::emit_result(&result);
-            } else if !quiet {
+            } else if !quiet && run_result.is_ok() {
                 println!("{}", render_task_complete(start.elapsed()));
+            }
+            if let Err(e) = &run_result {
+                if !quiet && !is_structured {
+                    eprintln!("✗ Task failed: {}", e);
+                }
             }
             run_result?;
         }
@@ -2118,7 +2130,7 @@ async fn handle_command(
         },
 
         Commands::McpServer => {
-            crate::mcp::server::run_mcp_server().await?;
+            crate::mcp::server::run_mcp_server(&config).await?;
         }
 
         Commands::Lsp => {
@@ -2562,7 +2574,7 @@ async fn handle_command(
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            let report = crate::doctor::run_doctor().await;
+            let report = crate::doctor::run_doctor(config_path.as_deref()).await;
             report.print();
             let code = report.exit_code();
             if code != 0 {

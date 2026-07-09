@@ -693,7 +693,7 @@ impl McpServer {
 /// Run the MCP server, reading from stdin and writing to stdout.
 ///
 /// This function blocks until stdin is closed or a shutdown request is received.
-pub async fn run_mcp_server() -> Result<()> {
+pub async fn run_mcp_server(_config: &crate::config::Config) -> Result<()> {
     // Redirect tracing output to stderr so it doesn't interfere with the JSON-RPC
     // protocol on stdout.
     eprintln!("selfware MCP server v{} starting...", SERVER_VERSION);

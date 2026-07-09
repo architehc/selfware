@@ -10,7 +10,7 @@ use super::*;
 
 /// Check if input is an exit command.
 fn is_exit_command(input: &str) -> bool {
-    matches!(input, "exit" | "quit" | "/exit" | "/quit" | "q" | "/q")
+    matches!(input, "exit" | "quit" | "/exit" | "/quit" | "/q")
 }
 
 /// Truncate a string at a char boundary, avoiding panics on multi-byte UTF-8.
@@ -3577,7 +3577,7 @@ mod tests {
 
     #[test]
     fn exit_commands_recognized() {
-        for input in &["exit", "quit", "/exit", "/quit", "q", "/q"] {
+        for input in &["exit", "quit", "/exit", "/quit", "/q"] {
             assert!(is_exit_command(input), "'{}' should trigger exit", input);
         }
 
@@ -3588,6 +3588,7 @@ mod tests {
             "exit now",
             "query",
             "/question",
+            "q",
         ] {
             assert!(
                 !is_exit_command(input),

@@ -676,7 +676,7 @@ fn ck(
 }
 
 /// Run all diagnostic checks and return a report.
-pub async fn run_doctor() -> DoctorReport {
+pub async fn run_doctor(config_path: Option<&str>) -> DoctorReport {
     // We group checks by category and run each category in parallel.
     // Within each category, checks also run in parallel via join_all.
     // All futures are boxed via `ck()` so they share a single type.
@@ -954,7 +954,7 @@ pub async fn run_doctor() -> DoctorReport {
         checks.push(windows_gui_note());
     }
     // Best-effort: load and validate the user's config.
-    match crate::config::Config::load(None) {
+    match crate::config::Config::load(config_path) {
         Ok(cfg) => checks.extend(config_checks(&cfg)),
         Err(e) => checks.push(DoctorCheck {
             name: "config load".to_string(),
@@ -1329,7 +1329,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_doctor_completes() {
         // Smoke test: just ensure it doesn't panic or hang.
-        let report = run_doctor().await;
+        let report = run_doctor(None).await;
         assert!(!report.checks.is_empty());
         // rustc must be present in a Rust build environment
         let rustc = report.checks.iter().find(|c| c.name == "rustc");

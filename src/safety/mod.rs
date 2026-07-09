@@ -22,7 +22,6 @@ pub mod tool_metadata;
 pub mod confirm;
 #[cfg(feature = "execution-modes")]
 pub mod dry_run;
-#[cfg(feature = "execution-modes")]
 pub mod yolo;
 
 // Re-exports for convenience
