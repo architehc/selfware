@@ -570,18 +570,44 @@ impl LspClient {
                         .or(Ok(joined.display().to_string()))
                 })
                 .unwrap_or_else(|_| file.to_string())
-        }
-        .replace(' ', "%20");
+        };
 
         // On Windows, absolute paths look like `C:\...`; on Unix, `/...`.
         // The `file://` scheme expects `file:///path` (three slashes for
         // Unix) or `file:///C:/...` on Windows (with forward slashes).
         let normalized = abs.replace('\\', "/");
-        if normalized.starts_with('/') {
-            format!("file://{}", normalized)
+
+        // Percent-encode characters that are not allowed unencoded in a
+        // file URI path component.  We encode the path segment-by-segment
+        // (splitting on `/`) so that the path separators themselves are
+        // preserved.
+        let encoded: String = normalized
+            .split('/')
+            .map(|segment| {
+                segment
+                    .chars()
+                    .map(|ch| {
+                        if ch.is_ascii_alphanumeric()
+                            || ch == '-'
+                            || ch == '.'
+                            || ch == '_'
+                            || ch == '~'
+                        {
+                            ch.to_string()
+                        } else {
+                            format!("%{:02X}", ch as u8)
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+
+        if encoded.starts_with('/') {
+            format!("file://{}", encoded)
         } else {
             // Windows drive letter: `C:/...` → `file:///C:/...`
-            format!("file:///{}", normalized)
+            format!("file:///{}", encoded)
         }
     }
 
@@ -1084,6 +1110,32 @@ mod tests {
         {
             let uri = LspClient::file_uri("/home/user/project/src/main.rs");
             assert_eq!(uri, "file:///home/user/project/src/main.rs");
+        }
+    }
+
+    #[test]
+    fn test_file_uri_percent_encoding() {
+        // Verify that special characters are percent-encoded.
+        // We test with a path that doesn't need canonicalization by
+        // using an already-absolute path that contains special chars.
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Use a temp dir with special characters in the name
+            let dir = std::env::temp_dir().join("selfware test#dir%");
+            // Create the directory so canonicalize works
+            let _ = std::fs::create_dir_all(&dir);
+            let file = dir.join("test file.rs");
+            let _ = std::fs::write(&file, "fn main() {}");
+
+            let uri = LspClient::file_uri(file.to_str().unwrap());
+            // The URI should contain percent-encoded versions of space,
+            // #, and %
+            assert!(uri.starts_with("file:///"));
+            assert!(!uri.contains(' '), "URI should not contain raw spaces: {}", uri);
+            assert!(!uri.contains('#'), "URI should not contain raw #: {}", uri);
+
+            // Clean up
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 

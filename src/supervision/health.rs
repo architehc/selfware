@@ -111,6 +111,17 @@ impl HealthMonitor {
             // Store results
             *self.results.write().await = results.clone();
 
+            // Update the global health flag used by the HTTP health
+            // endpoint so that Docker/Kubernetes probes reflect the real
+            // status.  If any check is Unhealthy, the endpoint returns 503.
+            let any_unhealthy = results.iter().any(|r| {
+                matches!(
+                    r.status,
+                    HealthStatus::Unhealthy { .. }
+                )
+            });
+            set_global_healthy(!any_unhealthy);
+
             // Log any issues
             for result in &results {
                 match &result.status {

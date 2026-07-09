@@ -2222,7 +2222,8 @@ async fn handle_command(
         },
 
         Commands::McpServer => {
-            crate::mcp::server::run_mcp_server(&config).await?;
+            crate::mcp::server::run_mcp_server(&config, config_path.as_deref())
+                .await?;
         }
 
         Commands::Lsp => {

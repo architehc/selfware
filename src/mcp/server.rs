@@ -150,6 +150,10 @@ pub struct McpServer {
     /// protocol) could invoke any registered tool, including shell_exec/
     /// file_delete/git_push, with none of the checks in src/safety/ applied.
     safety: SafetyChecker,
+    /// Optional explicit config path override (from `--config` CLI flag).
+    config_path: Option<String>,
+    /// Kept so `with_project_root` doesn't need to recompute the env cwd.
+    _project_root_env: PathBuf,
 }
 
 impl Default for McpServer {
@@ -162,8 +166,8 @@ impl Default for McpServer {
 /// are already conservative -- allowed_paths=["./**"], the standard
 /// denied_paths/require_confirmation lists) if no config file is found or it
 /// fails to parse, rather than refusing to start the server entirely.
-fn load_mcp_safety_config() -> crate::config::SafetyConfig {
-    match crate::config::Config::load(None) {
+fn load_mcp_safety_config(config_path: Option<&str>) -> crate::config::SafetyConfig {
+    match crate::config::Config::load(config_path) {
         Ok(config) => config.safety,
         Err(e) => {
             tracing::warn!(
@@ -178,22 +182,36 @@ fn load_mcp_safety_config() -> crate::config::SafetyConfig {
 impl McpServer {
     /// Create a new MCP server with the default tool registry.
     pub fn new() -> Self {
+        Self::with_config(None)
+    }
+
+    /// Create a new MCP server with a custom project root.
+    pub fn with_project_root(project_root: PathBuf) -> Self {
+        let project_root_env = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self {
+            registry: ToolRegistry::new(),
+            project_root,
+            initialized: false,
+            safety: SafetyChecker::new(&load_mcp_safety_config(None)),
+            config_path: None,
+            _project_root_env: project_root_env,
+        }
+    }
+
+    /// Create a new MCP server with an explicit config path override.
+    /// When `config_path` is `Some`, the config is loaded from that path
+    /// instead of the default search.  This threads the `--config` CLI
+    /// flag into the MCP server so it uses the same config as the rest
+    /// of the application.
+    pub fn with_config(config_path: Option<String>) -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
             registry: ToolRegistry::new(),
             project_root,
             initialized: false,
-            safety: SafetyChecker::new(&load_mcp_safety_config()),
-        }
-    }
-
-    /// Create a new MCP server with a custom project root.
-    pub fn with_project_root(project_root: PathBuf) -> Self {
-        Self {
-            registry: ToolRegistry::new(),
-            project_root,
-            initialized: false,
-            safety: SafetyChecker::new(&load_mcp_safety_config()),
+            safety: SafetyChecker::new(&load_mcp_safety_config(config_path.as_deref())),
+            config_path,
+            _project_root_env: PathBuf::from("."),
         }
     }
 
@@ -283,8 +301,25 @@ impl McpServer {
     /// Handle `initialize` request.
     fn handle_initialize(
         &mut self,
-        _params: &Option<Value>,
+        params: &Option<Value>,
     ) -> (Option<Value>, Option<JsonRpcError>) {
+        // Check the client's requested protocolVersion.  The MCP spec says
+        // the server SHOULD negotiate a version.  We support
+        // "2024-11-05"; if the client requests a different version we
+        // still respond with our version (the client can decide whether
+        // to proceed), but we log a warning so the operator is aware.
+        if let Some(p) = params {
+            if let Some(client_version) = p.get("protocolVersion").and_then(|v| v.as_str()) {
+                if client_version != MCP_PROTOCOL_VERSION {
+                    tracing::warn!(
+                        "MCP client requested protocol version '{}', we support '{}'",
+                        client_version,
+                        MCP_PROTOCOL_VERSION
+                    );
+                }
+            }
+        }
+
         self.initialized = true;
 
         let result = serde_json::json!({
@@ -527,7 +562,7 @@ impl McpServer {
                 )
             }
             "selfware://config" => {
-                let config = match crate::config::Config::load(None) {
+                let config = match crate::config::Config::load(self.config_path.as_deref()) {
                     Ok(cfg) => serde_json::to_string_pretty(&cfg).unwrap_or_default(),
                     Err(e) => format!("{{\"error\": \"{}\"}}", e),
                 };
@@ -715,13 +750,21 @@ impl McpServer {
 /// Run the MCP server, reading from stdin and writing to stdout.
 ///
 /// This function blocks until stdin is closed or a shutdown request is received.
-pub async fn run_mcp_server(_config: &crate::config::Config) -> Result<()> {
+///
+/// `config_path` is the resolved path to the config file (from `--config` or
+/// default search).  When `Some`, it is threaded into the server so that
+/// internal `Config::load` calls (e.g. for the `selfware://config` resource)
+/// use the same file rather than falling back to the default search.
+pub async fn run_mcp_server(
+    _config: &crate::config::Config,
+    config_path: Option<&str>,
+) -> Result<()> {
     // Redirect tracing output to stderr so it doesn't interfere with the JSON-RPC
     // protocol on stdout.
     eprintln!("selfware MCP server v{} starting...", SERVER_VERSION);
     info!("MCP server starting on stdio transport");
 
-    let mut server = McpServer::new();
+    let mut server = McpServer::with_config(config_path.map(|s| s.to_string()));
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();

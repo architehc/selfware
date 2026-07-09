@@ -343,7 +343,9 @@ impl MultiAgentChat {
             }
         };
 
-        // Update agent status and heartbeat
+        // Update agent status and heartbeat, and append the assistant
+        // response back into the agent's message history so that
+        // subsequent turns include the conversation context.
         {
             let mut agents = agents.write().await;
             if let Some(agent) = agents.get_mut(agent_id) {
@@ -353,6 +355,11 @@ impl MultiAgentChat {
                     AgentStatus::Failed
                 };
                 agent.last_heartbeat = Instant::now();
+                // Append the assistant response (or error text) so the
+                // agent accumulates conversation history across turns.
+                if agent_result.success {
+                    agent.messages.push(Message::assistant(&agent_result.content));
+                }
             }
         }
 

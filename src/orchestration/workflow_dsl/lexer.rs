@@ -342,6 +342,22 @@ impl Lexer {
                 if self.current() == Some('>') {
                     self.advance();
                     Token::Arrow
+                } else if self.current() == Some('-') {
+                    // `--` prefix: this is likely a command-line flag like
+                    // `--check` or `--release`.  Lex the entire `--flag`
+                    // sequence as a single Identifier so that the parser can
+                    // collect it as part of a bare command expression.
+                    self.advance(); // consume second '-'
+                    let mut flag = String::from("--");
+                    while let Some(ch) = self.current() {
+                        if ch.is_alphanumeric() || ch == '_' || ch == '-' {
+                            flag.push(ch);
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    Token::Identifier(flag)
                 } else {
                     Token::Minus
                 }
@@ -440,5 +456,39 @@ mod tests {
         let mut lexer = Lexer::new("-> =>");
         assert_eq!(lexer.next_token(), Token::Arrow);
         assert_eq!(lexer.next_token(), Token::DoubleArrow);
+    }
+
+    #[test]
+    fn test_lexer_double_dash_flag() {
+        // `--check` should be lexed as a single Identifier, not Minus Minus
+        let mut lexer = Lexer::new("--check");
+        assert_eq!(lexer.next_token(), Token::Identifier("--check".to_string()));
+
+        // `--release` followed by `--` and more chars
+        let mut lexer = Lexer::new("--release-profile");
+        assert_eq!(
+            lexer.next_token(),
+            Token::Identifier("--release-profile".to_string())
+        );
+
+        // Single `-` should still be Minus
+        let mut lexer = Lexer::new("- ");
+        assert_eq!(lexer.next_token(), Token::Minus);
+
+        // `->` should still be Arrow
+        let mut lexer = Lexer::new("->");
+        assert_eq!(lexer.next_token(), Token::Arrow);
+    }
+
+    #[test]
+    fn test_lexer_command_with_flags() {
+        // `cargo fmt --check` should produce three Identifier tokens
+        let mut lexer = Lexer::new("cargo fmt --check");
+        assert_eq!(lexer.next_token(), Token::Identifier("cargo".to_string()));
+        assert_eq!(lexer.next_token(), Token::Identifier("fmt".to_string()));
+        assert_eq!(
+            lexer.next_token(),
+            Token::Identifier("--check".to_string())
+        );
     }
 }

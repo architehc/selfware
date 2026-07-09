@@ -694,7 +694,15 @@ pub(crate) fn thinking(text: &str, inline: bool) {
 
     // Replace \n with \r\n so newlines in thinking text reset to column 0
     let safe = text.replace('\n', "\r\n");
-    if inline {
+    if is_plain_mode() {
+        // Plain mode: no ANSI escape codes
+        if inline {
+            print!("{}", safe);
+        } else {
+            print!("Thinking: {}\r\n", safe);
+        }
+        io::stdout().flush().ok();
+    } else if inline {
         if is_verbose() {
             print!("{}", safe.bright_black());
         } else {
@@ -721,7 +729,11 @@ pub(crate) fn thinking_prefix() {
     }
     if !is_compact() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        print!("\r\x1b[2K{} ", "Thinking:".dimmed());
+        if is_plain_mode() {
+            print!("Thinking: ");
+        } else {
+            print!("\r\x1b[2K{} ", "Thinking:".dimmed());
+        }
         io::stdout().flush().ok();
     }
 }
@@ -812,8 +824,10 @@ pub(crate) fn final_answer(content: &str) {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if is_plain_mode() {
-        print!("Final answer: {}\n", content);
+    if is_plain_mode() || is_json_mode() {
+        // In plain/JSON mode, emit only the content with no prefix or
+        // decoration so machine-readable output is not corrupted.
+        print!("{}\n", content);
     } else if is_compact() {
         print!("\r\x1b[2K{}\n", content);
     } else {
@@ -1201,30 +1215,46 @@ impl TaskProgress {
                         (p.clamp(0.0, 1.0) * 100.0).round() as u32
                     }
                 };
-                let bar_width = 20;
-                let filled = (pct as usize * bar_width) / 100;
-                let empty = bar_width - filled;
-                let bar = format!(
-                    "{}{}",
-                    "█".repeat(filled).bright_cyan(),
-                    "░".repeat(empty).dimmed()
-                );
 
-                let eta_str = self
-                    .format_eta()
-                    .map(|e| format!(" ETA: {}", e.cyan()))
-                    .unwrap_or_default();
+                if is_plain_mode() {
+                    let eta_str = self
+                        .format_eta()
+                        .map(|e| format!(" ETA: {}", e))
+                        .unwrap_or_default();
+                    print!(
+                        "\r[{}/{}] {} {}%{}\n",
+                        self.current_phase + 1,
+                        self.phases.len(),
+                        phase.name,
+                        pct,
+                        eta_str
+                    );
+                } else {
+                    let bar_width = 20;
+                    let filled = (pct as usize * bar_width) / 100;
+                    let empty = bar_width - filled;
+                    let bar = format!(
+                        "{}{}",
+                        "█".repeat(filled).bright_cyan(),
+                        "░".repeat(empty).dimmed()
+                    );
 
-                print!(
-                    "\r\x1b[2K{} [{}/{}] {} [{}] {}%{}\n",
-                    "📊".bright_blue(),
-                    (self.current_phase + 1).to_string().bright_white(),
-                    self.phases.len().to_string().dimmed(),
-                    phase.name.bright_white(),
-                    bar,
-                    pct.to_string().bright_cyan(),
-                    eta_str
-                );
+                    let eta_str = self
+                        .format_eta()
+                        .map(|e| format!(" ETA: {}", e.cyan()))
+                        .unwrap_or_default();
+
+                    print!(
+                        "\r\x1b[2K{} [{}/{}] {} [{}] {}%{}\n",
+                        "📊".bright_blue(),
+                        (self.current_phase + 1).to_string().bright_white(),
+                        self.phases.len().to_string().dimmed(),
+                        phase.name.bright_white(),
+                        bar,
+                        pct.to_string().bright_cyan(),
+                        eta_str
+                    );
+                }
                 io::stdout().flush().ok();
             }
         }
@@ -1237,7 +1267,9 @@ pub(crate) fn step_start(step: usize, name: &str) {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if is_compact() {
+    if is_plain_mode() {
+        print!("[Step {}] {}...\n", step, name);
+    } else if is_compact() {
         print!("\r\x1b[2K[Step {}] ", step);
     } else {
         print!(

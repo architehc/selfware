@@ -783,4 +783,27 @@ mod tests {
             other => panic!("Expected Step node, got {:?}", other),
         }
     }
+
+    #[test]
+    fn test_parser_step_bare_command_with_flags() {
+        // `step lint = cargo fmt --check` should produce a Step whose
+        // command is an AstNode::Command("cargo fmt --check").
+        let tokens = Lexer::new("step lint = cargo fmt --check").tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+
+        assert_eq!(ast.len(), 1);
+        match &ast[0] {
+            AstNode::Step { name, command } => {
+                assert_eq!(name, "lint");
+                match command.as_ref() {
+                    AstNode::Command(cmd) => {
+                        assert_eq!(cmd, "cargo fmt --check");
+                    }
+                    other => panic!("Expected Command node, got {:?}", other),
+                }
+            }
+            other => panic!("Expected Step node, got {:?}", other),
+        }
+    }
 }
