@@ -257,56 +257,90 @@ impl Swarm {
 
     /// Handle conflict
     pub fn resolve_conflict(&mut self, decision_id: &str) -> Result<Option<String>> {
-        let decision = self
+        // First, check the status without holding a mutable borrow.
+        let status = self
             .decisions
             .get(decision_id)
+            .ok_or_else(|| anyhow!("Decision not found: {}", decision_id))?
+            .status;
+
+        if status != DecisionStatus::Conflict {
+            return Ok(
+                self.decisions
+                    .get(decision_id)
+                    .and_then(|d| d.outcome.clone()),
+            );
+        }
+
+        // Compute the resolution based on conflict strategy.
+        let resolution: Option<String> = {
+            let decision = self
+                .decisions
+                .get(decision_id)
+                .ok_or_else(|| anyhow!("Decision not found: {}", decision_id))?;
+
+            match self.conflict_strategy {
+                ConflictStrategy::PriorityWins => {
+                    // Find vote with highest priority role
+                    let best_vote = decision.votes.iter().max_by_key(|v| v.role.priority());
+                    best_vote.map(|v| v.choice.clone())
+                }
+                ConflictStrategy::ConfidenceWins => {
+                    // Find vote with highest confidence
+                    let best_vote = decision.votes.iter().max_by(|a, b| {
+                        a.confidence
+                            .partial_cmp(&b.confidence)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    best_vote.map(|v| v.choice.clone())
+                }
+                ConflictStrategy::MajorityWins => {
+                    // Simple majority
+                    let mut counts: std::collections::HashMap<&str, usize> = HashMap::new();
+                    for vote in &decision.votes {
+                        *counts.entry(&vote.choice).or_insert(0) += 1;
+                    }
+                    counts
+                        .into_iter()
+                        .max_by_key(|(_, count)| *count)
+                        .map(|(choice, _)| choice.to_string())
+                }
+                ConflictStrategy::HumanIntervention => {
+                    // Return None to indicate human input needed
+                    None
+                }
+                ConflictStrategy::AcceptAll => {
+                    // Return all unique choices joined
+                    let choices: std::collections::HashSet<_> =
+                        decision.votes.iter().map(|v| &v.choice).collect();
+                    Some(
+                        choices.into_iter().cloned().collect::<Vec<_>>().join(", "),
+                    )
+                }
+            }
+        };
+
+        // Update the decision's status and outcome to reflect the resolution.
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let decision = self
+            .decisions
+            .get_mut(decision_id)
             .ok_or_else(|| anyhow!("Decision not found: {}", decision_id))?;
 
-        if decision.status != DecisionStatus::Conflict {
-            return Ok(decision.outcome.clone());
+        if resolution.is_some() {
+            decision.status = DecisionStatus::Resolved;
+            decision.outcome = resolution.clone();
+        } else {
+            // HumanIntervention or no votes: leave as Conflict but record that
+            // resolution was attempted (no outcome to set).
+            // Keep status as Conflict so callers know human input is still needed.
         }
+        decision.resolved_at = Some(now);
 
-        match self.conflict_strategy {
-            ConflictStrategy::PriorityWins => {
-                // Find vote with highest priority role
-                let best_vote = decision.votes.iter().max_by_key(|v| v.role.priority());
-
-                Ok(best_vote.map(|v| v.choice.clone()))
-            }
-            ConflictStrategy::ConfidenceWins => {
-                // Find vote with highest confidence
-                let best_vote = decision.votes.iter().max_by(|a, b| {
-                    a.confidence
-                        .partial_cmp(&b.confidence)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-
-                Ok(best_vote.map(|v| v.choice.clone()))
-            }
-            ConflictStrategy::MajorityWins => {
-                // Simple majority
-                let mut counts: std::collections::HashMap<&str, usize> = HashMap::new();
-                for vote in &decision.votes {
-                    *counts.entry(&vote.choice).or_insert(0) += 1;
-                }
-                Ok(counts
-                    .into_iter()
-                    .max_by_key(|(_, count)| *count)
-                    .map(|(choice, _)| choice.to_string()))
-            }
-            ConflictStrategy::HumanIntervention => {
-                // Return None to indicate human input needed
-                Ok(None)
-            }
-            ConflictStrategy::AcceptAll => {
-                // Return all unique choices joined
-                let choices: std::collections::HashSet<_> =
-                    decision.votes.iter().map(|v| &v.choice).collect();
-                Ok(Some(
-                    choices.into_iter().cloned().collect::<Vec<_>>().join(", "),
-                ))
-            }
-        }
+        Ok(resolution)
     }
 
     /// Queue a task. Returns an error if resource pressure is `High` or `Critical`.

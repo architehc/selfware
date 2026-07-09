@@ -1061,6 +1061,39 @@ fn test_resolve_conflict_decision_not_found() {
     assert!(result.is_err());
 }
 
+#[test]
+fn test_resolve_conflict_updates_decision_state() {
+    // Verify that resolve_conflict actually mutates the decision's
+    // status and outcome (not just computing and discarding the result).
+    let mut swarm = Swarm::new()
+        .with_conflict_strategy(ConflictStrategy::PriorityWins)
+        .with_consensus_threshold(0.9); // high threshold to force Conflict
+
+    let sec_id = swarm.add_agent(Agent::new("Sec", AgentRole::Security));
+    let cod_id = swarm.add_agent(Agent::new("Cod", AgentRole::Coder));
+
+    let did = swarm.create_decision("Strategy?", vec!["A".into(), "B".into()]);
+    swarm.vote(&did, &sec_id, "A", 0.8, "r").unwrap();
+    swarm.vote(&did, &cod_id, "B", 0.8, "r").unwrap();
+
+    // This should produce a Conflict (scores are close, threshold is 0.9)
+    swarm.resolve_decision(&did).ok();
+    assert_eq!(
+        swarm.get_decision(&did).unwrap().status,
+        DecisionStatus::Conflict
+    );
+
+    // Now resolve the conflict — Security has higher priority, so "A" wins.
+    let result = swarm.resolve_conflict(&did).unwrap();
+    assert_eq!(result, Some("A".to_string()));
+
+    // The decision's state must be updated to reflect the resolution.
+    let decision = swarm.get_decision(&did).unwrap();
+    assert_eq!(decision.status, DecisionStatus::Resolved);
+    assert_eq!(decision.outcome, Some("A".to_string()));
+    assert!(decision.resolved_at.is_some());
+}
+
 // ============================================================================
 // Swarm Factory Tests
 // ============================================================================

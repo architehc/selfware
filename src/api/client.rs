@@ -132,6 +132,11 @@ impl ApiClient {
         })
     }
 
+    /// Return a reference to the underlying [`Config`](crate::config::Config).
+    pub fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
+
     pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
         self.retry_config = retry_config;
         self

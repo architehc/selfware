@@ -127,7 +127,6 @@ impl MultiAgentChat {
         let mut join_set = JoinSet::new();
 
         for agent_id in 0..agent_count {
-            let client = Arc::clone(&self.client);
             let tools = Arc::clone(&self.tools);
             let semaphore = Arc::clone(&self.semaphore);
             let agents = Arc::clone(&self.agents);
@@ -137,6 +136,16 @@ impl MultiAgentChat {
             let event_tx = self.event_tx.clone();
             let failure_policy = self.config.failure_policy;
             let cancelled = Arc::clone(&cancelled);
+            // Per-agent overrides: build a dedicated ApiClient that uses the
+            // temperature / max_tokens from MultiAgentConfig rather than the
+            // base API config values.  Config is Clone, so this is cheap.
+            let mut per_agent_config = self.client.config().clone();
+            per_agent_config.temperature = self.config.temperature;
+            per_agent_config.max_tokens = self.config.max_tokens;
+            let per_agent_client = Arc::new(
+                ApiClient::new(&per_agent_config)
+                    .context("Failed to create per-agent API client")?,
+            );
 
             join_set.spawn(async move {
                 tokio::select! {
@@ -145,7 +154,7 @@ impl MultiAgentChat {
                         Ok(())
                     }
                     res = Self::run_single_agent(
-                        agent_id, task, client, tools, semaphore, agents, results, timeout, event_tx,
+                        agent_id, task, per_agent_client, tools, semaphore, agents, results, timeout, event_tx,
                     ) => {
                         if failure_policy == MultiAgentFailurePolicy::FailFast && res.is_err() {
                             cancelled.notify_waiters();

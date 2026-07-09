@@ -235,33 +235,25 @@ impl MultiAgentChat {
             // Wait for event handler
             let _ = handle.await;
 
-            // Print results
-            println!("\n{}", "Agent Responses:".bright_cyan().bold());
-            for result in &results {
-                if result.success {
-                    println!(
-                        "\n{} {} ({}):",
-                        "━━━".bright_blue(),
-                        result.agent_name.bright_white(),
-                        result.role.name()
-                    );
-                    // Truncate long responses for display (UTF-8 safe)
-                    let preview = if result.content.len() > 500 {
-                        let mut end = 500;
-                        while end > 0 && !result.content.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        format!(
-                            "{}...\n[{} more chars]",
-                            &result.content[..end],
-                            result.content.len() - end
-                        )
-                    } else {
-                        result.content.clone()
-                    };
-                    println!("{}", preview);
+            // Print aggregated results (combines all agent outputs into a
+            // single coherent summary rather than disconnected previews).
+            let summary = Self::aggregate_results(&results);
+            println!("\n{}", "Aggregated Result:".bright_cyan().bold());
+            // Truncate long summaries for display (UTF-8 safe)
+            let preview = if summary.len() > 2000 {
+                let mut end = 2000;
+                while end > 0 && !summary.is_char_boundary(end) {
+                    end -= 1;
                 }
-            }
+                format!(
+                    "{}...\n[{} more chars]",
+                    &summary[..end],
+                    summary.len() - end
+                )
+            } else {
+                summary
+            };
+            println!("{}", preview);
 
             println!(
                 "\n{} Total time: {:.2}s",
