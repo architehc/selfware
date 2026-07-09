@@ -993,3 +993,74 @@ async fn test_agent_new_rejects_tiny_context_budget() {
         err
     );
 }
+
+// =========================================================================
+// apply_recovery_action — RecoveryAction runtime application
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_apply_recovery_action_fallback_switches_endpoint() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let remote_endpoint = format!("{}/v1", server.url());
+    let config = Config {
+        endpoint: remote_endpoint.clone(),
+        model: "mock-model".to_string(),
+        context_length: 500_000,
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let target = "http://localhost:11434/v1".to_string();
+    let action = crate::self_healing::RecoveryAction::Fallback {
+        target: target.clone(),
+    };
+    let result = agent.apply_recovery_action(&action).await;
+    assert!(result.is_ok(), "apply_recovery_action should succeed");
+    assert!(
+        result.unwrap(),
+        "apply_recovery_action should return Ok(true) for a different endpoint"
+    );
+    assert_eq!(
+        agent.config.endpoint, target,
+        "endpoint should have been switched to the fallback target"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn test_apply_recovery_action_fallback_same_endpoint_returns_false() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let endpoint = format!("{}/v1", server.url());
+    let config = Config {
+        endpoint: endpoint.clone(),
+        model: "mock-model".to_string(),
+        context_length: 500_000,
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let action = crate::self_healing::RecoveryAction::Fallback {
+        target: endpoint.clone(),
+    };
+    let result = agent.apply_recovery_action(&action).await;
+    assert!(result.is_ok(), "apply_recovery_action should succeed");
+    assert!(
+        !result.unwrap(),
+        "apply_recovery_action should return Ok(false) when target equals current"
+    );
+    assert_eq!(
+        agent.config.endpoint, endpoint,
+        "endpoint should be unchanged"
+    );
+    server.stop().await;
+}

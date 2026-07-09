@@ -1286,6 +1286,53 @@ To call a tool, use this EXACT XML structure:
         self
     }
 
+    /// Apply a resolved [`RecoveryAction`] at runtime.
+    ///
+    /// Returns `Ok(true)` when the action was applied (the caller should retry
+    /// the operation) or `Ok(false)` when the action was not handled.
+    ///
+    /// - `Fallback { target }`: if `target` is non-empty and differs from the
+    ///   current `self.config.endpoint`, the endpoint is switched and the API
+    ///   client is rebuilt.  The progress emitter is re-propagated so HTTP
+    ///   round-trip events continue to flow.
+    /// - `Retry { delay_ms, .. }`: sleeps for `delay_ms` milliseconds.
+    /// - Any other variant: returns `Ok(false)`.
+    pub(crate) async fn apply_recovery_action(
+        &mut self,
+        action: &crate::self_healing::RecoveryAction,
+    ) -> anyhow::Result<bool> {
+        use crate::self_healing::RecoveryAction;
+        match action {
+            RecoveryAction::Fallback { target } => {
+                if target.is_empty() || *target == self.config.endpoint {
+                    return Ok(false);
+                }
+                let old_endpoint = self.config.endpoint.clone();
+                self.config.endpoint = target.clone();
+                // Rebuild the client so it points at the new endpoint.
+                self.client = crate::api::ApiClient::new(&self.config)?;
+                // Re-propagate the progress emitter so HTTP round-trip events
+                // continue to land on the same channel after the rebuild.
+                self.client.with_progress_emitter(Arc::clone(&self.progress_emitter));
+                warn!(
+                    "Recovery tree switched endpoint from '{}' to '{}'",
+                    old_endpoint, target
+                );
+                info!("Endpoint fallback applied — caller should retry");
+                Ok(true)
+            }
+            RecoveryAction::Retry { delay_ms, .. } => {
+                tracing::info!(
+                    "Recovery tree applying retry backoff: sleeping {}ms",
+                    delay_ms
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Emit a structured progress event (no-op when the emitter is the default).
     pub(super) fn emit_progress(&self, event: progress::ProgressEvent) {
         self.progress_emitter.emit(event);

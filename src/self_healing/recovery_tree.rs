@@ -283,6 +283,53 @@ impl Resolution for LocalEndpointFallback {
 }
 
 // ============================================================================
+// RateLimitBackoff — offline resolver for RateLimited
+// ============================================================================
+
+/// Offline resolver for rate-limiting failures (HTTP 429 / too many requests).
+///
+/// Returns `Resolved(Retry { delay_ms, max_attempts })` so the caller backs off
+/// and retries the operation.  No network access is required.
+pub struct RateLimitBackoff {
+    /// Backoff delay in milliseconds between retry attempts.
+    pub delay_ms: u64,
+    /// Maximum number of retry attempts before giving up.
+    pub max_attempts: u32,
+}
+
+impl RateLimitBackoff {
+    /// Create a new resolver with the given backoff parameters.
+    pub fn new(delay_ms: u64, max_attempts: u32) -> Self {
+        Self {
+            delay_ms,
+            max_attempts,
+        }
+    }
+}
+
+impl Resolution for RateLimitBackoff {
+    fn name(&self) -> &'static str {
+        "RateLimitBackoff"
+    }
+
+    fn offline_capable(&self) -> bool {
+        true
+    }
+
+    fn resolve(&self, ctx: &RecoveryContext) -> ResolutionOutcome {
+        // Only relevant for rate-limiting failures.
+        if classify(ctx.message) != FailureKind::RateLimited {
+            return ResolutionOutcome::Escalate;
+        }
+
+        ResolutionOutcome::Resolved(RecoveryAction::Retry {
+            delay_ms: self.delay_ms,
+            max_attempts: self.max_attempts,
+        })
+    }
+}
+
+// ============================================================================
 // RecoveryTree
 // ============================================================================
 
@@ -314,6 +361,12 @@ impl RecoveryTree {
 
         // LlmUnreachable → LocalEndpointFallback (offline)
         tree.register(FailureKind::LlmUnreachable, Box::new(LocalEndpointFallback));
+
+        // RateLimited → RateLimitBackoff (offline)
+        tree.register(
+            FailureKind::RateLimited,
+            Box::new(RateLimitBackoff::new(2000, 3)),
+        );
 
         tree
     }
@@ -739,6 +792,77 @@ mod tests {
         match outcome {
             ResolutionOutcome::Resolved(_) => {}
             other => panic!("expected Resolved, got {:?}", other),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // RateLimitBackoff
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_rate_limit_backoff_resolves_rate_limited() {
+        let resolver = RateLimitBackoff::new(2000, 3);
+        let config = make_config("https://api.example.com/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "429 Too Many Requests",
+        };
+        let outcome = resolver.resolve(&ctx);
+        match outcome {
+            ResolutionOutcome::Resolved(RecoveryAction::Retry {
+                delay_ms,
+                max_attempts,
+            }) => {
+                assert_eq!(delay_ms, 2000);
+                assert_eq!(max_attempts, 3);
+            }
+            other => panic!("expected Resolved(Retry), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_backoff_non_rate_limited_escalates() {
+        let resolver = RateLimitBackoff::new(2000, 3);
+        let config = make_config("https://api.example.com/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "connection refused",
+        };
+        match resolver.resolve(&ctx) {
+            ResolutionOutcome::Escalate => {}
+            other => panic!("expected Escalate, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_rate_limit_backoff_offline_capable() {
+        let resolver = RateLimitBackoff::new(2000, 3);
+        assert!(resolver.offline_capable());
+        assert_eq!(resolver.name(), "RateLimitBackoff");
+    }
+
+    #[test]
+    fn test_recovery_tree_with_defaults_resolves_rate_limited() {
+        let tree = RecoveryTree::with_defaults();
+        let config = make_config("https://api.example.com/v1");
+        let signal = FailureSignal {
+            kind: FailureKind::RateLimited,
+            message: "429 Too Many Requests".to_string(),
+        };
+        let ctx = RecoveryContext {
+            config: &config,
+            message: &signal.message,
+        };
+        let outcome = tree.resolve(&signal, &ctx);
+        match outcome {
+            ResolutionOutcome::Resolved(RecoveryAction::Retry {
+                delay_ms,
+                max_attempts,
+            }) => {
+                assert_eq!(delay_ms, 2000);
+                assert_eq!(max_attempts, 3);
+            }
+            other => panic!("expected Resolved(Retry), got {:?}", other),
         }
     }
 

@@ -1035,6 +1035,50 @@ impl Agent {
                         continue;
                     }
 
+                    // --- Recovery tree (INCREMENT 2) ---
+                    // When auto_recovery is enabled, classify the error and
+                    // walk the offline-first resolution tree.  If a resolver
+                    // produces a concrete RecoveryAction, apply it and retry.
+                    // This sits BETWEEN the consecutive_error_recoveries
+                    // terminal and the existing nudge/advice logic so the
+                    // terminal guard still fires at MAX.
+                    if self.config.continuous_work.auto_recovery {
+                        let kind = crate::self_healing::recovery_tree::classify(&error);
+                        let signal = crate::self_healing::FailureSignal {
+                            kind,
+                            message: error.clone(),
+                        };
+                        let ctx = crate::self_healing::RecoveryContext {
+                            config: &self.config,
+                            message: &error,
+                        };
+                        let outcome = crate::self_healing::RecoveryTree::with_defaults()
+                            .resolve(&signal, &ctx);
+                        if let crate::self_healing::ResolutionOutcome::Resolved(action) =
+                            outcome
+                        {
+                            match self.apply_recovery_action(&action).await {
+                                Ok(true) => {
+                                    tracing::info!(
+                                        "Recovery tree resolved failure (kind={:?}) — retrying execution",
+                                        kind
+                                    );
+                                    record_state_transition("ErrorRecovery", "Executing");
+                                    self.set_loop_state(AgentState::Executing {
+                                        step: self.loop_control.current_step(),
+                                    })?;
+                                    continue;
+                                }
+                                Ok(false) | Err(_) => {
+                                    // Action not handled or failed to apply —
+                                    // fall through to existing nudge/advice.
+                                }
+                            }
+                        }
+                        // Escalate / Unresolvable: fall through to existing
+                        // nudge/advice behavior unchanged.
+                    }
+
                     #[cfg(feature = "resilience")]
                     let mut recovered = false;
                     #[cfg(not(feature = "resilience"))]
