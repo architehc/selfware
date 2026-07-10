@@ -459,53 +459,85 @@ impl ApiClient {
                 request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
 
-            match request.json(&body).send().await {
-                Ok(response) => {
-                    let status = response.status();
-                    if status.is_success() {
-                        let stream_chunk_timeout_secs = self.config.agent.step_timeout_secs.max(30);
-                        return Ok(StreamingResponse::new(
-                            response,
-                            Duration::from_secs(stream_chunk_timeout_secs),
-                        ));
-                    }
-
-                    let retry_after = Self::parse_retry_after(response.headers());
-                    let text = response.text().await.unwrap_or_default();
-                    if Self::is_retryable_status(status) && attempt < max_attempts {
-                        let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
-                        warn!(
-                            "Streaming request retryable error {} (attempt {}/{}); retrying after {}ms{}",
-                            status, attempt, max_attempts, sleep_ms,
-                            if retry_after.is_some() { " (server Retry-After)" } else { " (jittered)" }
-                        );
-                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-                        delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
-                        continue;
-                    }
-                    return Err(ApiError::HttpStatus {
-                        status: status.as_u16(),
-                        message: text,
-                    }
-                    .into());
-                }
-                Err(e) => {
+            // Bound the wait for RESPONSE HEADERS without bounding the body.
+            // `connect_timeout` only covers TCP connect; a server that accepts
+            // the connection then stalls before sending headers would hang
+            // forever.  We use a header timeout of at least 120 s (or the
+            // agent step timeout if larger) so slow-but-healthy models are
+            // unaffected.  The body is then streamed as before (per-chunk
+            // timeout only — NO total timeout on the body).
+            let hdr_timeout_secs = self.config.agent.step_timeout_secs.max(120);
+            let send_result = tokio::time::timeout(
+                Duration::from_secs(hdr_timeout_secs),
+                request.json(&body).send(),
+            )
+            .await;
+            match send_result {
+                Err(_elapsed) => {
                     if attempt < max_attempts {
                         let sleep_ms = self.retry_sleep_ms(delay_ms, None);
                         warn!(
-                            "Streaming request network error: {} (attempt {}/{}); retrying after {}ms (jittered)",
-                            e, attempt, max_attempts, sleep_ms
+                            "Streaming request header timeout after {}s (attempt {}/{}); retrying after {}ms (jittered)",
+                            hdr_timeout_secs, attempt, max_attempts, sleep_ms
                         );
                         tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
                     return Err(ApiError::Network(format!(
-                        "Failed to send streaming request after {} attempts: {}",
-                        attempt, e
+                        "Streaming request timed out waiting for response headers after {}s ({} attempts)",
+                        hdr_timeout_secs, attempt
                     ))
                     .into());
                 }
+                Ok(matched) => match matched {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            let stream_chunk_timeout_secs = self.config.agent.step_timeout_secs.max(30);
+                            return Ok(StreamingResponse::new(
+                                response,
+                                Duration::from_secs(stream_chunk_timeout_secs),
+                            ));
+                        }
+
+                        let retry_after = Self::parse_retry_after(response.headers());
+                        let text = response.text().await.unwrap_or_default();
+                        if Self::is_retryable_status(status) && attempt < max_attempts {
+                            let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
+                            warn!(
+                                "Streaming request retryable error {} (attempt {}/{}); retrying after {}ms{}",
+                                status, attempt, max_attempts, sleep_ms,
+                                if retry_after.is_some() { " (server Retry-After)" } else { " (jittered)" }
+                            );
+                            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                            delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                            continue;
+                        }
+                        return Err(ApiError::HttpStatus {
+                            status: status.as_u16(),
+                            message: text,
+                        }
+                        .into());
+                    }
+                    Err(e) => {
+                        if attempt < max_attempts {
+                            let sleep_ms = self.retry_sleep_ms(delay_ms, None);
+                            warn!(
+                                "Streaming request network error: {} (attempt {}/{}); retrying after {}ms (jittered)",
+                                e, attempt, max_attempts, sleep_ms
+                            );
+                            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                            delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
+                            continue;
+                        }
+                        return Err(ApiError::Network(format!(
+                            "Failed to send streaming request after {} attempts: {}",
+                            attempt, e
+                        ))
+                        .into());
+                    }
+                },
             }
         }
 

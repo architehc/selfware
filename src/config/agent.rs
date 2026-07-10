@@ -128,7 +128,7 @@ impl Default for AgentConfig {
             context_compression_ratio: default_context_compression_ratio(),
             context_thinking_ratio: default_context_thinking_ratio(),
             compression_detail: default_compression_detail(),
-            disable_turn_artifacts: false,
+            disable_turn_artifacts: true,
             prompt_profile: default_prompt_profile(),
             post_edit_test_command: None,
             max_budget_tokens: None,
@@ -321,7 +321,10 @@ mod tests {
         assert!(cfg.require_verification_before_completion);
         assert_eq!(cfg.read_loop_policy, ReadLoopPolicy::ForceMutation);
         assert!(!cfg.require_visual_verification);
-        assert!(!cfg.disable_turn_artifacts);
+        // P0 privacy: turn artifacts (request/response/reasoning/tool-args
+        // written to disk) must be OFF by default so secrets in conversation
+        // text are NOT persisted unless the user explicitly opts in.
+        assert!(cfg.disable_turn_artifacts);
         assert_eq!(cfg.post_edit_test_command, None);
         assert_eq!(cfg.max_budget_tokens, None);
         assert_eq!(cfg.max_wall_secs, None);
