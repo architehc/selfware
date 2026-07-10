@@ -1471,6 +1471,8 @@ mod tests {
             new_visual_assertions: vec![],
             pending_visual_assertion: None,
             updated_tokens: None,
+            cumulative_tokens: None,
+            elapsed_wall_secs: None,
             git_checkpoint: None,
         };
         let result = cp.apply_delta(&delta);
@@ -1500,6 +1502,8 @@ mod tests {
             new_visual_assertions: vec![],
             pending_visual_assertion: None,
             updated_tokens: None,
+            cumulative_tokens: None,
+            elapsed_wall_secs: None,
             git_checkpoint: None,
         };
         let result = cp.apply_delta(&delta);
@@ -1548,6 +1552,8 @@ mod tests {
             new_visual_assertions: vec![],
             pending_visual_assertion: None,
             updated_tokens: Some(9999),
+            cumulative_tokens: None,
+            elapsed_wall_secs: None,
             git_checkpoint: Some(GitCheckpointInfo {
                 branch: "dev".to_string(),
                 commit_hash: "xyz789".to_string(),
@@ -1595,6 +1601,8 @@ mod tests {
             new_visual_assertions: vec![],
             pending_visual_assertion: None,
             updated_tokens: None, // should not change
+            cumulative_tokens: None,
+            elapsed_wall_secs: None,
             git_checkpoint: None,
         };
 
@@ -1629,6 +1637,8 @@ mod tests {
             new_visual_assertions: vec![],
             pending_visual_assertion: None,
             updated_tokens: Some(15000),
+            cumulative_tokens: None,
+            elapsed_wall_secs: None,
             git_checkpoint: None,
         };
 

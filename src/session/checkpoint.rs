@@ -273,6 +273,12 @@ pub struct CheckpointDelta {
     pub new_visual_assertions: Vec<VisualAssertion>,
 
     pub updated_tokens: Option<usize>,
+    // Cumulative budget consumption — carried in the delta so incremental saves
+    // don't lose it (otherwise resume reconstructs a stale budget and resets it).
+    #[serde(default)]
+    pub cumulative_tokens: Option<usize>,
+    #[serde(default)]
+    pub elapsed_wall_secs: Option<u64>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
 
     // Visual assertion state (changes are always recorded, None means no change)
@@ -340,6 +346,10 @@ impl TaskCheckpoint {
             (self.current_iteration != base.current_iteration).then_some(self.current_iteration);
         let updated_tokens =
             (self.estimated_tokens != base.estimated_tokens).then_some(self.estimated_tokens);
+        let cumulative_tokens =
+            (self.cumulative_tokens != base.cumulative_tokens).then_some(self.cumulative_tokens);
+        let elapsed_wall_secs =
+            (self.elapsed_wall_secs != base.elapsed_wall_secs).then_some(self.elapsed_wall_secs);
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
             // Delta format cannot encode "explicitly clear git checkpoint".
             // Force a full checkpoint write for this transition.
@@ -391,6 +401,8 @@ impl TaskCheckpoint {
             || !new_errors.is_empty()
             || !new_visual_assertions.is_empty()
             || updated_tokens.is_some()
+            || cumulative_tokens.is_some()
+            || elapsed_wall_secs.is_some()
             || git_checkpoint.is_some()
             || pending_changed;
 
@@ -412,6 +424,8 @@ impl TaskCheckpoint {
             new_errors,
             new_visual_assertions,
             updated_tokens,
+            cumulative_tokens,
+            elapsed_wall_secs,
             git_checkpoint,
             pending_visual_assertion,
         })
@@ -455,6 +469,12 @@ impl TaskCheckpoint {
 
         if let Some(tokens) = delta.updated_tokens {
             self.estimated_tokens = tokens;
+        }
+        if let Some(tokens) = delta.cumulative_tokens {
+            self.cumulative_tokens = tokens;
+        }
+        if let Some(secs) = delta.elapsed_wall_secs {
+            self.elapsed_wall_secs = secs;
         }
         if let Some(ref git) = delta.git_checkpoint {
             self.git_checkpoint = Some(git.clone());
@@ -2541,5 +2561,26 @@ mod tests {
         let restored: TaskCheckpoint = serde_json::from_value(legacy_value).unwrap();
         assert_eq!(restored.cumulative_tokens, 0);
         assert_eq!(restored.elapsed_wall_secs, 0);
+    }
+
+    #[test]
+    fn delta_carries_cumulative_budget_across_apply() {
+        let mut base = TaskCheckpoint::new("t".to_string(), "d".to_string());
+        base.cumulative_tokens = 100;
+        base.elapsed_wall_secs = 30;
+        // A newer checkpoint that consumed more budget.
+        let mut newer = base.clone();
+        newer.version = base.version + 1;
+        newer.current_step = base.current_step + 1;
+        newer.cumulative_tokens = 500;
+        newer.elapsed_wall_secs = 90;
+        let delta = newer.compute_delta(&base).expect("delta should exist");
+        assert_eq!(delta.cumulative_tokens, Some(500));
+        assert_eq!(delta.elapsed_wall_secs, Some(90));
+        // Applying the delta to the base must update the budget (not keep it stale).
+        let mut reconstructed = base.clone();
+        reconstructed.apply_delta(&delta).unwrap();
+        assert_eq!(reconstructed.cumulative_tokens, 500);
+        assert_eq!(reconstructed.elapsed_wall_secs, 90);
     }
 }

@@ -536,37 +536,37 @@ impl Agent {
             }
         }
 
+        // Trailing newline is DISPLAY output — suppress it in json/quiet mode.
         if !tui_active && !suppress_stream_stdout {
-            // Ensure we end with a newline if we printed content
             if !content.is_empty() || !reasoning.is_empty() {
                 println!();
             }
+        }
 
-            // Cache the response for long-term memory (using cloned data from before move)
-            if !content.is_empty() {
-                let reasoning_opt: Option<String> = if reasoning.is_empty() {
-                    None
-                } else {
-                    Some(reasoning.clone())
-                };
-                let tool_calls_opt: Option<Vec<ToolCall>> = if tool_calls.is_empty() {
-                    None
-                } else {
-                    Some(tool_calls.clone())
-                };
+        // Response caching is NOT display — it must run regardless of output
+        // mode. (It was previously nested under the display guard above, so
+        // json/quiet mode accidentally skipped caching.)
+        if !tui_active && !content.is_empty() {
+            let reasoning_opt: Option<String> = if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning.clone())
+            };
+            let tool_calls_opt: Option<Vec<ToolCall>> = if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls.clone())
+            };
 
-                self.cache_response(
-                    &messages_for_cache,
-                    &tools_for_cache,
-                    thinking,
-                    &content,
-                    &reasoning_opt,
-                    &tool_calls_opt,
-                )
-                .await;
-            }
-
-            // No per-call summary — chat_streaming runs multiple times per task.
+            self.cache_response(
+                &messages_for_cache,
+                &tools_for_cache,
+                thinking,
+                &content,
+                &reasoning_opt,
+                &tool_calls_opt,
+            )
+            .await;
         }
 
         // Mirror the non-streaming path: emit `LlmResponseReceived` once the
