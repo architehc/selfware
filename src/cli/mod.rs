@@ -3143,6 +3143,88 @@ max_recovery_attempts = 3
                 .await
                 .map_err(|e| anyhow::anyhow!("Task panicked: {}", e))??;
         }
+
+        Commands::Runs { command } => {
+            use crate::supervision::run_supervisor::{RunId, RunStatus, RunSupervisor};
+            use args::RunsCommand;
+
+            let supervisor = RunSupervisor::new();
+
+            match command {
+                RunsCommand::Start { task } => {
+                    if !quiet {
+                        println!("{} Starting supervised run…", Glyphs::gear());
+                    }
+                    let id = supervisor.start(task.clone(), config.clone()).await;
+                    println!("started run {}", id);
+
+                    if let Some(mut rx) = supervisor.attach(&id).await {
+                        loop {
+                            // Check for terminal status first so we don't
+                            // block forever on a closed-but-drained channel.
+                            if let Some(st) = supervisor.status(&id).await {
+                                if matches!(
+                                    st,
+                                    RunStatus::Completed
+                                        | RunStatus::Failed
+                                        | RunStatus::Aborted
+                                ) {
+                                    break;
+                                }
+                            }
+                            match rx.recv().await {
+                                Ok(ev) => {
+                                    if !quiet {
+                                        // Concise one-line summary of the event.
+                                        println!("  [{id}] {ev:?}");
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // Print the final status.
+                    match supervisor.status(&id).await {
+                        Some(st) => println!("run {} final status: {:?}", id, st),
+                        None => println!("run {} status: unknown (run vanished)", id),
+                    }
+                }
+
+                RunsCommand::List => {
+                    let runs = supervisor.list().await;
+                    if runs.is_empty() {
+                        println!(
+                            "No runs in this process. \
+                             (Cross-invocation run tracking requires a persistent \
+                             supervisor/daemon — planned.)"
+                        );
+                    } else {
+                        println!("{:<10} {}", "ID", "STATUS");
+                        for (rid, st) in runs {
+                            println!("run-{:<7} {:?}", rid.0, st);
+                        }
+                    }
+                }
+
+                RunsCommand::Abort { id } => {
+                    let ok = supervisor.abort(&RunId(id)).await;
+                    if ok {
+                        println!("Aborted run-{}.", id);
+                    } else {
+                        println!(
+                            "Run-{} not found in this process. \
+                             (Cross-invocation run tracking requires a persistent \
+                             supervisor/daemon — planned.)",
+                            id
+                        );
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

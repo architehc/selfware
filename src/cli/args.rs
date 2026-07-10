@@ -537,6 +537,12 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: StateCommands,
     },
+
+    /// Supervised run management (start, list, abort agent runs)
+    Runs {
+        #[command(subcommand)]
+        command: RunsCommand,
+    },
 }
 
 /// Subcommands of `selfware swebench`.
@@ -819,6 +825,29 @@ pub(crate) enum StateCommands {
         /// Skip confirmation if state exists
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+/// Subcommands of `selfware runs`.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum RunsCommand {
+    /// Start a task as a supervised run and stream its events.
+    Start {
+        /// The task description to run.
+        task: String,
+    },
+
+    /// List runs tracked by the current process.
+    ///
+    /// NOTE: Without a persistent supervisor/daemon, this is empty across
+    /// separate CLI invocations — only runs started *in this process* are
+    /// visible.
+    List,
+
+    /// Abort a run by id (current process only).
+    Abort {
+        /// The numeric run id to abort.
+        id: u64,
     },
 }
 
