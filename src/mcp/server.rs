@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::safety::SafetyChecker;
@@ -140,11 +144,20 @@ async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &
 /// MCP server that exposes Selfware tools and project resources.
 pub struct McpServer {
     /// The tool registry containing all available tools.
-    registry: ToolRegistry,
+    ///
+    /// Wrapped in `Arc<RwLock<…>>` so that multiple concurrent handler tasks
+    /// can share read access to the registry for `list`/`get`/`execute`,
+    /// while `activate` (which needs `&mut`) takes a brief write lock that
+    /// is **never** held across the tool-execution `.await`.
+    registry: Arc<RwLock<ToolRegistry>>,
     /// Root directory for project resource exposure.
     project_root: PathBuf,
     /// Whether the server has been initialized.
-    initialized: bool,
+    ///
+    /// `Arc<AtomicBool>` so that the flag set by the `initialize` handler
+    /// is visible to all concurrently-spawned handler tasks without needing
+    /// `&mut self` on `McpServer`.
+    initialized: Arc<AtomicBool>,
     /// Gates every tools/call the same way the CLI/TUI agent loop does --
     /// without this, an MCP client (any external AI tool speaking the
     /// protocol) could invoke any registered tool, including shell_exec/
@@ -189,9 +202,9 @@ impl McpServer {
     pub fn with_project_root(project_root: PathBuf) -> Self {
         let project_root_env = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            registry: ToolRegistry::new(),
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
             project_root,
-            initialized: false,
+            initialized: Arc::new(AtomicBool::new(false)),
             safety: SafetyChecker::new(&load_mcp_safety_config(None)),
             config_path: None,
             _project_root_env: project_root_env,
@@ -206,9 +219,9 @@ impl McpServer {
     pub fn with_config(config_path: Option<String>) -> Self {
         let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         Self {
-            registry: ToolRegistry::new(),
+            registry: Arc::new(RwLock::new(ToolRegistry::new())),
             project_root,
-            initialized: false,
+            initialized: Arc::new(AtomicBool::new(false)),
             safety: SafetyChecker::new(&load_mcp_safety_config(config_path.as_deref())),
             config_path,
             _project_root_env: PathBuf::from("."),
@@ -216,7 +229,7 @@ impl McpServer {
     }
 
     /// Handle a parsed JSON-RPC request and return a response (or `None` for notifications).
-    pub async fn handle_request(&mut self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+    pub async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = match &request.id {
             Some(id) => id.clone(),
             None => {
@@ -230,7 +243,7 @@ impl McpServer {
         // `initialize` handshake to have been completed first (MCP spec).
         // Without this, a client could call `tools/call` before initializing.
         const PRE_INIT_METHODS: &[&str] = &["initialize", "ping", "shutdown"];
-        if !self.initialized && !PRE_INIT_METHODS.contains(&request.method.as_str()) {
+        if !self.initialized.load(Ordering::SeqCst) && !PRE_INIT_METHODS.contains(&request.method.as_str()) {
             return Some(JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -248,7 +261,7 @@ impl McpServer {
 
         let (result, error) = match request.method.as_str() {
             "initialize" => self.handle_initialize(&request.params),
-            "tools/list" => self.handle_tools_list(&request.params),
+            "tools/list" => self.handle_tools_list(&request.params).await,
             "tools/call" => self.handle_tools_call(&request.params).await,
             "resources/list" => self.handle_resources_list(&request.params),
             "resources/read" => self.handle_resources_read(&request.params).await,
@@ -276,7 +289,7 @@ impl McpServer {
     }
 
     /// Handle notifications (no response expected).
-    async fn handle_notification(&mut self, request: &JsonRpcRequest) {
+    async fn handle_notification(&self, request: &JsonRpcRequest) {
         match request.method.as_str() {
             "notifications/initialized" => {
                 info!("MCP client confirmed initialization");
@@ -300,7 +313,7 @@ impl McpServer {
 
     /// Handle `initialize` request.
     fn handle_initialize(
-        &mut self,
+        &self,
         params: &Option<Value>,
     ) -> (Option<Value>, Option<JsonRpcError>) {
         // Check the client's requested protocolVersion.  The MCP spec says
@@ -320,7 +333,7 @@ impl McpServer {
             }
         }
 
-        self.initialized = true;
+        self.initialized.store(true, Ordering::SeqCst);
 
         let result = serde_json::json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
@@ -342,9 +355,9 @@ impl McpServer {
     }
 
     /// Handle `tools/list` request.
-    fn handle_tools_list(&self, _params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
-        let tools: Vec<Value> = self
-            .registry
+    async fn handle_tools_list(&self, _params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
+        let registry = self.registry.read().await;
+        let tools: Vec<Value> = registry
             .list()
             .iter()
             .map(|tool| {
@@ -366,8 +379,14 @@ impl McpServer {
     /// deferred), it is activated on demand — the same way the agent's tool
     /// discovery activates tools — so that every tool advertised by
     /// `tools/list` can actually be called.
+    ///
+    /// **Concurrency note:** The registry is behind an `Arc<RwLock<…>>`.
+    /// Read locks are used for schema validation and tool lookup.  A *brief*
+    /// write lock is taken only for the `activate` call, and it is dropped
+    /// before the tool-execution `.await` so that concurrent calls are not
+    /// serialized by the lock.
     async fn handle_tools_call(
-        &mut self,
+        &self,
         params: &Option<Value>,
     ) -> (Option<Value>, Option<JsonRpcError>) {
         let params = match params {
@@ -416,23 +435,26 @@ impl McpServer {
         // below will produce a tool-not-found error response).  If the tool
         // is registered but exposes no usable schema (e.g. schema is not an
         // object), skip validation for that tool.
-        if let Some(tool) = self.registry.get(tool_name) {
-            let schema = tool.schema();
-            if schema.is_object() {
-                if let Err(e) =
-                    crate::tools::validate_tool_arguments_schema(tool_name, &schema, &arguments)
-                {
-                    return (
-                        None,
-                        Some(JsonRpcError {
-                            code: INVALID_PARAMS,
-                            message: e.to_string(),
-                            data: Some(serde_json::json!({
-                                "tool": tool_name,
-                                "arguments": arguments,
-                            })),
-                        }),
-                    );
+        {
+            let registry = self.registry.read().await;
+            if let Some(tool) = registry.get(tool_name) {
+                let schema = tool.schema();
+                if schema.is_object() {
+                    if let Err(e) =
+                        crate::tools::validate_tool_arguments_schema(tool_name, &schema, &arguments)
+                    {
+                        return (
+                            None,
+                            Some(JsonRpcError {
+                                code: INVALID_PARAMS,
+                                message: e.to_string(),
+                                data: Some(serde_json::json!({
+                                    "tool": tool_name,
+                                    "arguments": arguments,
+                                })),
+                            }),
+                        );
+                    }
                 }
             }
         }
@@ -462,14 +484,29 @@ impl McpServer {
         // demand so that every tool advertised in tools/list is actually
         // callable.  This mirrors how the agent's tool discovery activates
         // deferred tools before first use.
-        if self.registry.get(tool_name).is_some()
-            && self.registry.get_activated(tool_name).is_none()
+        //
+        // We take a brief write lock for `activate` and drop it immediately
+        // — never holding it across the `execute` await below, to avoid
+        // serializing concurrent tool calls.
         {
-            debug!("tools/call: activating deferred tool '{}' on demand", tool_name);
-            self.registry.activate(tool_name);
+            let needs_activate = {
+                let registry = self.registry.read().await;
+                registry.get(tool_name).is_some()
+                    && registry.get_activated(tool_name).is_none()
+            };
+            if needs_activate {
+                debug!("tools/call: activating deferred tool '{}' on demand", tool_name);
+                let mut registry = self.registry.write().await;
+                registry.activate(tool_name);
+            }
         }
 
-        match self.registry.execute(tool_name, arguments).await {
+        let result = {
+            let registry = self.registry.read().await;
+            registry.execute(tool_name, arguments).await
+        };
+
+        match result {
             Ok(result) => {
                 // Convert tool result to MCP content format.
                 let text = match result.as_str() {
@@ -796,11 +833,29 @@ pub async fn run_mcp_server(
     eprintln!("selfware MCP server v{} starting...", SERVER_VERSION);
     info!("MCP server starting on stdio transport");
 
-    let mut server = McpServer::with_config(config_path.map(|s| s.to_string()));
+    // Wrap the server in an Arc so it can be cheaply cloned into each
+    // per-request handler task.  All interior mutability is handled via
+    // Arc<AtomicBool> (initialized flag) and Arc<RwLock<ToolRegistry>>.
+    let server = Arc::new(McpServer::with_config(config_path.map(|s| s.to_string())));
 
     let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
+
+    // Channel through which handler tasks send their serialized responses to
+    // the single writer task.  This serializes all stdout writes.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    // Spawn ONE writer task that owns stdout — this serializes all writes
+    // so concurrent handler tasks never interleave their Content-Length frames.
+    let writer_task = tokio::spawn(async move {
+        let mut so = tokio::io::stdout();
+        while let Some(body) = rx.recv().await {
+            // Ignore write errors — there's nothing we can do if stdout is broken.
+            if let Err(e) = write_message(&mut so, &body).await {
+                eprintln!("MCP server: write error: {}", e);
+            }
+        }
+    });
 
     loop {
         let message = match read_message(&mut reader).await {
@@ -810,7 +865,7 @@ pub async fn run_mcp_server(
                 break;
             }
             Err(e) => {
-                // Send a parse error response and continue.
+                // Send a parse error response via the channel.
                 let error_response = JsonRpcResponse {
                     jsonrpc: "2.0",
                     id: Value::Null,
@@ -821,8 +876,9 @@ pub async fn run_mcp_server(
                         data: None,
                     }),
                 };
-                let body = serde_json::to_string(&error_response)?;
-                write_message(&mut stdout, &body).await?;
+                if let Ok(body) = serde_json::to_string(&error_response) {
+                    let _ = tx.send(body);
+                }
                 continue;
             }
         };
@@ -841,8 +897,9 @@ pub async fn run_mcp_server(
                         data: None,
                     }),
                 };
-                let body = serde_json::to_string(&error_response)?;
-                write_message(&mut stdout, &body).await?;
+                if let Ok(body) = serde_json::to_string(&error_response) {
+                    let _ = tx.send(body);
+                }
                 continue;
             }
         };
@@ -856,10 +913,20 @@ pub async fn run_mcp_server(
         let is_shutdown = request.method == "shutdown"
             || request.method == "notifications/exit";
 
-        // Handle the request.
-        if let Some(response) = server.handle_request(&request).await {
-            let body = serde_json::to_string(&response)?;
-            write_message(&mut stdout, &body).await?;
+        // Spawn a task to handle each request concurrently.  The task
+        // clones the Arc<McpServer> handle and the channel sender, runs
+        // `handle_request`, and sends the serialized response (if any) to
+        // the writer task.  Notifications (None response) send nothing.
+        {
+            let server = Arc::clone(&server);
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Some(resp) = server.handle_request(&request).await {
+                    if let Ok(body) = serde_json::to_string(&resp) {
+                        let _ = tx.send(body);
+                    }
+                }
+            });
         }
 
         if is_shutdown {
@@ -867,6 +934,13 @@ pub async fn run_mcp_server(
             break;
         }
     }
+
+    // Drop the original sender so the writer task's `rx.recv()` will return
+    // None once all in-flight handler tasks have finished sending.
+    drop(tx);
+
+    // Wait for the writer task to drain remaining responses and exit.
+    let _ = writer_task.await;
 
     eprintln!("selfware MCP server stopped.");
     Ok(())
@@ -881,7 +955,7 @@ mod tests {
     use super::*;
 
     /// Helper: initialize a server so post-init methods can be tested.
-    async fn initialize_server(server: &mut McpServer) {
+    async fn initialize_server(server: &McpServer) {
         let req = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             id: Some(Value::from(0)),
@@ -962,7 +1036,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_initialize() {
-        let mut server = McpServer::new();
+        let server = McpServer::new();
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -993,13 +1067,13 @@ mod tests {
             Some("selfware")
         );
         assert!(result.get("capabilities").is_some());
-        assert!(server.initialized);
+        assert!(server.initialized.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
     async fn test_handle_tools_list() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1025,8 +1099,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_missing_params() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1042,8 +1116,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_missing_name() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1059,8 +1133,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_unknown_tool() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1084,8 +1158,8 @@ mod tests {
         // Regression test: an MCP client (any external tool speaking the
         // protocol) used to be able to invoke any registered tool, including
         // shell_exec, with none of the src/safety/ checks applied at all.
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1110,8 +1184,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_allows_safe_shell_command() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1134,8 +1208,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_resources_list() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1163,8 +1237,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_resources_read_missing_params() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1180,8 +1254,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_resources_read_unknown_uri() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1197,8 +1271,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_resources_read_project_files() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1216,8 +1290,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_resources_read_project_structure() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1236,8 +1310,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_method_not_found() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1253,7 +1327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_ping() {
-        let mut server = McpServer::new();
+        let server = McpServer::new();
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1269,7 +1343,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_notification_no_response() {
-        let mut server = McpServer::new();
+        let server = McpServer::new();
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1316,8 +1390,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_resources_read_file_path_escape() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1347,8 +1421,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_list_has_correct_schema_format() {
-        let mut server = McpServer::new();
-        initialize_server(&mut server).await;
+        let server = McpServer::new();
+        initialize_server(&server).await;
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1383,7 +1457,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_shutdown() {
-        let mut server = McpServer::new();
+        let server = McpServer::new();
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1400,8 +1474,8 @@ mod tests {
     async fn test_tools_call_rejected_before_initialize() {
         // A client must not be able to call tools/call before the
         // `initialize` handshake has been completed.
-        let mut server = McpServer::new();
-        assert!(!server.initialized);
+        let server = McpServer::new();
+        assert!(!server.initialized.load(Ordering::SeqCst));
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1420,7 +1494,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tools_list_rejected_before_initialize() {
-        let mut server = McpServer::new();
+        let server = McpServer::new();
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1436,8 +1510,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_ping_allowed_before_initialize() {
-        let mut server = McpServer::new();
-        assert!(!server.initialized);
+        let server = McpServer::new();
+        assert!(!server.initialized.load(Ordering::SeqCst));
 
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
@@ -1453,7 +1527,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tools_call_allowed_after_initialize() {
-        let mut server = McpServer::new();
+        let server = McpServer::new();
 
         // Initialize first
         let init_req = JsonRpcRequest {
@@ -1463,7 +1537,7 @@ mod tests {
             params: Some(serde_json::json!({})),
         };
         server.handle_request(&init_req).await;
-        assert!(server.initialized);
+        assert!(server.initialized.load(Ordering::SeqCst));
 
         // Now tools/call should not be rejected with INVALID_REQUEST
         let request = JsonRpcRequest {
@@ -1500,5 +1574,45 @@ mod tests {
         assert!(!tree.is_empty());
         // Should contain directory markers
         assert!(tree.contains('/'));
+    }
+
+    /// Verify that a cloned `McpServer` (as used by per-request tasks)
+    /// shares the `initialized` flag — i.e. that `initialize` on one clone
+    /// is visible to all others.  This is the core concurrency invariant.
+    #[tokio::test]
+    async fn test_concurrent_handle_request_via_shared_handle() {
+        let server = std::sync::Arc::new(McpServer::new());
+
+        // Initialize via the shared handle.
+        let init_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(100)),
+            method: "initialize".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let _ = server.handle_request(&init_req).await.unwrap();
+        assert!(server.initialized.load(std::sync::atomic::Ordering::SeqCst));
+
+        // Spawn multiple concurrent tools/list requests through cloned handles.
+        // If the shared state works, all should succeed (no INVALID_REQUEST).
+        let mut handles = Vec::new();
+        for i in 0..5u64 {
+            let server = std::sync::Arc::clone(&server);
+            handles.push(tokio::spawn(async move {
+                let req = JsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: Some(Value::from(200 + i)),
+                    method: "tools/list".to_string(),
+                    params: None,
+                };
+                server.handle_request(&req).await.unwrap()
+            }));
+        }
+
+        for handle in handles {
+            let response = handle.await.unwrap();
+            assert!(response.error.is_none(), "concurrent tools/list should succeed");
+            assert!(response.result.is_some());
+        }
     }
 }
