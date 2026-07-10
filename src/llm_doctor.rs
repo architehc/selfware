@@ -1427,7 +1427,7 @@ async fn test_tool_calling(
         Err(_) => return Ok(Some(false)),
     };
 
-    // Check if the response contains tool_calls
+    // Check if the response contains native tool_calls
     let has_tool_calls = body
         .get("choices")
         .and_then(|c| c.as_array())
@@ -1436,6 +1436,30 @@ async fn test_tool_calling(
         .and_then(|msg| msg.get("tool_calls"))
         .and_then(|tc| tc.as_array())
         .is_some_and(|arr| !arr.is_empty());
+
+    // GLM-5.2, Qwen, and other text-format models emit tool calls as
+    // text/XML inside the `content` field rather than as native `tool_calls`.
+    // If there are no native tool_calls, also check whether the response
+    // content contains a parseable text/XML tool call before concluding that
+    // tool calling is broken.
+    if !has_tool_calls {
+        let content = body
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|msg| msg.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+
+        if !content.is_empty() {
+            let parsed = crate::tool_parser::parse_tool_calls(content);
+            if !parsed.tool_calls.is_empty() {
+                return Ok(Some(true));
+            }
+        }
+        return Ok(Some(false));
+    }
 
     Ok(Some(has_tool_calls))
 }
