@@ -23,7 +23,7 @@ enum LoopMode {
     Resume,
 }
 
-fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
+pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
     let msg = error.to_string();
     msg.contains("READ_LOOP_NO_EDIT")
         || msg.contains("EDIT_FAILURE_LOOP_AFTER_EDIT")
@@ -150,7 +150,14 @@ impl Agent {
         cli_println!("{}", "🦊 Selfware starting task...".bright_cyan());
         cli_println!("Task: {}", task.bright_white());
 
-        // Initialize checkpoint if not resuming
+        // Always start with a fresh checkpoint for a genuinely new task. When an
+        // Agent is reused for a queued follow-up, current_checkpoint is still
+        // Some from the previous task, so the new task's checkpoint description
+        // (and thus verification/gate) would reference the OLD task. Resetting
+        // here ensures each top-level run_task call gets its own checkpoint.
+        // Resume/continue_execution is unaffected — it does not go through
+        // run_task and keeps its existing checkpoint.
+        self.current_checkpoint = None;
         if self.current_checkpoint.is_none() {
             let task_id = uuid::Uuid::new_v4().to_string();
             self.current_checkpoint = Some(TaskCheckpoint::new(task_id, task.to_string()));
@@ -2009,6 +2016,48 @@ mod tests {
         target_os = "windows",
         ignore = "mock TCP server unreliable on Windows CI"
     )]
+    async fn test_run_task_queued_task_gets_fresh_checkpoint() {
+        // Bug #11: When an Agent is reused for a queued second task, the
+        // checkpoint from task 1 must NOT persist — the new task needs its
+        // own checkpoint with the correct task_description.
+        let server = MockLlmServer::builder()
+            // Task 1 responses
+            .with_response("Plan.")
+            .with_response("Done.")
+            // Task 2 responses
+            .with_response("Plan 2.")
+            .with_response("Done 2.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // First task
+        agent.run_task("First task").await.unwrap();
+        let first_task_id = agent.current_checkpoint.as_ref().unwrap().task_id.clone();
+        assert_eq!(
+            agent.current_checkpoint.as_ref().unwrap().task_description,
+            "First task"
+        );
+
+        // Second (queued) task — must get its OWN checkpoint, not inherit task 1's
+        agent.run_task("Second task").await.unwrap();
+        assert_ne!(
+            agent.current_checkpoint.as_ref().unwrap().task_id,
+            first_task_id
+        );
+        assert_eq!(
+            agent.current_checkpoint.as_ref().unwrap().task_description,
+            "Second task"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
     async fn test_run_task_adds_user_message() {
         let server = MockLlmServer::builder()
             .with_response("Planning.")
@@ -2137,7 +2186,10 @@ mod tests {
             "existing-id".to_string(),
             "Existing".to_string(),
         ));
-        agent.run_task("Continue working").await.unwrap();
+        // Resume via continue_execution (the proper resume path) so the
+        // existing checkpoint is preserved. run_task now always resets
+        // the checkpoint for a genuinely new task (bug #11 fix).
+        agent.continue_execution().await.unwrap();
         assert_eq!(
             agent.current_checkpoint.as_ref().unwrap().task_id,
             "existing-id"

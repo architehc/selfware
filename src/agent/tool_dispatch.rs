@@ -1734,8 +1734,20 @@ impl Agent {
                 if self.is_cancelled() {
                     break;
                 }
-                self.execute_single_tool_in_batch(name, args_str, tool_call_id)
-                    .await?;
+                if let Err(e) = self
+                    .execute_single_tool_in_batch(name, args_str, tool_call_id)
+                    .await
+                {
+                    if super::task_runner::is_fatal_loop_error(&e) {
+                        return Err(e);
+                    }
+                    // Non-fatal tool error: the tool-result message has already
+                    // been pushed by execute_single_tool_in_batch (or its
+                    // sub-calls). Log and continue so remaining tool_calls in
+                    // the batch still execute — dropping them would leave the
+                    // native-FC history unbalanced (N calls, k<N results).
+                    warn!("Non-fatal tool error in sequential batch: {e}");
+                }
             }
             return Ok(());
         }
@@ -1753,8 +1765,15 @@ impl Agent {
             if self.is_cancelled() {
                 break;
             }
-            self.execute_single_tool_in_batch(name, args_str, tool_call_id)
-                .await?;
+            if let Err(e) = self
+                .execute_single_tool_in_batch(name, args_str, tool_call_id)
+                .await
+            {
+                if super::task_runner::is_fatal_loop_error(&e) {
+                    return Err(e);
+                }
+                warn!("Non-fatal tool error in sequential batch (phase 4): {e}");
+            }
         }
 
         Ok(())
