@@ -197,7 +197,10 @@ impl App {
         });
     }
 
-    /// Clear chat history (keeping a fresh system message)
+    /// Clear chat history (keeping a fresh system message).
+    ///
+    /// Also clears any in-progress streaming buffer so that a partial
+    /// assistant response does not persist after the history is wiped.
     pub fn clear_chat(&mut self) {
         self.messages.clear();
         self.clear_streaming();
