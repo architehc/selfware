@@ -213,6 +213,66 @@ fn build_workflow_llm_handler(
     })
 }
 
+/// Build a [`ToolHandler`](crate::workflows::ToolHandler) that dispatches Tool
+/// steps to the real [`ToolRegistry`] behind the safety gate.
+///
+/// The handler converts the `HashMap<String, String>` args from the workflow
+/// engine into a `serde_json::Value::Object`, then bridges the sync→async
+/// boundary using `tokio::task::block_in_place` +
+/// `Handle::current().block_on(...)` so we can `.await` the registry's async
+/// `execute_any` call.
+///
+/// `execute_any` is used (instead of `execute`) so that deferred tools — which
+/// are common in workflow scripts (e.g. `git_status`, `cargo_test`) — are also
+/// reachable without requiring an explicit activation step.
+fn build_workflow_tool_handler(
+    safety_config: &crate::config::SafetyConfig,
+) -> crate::workflows::ToolHandler {
+    use crate::tools::ToolRegistry;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    // Build the registry with the same safety config used elsewhere in the CLI.
+    let registry = Arc::new(ToolRegistry::with_safety_config(Some(safety_config)));
+
+    Box::new(move |tool_name: &str, args: &HashMap<String, String>| {
+        let registry = Arc::clone(&registry);
+
+        // Convert HashMap<String, String> → serde_json::Value::Object
+        let mut json_map = serde_json::Map::new();
+        for (k, v) in args {
+            // Try to parse each value as JSON first (so numbers/bools/arrays
+            // pass through correctly); fall back to a plain string.
+            let parsed = serde_json::from_str::<serde_json::Value>(v)
+                .unwrap_or(serde_json::Value::String(v.clone()));
+            json_map.insert(k.clone(), parsed);
+        }
+        let input = serde_json::Value::Object(json_map);
+
+        tracing::info!(
+            tool = %tool_name,
+            args = ?input,
+            "workflow tool_handler dispatching to ToolRegistry"
+        );
+
+        // Bridge sync → async. block_in_place is safe on the multi-thread
+        // runtime (the default for Selfware) and avoids the
+        // "cannot block_on within async" panic.
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { registry.execute_any(tool_name, input).await })
+        });
+
+        match result {
+            Ok(value) => Ok(value.to_string()),
+            Err(err) => {
+                tracing::warn!(tool = %tool_name, error = %err, "workflow tool execution failed");
+                Err(err)
+            }
+        }
+    })
+}
+
 /// Resolve the config file path relative to the original working directory.
 ///
 /// When `-C <dir>` is used, the process changes its cwd *after* this function
@@ -2044,6 +2104,8 @@ async fn handle_command(
                                     client,
                                     config.model.clone(),
                                 ));
+                                executor = executor
+                                    .with_tool_handler(build_workflow_tool_handler(&config.safety));
 
                                 println!(
                                     "   {} Executing workflow: {}\n",
@@ -2126,6 +2188,8 @@ async fn handle_command(
                                     client,
                                     config.model.clone(),
                                 ));
+                                executor = executor
+                                    .with_tool_handler(build_workflow_tool_handler(&config.safety));
                             }
 
                             println!(

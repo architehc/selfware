@@ -1609,6 +1609,59 @@ async fn test_full_workflow_with_tool_handler() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_tool_step_with_registry_backed_handler() {
+    // This test mirrors the CLI's `build_workflow_tool_handler`: it constructs
+    // a real ToolRegistry, wraps it in a closure that bridges sync→async, and
+    // runs a Tool step through it.  We use `file_read` (a critical tool that's
+    // always activated) with a known file to get a deterministic result.
+    // Uses multi_thread flavor so `block_in_place` is available.
+    use crate::tools::ToolRegistry;
+    use std::sync::Arc;
+
+    let registry = Arc::new(ToolRegistry::new());
+    let handler: crate::workflows::ToolHandler = Box::new(move |name: &str, args: &HashMap<String, String>| {
+        let registry = Arc::clone(&registry);
+        let mut json_map = serde_json::Map::new();
+        for (k, v) in args {
+            let parsed = serde_json::from_str::<serde_json::Value>(v)
+                .unwrap_or(serde_json::Value::String(v.clone()));
+            json_map.insert(k.clone(), parsed);
+        }
+        let input = serde_json::Value::Object(json_map);
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async move { registry.execute_any(name, input).await })
+        })
+        .map(|v| v.to_string())
+    });
+
+    let mut ctx = WorkflowContext::new("/tmp");
+    // file_read requires a "path" argument; point at this test file for a
+    // deterministic, small read.
+    let test_file = env!("CARGO_MANIFEST_DIR").to_string()
+        + "/src/orchestration/workflows/test_execution.rs";
+    let step_type = StepType::Tool {
+        name: "file_read".into(),
+        args: HashMap::from([("path".into(), test_file)]),
+    };
+    let executor = WorkflowExecutor::new().with_tool_handler(handler);
+    let result = executor
+        .execute_step_inner(&step_type, &mut ctx)
+        .await
+        .unwrap();
+    if let VarValue::String(s) = result {
+        // file_read returns a JSON object with "content" or "success" — just
+        // verify we got a non-empty, JSON-shaped string back from the registry.
+        assert!(!s.is_empty(), "tool result should not be empty");
+        let parsed: serde_json::Value = serde_json::from_str(&s)
+            .expect("tool result should be valid JSON from the registry");
+        assert!(parsed.is_object(), "file_read should return a JSON object");
+    } else {
+        panic!("Expected String result from tool handler");
+    }
+}
+
 #[tokio::test]
 async fn test_full_workflow_with_llm_handler() {
     let yaml = r#"
