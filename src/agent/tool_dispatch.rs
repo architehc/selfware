@@ -745,6 +745,28 @@ fn make_is_mutation_imperative(lower: &str) -> bool {
     false
 }
 
+/// Operator's choice at the tool-confirmation prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmDecision {
+    /// Approve just this one tool call.
+    ExecuteOnce,
+    /// Disable confirmations for the rest of the session (YOLO).
+    EnableYolo,
+    /// Do not execute this tool call.
+    Skip,
+}
+
+/// Parse a confirm-prompt response. Enabling session-wide YOLO requires the
+/// explicit full word "yolo" — a single stray keystroke (e.g. "s") must NOT
+/// silently disable every future confirmation; it means "skip".
+pub(crate) fn parse_confirm_response(response: &str) -> ConfirmDecision {
+    match response.trim().to_lowercase().as_str() {
+        "y" | "yes" => ConfirmDecision::ExecuteOnce,
+        "yolo" => ConfirmDecision::EnableYolo,
+        _ => ConfirmDecision::Skip,
+    }
+}
+
 pub(super) fn shell_command_is_observational(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
@@ -3052,24 +3074,23 @@ impl Agent {
             name.bright_cyan(),
             args_display.bright_white()
         );
-        print!("\n\x1b[0m\x1b[1m\x1b[97mExecute? [y/N/s(bypass permissions)]: \x1b[0m");
+        print!("\n\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m");
         let _ = tokio::io::stdout().flush().await;
 
         let response =
             super::execution::read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await;
         if let Ok(response) = response {
-            let response = response.trim().to_lowercase();
-            match response.as_str() {
-                "y" | "yes" => return Ok(true),
-                "s" | "skip" => {
+            match parse_confirm_response(&response) {
+                ConfirmDecision::ExecuteOnce => return Ok(true),
+                ConfirmDecision::EnableYolo => {
                     self.set_execution_mode(crate::config::ExecutionMode::Yolo);
                     cli_println!(
-                        "{} Switched to YOLO mode for this session",
+                        "{} Confirmations disabled for the rest of this session (YOLO)",
                         "⚡".bright_yellow()
                     );
                     return Ok(true);
                 }
-                _ => {}
+                ConfirmDecision::Skip => {}
             }
         }
 
@@ -3671,6 +3692,20 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::testing::mock_api::MockLlmServer;
+
+    #[test]
+    fn confirm_response_requires_explicit_yolo_word() {
+        use super::{parse_confirm_response, ConfirmDecision};
+        assert_eq!(parse_confirm_response("y"), ConfirmDecision::ExecuteOnce);
+        assert_eq!(parse_confirm_response("YES"), ConfirmDecision::ExecuteOnce);
+        assert_eq!(parse_confirm_response("yolo"), ConfirmDecision::EnableYolo);
+        assert_eq!(parse_confirm_response(" YOLO "), ConfirmDecision::EnableYolo);
+        // The old footgun keys must now be harmless skips, not a session downgrade.
+        assert_eq!(parse_confirm_response("s"), ConfirmDecision::Skip);
+        assert_eq!(parse_confirm_response("skip"), ConfirmDecision::Skip);
+        assert_eq!(parse_confirm_response("n"), ConfirmDecision::Skip);
+        assert_eq!(parse_confirm_response(""), ConfirmDecision::Skip);
+    }
 
     #[test]
     fn test_shell_verification_matches_at_command_boundary() {
