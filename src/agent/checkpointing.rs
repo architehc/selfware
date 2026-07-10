@@ -82,6 +82,10 @@ impl Agent {
         agent.loop_control = restored_loop;
         agent.current_checkpoint = Some(checkpoint.clone());
         agent.checkpoint_manager = Some(checkpoint_manager);
+        // Restore the cumulative budget so the wall-clock / token caps continue
+        // accumulating across resume instead of restarting from zero.
+        agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
+        agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -201,6 +205,12 @@ impl Agent {
         if let Ok(cwd) = std::env::current_dir() {
             checkpoint.git_checkpoint = capture_git_state(cwd.to_string_lossy().as_ref());
         }
+
+        // Persist cumulative budget so a resumed run continues from where the
+        // budget stood, instead of resetting it (which would let N resumes
+        // consume N× the configured token/wall budget).
+        checkpoint.cumulative_tokens = self.cumulative_token_usage.total;
+        checkpoint.elapsed_wall_secs = self.budget_elapsed_secs();
 
         checkpoint
     }

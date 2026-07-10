@@ -310,6 +310,16 @@ pub struct TaskCheckpoint {
 
     // Git state
     pub git_checkpoint: Option<GitCheckpointInfo>,
+
+    // Cumulative budget consumed across ALL run segments, so resume/recovery
+    // cannot reset it (otherwise N resumes = N× the configured budget).
+    /// Total tokens consumed so far across every segment of this task.
+    #[serde(default)]
+    pub cumulative_tokens: usize,
+    /// Active wall-clock seconds consumed so far across every segment (excludes
+    /// time the task was paused/not running).
+    #[serde(default)]
+    pub elapsed_wall_secs: u64,
 }
 
 impl TaskCheckpoint {
@@ -488,6 +498,8 @@ impl TaskCheckpoint {
             visual_assertions: Vec::new(),
             pending_visual_assertion: None,
             git_checkpoint: None,
+            cumulative_tokens: 0,
+            elapsed_wall_secs: 0,
         }
     }
 
@@ -2507,5 +2519,27 @@ mod tests {
             MAX_CHECKPOINT_FILES,
             count_after
         );
+    }
+
+    #[test]
+    fn task_checkpoint_budget_fields_roundtrip_and_default() {
+        let mut cp = TaskCheckpoint::new("t1".to_string(), "desc".to_string());
+        cp.cumulative_tokens = 12345;
+        cp.elapsed_wall_secs = 678;
+        let json = serde_json::to_string(&cp).unwrap();
+        let back: TaskCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cumulative_tokens, 12345);
+        assert_eq!(back.elapsed_wall_secs, 678);
+
+        // Legacy checkpoints without these fields must default to 0, not fail.
+        let mut legacy_value = serde_json::to_value(&TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
+        // Remove the new budget fields to simulate a legacy checkpoint.
+        if let serde_json::Value::Object(ref mut map) = legacy_value {
+            map.remove("cumulative_tokens");
+            map.remove("elapsed_wall_secs");
+        }
+        let restored: TaskCheckpoint = serde_json::from_value(legacy_value).unwrap();
+        assert_eq!(restored.cumulative_tokens, 0);
+        assert_eq!(restored.elapsed_wall_secs, 0);
     }
 }

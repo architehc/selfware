@@ -633,8 +633,15 @@ pub struct Agent {
     cumulative_token_usage: crate::observability::dashboard::TokenUsage,
     /// Failure mode from the most recent run (set by `finalize_failure_mode`).
     last_run_failure_mode: Option<failure_mode::FailureMode>,
-    /// Wall-clock start time of the current task.
+    /// Wall-clock start time of the CURRENT run segment. Reset on resume so a
+    /// long pause is not counted; accumulated active time lives in
+    /// `prior_elapsed_secs`.
     task_start_time: std::time::Instant,
+    /// Active wall-clock seconds consumed in PRIOR run segments (restored from
+    /// the checkpoint on resume). The wall-clock budget is measured as
+    /// `prior_elapsed_secs + task_start_time.elapsed()`, so resuming cannot
+    /// reset it.
+    prior_elapsed_secs: u64,
     /// Set of repo paths that were already dirty (uncommitted relative to HEAD)
     /// when the current task started. The completion gate uses this to exclude
     /// pre-existing uncommitted changes from the agent's diff.
@@ -1208,6 +1215,7 @@ To call a tool, use this EXACT XML structure:
             cumulative_token_usage: crate::observability::dashboard::TokenUsage::default(),
             last_run_failure_mode: None,
             task_start_time: Instant::now(),
+            prior_elapsed_secs: 0,
             baseline_dirty_paths: std::sync::Mutex::new(None),
             rigor_mode: false,
             rigor_directive_injected: false,
@@ -2212,6 +2220,14 @@ To call a tool, use this EXACT XML structure:
     /// Cumulative token usage across all LLM calls in the current task.
     pub fn cumulative_token_usage(&self) -> &crate::observability::dashboard::TokenUsage {
         &self.cumulative_token_usage
+    }
+
+    /// Active wall-clock seconds consumed across ALL run segments of the
+    /// current task (prior segments + the current one). Used for the
+    /// wall-clock budget so resume/recovery cannot reset it.
+    pub(crate) fn budget_elapsed_secs(&self) -> u64 {
+        self.prior_elapsed_secs
+            .saturating_add(self.task_start_time.elapsed().as_secs())
     }
 
     /// Failure mode from the most recent run.

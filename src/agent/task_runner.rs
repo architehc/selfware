@@ -88,6 +88,8 @@ impl Agent {
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
         self.task_start_time = std::time::Instant::now();
+        // Fresh task → no prior segments; the budget starts at zero.
+        self.prior_elapsed_secs = 0;
         self.last_run_failure_mode = None;
         // Capture the set of paths already dirty relative to HEAD so the
         // completion gate can exclude pre-existing uncommitted changes.
@@ -638,7 +640,7 @@ impl Agent {
                 }
             }
             if let Some(max_secs) = self.config.agent.max_wall_secs {
-                let elapsed = self.task_start_time.elapsed().as_secs();
+                let elapsed = self.budget_elapsed_secs();
                 if elapsed >= max_secs {
                     let reason = format!("Wall-clock timeout: {}s >= {}s", elapsed, max_secs);
                     warn!("{}", reason);
