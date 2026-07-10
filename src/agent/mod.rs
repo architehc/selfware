@@ -626,6 +626,16 @@ pub struct Agent {
     /// when the current task started. The completion gate uses this to exclude
     /// pre-existing uncommitted changes from the agent's diff.
     baseline_dirty_paths: std::sync::Mutex<Option<Vec<String>>>,
+    /// RIGOR MODE (Increment 3 of self-healing): set to true when auto-recovery
+    /// fails to resolve a failure (Escalate/Unresolvable). While true, the
+    /// completion gate requires a verification step and a careful-mode system
+    /// directive is injected into the next attempt. Reset to false on genuine
+    /// progress (successful tool continuation). Advisory only — does not alter
+    /// normal planning.
+    rigor_mode: bool,
+    /// Whether the careful-mode directive has already been injected for the
+    /// current rigor-mode episode. Prevents duplicate injections.
+    rigor_directive_injected: bool,
 }
 
 impl Agent {
@@ -1177,6 +1187,8 @@ To call a tool, use this EXACT XML structure:
             last_run_failure_mode: None,
             task_start_time: Instant::now(),
             baseline_dirty_paths: std::sync::Mutex::new(None),
+            rigor_mode: false,
+            rigor_directive_injected: false,
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
@@ -2226,6 +2238,46 @@ To call a tool, use this EXACT XML structure:
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;
+        self.rigor_mode = false;
+        self.rigor_directive_injected = false;
+    }
+
+    // ============================================================
+    // Rigor mode (Increment 3 of self-healing)
+    // ============================================================
+
+    /// Pure decision function: should rigor mode be entered given a
+    /// [`ResolutionOutcome`]? Returns `true` for `Escalate` and
+    /// `Unresolvable` (auto-recovery could NOT fix the failure), `false`
+    /// for `Resolved` (auto-recovery succeeded).
+    pub fn should_enter_rigor(outcome: &crate::self_healing::ResolutionOutcome) -> bool {
+        matches!(
+            outcome,
+            crate::self_healing::ResolutionOutcome::Escalate
+                | crate::self_healing::ResolutionOutcome::Unresolvable
+        )
+    }
+
+    /// Returns `true` when rigor mode is currently active.
+    pub fn is_rigor_mode(&self) -> bool {
+        self.rigor_mode
+    }
+
+    /// Returns whether the completion gate should require verification before
+    /// accepting completion. This is true when the config flag is set OR when
+    /// rigor mode is active (a previous step failed and could not be
+    /// auto-recovered).
+    pub fn completion_requires_verification(&self) -> bool {
+        self.config.agent.require_verification_before_completion || self.rigor_mode
+    }
+
+    /// Build the careful-mode system directive message injected when rigor
+    /// mode is first entered.
+    pub fn careful_mode_directive() -> &'static str {
+        "[CAREFUL MODE] A previous step failed and could not be auto-recovered. \
+         Slow down: validate the current state before acting, take one concrete \
+         corrective step, and DO NOT declare the task complete without an \
+         explicit verification (e.g. run a check/test) confirming the fix."
     }
 
     /// Capture the set of paths that are dirty (uncommitted relative to HEAD)

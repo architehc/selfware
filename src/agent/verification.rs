@@ -662,7 +662,7 @@ impl Agent {
         // Reject completion when the task requires code changes but no source files
         // were written at all. This catches the "context insufficient" early-quit
         // pattern where the model gives a text-only answer without doing any work.
-        if !is_read_only && self.config.agent.require_verification_before_completion {
+        if !is_read_only && self.completion_requires_verification() {
             let has_any_file_write = self
                 .messages
                 .iter()
@@ -697,7 +697,7 @@ impl Agent {
             }
         }
 
-        if !is_read_only && self.config.agent.require_verification_before_completion {
+        if !is_read_only && self.completion_requires_verification() {
             // Only require a verification tool call when the task is not
             // exclusively using read-only / non-code tools (browser, vision,
             // HTTP, desktop control, etc.). If no checkpoint exists yet, or if

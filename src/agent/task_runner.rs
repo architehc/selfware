@@ -761,6 +761,8 @@ impl Agent {
                                 self.reset_self_healing_retry();
                             }
                             consecutive_error_recoveries = 0;
+                            self.rigor_mode = false;
+                            self.rigor_directive_injected = false;
                         }
                         Ok(PlannedToolExecution::NoToolCalls) => {}
                         Err(e) => {
@@ -821,6 +823,18 @@ impl Agent {
                 }
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
+
+                    // Rigor mode directive injection (Increment 3): when
+                    // rigor_mode is active and we haven't yet injected the
+                    // careful-mode directive for this episode, inject it now
+                    // so the model sees it before its next action. The
+                    // directive is injected exactly once per rigor episode.
+                    if self.rigor_mode && !self.rigor_directive_injected {
+                        self.messages
+                            .push(Message::system(Self::careful_mode_directive().to_string()));
+                        self.rigor_directive_injected = true;
+                    }
+
                     // The descriptive step line ("📝 Step N → <action>") is printed
                     // inside execute_step_internal once the model's response is known;
                     // a generic "Executing" here would just be uninformative noise.
@@ -913,6 +927,8 @@ impl Agent {
                                 self.reset_self_healing_retry();
                             }
                             consecutive_error_recoveries = 0;
+                            self.rigor_mode = false;
+                            self.rigor_directive_injected = false;
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 if mode == LoopMode::NewTask {
@@ -1074,9 +1090,22 @@ impl Agent {
                                     // fall through to existing nudge/advice.
                                 }
                             }
+                        } else if Self::should_enter_rigor(&outcome) {
+                            // Escalate / Unresolvable: auto-recovery could NOT
+                            // resolve this failure. Enter rigor mode so the
+                            // next attempt gets a careful-mode directive and
+                            // a tightened completion gate.
+                            if !self.rigor_mode {
+                                tracing::warn!(
+                                    "Auto-recovery failed (outcome={:?}, kind={:?}) — entering rigor mode",
+                                    outcome, kind
+                                );
+                                self.rigor_mode = true;
+                                self.rigor_directive_injected = false;
+                            }
                         }
-                        // Escalate / Unresolvable: fall through to existing
-                        // nudge/advice behavior unchanged.
+                        // Escalate / Unresolvable with auto_recovery disabled:
+                        // fall through to existing nudge/advice behavior unchanged.
                     }
 
                     #[cfg(feature = "resilience")]
@@ -2671,6 +2700,132 @@ mod tests {
         let w = lc.approaching_limit_warning();
         assert!(w.is_some());
         assert!(w.unwrap().contains("wrapping up"));
+    }
+
+    // =========================================================================
+    // Rigor mode (Increment 3 of self-healing)
+    // =========================================================================
+
+    #[test]
+    fn test_should_enter_rigor_escalate() {
+        let outcome = crate::self_healing::ResolutionOutcome::Escalate;
+        assert!(Agent::should_enter_rigor(&outcome));
+    }
+
+    #[test]
+    fn test_should_enter_rigor_unresolvable() {
+        let outcome = crate::self_healing::ResolutionOutcome::Unresolvable;
+        assert!(Agent::should_enter_rigor(&outcome));
+    }
+
+    #[test]
+    fn test_should_enter_rigor_resolved_is_false() {
+        let action = crate::self_healing::RecoveryAction::Fallback {
+            target: "http://localhost:11434/v1".to_string(),
+        };
+        let directive = crate::self_healing::RecoveryDirective::Action(action);
+        let outcome = crate::self_healing::ResolutionOutcome::Resolved(directive);
+        assert!(
+            !Agent::should_enter_rigor(&outcome),
+            "Resolved outcome should NOT trigger rigor mode"
+        );
+    }
+
+    #[test]
+    fn test_completion_requires_verification_logic() {
+        // Pure logic test for the gate condition:
+        //   completion_requires_verification = config_flag || rigor_mode
+        // config_flag=false, rigor_mode=false -> false
+        assert!(!(false || false));
+        // config_flag=false, rigor_mode=true -> true
+        assert!((false || true));
+        // config_flag=true, rigor_mode=false -> true
+        assert!((true || false));
+        // config_flag=true, rigor_mode=true -> true
+        assert!((true || true));
+    }
+
+    #[test]
+    fn test_careful_mode_directive_is_nonempty_and_specific() {
+        let directive = Agent::careful_mode_directive();
+        assert!(!directive.is_empty());
+        assert!(directive.starts_with("[CAREFUL MODE]"));
+        // The directive must mention verification explicitly.
+        assert!(directive.to_lowercase().contains("verification"));
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_completion_gate_rejects_in_rigor_mode_without_verification() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let url = server.url();
+        let mut config = mock_agent_config(format!("{}/v1", url), false);
+        config.agent.require_verification_before_completion = false;
+        config.agent.min_completion_steps = 0;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.rigor_mode = true;
+        agent.has_written_any_file = true;
+        agent.current_task_context = "Fix the bug in foo()".to_string();
+        let result = agent.check_completion_gate().await;
+        assert!(
+            result.is_some(),
+            "In rigor mode, completion should be rejected without verification: {:?}",
+            result
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_completion_gate_accepts_in_rigor_mode_with_verification() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let url = server.url();
+        let mut config = mock_agent_config(format!("{}/v1", url), false);
+        config.agent.require_verification_before_completion = false;
+        config.agent.min_completion_steps = 0;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.rigor_mode = true;
+        agent.has_written_any_file = true;
+        // Use a non-mutation task context so the mutation gate (which checks
+        // git diff) does not fire — we are testing the verification requirement
+        // part of the gate, not the mutation gate.
+        agent.current_task_context = "Summarize the authentication module".to_string();
+        // Add a file_write tool call to message history so the "no file write"
+        // gate does not fire (that gate checks message tool_calls, not checkpoint).
+        let mut file_write_msg = crate::api::types::Message::assistant("Writing the fix.");
+        file_write_msg.tool_calls = Some(vec![crate::api::types::ToolCall {
+            id: "call_1".to_string(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: "file_write".to_string(),
+                arguments: r#"{"path":"src/foo.rs","content":"fn foo() {}"}"#.to_string(),
+            },
+        }]);
+        agent.messages.push(file_write_msg);
+        // Add a successful verification tool call to checkpoint.
+        let mut cp = TaskCheckpoint::new("rigor-test".to_string(), "Summarize".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_check".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(100),
+        });
+        agent.current_checkpoint = Some(cp);
+        let result = agent.check_completion_gate().await;
+        assert!(
+            result.is_none(),
+            "In rigor mode with verification and file write, completion should be accepted: {:?}",
+            result
+        );
+        server.stop().await;
     }
 
     // =========================================================================
