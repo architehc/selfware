@@ -13,6 +13,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "context_length",
     "temperature",
     "api_key",
+    "execution_mode",
     "safety",
     "agent",
     "yolo",

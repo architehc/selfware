@@ -1,5 +1,11 @@
 # Selfware configuration
 # Copy this file to selfware.toml and adjust values for your setup.
+#
+# UNATTENDED RUNS: selfware does NOT impose a token/wall-clock/cost cap by
+# default. For any long or unattended run, pass hard limits on the CLI:
+#   selfware --max-turns 200 --max-wall-secs 3600 --max-budget-tokens 2000000 ...
+# (These are the only hard run-bounding levers; there is no TOML equivalent and
+# they reset on resume, so re-pass them each launch.)
 
 # Set this to your OpenAI-compatible API endpoint (e.g., local vLLM/sglang server, ngrok tunnel, etc.)
 endpoint = "http://127.0.0.1:8000/v1"
@@ -12,11 +18,16 @@ context_length = 1010000
 chat_template_kwargs = { enable_thinking = false }
 
 [safety]
-allowed_paths = ["./**", "~/**"]
+# Scope filesystem access to the project directory by default. Only widen this
+# (e.g. add "~/**") if you genuinely need it — a wide scope lets an autonomous
+# run read/modify files far outside your project.
+allowed_paths = ["./**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 [agent]
-max_iterations = 10000
+# Keep the iteration cap modest. Raise deliberately for large tasks rather than
+# shipping a five-figure default.
+max_iterations = 100
 step_timeout_secs = 600
 # Use XML-based tool calling for SGLang
 native_function_calling = false
@@ -26,7 +37,8 @@ enabled = true
 checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
-max_recovery_attempts = 50
+# Bound automatic recovery so a wedged task cannot retry indefinitely.
+max_recovery_attempts = 3
 
 [retry]
 max_retries = 5
