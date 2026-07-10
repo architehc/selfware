@@ -2,6 +2,39 @@ use super::*;
 
 use std::path::Path;
 
+// ── parse_task_file tests ──
+
+#[test]
+fn parse_task_file_skips_blanks_and_comments() {
+    let contents = "# This is a comment\n\ntask 1\n  \n# another comment\ntask 2\n";
+    let tasks = parse_task_file(contents);
+    assert_eq!(tasks, vec!["task 1", "task 2"]);
+}
+
+#[test]
+fn parse_task_file_empty_contents() {
+    assert!(parse_task_file("").is_empty());
+}
+
+#[test]
+fn parse_task_file_all_comments() {
+    let contents = "# comment 1\n# comment 2\n";
+    assert!(parse_task_file(contents).is_empty());
+}
+
+#[test]
+fn parse_task_file_trims_whitespace() {
+    let contents = "  task with spaces  \n\t  tabbed task  \n";
+    let tasks = parse_task_file(contents);
+    assert_eq!(tasks, vec!["task with spaces", "tabbed task"]);
+}
+
+#[test]
+fn parse_task_file_single_task_no_trailing_newline() {
+    let tasks = parse_task_file("only task");
+    assert_eq!(tasks, vec!["only task"]);
+}
+
 // ── truncate_with_ellipsis tests ──
 
 #[test]

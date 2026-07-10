@@ -481,7 +481,7 @@ pub(crate) enum Commands {
     /// Start selfware in LSP server mode (for editor extensions)
     Lsp,
 
-    /// Experimental batch entrypoint (currently disabled)
+    /// Experimental batch entrypoint — runs tasks from a file sequentially
     #[command(alias = "bat")]
     Batch {
         /// File containing tasks (one per line)

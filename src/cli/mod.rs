@@ -346,6 +346,20 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
     false
 }
 
+/// Parse task-file contents into a list of tasks.
+///
+/// Each non-empty, non-comment line is a task.  Lines starting with `#`
+/// are treated as comments and skipped, as are blank/whitespace-only lines.
+/// Leading and trailing whitespace is trimmed from each task.
+pub fn parse_task_file(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| l.to_string())
+        .collect()
+}
+
 pub async fn run() -> Result<()> {
     // Initialize telemetry
     init_tracing();
@@ -1643,17 +1657,149 @@ async fn handle_command(
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            anyhow::bail!(
-                "Batch mode is not implemented safely yet. It would currently report synthetic success.\n\
-                 Use a shell-level fan-out with `selfware run` for now, for example:\n\
-                 xargs -P {} -I{{}} selfware run -- \"{{}}\" < {}\n\
-                 Requested timeout={}s aggregate={} output={}",
-                workers,
-                file,
-                timeout,
-                aggregate,
-                output
+
+            // ── Read and parse the task file ──
+            let contents = match std::fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("✗ Cannot read task file '{}': {}", file, e);
+                    anyhow::bail!("Failed to read batch task file '{}': {}", file, e);
+                }
+            };
+            let tasks = parse_task_file(&contents);
+            if tasks.is_empty() {
+                if !quiet {
+                    println!(
+                        "No tasks found in '{}' (empty file or all lines blank/commented).",
+                        file
+                    );
+                }
+                return Ok(());
+            }
+
+            if !quiet {
+                println!(
+                    "\n{} Batch mode: {} task(s) from '{}'",
+                    Glyphs::gear(),
+                    tasks.len(),
+                    file
+                );
+                if workers > 1 {
+                    println!(
+                        "⚠ Note: concurrent batch tasks share the same workspace and may conflict."
+                    );
+                    println!(
+                        "  Running sequentially for safety (workers={} requested).",
+                        workers
+                    );
+                }
+            }
+
+            // ── Run each task sequentially for workspace safety ──
+            struct TaskResult {
+                index: usize,
+                task: String,
+                ok: bool,
+                error: Option<String>,
+            }
+
+            let mut results: Vec<TaskResult> = Vec::with_capacity(tasks.len());
+
+            for (i, task) in tasks.iter().enumerate() {
+                if !quiet {
+                    println!("\n── Task {}/{}: {} ──", i + 1, tasks.len(), task);
+                }
+                let start = std::time::Instant::now();
+                let mut agent = crate::agent::Agent::new(config.clone()).await?;
+                let run_result = agent.run_task(task).await;
+                let duration = start.elapsed();
+
+                let (ok, error) = match &run_result {
+                    Ok(()) => (true, None),
+                    Err(e) => (false, Some(format!("{:#}", e))),
+                };
+
+                if !quiet {
+                    let snippet = truncate_with_ellipsis(task, 60);
+                    let status = if ok { "PASS" } else { "FAIL" };
+                    if ok {
+                        println!("  ✓ {} · {} ({}s)", status, snippet, duration.as_secs());
+                    } else {
+                        println!(
+                            "  ✗ {} · {} ({}s) — {}",
+                            status,
+                            snippet,
+                            duration.as_secs(),
+                            error.as_deref().unwrap_or("unknown error")
+                        );
+                    }
+                }
+
+                results.push(TaskResult {
+                    index: i,
+                    task: task.clone(),
+                    ok,
+                    error,
+                });
+            }
+
+            // ── Summary ──
+            let total = results.len();
+            let passed = results.iter().filter(|r| r.ok).count();
+            let failed = total - passed;
+
+            println!("\n{}", "─".repeat(60));
+            println!(
+                "Batch Summary: {} total, {} passed, {} failed",
+                total, passed, failed
             );
+            for r in &results {
+                let snippet = truncate_with_ellipsis(&r.task, 50);
+                let status = if r.ok { "PASS" } else { "FAIL" };
+                if r.ok {
+                    println!("  {} · {} · {}", r.index + 1, status, snippet);
+                } else {
+                    println!(
+                        "  {} · {} · {} — {}",
+                        r.index + 1,
+                        status,
+                        snippet,
+                        r.error.as_deref().unwrap_or("unknown error")
+                    );
+                }
+            }
+            println!("{}", "─".repeat(60));
+
+            // ── Write results to output directory ──
+            let _ = std::fs::create_dir_all(&output);
+            let summary_path = std::path::Path::new(&output).join("batch_summary.txt");
+            let mut summary = format!(
+                "Batch Summary: {} total, {} passed, {} failed\n\n",
+                total, passed, failed
+            );
+            for r in &results {
+                let status = if r.ok { "PASS" } else { "FAIL" };
+                summary.push_str(&format!("{} · {} · {}", r.index + 1, status, r.task));
+                if let Some(ref err) = r.error {
+                    summary.push_str(&format!(" — {}", err));
+                }
+                summary.push('\n');
+            }
+            let _ = std::fs::write(&summary_path, &summary);
+            if !quiet {
+                println!("Results written to: {}", summary_path.display());
+            }
+
+            let _ = timeout;
+            let _ = aggregate;
+
+            if failed > 0 {
+                anyhow::bail!(
+                    "Batch completed with {} failed task(s) out of {}",
+                    failed,
+                    total
+                );
+            }
         }
 
         Commands::Validate {
