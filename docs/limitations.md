@@ -29,11 +29,13 @@ Not every feature works with every model. Here's what to expect:
 - **Cannot replace code review** — generated code should always be reviewed by a human
 - **Cannot understand business context** — it knows code, not your business requirements
 - **Cannot access the internet** (unless you configure MCP servers) — fully local by design
+- **No true task decomposition** — the agent runs a ReAct-style tool-use loop with a fixed Plan→Execute template; it does not decompose a goal into a tracked subtask plan. Break large goals into concrete tasks yourself.
 
 ### Safety Limitations
 - **Cannot prevent all prompt injection** — adversarial inputs may influence the agent
 - **Cannot guarantee sandbox escape is impossible** — defense-in-depth, not absolute containment
 - **Cannot detect all malicious patterns** — shell command filtering is regex-based, not a full parser
+- **Shell bypasses file path-denies** — allow/deny path globs govern the *file* tools; `shell_exec` is governed separately (its cwd plus a regex command filter), so a shell command (e.g. `cat`) can read files the file-deny globs would block (`.env`, `~/.ssh`). There is no OS-level sandbox (namespaces/seccomp); containment is cooperative. For unattended runs, stay in Normal mode and keep secrets out of the working tree.
 - **Cannot prevent TOCTOU races in all cases** — mitigated but not eliminated
 
 ### Performance Limitations

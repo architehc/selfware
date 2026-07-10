@@ -19,7 +19,7 @@
 
 An **agentic coding harness** for local LLMs that runs entirely on your hardware. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot — all local-first, no cloud required.
 
-> **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it autonomously read, plan, edit, test, and commit code. Then let the evolution engine improve itself.
+> **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it work a tool-use (ReAct) loop — reading, editing, running tests, and committing. A lightweight Plan→Execute phase structures each run; it is not a full task decomposer, so scope large goals into concrete tasks. Then let the evolution engine iterate.
 
 ---
 
@@ -666,7 +666,7 @@ selfware resume <task-id> # Pick up exactly where you left off
 
 ### Cognitive Architecture
 
-The agent thinks in PDVR cycles with working memory:
+The agent runs a Plan→Do→Verify→Reflect (PDVR) loop over working memory. PDVR is the loop structure the run iterates — not a guarantee of autonomous multi-step planning; complex goals still need to be scoped in the task itself:
 
 ```
     ╭─────────╮         ╭─────────╮
@@ -687,7 +687,7 @@ The agent thinks in PDVR cycles with working memory:
 Request → Path Guardian → Command Sentinel → Protected Groves → Execute
 ```
 
-- **Path validation**: Allowed/denied path globs, no escape from workspace
+- **Path validation**: allow/deny path globs scope the *file* tools to your workspace. Note: `shell_exec` is governed separately (a regex command filter), so shell commands are **not** bound by the file-deny globs, and there is **no OS-level sandbox** — containment is cooperative. See [docs/limitations.md](docs/limitations.md).
 - **Command filtering**: Dangerous commands blocked by default
 - **Protected branches**: Prevent force-push to main
 - **SSRF protection**: URL validation on web requests
