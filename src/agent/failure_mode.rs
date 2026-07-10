@@ -121,7 +121,7 @@ impl FailureMode {
                             "model emitted 'Final answer' but performed 0 mutating tool calls across {} total calls",
                             total_calls
                         ),
-                        advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
+                        advice: "the model said it was done but changed no files — restate the task with the exact file(s) and change required, or confirm whether it was meant to be read-only".to_string(),
                     };
                 }
                 // Bug fix: a natural completion that performed zero mutating
@@ -137,7 +137,7 @@ impl FailureMode {
                             "task required mutation but agent completed naturally with 0 mutating tool calls (total={})",
                             total_calls
                         ),
-                        advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
+                        advice: "the model said it was done but changed no files — restate the task with the exact file(s) and change required, or confirm whether it was meant to be read-only".to_string(),
                     };
                 }
                 // Reaching here with 0 mutating calls means: no "Final answer"
@@ -349,7 +349,7 @@ fn classify_max_iter_failure(
                 "progress guard fired {} time(s); {} read/verify calls but 0 mutating calls",
                 progress_guard, total_calls
             ),
-            advice: "raise the read-only block threshold or feed the model an explicit edit hint"
+            advice: "the model kept reading without editing — name the file to change and the concrete edit it should make"
                 .to_string(),
         };
     }
@@ -362,7 +362,7 @@ fn classify_max_iter_failure(
                 "{} tool call(s) hard-blocked after repeated failures (mutating={}, total={})",
                 permanently_blocked, mutating, total_calls
             ),
-            advice: "inspect the tool error and either fix selfware's validator or steer the model away from that signature".to_string(),
+            advice: "a tool call kept failing — check the tool error in the log and adjust the task inputs, or steer the model away from that operation".to_string(),
         };
     }
 
@@ -374,7 +374,7 @@ fn classify_max_iter_failure(
                 "model produced {}B of final answer text but executed 0 mutating calls",
                 final_answer_len
             ),
-            advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
+            advice: "the model said it was done but changed no files — restate the task with the exact file(s) and change required, or confirm whether it was meant to be read-only".to_string(),
         };
     }
 
@@ -658,6 +658,22 @@ mod tests {
         assert!(b.contains("NO_CHANGES"));
         assert!(!b.contains("REAL_EDIT"));
         assert!(!b.contains("❌"));
+    }
+
+    #[test]
+    fn advice_is_operator_facing_not_selfware_internal() {
+        // ReadLoop branch: progress guard fired, zero mutations.
+        let read_loop = classify_max_iter_failure(0, 1, 0, 0, 5, 0);
+        assert_eq!(read_loop.kind, FailureKind::ReadLoop);
+        // RetryLoop branch: a tool was permanently blocked.
+        let retry_loop = classify_max_iter_failure(0, 0, 0, 1, 5, 0);
+        assert_eq!(retry_loop.kind, FailureKind::RetryLoop);
+        for m in [&read_loop, &retry_loop] {
+            let a = m.advice.to_lowercase();
+            assert!(!a.contains("selfware"), "advice leaks selfware internals: {}", m.advice);
+            assert!(!a.contains("completion gate"), "advice leaks selfware internals: {}", m.advice);
+            assert!(!a.contains("block threshold"), "advice leaks selfware internals: {}", m.advice);
+        }
     }
 
     #[test]
