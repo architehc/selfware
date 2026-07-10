@@ -97,15 +97,29 @@ impl Agent {
         tools: &Option<Vec<crate::api::types::ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<Option<LlmCacheEntry>> {
-        // Generate cache key from messages, tools, and thinking mode
+        // Generate cache key from model, messages, tools, and thinking mode.
+        // Including the model name prevents cross-model semantic matches.
         let prompt = Self::messages_to_prompt(messages);
-        let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
+        let key = format!("{}:{}:{:?}:{:?}", self.config.model, prompt, tools, thinking);
+
+        // Compute a real context hash from the full key so that entries with
+        // different model / prompt / tools / thinking never collide.
+        let context_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut h);
+            h.finish()
+        };
 
         // Generate embedding for the prompt
         let embedding = self.cache_manager.llm_embedding.embed(&prompt).await?;
 
-        // Look up in cache (context_hash=0 for now)
-        let cached = self.cache_manager.llm_cache.lookup(&prompt, &embedding, 0).await;
+        // Look up in cache using the real context hash
+        let cached = self
+            .cache_manager
+            .llm_cache
+            .lookup(&prompt, &embedding, context_hash, &self.config.model)
+            .await;
 
         Ok(cached)
     }
@@ -140,8 +154,24 @@ impl Agent {
             return;
         }
 
+        // Also never cache a response whose *content* contains a text/XML tool
+        // call (e.g. GLM/Qwen style). Without native tool_calls this would be
+        // stored as plain prose and replayed as a non-tool completion on a hit.
+        let parsed = crate::tool_parser::parse_tool_calls(content);
+        if !parsed.tool_calls.is_empty() {
+            return;
+        }
+
         let prompt = Self::messages_to_prompt(messages);
-        let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
+        let key = format!("{}:{}:{:?}:{:?}", self.config.model, prompt, tools, thinking);
+
+        // Compute a real context hash from the full key (includes model).
+        let context_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut h);
+            h.finish()
+        };
 
         let embedding = match self.cache_manager.llm_embedding.embed(&prompt).await {
             Ok(e) => e,
@@ -173,7 +203,7 @@ impl Agent {
                 .unwrap_or_default()
                 .as_secs(),
             hit_count: 0,
-            context_hash: 0,
+            context_hash,
             file_paths: vec![],
         };
 

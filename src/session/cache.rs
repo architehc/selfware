@@ -294,6 +294,7 @@ impl LlmCache {
         _prompt: &str,
         embedding: &[f32],
         context_hash: u64,
+        model: &str,
     ) -> Option<LlmCacheEntry> {
         if !self.config.enabled {
             return None;
@@ -315,8 +316,13 @@ impl LlmCache {
 
             if similarity >= self.config.similarity_threshold {
                 if let Some(entry) = entries.get(id) {
+                    // Require both the same context_hash AND the same model
+                    // before accepting a hit. This prevents semantic matches
+                    // across different causal contexts or different models.
                     if entry.context_hash == context_hash
-                        && (best_match.is_none() || similarity > best_match.as_ref().unwrap().1)
+                        && entry.model == model
+                        && (best_match.is_none()
+                            || similarity > best_match.as_ref().unwrap().1)
                     {
                         best_match = Some((id.clone(), similarity));
                     }
@@ -553,7 +559,7 @@ mod tests {
         let cache = LlmCache::default();
 
         // Should return None for empty cache
-        let result = cache.lookup("test", &[0.1, 0.2, 0.3], 0).await;
+        let result = cache.lookup("test", &[0.1, 0.2, 0.3], 0, "test").await;
         assert!(result.is_none());
 
         // Store an entry
@@ -573,7 +579,7 @@ mod tests {
         cache.store(entry).await;
 
         // Should find with exact match
-        let result = cache.lookup("test prompt", &[1.0, 0.0, 0.0], 0).await;
+        let result = cache.lookup("test prompt", &[1.0, 0.0, 0.0], 0, "test").await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().response, "test response");
     }
@@ -602,5 +608,84 @@ mod tests {
         let normalized = LlmCache::l2_normalize(&v);
         let norm: f32 = normalized.iter().map(|x| x * x).sum();
         assert!((norm - 1.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_llm_cache_different_model_no_hit() {
+        let cache = LlmCache::default();
+
+        // Store an entry with model "alpha"
+        let entry = LlmCacheEntry {
+            id: "model-alpha".into(),
+            prompt: "same prompt".into(),
+            embedding: vec![1.0, 0.0, 0.0],
+            response: "alpha response".into(),
+            model: "alpha".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: 0,
+            hit_count: 0,
+            context_hash: 42,
+            file_paths: vec![],
+        };
+        cache.store(entry).await;
+
+        // Same embedding + context_hash but DIFFERENT model -> no hit
+        let result = cache.lookup("same prompt", &[1.0, 0.0, 0.0], 42, "beta").await;
+        assert!(
+            result.is_none(),
+            "cache should NOT hit for a different model"
+        );
+
+        // Same model -> hit
+        let result = cache.lookup("same prompt", &[1.0, 0.0, 0.0], 42, "alpha").await;
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_llm_cache_different_context_hash_no_hit() {
+        let cache = LlmCache::default();
+
+        let entry = LlmCacheEntry {
+            id: "hash-100".into(),
+            prompt: "prompt".into(),
+            embedding: vec![1.0, 0.0, 0.0],
+            response: "response".into(),
+            model: "m".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: 0,
+            hit_count: 0,
+            context_hash: 100,
+            file_paths: vec![],
+        };
+        cache.store(entry).await;
+
+        // Same model, same embedding, DIFFERENT context_hash -> no hit
+        let result = cache.lookup("prompt", &[1.0, 0.0, 0.0], 200, "m").await;
+        assert!(
+            result.is_none(),
+            "cache should NOT hit for a different context_hash"
+        );
+    }
+
+    #[test]
+    fn test_text_tool_call_not_cached_via_parse() {
+        // Verify that parse_tool_calls detects XML tool calls so that
+        // cache_response will skip caching such responses.
+        let content = "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"echo hello\"}</arguments>\n</tool>";
+        let parsed = crate::tool_parser::parse_tool_calls(content);
+        assert!(
+            !parsed.tool_calls.is_empty(),
+            "text/XML tool call must be detected so it is not cached"
+        );
+
+        // A plain text response should NOT be detected as a tool call
+        let plain = "This is a normal response with no tool calls.";
+        let parsed_plain = crate::tool_parser::parse_tool_calls(plain);
+        assert!(
+            parsed_plain.tool_calls.is_empty(),
+            "plain text should not be detected as a tool call"
+        );
     }
 }
