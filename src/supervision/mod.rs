@@ -46,9 +46,11 @@ impl std::fmt::Debug for ChildRuntime {
 
 pub mod circuit_breaker;
 pub mod health;
+pub mod run_supervisor;
 
 pub use circuit_breaker::CircuitBreaker;
 pub use health::{HealthCheck, HealthMonitor, HealthStatus};
+pub use run_supervisor::{RunId, RunStatus, RunSupervisor};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum BackoffStrategy {
