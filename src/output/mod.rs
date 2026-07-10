@@ -1139,7 +1139,9 @@ impl TaskProgress {
 
     /// Print current progress state
     pub(crate) fn print_progress(&self) {
-        if is_quiet() {
+        // Suppress in quiet, TUI, and JSON modes — a progress bar on stdout
+        // pollutes JSON output and corrupts a TUI frame.
+        if should_suppress_output() {
             return;
         }
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());

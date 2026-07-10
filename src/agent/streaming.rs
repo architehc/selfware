@@ -253,6 +253,11 @@ impl Agent {
         // Start loading spinner with a random phrase while waiting for first token
         let initial_phrase = crate::ui::loading_phrases::random_phrase();
         let tui_active = crate::output::is_tui_active();
+        // In JSON or quiet mode, streamed prose must NOT be printed to stdout —
+        // it would pollute the machine-readable output stream. The text is still
+        // accumulated into `content` and returned via the normal result path.
+        let suppress_stream_stdout =
+            crate::output::is_json_mode() || crate::output::is_quiet();
         // Track whether the TUI spinner is logically active (to avoid
         // sending SpinnerUpdate/SpinnerStop after it has already stopped).
         let mut tui_spinner_active = false;
@@ -368,7 +373,7 @@ impl Agent {
                         );
                         if tui_active {
                             self.emit_event(AgentEvent::ThinkingEnd);
-                        } else if !output::is_compact() {
+                        } else if !output::is_compact() && !suppress_stream_stdout {
                             println!();
                         }
                     }
@@ -395,7 +400,7 @@ impl Agent {
                                                 name: fname,
                                                 status: "parsing".into(),
                                             });
-                                        } else {
+                                        } else if !suppress_stream_stdout {
                                             print!(
                                                 "\r\n  {} {}...",
                                                 "🔧".dimmed(),
@@ -432,7 +437,7 @@ impl Agent {
                                         self.emit_event(AgentEvent::AssistantDelta {
                                             text: before.to_string(),
                                         });
-                                    } else {
+                                    } else if !suppress_stream_stdout {
                                         // Replace \n with \r\n so every newline resets to col 0
                                         let safe = before.replace('\n', "\r\n");
                                         print!("{}", safe);
@@ -451,7 +456,7 @@ impl Agent {
                                         self.emit_event(AgentEvent::AssistantDelta {
                                             text: display_buf.clone(),
                                         });
-                                    } else {
+                                    } else if !suppress_stream_stdout {
                                         let safe = display_buf.replace('\n', "\r\n");
                                         print!("{}", safe);
                                         io::stdout().flush().ok();
@@ -524,14 +529,14 @@ impl Agent {
                 self.emit_event(AgentEvent::AssistantDelta {
                     text: display_buf.clone(),
                 });
-            } else {
+            } else if !suppress_stream_stdout {
                 let safe = display_buf.replace('\n', "\r\n");
                 print!("{}", safe);
                 io::stdout().flush().ok();
             }
         }
 
-        if !tui_active {
+        if !tui_active && !suppress_stream_stdout {
             // Ensure we end with a newline if we printed content
             if !content.is_empty() || !reasoning.is_empty() {
                 println!();

@@ -65,7 +65,11 @@ use tokio::sync::RwLock;
 /// Uses the global output lock to prevent interleaving from concurrent tasks.
 macro_rules! cli_println {
     ($($arg:tt)*) => {
-        if !crate::output::is_tui_active() {
+        // Suppress human-facing chatter in JSON, quiet, AND TUI modes — in JSON
+        // mode a stray println! pollutes the machine-readable output stream, and
+        // in TUI mode raw stdout corrupts the rendered frame. `should_suppress_output()`
+        // covers is_quiet() || is_tui_active() || is_json_mode().
+        if !crate::output::should_suppress_output() {
             let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             println!($($arg)*);
         }
