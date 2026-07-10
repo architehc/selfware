@@ -23,6 +23,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
+use crate::agent::tui_events::{AgentEvent, BroadcastEmitter, EventEmitter};
+
 /// Lifecycle status of a single run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
@@ -52,6 +54,9 @@ impl std::fmt::Display for RunId {
     }
 }
 
+/// Capacity of each run's broadcast event channel.
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
 /// Internal handle for a single run.
 struct RunHandle {
     status: Arc<RwLock<RunStatus>>,
@@ -60,6 +65,14 @@ struct RunHandle {
     /// Human-readable task description for diagnostics/listing.
     #[allow(dead_code)]
     task: String,
+    /// Per-run broadcast sender for `AgentEvent`s.
+    ///
+    /// Every run — whether created via [`RunSupervisor::spawn`] (pure future)
+    /// or [`RunSupervisor::start`] (real agent) — gets its own broadcast
+    /// channel so that [`attach`](RunSupervisor::attach) always works.
+    /// For `spawn`-only runs nothing may ever emit, but the channel exists
+    /// so `attach` can return a live subscriber regardless.
+    events: tokio::sync::broadcast::Sender<AgentEvent>,
 }
 
 /// Supervisor owning N concurrent agent runs.
@@ -108,6 +121,8 @@ impl RunSupervisor {
         let id = RunId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let status = Arc::new(RwLock::new(RunStatus::Running));
         let cancel = Arc::new(AtomicBool::new(false));
+        let (event_tx, _event_rx) =
+            tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
 
         let status_clone = Arc::clone(&status);
         let cancel_clone = Arc::clone(&cancel);
@@ -132,6 +147,55 @@ impl RunSupervisor {
             cancel,
             join,
             task,
+            events: event_tx,
+        };
+
+        self.runs.write().await.insert(id, handle);
+        id
+    }
+
+    /// Like [`spawn`](Self::spawn) but uses a caller-provided broadcast sender
+    /// for the run's event channel instead of creating a new one.
+    ///
+    /// This lets [`start`](Self::start) pre-create the channel, wire a
+    /// [`BroadcastEmitter`] onto the agent, and then pass the *same* sender
+    /// here so that [`attach`](Self::attach) subscribers receive events the
+    /// agent emits.
+    async fn spawn_with_events<F>(
+        &self,
+        task: String,
+        event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+        run: F,
+    ) -> RunId
+    where
+        F: Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let id = RunId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let status = Arc::new(RwLock::new(RunStatus::Running));
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let status_clone = Arc::clone(&status);
+        let cancel_clone = Arc::clone(&cancel);
+
+        let join = tokio::spawn(async move {
+            let result = run.await;
+            let final_status = if cancel_clone.load(Ordering::Relaxed) {
+                RunStatus::Aborted
+            } else {
+                match result {
+                    Ok(()) => RunStatus::Completed,
+                    Err(_) => RunStatus::Failed,
+                }
+            };
+            *status_clone.write().await = final_status;
+        });
+
+        let handle = RunHandle {
+            status,
+            cancel,
+            join,
+            task,
+            events: event_tx,
         };
 
         self.runs.write().await.insert(id, handle);
@@ -144,13 +208,34 @@ impl RunSupervisor {
     /// [`Agent::run_task`](crate::agent::Agent::run_task). **Requires a live
     /// LLM** (a configured API client); tests should use [`spawn`](Self::spawn)
     /// instead.
+    ///
+    /// A per-run `tokio::sync::broadcast` channel is created and a
+    /// [`BroadcastEmitter`] is wired onto the agent via
+    /// [`Agent::with_event_emitter`](crate::agent::Agent::with_event_emitter)
+    /// before `run_task` is called, so that [`attach`](Self::attach) returns a
+    /// live subscriber that receives the agent's `AgentEvent`s.
     pub async fn start(&self, task: String, config: crate::config::Config) -> RunId {
         let task_for_run = task.clone();
-        self.spawn(task, async move {
-            let mut agent = crate::agent::Agent::new(config).await?;
-            agent.run_task(&task_for_run).await
-        })
-        .await
+        // We create the broadcast channel here and clone the sender into the
+        // RunHandle (via spawn) while also wrapping a clone in a
+        // BroadcastEmitter for the agent.
+        let (event_tx, _event_rx) =
+            tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
+        let emitter: Arc<dyn EventEmitter> =
+            Arc::new(BroadcastEmitter::new(event_tx.clone()));
+
+        let task_for_spawn = task.clone();
+        // Call spawn but override its internal channel with our pre-built one
+        // by using a lower-level path: we can't easily inject into spawn, so
+        // instead we use spawn_with_events.
+        let id = self
+            .spawn_with_events(task_for_spawn, event_tx, async move {
+                let mut agent = crate::agent::Agent::new(config).await?;
+                agent = agent.with_event_emitter(emitter);
+                agent.run_task(&task_for_run).await
+            })
+            .await;
+        id
     }
 
     /// Abort a run: set the cancel flag, abort the `JoinHandle`, and mark the
@@ -195,13 +280,23 @@ impl RunSupervisor {
 
     /// Attach to a run's event stream.
     ///
-    /// **Not implemented in Increment 1.** Event-stream attach (per-run
-    /// `tokio::sync::broadcast` of `AgentEvent`s) lands in Increment 2.
-    /// Returns `None` for now.
-    pub async fn attach(&self, _id: &RunId) -> Option<()> {
-        // Inc2: return a broadcast::Receiver<AgentEvent> subscriber for the
-        // run's event channel.
-        None
+    /// Returns a live `tokio::sync::broadcast::Receiver<AgentEvent>` for the
+    /// run's event channel, or `None` if the run id is unknown.
+    ///
+    /// Multiple callers can attach to the same run simultaneously — the
+    /// underlying `tokio::sync::broadcast` channel fans out each emitted
+    /// `AgentEvent` to every active subscriber.
+    ///
+    /// For runs created via [`start`](Self::start), the agent's events flow
+    /// through this channel in real time. For runs created via
+    /// [`spawn`](Self::spawn) (pure futures), the channel exists but may
+    /// never receive events unless something writes to it directly.
+    pub async fn attach(
+        &self,
+        id: &RunId,
+    ) -> Option<tokio::sync::broadcast::Receiver<AgentEvent>> {
+        let runs = self.runs.read().await;
+        runs.get(id).map(|h| h.events.subscribe())
     }
 
     /// Pause a running run.
@@ -216,6 +311,26 @@ impl RunSupervisor {
     /// **Not yet implemented (Increment 2).** Currently returns an error.
     pub async fn resume(&self, _id: &RunId) -> anyhow::Result<()> {
         anyhow::bail!("resume not yet implemented (inc2)")
+    }
+
+    /// Emit an `AgentEvent` directly to a run's broadcast channel.
+    ///
+    /// This is primarily intended for testing fan-out without a live LLM:
+    /// a test can [`spawn`](Self::spawn) a trivial future, [`attach`](Self::attach)
+    /// multiple subscribers, then call this to push an event and verify every
+    /// subscriber receives it.
+    ///
+    /// Returns `true` if the run existed, `false` otherwise.
+    #[allow(dead_code)]
+    pub(crate) async fn emit_event(&self, id: &RunId, event: AgentEvent) -> bool {
+        let runs = self.runs.read().await;
+        match runs.get(id) {
+            Some(h) => {
+                let _ = h.events.send(event);
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -353,5 +468,86 @@ mod tests {
         assert_eq!(by_id[&ok], RunStatus::Completed);
         assert_eq!(by_id[&err], RunStatus::Failed);
         assert_eq!(by_id[&long], RunStatus::Aborted);
+    }
+
+    // ── Increment 2: broadcast event channel ───────────────────────────
+
+    #[tokio::test]
+    async fn attach_nonexistent_returns_none() {
+        let sup = RunSupervisor::new();
+        let bogus = RunId(999_999);
+        assert!(sup.attach(&bogus).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn attach_returns_live_subscriber() {
+        let sup = RunSupervisor::new();
+        let id = sup.spawn("trivial".into(), async { Ok(()) }).await;
+
+        let sub = sup.attach(&id).await;
+        assert!(sub.is_some(), "attach should return Some for an existing run");
+
+        // The subscriber should be a broadcast::Receiver.
+        let mut rx = sub.unwrap();
+
+        // Emit an event and verify we receive it.
+        let event = AgentEvent::Status {
+            message: "hello".into(),
+        };
+        assert!(sup.emit_event(&id, event.clone()).await);
+
+        let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("recv should not time out")
+            .expect("recv should succeed");
+
+        assert_eq!(received, AgentEvent::Status {
+            message: "hello".into()
+        });
+    }
+
+    #[tokio::test]
+    async fn attach_fans_out_to_multiple_subscribers() {
+        let sup = RunSupervisor::new();
+        let id = sup
+            .spawn("fan-out-test".into(), async {
+                // Keep the run alive long enough for the test to emit + recv.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(())
+            })
+            .await;
+
+        // Two independent subscribers on the same run.
+        let mut rx1 = sup.attach(&id).await.expect("attach rx1");
+        let mut rx2 = sup.attach(&id).await.expect("attach rx2");
+
+        // Emit a single event — BOTH subscribers must receive it.
+        let event = AgentEvent::Started;
+        assert!(sup.emit_event(&id, event.clone()).await);
+
+        let r1 = tokio::time::timeout(Duration::from_secs(2), rx1.recv())
+            .await
+            .expect("rx1 should not time out")
+            .expect("rx1 recv should succeed");
+        let r2 = tokio::time::timeout(Duration::from_secs(2), rx2.recv())
+            .await
+            .expect("rx2 should not time out")
+            .expect("rx2 recv should succeed");
+
+        assert_eq!(r1, AgentEvent::Started);
+        assert_eq!(r2, AgentEvent::Started);
+
+        // Clean up.
+        sup.abort(&id).await;
+    }
+
+    #[tokio::test]
+    async fn emit_event_nonexistent_returns_false() {
+        let sup = RunSupervisor::new();
+        let bogus = RunId(42);
+        assert!(
+            !sup.emit_event(&bogus, AgentEvent::Started).await,
+            "emit_event on unknown run should return false"
+        );
     }
 }

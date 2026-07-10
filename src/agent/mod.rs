@@ -1227,6 +1227,21 @@ To call a tool, use this EXACT XML structure:
         self
     }
 
+    /// Set a custom event emitter (e.g. a `BroadcastEmitter` for fan-out).
+    ///
+    /// This is the generic counterpart to [`with_event_sender`](Self::with_event_sender)
+    /// and works without the `tui` feature. The supervisor uses it to wire a
+    /// per-run `tokio::sync::broadcast` channel so that multiple callers can
+    /// [`attach`](crate::supervision::run_supervisor::RunSupervisor::attach)
+    /// to the same run's event stream.
+    pub fn with_event_emitter(
+        mut self,
+        emitter: Arc<dyn crate::agent::tui_events::EventEmitter>,
+    ) -> Self {
+        self.events = emitter;
+        self
+    }
+
     /// Wire up the channel the TUI uses to answer permission prompts
     /// (see `AgentEvent::PermissionRequested` / `await_tui_permission_response`).
     #[cfg(feature = "tui")]

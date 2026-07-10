@@ -6,7 +6,7 @@ use crate::ui::tui::TuiEvent;
 /// This allows agent code to emit events unconditionally without
 /// `#[cfg(feature = "tui")]` at every call site. When the TUI feature
 /// is enabled, these are translated to `TuiEvent` and sent to the UI.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     Started,
     Completed {
@@ -85,6 +85,30 @@ impl EventEmitter for NoopEmitter {
     fn emit(&self, _event: AgentEvent) {}
 }
 
+/// A broadcast event emitter that fans out `AgentEvent`s to multiple
+/// subscribers via a `tokio::sync::broadcast` channel.
+///
+/// Unlike [`TuiEmitter`] (single-consumer `mpsc`), this supports N concurrent
+/// subscribers — each call to [`tokio::sync::broadcast::Sender::subscribe`]
+/// on the underlying sender produces an independent receiver.
+pub struct BroadcastEmitter {
+    tx: tokio::sync::broadcast::Sender<AgentEvent>,
+}
+
+impl BroadcastEmitter {
+    /// Wrap an existing broadcast sender.
+    pub fn new(tx: tokio::sync::broadcast::Sender<AgentEvent>) -> Self {
+        Self { tx }
+    }
+}
+
+impl EventEmitter for BroadcastEmitter {
+    fn emit(&self, event: AgentEvent) {
+        // `send` errors only when there are zero active receivers; ignore.
+        let _ = self.tx.send(event);
+    }
+}
+
 /// An event emitter that sends events via an mpsc channel to the TUI.
 #[cfg(feature = "tui")]
 pub struct TuiEmitter {
@@ -139,5 +163,42 @@ impl EventEmitter for TuiEmitter {
             AgentEvent::ModeChangeRequested { mode } => TuiEvent::ModeChangeRequested { mode },
         };
         let _ = self.tx.send(tui_event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn broadcast_emitter_fans_out() {
+        let (tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(16);
+        let emitter = BroadcastEmitter::new(tx.clone());
+
+        let mut rx1 = tx.subscribe();
+        let mut rx2 = tx.subscribe();
+
+        emitter.emit(AgentEvent::Started);
+
+        let r1 = tokio::time::timeout(std::time::Duration::from_secs(2), rx1.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let r2 = tokio::time::timeout(std::time::Duration::from_secs(2), rx2.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(r1, AgentEvent::Started);
+        assert_eq!(r2, AgentEvent::Started);
+    }
+
+    #[tokio::test]
+    async fn broadcast_emitter_no_receivers_is_ok() {
+        // Emitting with zero receivers should not panic — the Result is
+        // silently dropped.
+        let (tx, _) = tokio::sync::broadcast::channel::<AgentEvent>(16);
+        let emitter = BroadcastEmitter::new(tx);
+        emitter.emit(AgentEvent::Started);
     }
 }
