@@ -533,9 +533,9 @@ impl ToolRegistry {
         registry.register_deferred(hot_reload::HotReloadTool::new());
 
         // Deferred: Clarification tool (ask_user) — rate-limited, user-disableable,
-        // safe in headless mode. Uses default enabled=true with max_asks=3 so the
-        // tool is always discoverable; callers can construct a custom instance
-        // via ClarificationTool::new if they need to gate on config at runtime.
+        // safe in headless/TUI mode. Registered here with default enabled=true so
+        // the tool is always discoverable; the agent re-registers it in
+        // Agent::new() with the actual `config.ui.allow_clarification` value.
         registry.register_deferred(clarify::ClarificationTool::default());
 
         registry.rebuild_search_index();

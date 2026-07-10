@@ -1783,6 +1783,15 @@ impl Agent {
                 if self.is_cancelled() {
                     break;
                 }
+                // Clone name/tool_call_id before execute_single_tool_in_batch
+                // takes them by value — we need them in the catch to push a
+                // synthetic error result if the fn returns Err BEFORE pushing
+                // any tool-result (e.g. confirmation rejection, pre-execution
+                // safety gate). Without this, native-FC history gets N calls
+                // but k<N results → 400.
+                let name_clone = name.clone();
+                let args_str_clone = args_str.clone();
+                let id_clone = tool_call_id.clone();
                 if let Err(e) = self
                     .execute_single_tool_in_batch(name, args_str, tool_call_id)
                     .await
@@ -1790,11 +1799,20 @@ impl Agent {
                     if super::task_runner::is_fatal_loop_error(&e) {
                         return Err(e);
                     }
-                    // Non-fatal tool error: the tool-result message has already
-                    // been pushed by execute_single_tool_in_batch (or its
-                    // sub-calls). Log and continue so remaining tool_calls in
-                    // the batch still execute — dropping them would leave the
-                    // native-FC history unbalanced (N calls, k<N results).
+                    // Non-fatal tool error that returned Err before pushing a
+                    // tool-result: push a synthetic error result for this
+                    // tool_call_id so every call gets exactly one result.
+                    let (call_id, use_native_fc, _) =
+                        self.build_tool_call_context(&name_clone, &args_str_clone, id_clone);
+                    let error_text = e.to_string();
+                    self.push_tool_result_message(
+                        use_native_fc,
+                        &call_id,
+                        &name_clone,
+                        false,
+                        &error_text,
+                    )
+                    .await;
                     warn!("Non-fatal tool error in sequential batch: {e}");
                 }
             }
@@ -1814,6 +1832,10 @@ impl Agent {
             if self.is_cancelled() {
                 break;
             }
+            // Clone before execute_single_tool_in_batch takes them by value.
+            let name_clone = name.clone();
+            let args_str_clone = args_str.clone();
+            let id_clone = tool_call_id.clone();
             if let Err(e) = self
                 .execute_single_tool_in_batch(name, args_str, tool_call_id)
                 .await
@@ -1821,6 +1843,19 @@ impl Agent {
                 if super::task_runner::is_fatal_loop_error(&e) {
                     return Err(e);
                 }
+                // Push a synthetic error result so native-FC history stays
+                // balanced (N calls → N results).
+                let (call_id, use_native_fc, _) =
+                    self.build_tool_call_context(&name_clone, &args_str_clone, id_clone);
+                let error_text = e.to_string();
+                self.push_tool_result_message(
+                    use_native_fc,
+                    &call_id,
+                    &name_clone,
+                    false,
+                    &error_text,
+                )
+                .await;
                 warn!("Non-fatal tool error in sequential batch (phase 4): {e}");
             }
         }
@@ -5292,6 +5327,64 @@ mod tests {
 
         let last = agent.messages.last().expect("expected a skip message");
         assert!(last.content.text().contains("protected branch"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn confirmation_error_in_batch_still_pushes_tool_result() {
+        // Regression: when execute_single_tool_in_batch returns Err BEFORE
+        // pushing a tool-result (e.g. confirmation rejection in non-YOLO
+        // headless mode), the catch-and-continue loop must push a synthetic
+        // error result for that tool_call_id so native-FC history stays
+        // balanced (N calls → N results).  Without the fix, the tool_call_id
+        // had NO result → 400 on the next API call.
+        //
+        // We use Normal mode (not Yolo) so confirmation is required for
+        // file_write.  In the test runner stdin is not a terminal, so
+        // confirm_tool_execution returns Err("requires confirmation but
+        // cannot prompt in headless mode").  The fix pushes a synthetic
+        // error result and the batch continues with the second tool.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.execution_mode = crate::config::ExecutionMode::Normal;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent
+            .execute_tool_batch(vec![
+                (
+                    "file_write".to_string(),
+                    r#"{"path":"/tmp/selfware-test-confirm.txt","content":"x"}"#.to_string(),
+                    Some("call_confirm_err".to_string()),
+                ),
+                // A second tool that should still execute.
+                (
+                    "shell_exec".to_string(),
+                    r#"{"command":"echo hello"}"#.to_string(),
+                    Some("call_after_err".to_string()),
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let all_text: String = agent
+            .messages
+            .iter()
+            .map(|m| m.content.text())
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+
+        // The confirmation-errored tool must have a synthetic error result
+        // pushed (contains "headless mode" from the error message).
+        assert!(
+            all_text.contains("headless mode"),
+            "expected a synthetic error result for the confirmation-errored tool; got: {all_text}"
+        );
+        // The second tool should also have executed (its result present).
+        assert!(
+            all_text.contains("hello"),
+            "expected the second tool in the batch to still execute after the first errored; got: {all_text}"
+        );
+
         server.stop().await;
     }
 }

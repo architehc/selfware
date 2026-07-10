@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use tracing::{debug, info};
 
 use crate::safety::SafetyChecker;
@@ -841,9 +841,15 @@ pub async fn run_mcp_server(
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin);
 
-    // Channel through which handler tasks send their serialized responses to
-    // the single writer task.  This serializes all stdout writes.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Bounded channel (256) for responses — provides backpressure so a fast
+    // client cannot create unlimited in-flight response messages.  The single
+    // writer task drains this channel and serializes all stdout writes.
+    let (tx, mut rx) = mpsc::channel::<String>(256);
+
+    // Semaphore (32 permits) to cap concurrent in-flight request handler
+    // tasks.  Each request acquires a permit before spawning; the permit is
+    // dropped when the handler completes, preventing unbounded task growth.
+    let request_semaphore = Arc::new(Semaphore::new(32));
 
     // Spawn ONE writer task that owns stdout — this serializes all writes
     // so concurrent handler tasks never interleave their Content-Length frames.
@@ -877,7 +883,7 @@ pub async fn run_mcp_server(
                     }),
                 };
                 if let Ok(body) = serde_json::to_string(&error_response) {
-                    let _ = tx.send(body);
+                    let _ = tx.send(body).await;
                 }
                 continue;
             }
@@ -898,7 +904,7 @@ pub async fn run_mcp_server(
                     }),
                 };
                 if let Ok(body) = serde_json::to_string(&error_response) {
-                    let _ = tx.send(body);
+                    let _ = tx.send(body).await;
                 }
                 continue;
             }
@@ -917,13 +923,27 @@ pub async fn run_mcp_server(
         // clones the Arc<McpServer> handle and the channel sender, runs
         // `handle_request`, and sends the serialized response (if any) to
         // the writer task.  Notifications (None response) send nothing.
+        //
+        // A semaphore permit is acquired before spawning to cap in-flight
+        // tasks at 32; the permit is held for the lifetime of the handler
+        // task and released on completion.
         {
             let server = Arc::clone(&server);
             let tx = tx.clone();
+            let permit = request_semaphore.clone().acquire_owned().await;
+            // If the semaphore is closed (shouldn't happen in normal operation),
+            // skip spawning — but this is non-fatal.
+            if permit.is_err() {
+                continue;
+            }
+            let permit = permit.unwrap();
             tokio::spawn(async move {
+                // _permit is held until the handler completes, bounding
+                // the number of concurrent in-flight request tasks.
+                let _permit = permit;
                 if let Some(resp) = server.handle_request(&request).await {
                     if let Ok(body) = serde_json::to_string(&resp) {
-                        let _ = tx.send(body);
+                        let _ = tx.send(body).await;
                     }
                 }
             });

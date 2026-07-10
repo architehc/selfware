@@ -663,6 +663,14 @@ impl Agent {
             std::sync::Arc::new(client.clone()),
             config.safety.clone(),
         ));
+        // Re-register the clarification (ask_user) tool with the config's
+        // allow_clarification flag so it can be disabled by the user.
+        // ToolRegistry::with_safety_config registers a default-enabled
+        // instance; replacing it here wires the actual config value.
+        tools.register_deferred(crate::tools::clarify::ClarificationTool::new(
+            config.ui.allow_clarification,
+            3,
+        ));
         tools.rebuild_search_index();
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);

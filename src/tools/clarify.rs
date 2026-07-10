@@ -101,7 +101,20 @@ impl Tool for ClarificationTool {
             }));
         }
 
-        // --- Guard 3: headless / non-interactive (NEVER block on stdin) ---
+        // --- Guard 3: TUI mode (NEVER block on stdin — the TUI owns the ---
+        // --- terminal in raw mode, so a blocking read_line() would fight ---
+        // --- its event loop).  We check the same global atomic the rest  ---
+        // --- of the agent uses (`crate::output::is_tui_active()`).       ---
+        // Checked BEFORE the headless guard because the TUI may have a
+        // terminal stdin (is_terminal() == true) but still must not block.
+        if crate::output::is_tui_active() {
+            return Ok(serde_json::json!({
+                "answer": null,
+                "note": "running in TUI mode; interactive clarification is not available — proceed with your best assumption"
+            }));
+        }
+
+        // --- Guard 4: headless / non-interactive (NEVER block on stdin) ---
         if !std::io::stdin().is_terminal() {
             return Ok(serde_json::json!({
                 "answer": null,
@@ -259,5 +272,31 @@ mod tests {
         assert_eq!(tool.asked_count(), 0);
         // We can't directly read `enabled`/`max_asks` (private), but the
         // disabled test above covers the false path and this covers default.
+    }
+
+    // ── TUI mode guard ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tui_mode_returns_note_without_blocking() {
+        // When the TUI is active, the tool must NOT block on stdin — it
+        // should return a null answer immediately.
+        let tool = ClarificationTool::new(true, 3);
+
+        // Activate TUI mode for the duration of this test.
+        crate::output::set_tui_active(true);
+        let result = tool
+            .execute(serde_json::json!({"question": "test?"}))
+            .await
+            .unwrap();
+        // Restore TUI state.
+        crate::output::set_tui_active(false);
+
+        assert!(result["answer"].is_null());
+        assert!(result["note"]
+            .as_str()
+            .unwrap()
+            .contains("TUI mode"));
+        // Counter should not have been incremented.
+        assert_eq!(tool.asked_count(), 0);
     }
 }
