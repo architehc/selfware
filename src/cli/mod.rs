@@ -778,73 +778,7 @@ pub async fn run() -> Result<()> {
     {
         let should_use_tui = !cli.quiet && (cli.tui || (cli.command.is_none() && !cli.no_tui));
         if should_use_tui {
-            let (event_tx, event_rx) = mpsc::channel();
-            let (user_input_tx, user_input_rx) = mpsc::channel();
-            let (permission_tx, permission_rx) = mpsc::channel();
-
-            let mut agent = Agent::new(config.clone())
-                .await?
-                .with_event_sender(event_tx)
-                .with_permission_channel(permission_rx);
-
-            let shared_state = crate::ui::tui::SharedDashboardState::default();
-            let model = config.model.clone();
-
-            // Suppress ALL direct stdout/stderr from the agent — the TUI
-            // owns the terminal and renders from events only.
-            crate::output::set_tui_active(true);
-
-            // Run TUI using spawn_blocking to properly integrate with tokio runtime
-            let tui_handle = tokio::task::spawn_blocking(move || {
-                crate::ui::tui::run_tui_dashboard_with_events(
-                    &model,
-                    shared_state,
-                    event_rx,
-                    user_input_tx,
-                    permission_tx,
-                )
-            });
-
-            // Process user inputs from TUI.
-            // The recv() is blocking (std::sync::mpsc), so we use block_in_place
-            // to let tokio move other tasks off this thread while we wait.
-            loop {
-                let input = tokio::task::block_in_place(|| user_input_rx.recv());
-
-                match input {
-                    Ok(ref input) if input == "exit" || input == "quit" => break,
-                    Ok(input) => {
-                        // Slash commands must NOT be sent to the LLM as prompts.
-                        // In TUI dashboard mode the full interactive command
-                        // dispatcher is not available, so we skip LLM routing
-                        // for any input starting with '/'.
-                        if input.starts_with('/') {
-                            warn!(
-                                "Slash command '{}' ignored in TUI mode — use interactive mode for command dispatch",
-                                input
-                            );
-                            continue;
-                        }
-                        // Run the task — this will emit events to the TUI through event_tx
-                        if let Err(e) = agent.run_task(&input).await {
-                            warn!("Agent failed to run task: {}", e);
-                        }
-                    }
-                    _ => break,
-                }
-            }
-
-            crate::output::set_tui_active(false);
-
-            // Auto-save conversation/session on exit so history isn't lost.
-            if let Err(e) = agent.save_checkpoint("TUI session exit") {
-                warn!("Failed to auto-save session on TUI exit: {}", e);
-            }
-
-            // Cleanup: await the TUI task with a bounded timeout so a stuck
-            // TUI thread can never block shutdown indefinitely.
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tui_handle).await;
-            return Ok(());
+            return run_live_agent_tui(config).await;
         }
     }
 
@@ -923,6 +857,83 @@ fn build_session_result(
         failure_mode,
         artifact_dir,
     }
+}
+
+/// Launch the live agent-driven TUI dashboard.
+///
+/// This is the single entry point used by the default no-subcommand path,
+/// `selfware dashboard`, and `selfware command-center`. It builds an
+/// `Agent` with an event sender, spawns the TUI in a blocking thread,
+/// processes user input, and cleans up on exit.
+#[cfg(feature = "tui")]
+async fn run_live_agent_tui(config: Config) -> Result<()> {
+    let (event_tx, event_rx) = mpsc::channel();
+    let (user_input_tx, user_input_rx) = mpsc::channel();
+    let (permission_tx, permission_rx) = mpsc::channel();
+
+    let mut agent = Agent::new(config.clone())
+        .await?
+        .with_event_sender(event_tx)
+        .with_permission_channel(permission_rx);
+
+    let shared_state = crate::ui::tui::SharedDashboardState::default();
+    let model = config.model.clone();
+
+    // Suppress ALL direct stdout/stderr from the agent — the TUI
+    // owns the terminal and renders from events only.
+    crate::output::set_tui_active(true);
+
+    // Run TUI using spawn_blocking to properly integrate with tokio runtime
+    let tui_handle = tokio::task::spawn_blocking(move || {
+        crate::ui::tui::run_tui_dashboard_with_events(
+            &model,
+            shared_state,
+            event_rx,
+            user_input_tx,
+            permission_tx,
+        )
+    });
+
+    // Process user inputs from TUI.
+    // The recv() is blocking (std::sync::mpsc), so we use block_in_place
+    // to let tokio move other tasks off this thread while we wait.
+    loop {
+        let input = tokio::task::block_in_place(|| user_input_rx.recv());
+
+        match input {
+            Ok(ref input) if input == "exit" || input == "quit" => break,
+            Ok(input) => {
+                // Slash commands must NOT be sent to the LLM as prompts.
+                // In TUI dashboard mode the full interactive command
+                // dispatcher is not available, so we skip LLM routing
+                // for any input starting with '/'.
+                if input.starts_with('/') {
+                    warn!(
+                        "Slash command '{}' ignored in TUI mode — use interactive mode for command dispatch",
+                        input
+                    );
+                    continue;
+                }
+                // Run the task — this will emit events to the TUI through event_tx
+                if let Err(e) = agent.run_task(&input).await {
+                    warn!("Agent failed to run task: {}", e);
+                }
+            }
+            _ => break,
+        }
+    }
+
+    crate::output::set_tui_active(false);
+
+    // Auto-save conversation/session on exit so history isn't lost.
+    if let Err(e) = agent.save_checkpoint("TUI session exit") {
+        warn!("Failed to auto-save session on TUI exit: {}", e);
+    }
+
+    // Cleanup: await the TUI task with a bounded timeout so a stuck
+    // TUI thread can never block shutdown indefinitely.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), tui_handle).await;
+    Ok(())
 }
 
 async fn handle_command(
@@ -1174,15 +1185,10 @@ async fn handle_command(
         }
 
         #[cfg(feature = "tui")]
-        Commands::Dashboard { swarm_mode } => {
-            if swarm_mode && !quiet {
-                println!(
-                    "{} {}",
-                    Glyphs::gear(),
-                    "Swarm mode enabled for dashboard session".craftsman_voice()
-                );
-            }
-            let _user_inputs = crate::ui::tui::run_tui_dashboard(&config.model)?;
+        Commands::Dashboard { swarm_mode: _ } => {
+            // Dashboard launches the same live agent-driven TUI as the
+            // default no-subcommand path — no canned agent-less loop.
+            return run_live_agent_tui(config).await;
         }
 
         #[cfg(feature = "tui")]
@@ -1190,19 +1196,9 @@ async fn handle_command(
             mode: _,
             refresh: _,
         } => {
-            if !quiet {
-                println!("{}", render_header(ctx));
-                println!(
-                    "\n{} {}\n",
-                    Glyphs::gear(),
-                    "Command Center - SWL Workflow Monitoring".workshop_title()
-                );
-            }
-
-            println!(
-                "Command Center is temporarily unavailable (observability dashboard removed)."
-            );
-            println!("Use `selfware dashboard` for the TUI overview instead.");
+            // Command Center now launches the same live agent-driven TUI
+            // as the default no-subcommand path — no dead stub.
+            return run_live_agent_tui(config).await;
         }
 
         Commands::Resume { task_id } => {

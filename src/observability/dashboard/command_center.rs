@@ -1,6 +1,8 @@
 //! Command Center Dashboard for SWL Workflow Monitoring
 //!
-//! Real-time monitoring dashboard for SWL workflows
+//! The live agent-driven TUI is now unified in [`crate::cli::run_live_agent_tui`].
+//! This module retains the shared state types that may be referenced by other
+//! components, but the dead placeholder runner has been removed.
 
 /// Dashboard update mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -8,22 +10,6 @@ pub enum UpdateMode {
     #[default]
     Polling,
     Streaming,
-}
-
-/// Run the command center dashboard
-#[cfg(feature = "tui")]
-pub async fn run_command_center() -> anyhow::Result<()> {
-    println!("Command Center dashboard started");
-    println!("(Full TUI implementation with ratatui would go here)");
-    Ok(())
-}
-
-/// Run with shared state for external integration
-#[cfg(feature = "tui")]
-pub async fn run_command_center_with_state(
-    _state: std::sync::Arc<tokio::sync::RwLock<CommandCenterState>>,
-) -> anyhow::Result<()> {
-    run_command_center().await
 }
 
 /// Dashboard state
