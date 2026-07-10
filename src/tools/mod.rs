@@ -23,6 +23,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod clarify;
 pub mod analyzer;
 pub mod browser;
 pub mod cargo;
@@ -531,6 +532,12 @@ impl ToolRegistry {
         // Deferred: Hot-reload tool for dynamic plugin loading
         #[cfg(feature = "hot-reload")]
         registry.register_deferred(hot_reload::HotReloadTool::new());
+
+        // Deferred: Clarification tool (ask_user) — rate-limited, user-disableable,
+        // safe in headless mode. Uses default enabled=true with max_asks=3 so the
+        // tool is always discoverable; callers can construct a custom instance
+        // via ClarificationTool::new if they need to gate on config at runtime.
+        registry.register_deferred(clarify::ClarificationTool::default());
 
         registry.rebuild_search_index();
         registry

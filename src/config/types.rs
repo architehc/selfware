@@ -45,6 +45,11 @@ pub struct UiConfig {
     /// Default to verbose mode
     #[serde(default)]
     pub verbose_mode: bool,
+    /// Allow the agent to use the `ask_user` clarification tool.
+    /// When `false`, the tool returns a null answer immediately so the
+    /// agent proceeds with its best assumption. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub allow_clarification: bool,
     /// Always show token usage
     #[serde(default)]
     pub show_tokens: bool,
@@ -60,6 +65,7 @@ impl Default for UiConfig {
             animations: true,
             compact_mode: false,
             verbose_mode: false,
+            allow_clarification: true,
             show_tokens: false,
             animation_speed: 1.0,
         }

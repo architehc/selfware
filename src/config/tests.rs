@@ -385,6 +385,7 @@ fn test_config_full_roundtrip() {
             animations: true,
             compact_mode: true,
             verbose_mode: false,
+            allow_clarification: true,
             show_tokens: true,
             animation_speed: 1.5,
         },
@@ -751,6 +752,7 @@ fn test_ui_config_serialization() {
         animations: false,
         compact_mode: true,
         verbose_mode: true,
+        allow_clarification: true,
         show_tokens: true,
         animation_speed: 2.0,
     };

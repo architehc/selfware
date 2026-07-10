@@ -91,6 +91,7 @@ mod ui_config_tests {
             animations: false,
             compact_mode: true,
             verbose_mode: false,
+            allow_clarification: true,
             show_tokens: true,
             animation_speed: 2.0,
         };
