@@ -56,7 +56,6 @@ pub mod screen_capture;
 pub mod search;
 pub mod shell;
 pub mod shell_exec;
-pub mod swarm_tool;
 pub mod task_focus;
 pub mod tool_search;
 pub mod vision;

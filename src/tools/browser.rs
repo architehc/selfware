@@ -74,7 +74,8 @@ async fn detect_browser() -> Result<BrowserType> {
     }
 
     Err(anyhow::anyhow!(
-        "No browser automation tool found. Install Chrome, Chromium, or Playwright."
+        "browser automation unavailable: no Playwright/Chrome backend found; \
+         install a browser backend to use browser_* tools"
     ))
 }
 
@@ -761,7 +762,8 @@ impl Tool for BrowserScreenshot {
                 }))
             }
             BrowserType::Curl => Err(anyhow::anyhow!(
-                "Screenshots require Chrome or Playwright. Curl cannot take screenshots."
+                "browser automation unavailable: no Playwright/Chrome backend found; \
+                 install a browser backend to use browser_screenshot"
             )),
         }
     }
@@ -941,7 +943,8 @@ impl Tool for BrowserPdf {
                 }))
             }
             BrowserType::Curl => Err(anyhow::anyhow!(
-                "PDF generation requires Chrome or Playwright. Curl cannot generate PDFs."
+                "browser automation unavailable: no Playwright/Chrome backend found; \
+                 install a browser backend to use browser_pdf"
             )),
         }
     }
@@ -1078,7 +1081,10 @@ impl Tool for BrowserEval {
                 ))
             }
             BrowserType::Curl => {
-                Err(anyhow::anyhow!("JavaScript evaluation requires a browser (Playwright recommended)"))
+                Err(anyhow::anyhow!(
+                    "browser automation unavailable: no Playwright/Chrome backend found; \
+                     install a browser backend to use browser_eval"
+                ))
             }
         }
     }

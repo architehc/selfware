@@ -292,6 +292,15 @@ async fn run_powershell_sendkeys(_sendkeys_sequence: &str) -> Result<()> {
 async fn run_xdotool(args: &[String]) -> Result<()> {
     use tokio::process::Command;
 
+    // If no input backend was detected, fail with a clear message instead of
+    // shelling out to a missing xdotool binary (which produces a raw ENOENT).
+    if detect_backend().is_none() {
+        bail!(
+            "no input backend available: install xdotool (Linux X11) or run \
+             under a supported environment"
+        );
+    }
+
     let output = Command::new("xdotool")
         .args(args)
         .output()

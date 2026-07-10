@@ -865,7 +865,6 @@ fn try_parse_plain_function_calls(content: &str) -> Option<Vec<(Result<ParsedToo
         "code_plan",
         "code_diff_plan",
         "localize_issue",
-        "swarm_dispatch",
         "npm_install",
         "npm_run",
         "npm_scripts",
