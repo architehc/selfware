@@ -152,13 +152,28 @@ pub fn emit_result(result: &SessionResult) {
 /// Capture `git diff` from the current working directory, including newly
 /// added files and excluding selfware-internal scratch directories.
 pub fn capture_patch() -> anyhow::Result<String> {
+    // Stage changes into a *temporary* git index so we never mutate the user's
+    // real `.git/index`. `GIT_INDEX_FILE` redirects `git add`/`git diff` at a
+    // throwaway index. We use a temp *directory* (not a pre-created temp file)
+    // because git rejects a zero-byte existing index file; the index file path
+    // inside the temp dir does not pre-exist, so git creates a fresh index.
+    // The TempDir auto-deletes the index on drop, keeping the user's real index
+    // (`git status` / `.git/index`) exactly as the user had it.
+    let tmp_index_dir = tempfile::Builder::new()
+        .prefix("selfware-index-")
+        .tempdir()
+        .map_err(|e| anyhow::anyhow!("creating temp dir for git index: {}", e))?;
+    let tmp_index = tmp_index_dir.path().join("index");
+
     let _ = std::process::Command::new("git")
+        .env("GIT_INDEX_FILE", &tmp_index)
         .args(["add", "-A"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
 
     let out = std::process::Command::new("git")
+        .env("GIT_INDEX_FILE", &tmp_index)
         .args([
             "diff",
             "--cached",
@@ -175,6 +190,10 @@ pub fn capture_patch() -> anyhow::Result<String> {
         ])
         .output()
         .map_err(|e| anyhow::anyhow!("running git diff: {}", e))?;
+
+    // `out.stdout` is owned (into memory) before the temp index is dropped &
+    // cleaned up below, so the captured patch survives the cleanup.
+    drop(tmp_index_dir);
 
     if !out.status.success() {
         anyhow::bail!(
@@ -817,6 +836,62 @@ mod tests {
             !patch.contains("secret cache"),
             "patch should exclude .selfware/, got: {}",
             patch
+        );
+    }
+
+    #[test]
+    fn test_capture_patch_does_not_stage_user_files() {
+        let tmp_dir = match make_temp_git_repo("selfware_cp_nostage") {
+            Some(d) => d,
+            None => {
+                eprintln!("Skipping: git not available");
+                return;
+            }
+        };
+        let _cleanup = TempDirCleanup(tmp_dir.clone());
+        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original_dir = std::env::current_dir().unwrap();
+
+        // Make an unstaged modification to the tracked file.
+        std::fs::write(tmp_dir.join("file.txt"), "line1\nline2\nUNSTAGED\n").unwrap();
+
+        // Snapshot the real index state BEFORE capture_patch (git diff --cached
+        // against the real index should be empty since nothing is staged yet).
+        std::env::set_current_dir(&tmp_dir).unwrap();
+        let staged_before = std::process::Command::new("git")
+            .args(["diff", "--cached", "HEAD"])
+            .output()
+            .unwrap();
+        std::env::set_current_dir(&original_dir).unwrap();
+        let staged_before = String::from_utf8_lossy(&staged_before.stdout).to_string();
+
+        // Run capture_patch (should NOT touch the real index).
+        std::env::set_current_dir(&tmp_dir).unwrap();
+        let result = capture_patch();
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_ok(), "capture_patch failed: {:?}", result.err());
+        let patch = result.unwrap();
+        assert!(
+            patch.contains("UNSTAGED"),
+            "patch should contain the unstaged change, got: {}",
+            patch
+        );
+
+        // Snapshot the real index state AFTER capture_patch and compare. The
+        // real `.git/index` must be untouched, so `git diff --cached` must be
+        // identical to the before snapshot.
+        std::env::set_current_dir(&tmp_dir).unwrap();
+        let staged_after = std::process::Command::new("git")
+            .args(["diff", "--cached", "HEAD"])
+            .output()
+            .unwrap();
+        std::env::set_current_dir(&original_dir).unwrap();
+        let staged_after = String::from_utf8_lossy(&staged_after.stdout).to_string();
+
+        assert_eq!(
+            staged_before, staged_after,
+            "capture_patch must not mutate the user's real git index (staged state changed)"
         );
     }
 }
