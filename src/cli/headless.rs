@@ -126,6 +126,22 @@ impl HeadlessEvent {
             reason: Some(reason),
         }
     }
+
+    pub fn turn_decision(decision: String, detail: String) -> Self {
+        // Reuse the `reason` field for the decision name and `outcome` for the
+        // detail so the JSON shape stays backward-compatible with existing
+        // consumers (no new struct fields needed).
+        Self {
+            event: "turn_decision",
+            step: None,
+            model: None,
+            tool: None,
+            args: None,
+            ok: None,
+            outcome: if detail.is_empty() { None } else { Some(detail) },
+            reason: Some(decision),
+        }
+    }
 }
 
 /// Emit a single headless event as JSON to stdout.
@@ -241,6 +257,9 @@ impl ProgressEmitter for JsonlProgressEmitter {
                 Some(HeadlessEvent::task_completed(outcome))
             }
             ProgressEvent::TaskFailed { reason } => Some(HeadlessEvent::task_failed(reason)),
+            ProgressEvent::TurnDecision { decision, detail } => {
+                Some(HeadlessEvent::turn_decision(decision, detail))
+            }
             _ => None,
         };
 

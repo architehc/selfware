@@ -257,7 +257,8 @@ impl ProgressEmitter for TraceProgressEmitter {
             }
             ProgressEvent::StepCompleted { .. }
             | ProgressEvent::TaskCompleted { .. }
-            | ProgressEvent::TaskFailed { .. } => {
+            | ProgressEvent::TaskFailed { .. }
+            | ProgressEvent::TurnDecision { .. } => {
                 drop(file);
                 self.flush_llm_response();
             }

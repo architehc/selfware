@@ -72,6 +72,10 @@ pub enum ProgressEvent {
     TaskCompleted { outcome: String },
     /// The task failed.
     TaskFailed { reason: String },
+    /// A turn ended WITHOUT executing tools and WITHOUT completing — a refusal,
+    /// a no-tool-call, an injected nudge, or an abort. Surfaced live so a
+    /// refused/no-op turn is visible instead of a silent step gap.
+    TurnDecision { decision: String, detail: String },
 }
 
 /// Build a short, log-safe args summary for a tool call. Pulls the most
@@ -129,6 +133,7 @@ impl ProgressEvent {
             ProgressEvent::SubprocessCompleted { .. } => "subprocess_completed",
             ProgressEvent::TaskCompleted { .. } => "task_completed",
             ProgressEvent::TaskFailed { .. } => "task_failed",
+            ProgressEvent::TurnDecision { .. } => "turn_decision",
         }
     }
 }
@@ -293,6 +298,13 @@ pub fn render_event_kv(event: &ProgressEvent) -> String {
             // Reason can contain spaces; quote it.
             format!("kind=task_failed reason={:?}", reason)
         }
+        ProgressEvent::TurnDecision { decision, detail } => {
+            if detail.is_empty() {
+                format!("kind=turn_decision decision={}", decision)
+            } else {
+                format!("kind=turn_decision decision={} detail=\"{}\"", decision, detail)
+            }
+        }
     }
 }
 
@@ -391,6 +403,30 @@ mod tests {
         });
         assert_eq!(a.snapshot().len(), 2);
         assert_eq!(b.snapshot().len(), 2);
+    }
+
+    #[test]
+    fn render_turn_decision_kv() {
+        let ev = ProgressEvent::TurnDecision {
+            decision: "refused".to_string(),
+            detail: "completion gate: no edit made".to_string(),
+        };
+        assert_eq!(ev.kind(), "turn_decision");
+        let s = render_event_kv(&ev);
+        assert!(s.contains("kind=turn_decision"), "line: {s}");
+        assert!(s.contains("decision=refused"), "line: {s}");
+        assert!(s.contains("detail="), "line: {s}");
+    }
+
+    #[test]
+    fn render_turn_decision_kv_no_detail() {
+        let ev = ProgressEvent::TurnDecision {
+            decision: "no_tool_call".to_string(),
+            detail: String::new(),
+        };
+        let s = render_event_kv(&ev);
+        assert!(s.contains("kind=turn_decision decision=no_tool_call"), "line: {s}");
+        assert!(!s.contains("detail="), "line: {s}");
     }
 
     /// Simulates the events a small agent loop should emit and asserts they

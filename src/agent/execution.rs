@@ -304,6 +304,32 @@ impl Agent {
         response_text: &str,
         reasoning_content: Option<&str>,
     ) {
+        // Surface a live progress event for turn decisions that would otherwise
+        // be invisible (a refused / no-op / nudged / aborted turn currently
+        // renders as step_started -> step_completed with nothing between). This
+        // runs BEFORE the artifact-disabled guard so live visibility does not
+        // depend on turn artifacts being enabled. Tool-executing and completed
+        // turns are already visible via tool events / task_completed, so they
+        // are intentionally not re-emitted here.
+        {
+            use super::turn_artifacts::AgentDecision as AD;
+            let live: Option<(&str, String)> = match &decision {
+                AD::NoToolCall => Some(("no_tool_call", String::new())),
+                AD::NudgeInjected { reason } => {
+                    Some(("nudge_injected", reason.chars().take(120).collect()))
+                }
+                AD::Aborted { reason } => Some(("aborted", reason.chars().take(120).collect())),
+                AD::Refused { reason } => Some(("refused", reason.chars().take(120).collect())),
+                AD::ExecutedTools { .. } | AD::Completed { .. } => None,
+            };
+            if let Some((decision_name, detail)) = live {
+                self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                    decision: decision_name.to_string(),
+                    detail,
+                });
+            }
+        }
+
         if self.config.agent.disable_turn_artifacts {
             return;
         }
