@@ -625,6 +625,18 @@ impl Agent {
             }
             self.trim_message_history();
 
+            // Surface the current step in the live TUI status bar so a
+            // converging run is distinguishable from a stalled one (the TUI had
+            // no step signal — step/iteration never reached it). Reuses the
+            // existing Status event path; a no-op when there is no TUI emitter.
+            self.emit_event(AgentEvent::Status {
+                message: format!(
+                    "Step {}/{}",
+                    self.loop_control.current_step(),
+                    self.config.agent.max_iterations
+                ),
+            });
+
             // Hard limits: token budget and wall-clock timeout
             if let Some(max_budget) = self.config.agent.max_budget_tokens {
                 let total = self.cumulative_token_usage.total;
