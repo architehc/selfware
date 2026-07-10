@@ -11,6 +11,50 @@ use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
 use crate::hooks::HookContext;
 
+/// A tool execution was halted before it returned a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolHalt {
+    /// The per-tool deadline (`step_timeout_secs`) elapsed.
+    TimedOut,
+    /// The agent's cancel token was set (ESC / abort) mid-execution.
+    Cancelled,
+}
+
+/// Race a tool-execution future against the per-tool deadline AND the agent's
+/// cancel token. Returns the tool's own `Result` when it finishes first, or a
+/// [`ToolHalt`] when the deadline elapses or cancellation is observed. The
+/// cancel token is polled every 50ms so an in-flight tool is interrupted
+/// promptly instead of blocking up to `timeout`.
+pub(crate) async fn run_tool_bounded<F>(
+    fut: F,
+    timeout: std::time::Duration,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::result::Result<anyhow::Result<serde_json::Value>, ToolHalt>
+where
+    F: std::future::Future<Output = anyhow::Result<serde_json::Value>>,
+{
+    use std::sync::atomic::Ordering;
+    // Fast path: already cancelled before we start.
+    if cancel.load(Ordering::Relaxed) {
+        return Err(ToolHalt::Cancelled);
+    }
+    let deadline = tokio::time::sleep(timeout);
+    tokio::pin!(fut);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            biased;
+            r = &mut fut => return Ok(r),
+            _ = &mut deadline => return Err(ToolHalt::TimedOut),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(ToolHalt::Cancelled);
+                }
+            }
+        }
+    }
+}
+
 pub(super) const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
 pub(super) const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
 pub(super) const FAILED_TOOL_ATTEMPT_WINDOW_SIZE: usize = 16;
@@ -2064,10 +2108,8 @@ impl Agent {
             return Ok(());
         }
 
-        // Build futures for concurrent execution. We use FuturesUnordered
-        // to run them concurrently within the current task (no spawning needed,
-        // avoids 'static lifetime requirements).
         let timeout_secs = self.config.agent.step_timeout_secs.max(1);
+        let batch_cancel = self.cancel_token();
 
         for vt in &validated {
             let activity = crate::output::tool_activity_message(&vt.name, &vt.args);
@@ -2085,6 +2127,7 @@ impl Agent {
                 let tool_name = vt.name.clone();
                 let tool_args = vt.args.clone();
                 let tool_ref = self.tools.get(&tool_name);
+                let cancel = batch_cancel.clone();
 
                 futures.push(async move {
                     let Some(tool) = tool_ref else {
@@ -2092,11 +2135,12 @@ impl Agent {
                         return (idx, (false, msg.clone(), msg));
                     };
                     let start = std::time::Instant::now();
-                    let execution = tokio::time::timeout(
-                        std::time::Duration::from_secs(timeout_secs),
+                    let execution = run_tool_bounded(
                         crate::observability::telemetry::track_tool_execution(&tool_name, || {
                             tool.execute(tool_args.clone())
                         }),
+                        std::time::Duration::from_secs(timeout_secs),
+                        cancel,
                     )
                     .await;
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -2124,8 +2168,12 @@ impl Agent {
                             );
                             (idx, (false, e.to_string(), summary))
                         }
-                        Err(_) => {
+                        Err(ToolHalt::TimedOut) => {
                             let msg = format!("Tool execution timed out after {}s", timeout_secs);
+                            (idx, (false, msg.clone(), msg))
+                        }
+                        Err(ToolHalt::Cancelled) => {
+                            let msg = format!("Tool '{}' cancelled", tool_name);
                             (idx, (false, msg.clone(), msg))
                         }
                     }
@@ -3281,11 +3329,12 @@ impl Agent {
             });
         }
 
-        let execution = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
+        let execution = run_tool_bounded(
             crate::observability::telemetry::track_tool_execution(name, || {
                 tool.execute(args.clone())
             }),
+            std::time::Duration::from_secs(timeout_secs),
+            self.cancel_token(),
         )
         .await;
 
@@ -3486,7 +3535,7 @@ impl Agent {
 
                 Ok((false, e.to_string(), summary))
             }
-            Err(_) => {
+            Err(ToolHalt::TimedOut) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let err = format!("Tool '{}' timed out after {}s", name, timeout_secs);
                 let summary =
@@ -3500,6 +3549,14 @@ impl Agent {
                     elapsed,
                     Some(err.clone()),
                 );
+                Ok((false, err, summary))
+            }
+            Err(ToolHalt::Cancelled) => {
+                let elapsed = start_time.elapsed().as_millis() as u64;
+                let err = format!("Tool '{}' cancelled", name);
+                let summary =
+                    crate::output::semantic_summary(name, args, Some(&err), false, elapsed);
+                self.log_tool_call(name, args_str, &err, false, start_time, false);
                 Ok((false, err, summary))
             }
         }
@@ -5386,5 +5443,58 @@ mod tests {
         );
 
         server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn run_tool_bounded_returns_result_when_fast() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let fut = async { Ok(serde_json::json!({"ok": true})) };
+        let out = run_tool_bounded(fut, std::time::Duration::from_secs(5), cancel).await;
+        assert!(out.is_ok());
+        assert!(out.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_tool_bounded_times_out() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(serde_json::json!({}))
+        };
+        let out = run_tool_bounded(slow, std::time::Duration::from_millis(50), cancel).await;
+        assert_eq!(out.unwrap_err(), ToolHalt::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn run_tool_bounded_cancels_in_flight() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            c2.store(true, Ordering::Relaxed);
+        });
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            Ok(serde_json::json!({}))
+        };
+        // Deadline is long (10s) so the ONLY way this returns quickly is cancellation.
+        let out = run_tool_bounded(slow, std::time::Duration::from_secs(10), cancel).await;
+        assert_eq!(out.unwrap_err(), ToolHalt::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn run_tool_bounded_fast_path_already_cancelled() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        let cancel = Arc::new(AtomicBool::new(true));
+        let fut = async { Ok(serde_json::json!({})) };
+        let out = run_tool_bounded(fut, std::time::Duration::from_secs(5), cancel).await;
+        assert_eq!(out.unwrap_err(), ToolHalt::Cancelled);
     }
 }
