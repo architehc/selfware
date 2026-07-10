@@ -325,13 +325,22 @@ impl YoloManager {
             return YoloDecision::RequireConfirmation("Git push requires confirmation".to_string());
         }
 
-        // Check destructive shell commands
+        // Check destructive shell commands + best-effort sensitive-path reads.
         if tool_name == "shell_exec" {
             if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
-                if is_destructive_command(cmd) && !self.config.allow_destructive_shell {
-                    return YoloDecision::RequireConfirmation(
-                        "Destructive shell command requires confirmation".to_string(),
-                    );
+                if !self.config.allow_destructive_shell {
+                    if is_destructive_command(cmd) {
+                        return YoloDecision::RequireConfirmation(
+                            "Destructive shell command requires confirmation".to_string(),
+                        );
+                    }
+                    if let Some(secret) = reads_sensitive_path(cmd) {
+                        return YoloDecision::RequireConfirmation(format!(
+                            "Shell command reads a sensitive path ({secret}) — requires confirmation. \
+                             File path-deny globs do not cover shell_exec; set allow_destructive_shell \
+                             to bypass."
+                        ));
+                    }
                 }
             }
         }
@@ -633,6 +642,39 @@ fn is_destructive_command(cmd: &str) -> bool {
     DESTRUCTIVE_PATTERNS
         .iter()
         .any(|re| re.is_match(&normalized))
+}
+
+/// Best-effort detection of a shell command that READS a sensitive path
+/// (SSH/private keys, cloud/git credentials, .env). Defense-in-depth only — a
+/// determined command can evade this; see docs/limitations.md. Returns the
+/// matched sensitive token so the confirmation reason can name it.
+fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
+    let lower = cmd.to_lowercase();
+    // High-signal sensitive path tokens.
+    const SENSITIVE: &[&str] = &[
+        ".ssh/",
+        "id_rsa",
+        "id_ed25519",
+        "id_ecdsa",
+        ".aws/credentials",
+        ".netrc",
+        ".git-credentials",
+        "private_key",
+        ".pem",
+        "/secrets/",
+        ".env",
+    ];
+    // Commands that read file contents (as opposed to merely listing).
+    const READERS: &[&str] = &[
+        "cat", "less", "more", "head", "tail", "bat", "nl", "tac", "xxd", "od",
+        "strings", "base64", "grep", "awk", "sed", "cp", "rsync", "scp", "curl", "dd",
+    ];
+    let secret = SENSITIVE.iter().copied().find(|s| lower.contains(s))?;
+    if READERS.iter().any(|r| lower.contains(r)) {
+        Some(secret)
+    } else {
+        None
+    }
 }
 
 /// Summarize arguments for audit log (truncate long values)
@@ -1129,6 +1171,19 @@ mod tests {
         if let YoloDecision::Block(msg) = decision {
             assert!(msg.contains("~/.ssh:/root/.ssh"));
         }
+    }
+
+    #[test]
+    fn reads_sensitive_path_flags_secret_reads() {
+        assert!(reads_sensitive_path("cat ~/.ssh/id_rsa").is_some());
+        assert!(reads_sensitive_path("base64 .env").is_some());
+        assert!(reads_sensitive_path("head -n1 ~/.aws/credentials").is_some());
+        assert!(reads_sensitive_path("grep TOKEN .env").is_some());
+        // Not a secret read:
+        assert!(reads_sensitive_path("ls -la").is_none());
+        assert!(reads_sensitive_path("cargo test").is_none());
+        // Mentions a secret path but does not read contents (listing only):
+        assert!(reads_sensitive_path("ls ~/.ssh/").is_none());
     }
 
     #[test]
