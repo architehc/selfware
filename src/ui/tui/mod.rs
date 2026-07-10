@@ -1054,10 +1054,14 @@ pub fn run_tui_dashboard_with_events(
                     // Connect agent responses to the chat pane
                     match &event {
                         TuiEvent::AgentCompleted { message } => {
+                            // The streamed buffer is superseded by the authoritative
+                            // final message — clear it first so the text isn't shown twice.
+                            app.clear_streaming();
                             app.add_assistant_message(message);
                             app.clear_progress();
                         }
                         TuiEvent::AgentError { message } => {
+                            app.clear_streaming();
                             app.add_system_message(&format!("Error: {}", message));
                             app.clear_progress();
                         }
@@ -1083,6 +1087,9 @@ pub fn run_tui_dashboard_with_events(
                         }
                         TuiEvent::PermissionRequested { tool_name, reason } => {
                             pending_permission = Some((tool_name.clone(), reason.clone()));
+                        }
+                        TuiEvent::AssistantDelta { text } => {
+                            app.append_streaming(text);
                         }
                         _ => {}
                     }
@@ -1915,7 +1922,14 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
 
     // Render messages with line wrapping
     let msg_width = chunks[0].width as usize;
-    let items: Vec<ListItem> = app
+    let mut items: Vec<ListItem> = Vec::new();
+    // Live streaming assistant response, shown as the newest line (the list is
+    // rendered newest-first) with a cursor marker while generating.
+    if let Some(live) = app.streaming_assistant.as_ref().filter(|s| !s.is_empty()) {
+        let style = Style::default().fg(TuiPalette::GARDEN_GREEN);
+        items.push(wrap_chat_message("🦊 ▌", live, style, msg_width));
+    }
+    items.extend(app
         .messages
         .iter()
         .rev()
@@ -1937,8 +1951,7 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
 
             let prefix_str = format!("{} {} ", msg.timestamp, prefix);
             wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
-        })
-        .collect();
+        }));
 
     let messages = List::new(items);
     frame.render_widget(messages, chunks[0]);
