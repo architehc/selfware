@@ -830,6 +830,19 @@ pub struct WorkflowResult {
     pub final_output: String,
 }
 
+/// Outcome of attempting to apply a worker's patch to the main repo behind a verify gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchApplyOutcome {
+    /// Patch applied cleanly and passed the verify gate.
+    Applied,
+    /// Patch was empty / contained no changes.
+    Empty,
+    /// `git apply --check` (or the real apply) rejected the patch.
+    DoesNotApply(String),
+    /// Patch applied but the verify command failed; the patch was reverted.
+    VerifyFailed(String),
+}
+
 impl WorkerAgent {
     /// Create a new worker agent (internal use, workers are spawned by coordinator)
     fn new(
@@ -970,17 +983,30 @@ impl WorkerAgent {
         match subagent_result {
             Ok(result) => {
                 if result.success {
-                    let output = result
-                        .patch
-                        .clone()
-                        .unwrap_or_else(|| result.artifacts.join("\n"));
+                    let patch_text = result.patch.clone().unwrap_or_default();
 
-                    // Write a structured finding back to the scratchpad so the
-                    // coordinator's synthesis phase can reason over real worker
-                    // output instead of simulated placeholders.
+                    // Apply the worker's patch to the main repo behind a verify
+                    // gate. Previously the patch was captured and then silently
+                    // discarded when the worktree was removed, so real worker
+                    // work never reached the repo.
+                    let apply_outcome = if patch_text.trim().is_empty() {
+                        PatchApplyOutcome::Empty
+                    } else {
+                        Self::apply_patch_gated(&git_root, &patch_text, "cargo", &["check"])
+                            .await
+                            .unwrap_or_else(|e| PatchApplyOutcome::VerifyFailed(e.to_string()))
+                    };
+
+                    let output = if patch_text.trim().is_empty() {
+                        result.artifacts.join("\n")
+                    } else {
+                        patch_text.clone()
+                    };
+
+                    // Record an HONEST finding including the apply outcome.
                     let finding = format!(
-                        "Worker {} (role: {}) completed task.\n\nOutput:\n{}\n\nArtifacts: {:?}",
-                        id, role, output, result.artifacts
+                        "Worker {} (role: {}) completed task.\n\nPatch apply: {:?}\n\nOutput:\n{}\n\nArtifacts: {:?}",
+                        id, role, apply_outcome, output, result.artifacts
                     );
                     let finding_key =
                         format!("finding:{}:{}", id, chrono::Utc::now().timestamp_millis());
@@ -992,7 +1018,17 @@ impl WorkerAgent {
                         warn!(worker_id = %id, error = %e, "Failed to write finding to scratchpad");
                     }
 
-                    Ok(output)
+                    match apply_outcome {
+                        PatchApplyOutcome::Applied | PatchApplyOutcome::Empty => Ok(output),
+                        PatchApplyOutcome::DoesNotApply(e) => Err(anyhow::anyhow!(
+                            "Worker {} patch does not apply to the repo: {}",
+                            id, e
+                        )),
+                        PatchApplyOutcome::VerifyFailed(e) => Err(anyhow::anyhow!(
+                            "Worker {} patch failed the verify gate and was reverted: {}",
+                            id, e
+                        )),
+                    }
                 } else {
                     Err(anyhow::anyhow!(
                         "Subagent failed: {}",
@@ -1004,32 +1040,103 @@ impl WorkerAgent {
         }
     }
 
-    /// Fallback stub when no agent config is available.
+    /// Fallback when no agent config is available.
+    ///
+    /// Previously this fabricated a fake "STUB: Sample finding" and returned
+    /// fake success, polluting the synthesis phase with invented output. There
+    /// is no way to execute the task without an agent config, so fail honestly.
     async fn execute_task_stub(
         id: &str,
-        task: &str,
+        _task: &str,
         role: &str,
-        scratchpad: &Scratchpad,
+        _scratchpad: &Scratchpad,
     ) -> Result<String> {
         warn!(
-            "STUB: Worker {} (role: {}) SIMULATING task execution: {}",
-            id, role, task
+            worker_id = %id, role = %role,
+            "No agent config available; cannot execute worker task"
         );
+        Err(anyhow::anyhow!(
+            "Worker {} (role: {}) has no agent config; real subagent execution is \
+             unavailable. Provide an agent config to run real workers.",
+            id, role
+        ))
+    }
 
-        let output = format!(
-            "STUB: Worker {} (role: {}) SIMULATED task: {}\n\
-            ⚠️ NO ACTUAL EXECUTION - This is placeholder output.",
-            id, role, task
-        );
+    /// Apply a unified diff to `repo_root` behind a verify gate.
+    ///
+    /// 1. Empty patch -> `Empty`.
+    /// 2. `git apply --check`; on failure -> `DoesNotApply` (repo untouched).
+    /// 3. `git apply` for real.
+    /// 4. Run `verify_program verify_args…` in `repo_root`. On success -> `Applied`.
+    ///    On failure, revert with `git apply -R` and return `VerifyFailed`.
+    ///
+    /// The verify step is a plain external command so the decision logic is unit-
+    /// testable without an LLM (`true` = always-pass, `false` = always-fail).
+    async fn apply_patch_gated(
+        repo_root: &std::path::Path,
+        patch: &str,
+        verify_program: &str,
+        verify_args: &[&str],
+    ) -> anyhow::Result<PatchApplyOutcome> {
+        use anyhow::Context;
+        if patch.trim().is_empty() {
+            return Ok(PatchApplyOutcome::Empty);
+        }
 
-        let finding_key = format!("finding:{}:{}", id, chrono::Utc::now().timestamp_millis());
-        scratchpad.write(ScratchpadEntry::new(
-            finding_key,
-            "STUB: Sample finding from SIMULATED worker execution",
-            id,
-        ))?;
+        let tmp = tempfile::NamedTempFile::new().context("create temp patch file")?;
+        tokio::fs::write(tmp.path(), patch)
+            .await
+            .context("write patch to temp file")?;
+        let patch_path = tmp.path().to_string_lossy().to_string();
 
-        Ok(output)
+        // 1. Dry-run check.
+        let check = tokio::process::Command::new("git")
+            .args(["apply", "--check", &patch_path])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .context("run git apply --check")?;
+        if !check.status.success() {
+            return Ok(PatchApplyOutcome::DoesNotApply(
+                String::from_utf8_lossy(&check.stderr).trim().to_string(),
+            ));
+        }
+
+        // 2. Apply for real.
+        let apply = tokio::process::Command::new("git")
+            .args(["apply", &patch_path])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .context("run git apply")?;
+        if !apply.status.success() {
+            return Ok(PatchApplyOutcome::DoesNotApply(
+                String::from_utf8_lossy(&apply.stderr).trim().to_string(),
+            ));
+        }
+
+        // 3. Verify gate.
+        let verify = tokio::process::Command::new(verify_program)
+            .args(verify_args)
+            .current_dir(repo_root)
+            .output()
+            .await;
+        let verify_ok = matches!(verify, Ok(ref o) if o.status.success());
+        if !verify_ok {
+            // Revert the applied patch so the repo is left as we found it.
+            let _ = tokio::process::Command::new("git")
+                .args(["apply", "-R", &patch_path])
+                .current_dir(repo_root)
+                .output()
+                .await;
+            let msg = match verify {
+                Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                Err(e) => e.to_string(),
+            };
+            return Ok(PatchApplyOutcome::VerifyFailed(msg));
+        }
+
+        Ok(PatchApplyOutcome::Applied)
     }
 
     /// Spawn a sub-worker (hierarchical worker spawning).
@@ -1763,5 +1870,86 @@ mod tests {
             .unwrap();
 
         assert_eq!(best.worker_id, "w3");
+    }
+
+    // =========================================================================
+    // apply_patch_gated tests (no LLM, no cargo needed)
+    // =========================================================================
+
+    async fn init_test_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t.t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            tokio::process::Command::new("git")
+                .args(&args)
+                .current_dir(p)
+                .output()
+                .await
+                .unwrap();
+        }
+        tokio::fs::write(p.join("f.txt"), "line1\n").await.unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "init"]] {
+            tokio::process::Command::new("git")
+                .args(&args)
+                .current_dir(p)
+                .output()
+                .await
+                .unwrap();
+        }
+        dir
+    }
+
+    // A minimal unified diff that turns "line1\n" into "line1\nline2\n" in f.txt.
+    const SAMPLE_PATCH: &str = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1,2 @@\n line1\n+line2\n";
+
+    #[tokio::test]
+    async fn apply_patch_gated_empty_is_empty() {
+        let dir = init_test_repo().await;
+        let out = WorkerAgent::apply_patch_gated(dir.path(), "   \n", "true", &[])
+            .await
+            .unwrap();
+        assert_eq!(out, PatchApplyOutcome::Empty);
+    }
+
+    #[tokio::test]
+    async fn apply_patch_gated_applies_when_verify_passes() {
+        let dir = init_test_repo().await;
+        let out = WorkerAgent::apply_patch_gated(dir.path(), SAMPLE_PATCH, "true", &[])
+            .await
+            .unwrap();
+        assert_eq!(out, PatchApplyOutcome::Applied);
+        let content = tokio::fs::read_to_string(dir.path().join("f.txt"))
+            .await
+            .unwrap();
+        assert!(content.contains("line2"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_gated_reverts_when_verify_fails() {
+        let dir = init_test_repo().await;
+        let out = WorkerAgent::apply_patch_gated(dir.path(), SAMPLE_PATCH, "false", &[])
+            .await
+            .unwrap();
+        assert!(matches!(out, PatchApplyOutcome::VerifyFailed(_)));
+        // Patch must have been reverted -> file back to original.
+        let content = tokio::fs::read_to_string(dir.path().join("f.txt"))
+            .await
+            .unwrap();
+        assert!(!content.contains("line2"));
+    }
+
+    #[tokio::test]
+    async fn apply_patch_gated_rejects_non_applying_patch() {
+        let dir = init_test_repo().await;
+        // A patch that references context that does not exist -> git apply --check fails.
+        let bad = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -5,2 +5,2 @@\n nonexistent\n-gone\n+new\n";
+        let out = WorkerAgent::apply_patch_gated(dir.path(), bad, "true", &[])
+            .await
+            .unwrap();
+        assert!(matches!(out, PatchApplyOutcome::DoesNotApply(_)));
     }
 }
