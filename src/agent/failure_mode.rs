@@ -40,6 +40,13 @@ pub enum FailureKind {
     Timeout,
     /// Selfware-side panic, invariant violation, or known bug.
     SelfwareError,
+    /// Completed naturally but performed zero mutating tool calls — no files
+    /// were changed. Not a failure (e.g. a read-only / Q&A task), but NOT a
+    /// real edit either, so it must never be labeled REAL_EDIT.
+    NoChange,
+    /// Token budget (`max_budget_tokens`) exhausted — distinct from a
+    /// wall-clock timeout; the fix is a bigger token budget, not more wall time.
+    BudgetExhausted,
     /// `max_iterations` hit without any other distinguishing signal.
     MaxIterations,
     /// Model emitted "Final answer:" without ever mutating a tool.
@@ -59,6 +66,8 @@ impl FailureKind {
             FailureKind::RetryLoop => "RETRY_LOOP",
             FailureKind::Timeout => "TIMEOUT",
             FailureKind::SelfwareError => "SELFWARE_ERROR",
+            FailureKind::NoChange => "NO_CHANGES",
+            FailureKind::BudgetExhausted => "BUDGET_EXHAUSTED",
             FailureKind::MaxIterations => "MAX_ITERATIONS",
             FailureKind::FakeComplete => "FAKE_COMPLETE",
             FailureKind::Unknown => "UNKNOWN",
@@ -131,6 +140,20 @@ impl FailureMode {
                         advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
                     };
                 }
+                // Reaching here with 0 mutating calls means: no "Final answer"
+                // marker AND the task was not detected as mutation-requiring —
+                // i.e. a legitimate read-only / Q&A completion. It changed
+                // nothing, so it is NOT a REAL_EDIT; label it honestly.
+                if mutating == 0 {
+                    return FailureMode {
+                        kind: FailureKind::NoChange,
+                        evidence: format!(
+                            "completed naturally with 0 mutating tool calls ({} total) — no files changed",
+                            total_calls
+                        ),
+                        advice: "if this task needed edits, the model made none; if it was read-only/Q&A, this is expected".to_string(),
+                    };
+                }
                 let progress_note = if progress_guard > 0 {
                     format!(", {} progress guards", progress_guard)
                 } else {
@@ -194,18 +217,30 @@ impl FailureMode {
                         final_answer_len,
                     );
                 }
-                if reason.to_lowercase().contains("timeout")
-                    || reason.contains("wall-clock")
-                    || reason.contains("budget exhausted")
+                // Token-budget exhaustion is NOT a wall-clock timeout — the fix
+                // is a bigger --max-budget-tokens, not more wall time. Check it
+                // first so it isn't misfiled as Timeout with the wrong advice.
+                if reason.contains("budget exhausted")
+                    || reason.to_lowercase().contains("token budget")
                 {
+                    return FailureMode {
+                        kind: FailureKind::BudgetExhausted,
+                        evidence: format!(
+                            "token budget exhausted with {} mutating tool calls completed",
+                            mutating
+                        ),
+                        advice: "increase --max-budget-tokens or shrink the task scope"
+                            .to_string(),
+                    };
+                }
+                if reason.to_lowercase().contains("timeout") || reason.contains("wall-clock") {
                     return FailureMode {
                         kind: FailureKind::Timeout,
                         evidence: format!(
-                            "wall-clock budget exhausted with {} mutating tool calls completed",
+                            "wall-clock time budget exhausted with {} mutating tool calls completed",
                             mutating
                         ),
-                        advice: "increase the wall-clock budget or shrink the task scope"
-                            .to_string(),
+                        advice: "increase --max-wall-secs or shrink the task scope".to_string(),
                     };
                 }
                 if reason.contains("panic")
@@ -258,6 +293,10 @@ impl FailureMode {
     pub fn cli_banner(&self) -> String {
         let header = if self.kind.is_success() {
             format!("✅ Task completed successfully ({})", self.kind.tag())
+        } else if matches!(self.kind, FailureKind::NoChange) {
+            // Completed, but made no edits — honest neutral banner, not a
+            // "successfully (REAL_EDIT)" claim and not an abort.
+            format!("✅ Completed — no file changes made ({})", self.kind.tag())
         } else {
             format!("❌ Task aborted ({})", self.kind.tag())
         };
@@ -576,6 +615,49 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         assert!(json.contains("PrefillBreaker"));
         assert!(json.contains("\"kind\""));
+    }
+
+    #[tokio::test]
+    async fn classify_no_change_when_natural_completion_zero_mutations() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(0);
+        agent.test_set_total_tool_calls(2);
+        agent.test_set_last_assistant_response(
+            "Here is the explanation you asked for.".to_string(),
+        );
+        let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+        assert_eq!(mode.kind, FailureKind::NoChange);
+        let banner = mode.cli_banner();
+        assert!(!banner.contains("REAL_EDIT"), "banner: {banner}");
+        assert!(!banner.contains("❌"), "banner: {banner}");
+        assert!(banner.contains("NO_CHANGES"), "banner: {banner}");
+    }
+
+    #[tokio::test]
+    async fn classify_budget_exhausted_distinct_from_timeout() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(1);
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "token budget exhausted".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::BudgetExhausted);
+        assert!(mode.advice.contains("max-budget-tokens"), "advice: {}", mode.advice);
+    }
+
+    #[test]
+    fn cli_banner_no_change_is_neither_success_nor_abort() {
+        let m = FailureMode {
+            kind: FailureKind::NoChange,
+            evidence: "e".to_string(),
+            advice: "a".to_string(),
+        };
+        let b = m.cli_banner();
+        assert!(b.contains("NO_CHANGES"));
+        assert!(!b.contains("REAL_EDIT"));
+        assert!(!b.contains("❌"));
     }
 
     #[test]
