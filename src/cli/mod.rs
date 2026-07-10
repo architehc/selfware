@@ -390,8 +390,29 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
         return true;
     }
 
-    // User pointed at a specific config file → respect their choice.
-    if cli.config.is_some() {
+    // User pointed at a specific config file (flag or env) → respect their choice.
+    if cli.config.is_some() || std::env::var_os("SELFWARE_CONFIG").is_some() {
+        return true;
+    }
+
+    // A config file exists on disk — an auto-discovered `./selfware.toml` or the
+    // global `~/.config/selfware/config.toml`. Its presence means the user has
+    // configured selfware, even if some values happen to equal the built-in
+    // defaults. Calibration would port-scan for a local backend and overwrite
+    // their endpoint/model, so skip it. (Without this, a project selfware.toml
+    // that sets model = the default value is mistaken for a bare install and
+    // silently clobbered by a locally-detected backend.)
+    let cwd_config_exists = std::path::Path::new("selfware.toml").is_file();
+    let global_config_exists = dirs::home_dir()
+        .map(|h| h.join(".config/selfware/config.toml").is_file())
+        .unwrap_or(false);
+    if cwd_config_exists || global_config_exists {
+        return true;
+    }
+
+    // A remote (non-localhost) endpoint cannot be calibrated by scanning local
+    // ports — skip so we never overwrite a remote config (e.g. OpenRouter).
+    if !endpoint_is_local(&config.endpoint) {
         return true;
     }
 
@@ -404,6 +425,16 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
 
     // Fresh install with bare defaults → allow calibration to run.
     false
+}
+
+/// Whether an endpoint URL points at the local machine (calibration only makes
+/// sense for a local backend it can port-scan / auto-start).
+fn endpoint_is_local(endpoint: &str) -> bool {
+    let e = endpoint.to_ascii_lowercase();
+    e.contains("localhost")
+        || e.contains("127.0.0.1")
+        || e.contains("0.0.0.0")
+        || e.contains("[::1]")
 }
 
 /// Parse task-file contents into a list of tasks.

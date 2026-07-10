@@ -587,6 +587,16 @@ fn bench_swebench_pro_official_eval_flags_parse() {
     }
 }
 
+    #[test]
+    fn endpoint_is_local_detects_localhost_variants() {
+        assert!(endpoint_is_local("http://localhost:8000/v1"));
+        assert!(endpoint_is_local("http://127.0.0.1:1234/v1"));
+        assert!(endpoint_is_local("http://0.0.0.0:8080/v1"));
+        assert!(endpoint_is_local("http://[::1]:8000/v1"));
+        assert!(!endpoint_is_local("https://openrouter.ai/api/v1"));
+        assert!(!endpoint_is_local("https://api.example.com/v1"));
+    }
+
 #[test]
 fn bench_other_subcommands_parse_for_help_visibility() {
     use args::BenchCommand;
