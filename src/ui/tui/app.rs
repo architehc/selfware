@@ -98,6 +98,10 @@ pub struct App {
     pub status_line: StatusLine,
     /// Discovered skills for slash-command execution
     pub skill_registry: Option<crate::skills::SkillRegistry>,
+    /// In-progress assistant response streamed token-by-token. Rendered as the
+    /// newest (live) chat line while generating; committed to `messages` and
+    /// cleared on completion.
+    pub streaming_assistant: Option<String>,
 }
 
 impl App {
@@ -125,6 +129,7 @@ impl App {
             garden_view: super::GardenView::new(),
             status_line: StatusLine::with_session(model),
             skill_registry: None,
+            streaming_assistant: None,
         }
     }
 
@@ -150,6 +155,19 @@ impl App {
             content: content.into(),
             timestamp: chrono::Local::now().format("%H:%M").to_string(),
         });
+    }
+
+    /// Append a streamed chunk to the in-progress assistant response.
+    pub fn append_streaming(&mut self, text: &str) {
+        self.streaming_assistant
+            .get_or_insert_with(String::new)
+            .push_str(text);
+    }
+
+    /// Clear the in-progress streaming buffer (called once the full message is
+    /// committed on completion).
+    pub fn clear_streaming(&mut self) {
+        self.streaming_assistant = None;
     }
 
     /// Add an assistant message
@@ -182,6 +200,7 @@ impl App {
     /// Clear chat history (keeping a fresh system message)
     pub fn clear_chat(&mut self) {
         self.messages.clear();
+        self.clear_streaming();
         self.messages.push(ChatMessage {
             role: MessageRole::System,
             content: "Chat cleared.".into(),
@@ -1032,5 +1051,19 @@ mod tests {
         let mut app = App::new("test");
         app.animation_speed = 1.5;
         assert_eq!(app.animation_speed_display(), "150%");
+    }
+
+    #[test]
+    fn streaming_assistant_accumulates_then_clears() {
+        let mut app = App::new("m");
+        assert!(app.streaming_assistant.is_none());
+        app.append_streaming("Hel");
+        app.append_streaming("lo");
+        assert_eq!(app.streaming_assistant.as_deref(), Some("Hello"));
+        let n = app.messages.len();
+        app.clear_streaming();
+        assert!(app.streaming_assistant.is_none());
+        app.add_assistant_message("Hello");
+        assert_eq!(app.messages.len(), n + 1);
     }
 }
