@@ -942,6 +942,49 @@ pub(super) fn tool_call_counts_as_state_change(name: &str, args_str: &str) -> bo
     }
 }
 
+/// Extract the primary investigative target (file path, glob pattern, or grep
+/// query) from a read-only tool call.  Returns `None` for tools that don't
+/// have a meaningful unique target (e.g. `git_status`, `cargo_check` without a
+/// path, `tool_search`).  The returned string is used as a key in
+/// `seen_read_targets` to detect whether the agent is reading something NEW
+/// (investigative progress) or re-reading something already seen (a loop).
+pub(super) fn read_tool_target(name: &str, args_str: &str) -> Option<String> {
+    let args: Value = serde_json::from_str(args_str).ok()?;
+    match name {
+        "file_read" | "file_write" | "file_edit" | "file_delete" => {
+            args.get("path").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        "directory_tree" => {
+            // directory_tree may use "path" or "pattern"
+            args.get("path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    args.get("pattern")
+                        .and_then(|v| v.as_str())
+                        .map(|s| format!("tree:{}", s))
+                })
+        }
+        "glob_find" => {
+            args.get("pattern")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("glob:{}", s))
+        }
+        "grep_search" => {
+            args.get("pattern")
+                .and_then(|v| v.as_str())
+                .map(|s| format!("grep:{}", s))
+        }
+        "symbol_search" => {
+            args.get("query")
+                .or_else(|| args.get("pattern"))
+                .and_then(|v| v.as_str())
+                .map(|s| format!("sym:{}", s))
+        }
+        _ => None,
+    }
+}
+
 fn configured_vision_profile(
     config: &crate::config::Config,
 ) -> Option<&crate::config::ModelProfile> {
@@ -1068,8 +1111,14 @@ impl Agent {
         // after writing and should not be blocked aggressively.
         let has_written = self.has_written_any_file;
 
-        let block_threshold = if has_written { 16 } else { 6 };
-        let escalation_threshold = if has_written { 20 } else { 8 };
+        // Pre-edit thresholds are generous (12/18) so that legitimate
+        // investigation of a complex change — reading many distinct files
+        // before the first edit — is not prematurely blocked.  True infinite
+        // loops are still caught because the investigation-progress reset
+        // (in execution.rs) only rewards *novel* reads; redundant re-reads
+        // let the counter climb to the threshold.
+        let block_threshold = if has_written { 16 } else { 12 };
+        let escalation_threshold = if has_written { 20 } else { 18 };
 
         if !task_requires_mutation(self.task_context_for_classification())
             || self.consecutive_read_only_steps <= block_threshold
@@ -1110,7 +1159,7 @@ impl Agent {
             .await;
         }
 
-        if guard_count >= 2 && self.mutating_tool_call_count() == 0 {
+        if guard_count >= 3 && self.mutating_tool_call_count() == 0 {
             anyhow::bail!(
                 "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
                 guard_count,
@@ -3963,7 +4012,9 @@ mod tests {
         agent.current_task_context =
             "Fix the failing tests, make code changes, and keep going until everything is green."
                 .to_string();
-        agent.consecutive_read_only_steps = 8;
+        // New pre-edit block_threshold is 12, escalation_threshold is 18.
+        // Set above escalation so the guard fires AND synthesis is triggered.
+        agent.consecutive_read_only_steps = 19;
 
         agent
             .execute_tool_batch(vec![(
@@ -3996,7 +4047,18 @@ mod tests {
             .back()
             .is_some_and(|attempt| attempt.failure_kind == "progress_guard"));
 
-        agent.consecutive_read_only_steps = 9;
+        // guard_count is now 1 (first fire).  Need >= 3 for hard abort.
+        agent.consecutive_read_only_steps = 14;
+        agent
+            .execute_tool_batch(vec![(
+                "shell_exec".to_string(),
+                r#"{"command":"git status"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+        // guard_count is now 2 — still not enough for hard abort (>= 3).
+        agent.consecutive_read_only_steps = 15;
         let err = agent
             .execute_tool_batch(vec![(
                 "shell_exec".to_string(),
@@ -4006,6 +4068,98 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("READ_LOOP_NO_EDIT"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_progress_guard_novel_reads_decrement_counter() {
+        // Bug #13: reading DISTINCT new files should NOT trip the guard as fast
+        // as re-reading the same file.  We verify that the investigation-progress
+        // reset causes `consecutive_read_only_steps` to DECREASE when the agent
+        // reads a novel file, while re-reading the same file INCREASES it.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context =
+            "Refactor the module: read many files, then make changes.".to_string();
+
+        // Start with a moderate read-only streak.
+        agent.consecutive_read_only_steps = 5;
+
+        // Read file A — novel target, counter should DECREMENT.
+        agent.update_read_only_step_tracking(
+            &[(
+                "file_read".to_string(),
+                r#"{"path":"src/main.rs"}"#.to_string(),
+                None,
+            )],
+            false,
+        );
+        assert_eq!(
+            agent.consecutive_read_only_steps, 4,
+            "novel read should decrement counter"
+        );
+
+        // Read file B — novel target, counter should DECREMENT again.
+        agent.update_read_only_step_tracking(
+            &[(
+                "file_read".to_string(),
+                r#"{"path":"src/lib.rs"}"#.to_string(),
+                None,
+            )],
+            false,
+        );
+        assert_eq!(
+            agent.consecutive_read_only_steps, 3,
+            "second novel read should decrement counter"
+        );
+
+        // Re-read file A — redundant, counter should INCREMENT.
+        agent.update_read_only_step_tracking(
+            &[(
+                "file_read".to_string(),
+                r#"{"path":"src/main.rs"}"#.to_string(),
+                None,
+            )],
+            false,
+        );
+        assert_eq!(
+            agent.consecutive_read_only_steps, 4,
+            "redundant re-read should increment counter"
+        );
+
+        // Re-read file A again — still redundant, counter should INCREMENT.
+        agent.update_read_only_step_tracking(
+            &[(
+                "file_read".to_string(),
+                r#"{"path":"src/main.rs"}"#.to_string(),
+                None,
+            )],
+            false,
+        );
+        assert_eq!(
+            agent.consecutive_read_only_steps, 5,
+            "second redundant re-read should increment counter"
+        );
+
+        // A write tool should reset counter AND clear the seen-set.
+        agent.update_read_only_step_tracking(
+            &[(
+                "file_edit".to_string(),
+                r#"{"path":"src/main.rs"}"#.to_string(),
+                None,
+            )],
+            true,
+        );
+        assert_eq!(
+            agent.consecutive_read_only_steps, 0,
+            "write should reset counter to 0"
+        );
+        assert!(
+            agent.seen_read_targets.is_empty(),
+            "write should clear seen_read_targets"
+        );
 
         server.stop().await;
     }

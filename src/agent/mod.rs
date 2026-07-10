@@ -570,6 +570,15 @@ pub struct Agent {
     /// logic nudges or blocks more read-only batches until the agent edits code
     /// or otherwise changes project state.
     consecutive_read_only_steps: usize,
+    /// Set of file paths / grep queries the agent has already targeted with
+    /// read-only tools during the current read-only streak.  When a read-only
+    /// tool call targets a **novel** target (not in this set) the
+    /// `consecutive_read_only_steps` counter is decremented/reset because the
+    /// agent is making investigative progress.  The set is cleared whenever the
+    /// agent performs a mutation (write/edit/delete).  This prevents legitimate
+    /// multi-file investigation refactors from tripping the progress guard
+    /// while still catching true infinite loops (re-reading the same file).
+    seen_read_targets: std::collections::HashSet<String>,
     /// Number of times a post-mutation observational shell batch has been
     /// detected as a repetition loop. Small models often need 1–2 verification
     /// cycles to repair syntax errors, so the agent is only hard-stopped after
@@ -1167,6 +1176,7 @@ To call a tool, use this EXACT XML structure:
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
             consecutive_read_only_steps: 0,
+            seen_read_targets: std::collections::HashSet::new(),
             post_edit_observational_shell_count: 0,
             terminal_guard_hits: 0,
             last_read_file: None,
@@ -2240,6 +2250,8 @@ To call a tool, use this EXACT XML structure:
         self.prefill_breaker_open = false;
         self.rigor_mode = false;
         self.rigor_directive_injected = false;
+        self.consecutive_read_only_steps = 0;
+        self.seen_read_targets.clear();
     }
 
     // ============================================================

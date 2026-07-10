@@ -380,6 +380,55 @@ impl Agent {
         result
     }
 
+    /// Update `consecutive_read_only_steps` and `seen_read_targets` based on
+    /// the tool calls in the current step.
+    ///
+    /// When the step contains a write/edit/delete tool, both the counter and
+    /// the seen-set are cleared (the agent made progress).
+    ///
+    /// When the step is read-only, the **investigation-progress reset** (bug
+    /// #13) kicks in: if any read-only tool targets a *novel* file path / grep
+    /// query (not yet in `seen_read_targets`), the counter is **decremented**
+    /// because the agent is exploring new ground.  Only when every read target
+    /// is redundant (already seen this streak) does the counter increment,
+    /// ensuring true infinite re-read loops still climb to the threshold.
+    pub(super) fn update_read_only_step_tracking(
+        &mut self,
+        tool_calls: &[super::execution::CollectedToolCall],
+        has_write_tool: bool,
+    ) {
+        if has_write_tool {
+            self.consecutive_read_only_steps = 0;
+            self.seen_read_targets.clear();
+            return;
+        }
+
+        let has_novel_target = tool_calls.iter().any(|(name, args_str, _)| {
+            if !super::tool_dispatch::tool_call_is_observational(name, args_str) {
+                return false;
+            }
+            match super::tool_dispatch::read_tool_target(name, args_str) {
+                Some(target) => !self.seen_read_targets.contains(&target),
+                None => false,
+            }
+        });
+
+        for (name, args_str, _) in tool_calls {
+            if super::tool_dispatch::tool_call_is_observational(name, args_str) {
+                if let Some(target) = super::tool_dispatch::read_tool_target(name, args_str) {
+                    self.seen_read_targets.insert(target);
+                }
+            }
+        }
+
+        if has_novel_target {
+            self.consecutive_read_only_steps =
+                self.consecutive_read_only_steps.saturating_sub(1);
+        } else {
+            self.consecutive_read_only_steps += 1;
+        }
+    }
+
     async fn execute_step_internal_inner(&mut self, use_last_message: bool) -> Result<bool> {
         // Emit a structured progress event at the top of every loop iteration.
         // Step is 1-based; tool count is the registry's current size.
@@ -530,6 +579,7 @@ impl Agent {
                     // but we'll execute it after the original tool calls
                     self.execute_tool_batch(write_call).await?;
                     self.consecutive_read_only_steps = 0;
+                    self.seen_read_targets.clear();
                     self.has_written_any_file = true;
                     self.terminal_guard_hits = 0;
                     self.messages.push(crate::api::types::Message::user(
@@ -981,11 +1031,7 @@ impl Agent {
         let has_write_tool = tool_calls.iter().any(|(name, args_str, _)| {
             super::tool_dispatch::tool_call_counts_as_state_change(name, args_str)
         });
-        if has_write_tool {
-            self.consecutive_read_only_steps = 0;
-        } else {
-            self.consecutive_read_only_steps += 1;
-        }
+        self.update_read_only_step_tracking(&tool_calls, has_write_tool);
 
         // A write to a file the agent has ALREADY READ is not a blind edit — the
         // read already established which file changes, so the FILES: checklist
@@ -1216,6 +1262,7 @@ impl Agent {
                     None,
                 )];
                 self.consecutive_read_only_steps = 0;
+                self.seen_read_targets.clear();
                 self.has_written_any_file = true;
                 self.terminal_guard_hits = 0;
                 if let Err(e) = self.execute_tool_batch(calls).await {
