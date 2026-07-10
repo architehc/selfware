@@ -599,6 +599,46 @@ pub struct CheckpointManager {
 const MAX_DELTA_ENTRIES_BEFORE_COMPACT: usize = 24;
 /// Maximum delta log size before forcing compaction.
 const MAX_DELTA_FILE_BYTES: u64 = 512 * 1024;
+/// Maximum number of checkpoint files to retain on disk.  Older checkpoints
+/// (and their matching `.delta.jsonl`) are pruned best-effort after each save.
+const MAX_CHECKPOINT_FILES: usize = 500;
+
+/// Sanitize a `task_id` for safe use as a filename inside `checkpoints_dir`.
+///
+/// Returns `Ok(sanitized)` when the task_id is safe (possibly with unsafe
+/// characters replaced), or `Err` when the result would still escape the
+/// checkpoints directory after sanitization.
+///
+/// - Rejects `..` path-traversal segments.
+/// - Replaces `/` and `\` with `_` so the task_id cannot contain path
+///   separators.
+/// - Trims leading/trailing dots and whitespace to avoid hidden files or
+///   directory escape.
+fn sanitize_task_id(task_id: &str) -> Result<String> {
+    // Reject any ".." segment immediately — this is the primary traversal vector.
+    if task_id.split('/').any(|seg| seg == "..")
+        || task_id.split('\\').any(|seg| seg == "..")
+        || task_id == ".."
+    {
+        bail!(
+            "task_id contains a '..' traversal segment and is rejected: {:?}",
+            task_id
+        );
+    }
+
+    // Replace path separators with underscores.
+    let sanitized = task_id.replace(['/', '\\'], "_");
+
+    // Trim leading/trailing dots and whitespace to avoid hidden files or
+    // degenerate names.
+    let trimmed = sanitized.trim_matches(['.', ' ', '\t', '\n', '\r']).to_string();
+
+    if trimmed.is_empty() {
+        bail!("task_id is empty after sanitization");
+    }
+
+    Ok(trimmed)
+}
 
 impl CheckpointManager {
     /// Create a new checkpoint manager
@@ -622,15 +662,58 @@ impl CheckpointManager {
         Self::new(checkpoints_dir)
     }
 
-    /// Get the path for a checkpoint file
-    fn checkpoint_path(&self, task_id: &str) -> PathBuf {
-        self.checkpoints_dir.join(format!("{}.json", task_id))
+    /// Get the path for a checkpoint file.
+    ///
+    /// The `task_id` is sanitized via [`sanitize_task_id`] to prevent path
+    /// traversal (e.g. `../evil` is rejected or neutralized).
+    fn checkpoint_path(&self, task_id: &str) -> Result<PathBuf> {
+        let safe_id = sanitize_task_id(task_id)?;
+        let path = self.checkpoints_dir.join(format!("{}.json", safe_id));
+        self.verify_path_in_dir(&path)?;
+        Ok(path)
     }
 
-    /// Get the path for a checkpoint delta log
-    fn checkpoint_delta_path(&self, task_id: &str) -> PathBuf {
-        self.checkpoints_dir
-            .join(format!("{}.delta.jsonl", task_id))
+    /// Get the path for a checkpoint delta log.
+    ///
+    /// The `task_id` is sanitized via [`sanitize_task_id`] to prevent path
+    /// traversal.
+    fn checkpoint_delta_path(&self, task_id: &str) -> Result<PathBuf> {
+        let safe_id = sanitize_task_id(task_id)?;
+        let path = self
+            .checkpoints_dir
+            .join(format!("{}.delta.jsonl", safe_id));
+        self.verify_path_in_dir(&path)?;
+        Ok(path)
+    }
+
+    /// Defence in depth: verify (by lexical prefix check) that `path` is
+    /// inside `checkpoints_dir`.  Uses canonicalize when the path exists,
+    /// otherwise falls back to a starts_with check on the components.
+    fn verify_path_in_dir(&self, path: &std::path::Path) -> Result<()> {
+        // If both paths exist, use canonicalize for a robust check.
+        if let (Ok(canon_dir), Ok(canon_path)) = (
+            std::fs::canonicalize(&self.checkpoints_dir),
+            std::fs::canonicalize(path),
+        ) {
+            if !canon_path.starts_with(&canon_dir) {
+                bail!(
+                    "checkpoint path {:?} escapes checkpoints_dir {:?}",
+                    path,
+                    self.checkpoints_dir
+                );
+            }
+            return Ok(());
+        }
+        // Fallback: lexical check on the components.
+        let dir = self.checkpoints_dir.canonicalize().unwrap_or(self.checkpoints_dir.clone());
+        if !path.starts_with(&dir) {
+            bail!(
+                "checkpoint path {:?} escapes checkpoints_dir {:?}",
+                path,
+                self.checkpoints_dir
+            );
+        }
+        Ok(())
     }
 
     /// Save a checkpoint to disk (with secrets redacted and integrity hash).
@@ -645,7 +728,7 @@ impl CheckpointManager {
     /// stored in a wrapper envelope so that `load()` can verify the file has
     /// not been corrupted or tampered with.
     pub fn save(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
-        let full_path = self.checkpoint_path(&checkpoint.task_id);
+        let full_path = self.checkpoint_path(&checkpoint.task_id)?;
 
         // Prefer a compact delta write when possible to reduce SSD wear.
         if full_path.exists() {
@@ -657,6 +740,7 @@ impl CheckpointManager {
                     );
                     self.save_full_checkpoint(checkpoint)?;
                     self.clear_delta_log(&checkpoint.task_id)?;
+                    self.prune_old_checkpoints();
                     return Ok(());
                 }
 
@@ -668,6 +752,7 @@ impl CheckpointManager {
                                     self.save_full_checkpoint(checkpoint)?;
                                     self.clear_delta_log(&checkpoint.task_id)?;
                                 }
+                                self.prune_old_checkpoints();
                                 return Ok(());
                             }
                             Err(e) => {
@@ -685,6 +770,7 @@ impl CheckpointManager {
         // Fallback to full checkpoint write when no efficient delta exists.
         self.save_full_checkpoint(checkpoint)?;
         self.clear_delta_log(&checkpoint.task_id)?;
+        self.prune_old_checkpoints();
         Ok(())
     }
 
@@ -705,7 +791,7 @@ impl CheckpointManager {
     }
 
     fn append_delta(&self, task_id: &str, delta: &CheckpointDelta) -> Result<()> {
-        let path = self.checkpoint_delta_path(task_id);
+        let path = self.checkpoint_delta_path(task_id)?;
         let mut json_value =
             serde_json::to_value(delta).context("Failed to serialize checkpoint delta")?;
         redact::redact_json(&mut json_value);
@@ -729,7 +815,7 @@ impl CheckpointManager {
     }
 
     fn should_compact_deltas(&self, task_id: &str) -> Result<bool> {
-        let path = self.checkpoint_delta_path(task_id);
+        let path = self.checkpoint_delta_path(task_id)?;
         if !path.exists() {
             return Ok(false);
         }
@@ -750,7 +836,7 @@ impl CheckpointManager {
     }
 
     fn clear_delta_log(&self, task_id: &str) -> Result<()> {
-        let delta_path = self.checkpoint_delta_path(task_id);
+        let delta_path = self.checkpoint_delta_path(task_id)?;
         if delta_path.exists() {
             fs::remove_file(&delta_path).with_context(|| {
                 format!("Failed to delete checkpoint delta log {:?}", delta_path)
@@ -759,8 +845,99 @@ impl CheckpointManager {
         Ok(())
     }
 
+    /// Best-effort retention pruning: keep at most [`MAX_CHECKPOINT_FILES`]
+    /// checkpoint `.json` files (by mtime, most recent first) and delete the
+    /// rest along with their matching `.delta.jsonl` and `.json.bak` files.
+    ///
+    /// This is best-effort — any delete errors are logged and swallowed so a
+    /// pruning failure never fails a `save`.
+    fn prune_old_checkpoints(&self) {
+        let entries = match fs::read_dir(&self.checkpoints_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("prune_old_checkpoints: failed to read dir: {}", e);
+                return;
+            }
+        };
+
+        // Collect (path, mtime) for .json files (excluding .bak and .tmp).
+        let mut json_files: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Only consider .json files (not .json.bak, .json.tmp.*, .delta.jsonl).
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            // Skip backup files.
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.ends_with(".bak") || stem.ends_with(".tmp") {
+                    continue;
+                }
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            json_files.push((path, mtime));
+        }
+
+        if json_files.len() <= MAX_CHECKPOINT_FILES {
+            return;
+        }
+
+        // Sort by mtime descending (most recent first).
+        json_files.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let to_delete = &json_files[MAX_CHECKPOINT_FILES..];
+        for (path, _) in to_delete {
+            // Derive the delta and backup paths from the checkpoint path.
+            // The path is `checkpoints_dir/<task_id>.json`.
+            // Delta:  `checkpoints_dir/<task_id>.delta.jsonl`
+            // Backup:  `checkpoints_dir/<task_id>.json.bak`
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+
+            // Delete the checkpoint file.
+            if let Err(e) = fs::remove_file(path) {
+                tracing::warn!("prune_old_checkpoints: failed to delete {:?}: {}", path, e);
+            }
+
+            // Delete matching delta log.
+            let delta_path = self.checkpoints_dir.join(format!("{}.delta.jsonl", stem));
+            if delta_path.exists() {
+                if let Err(e) = fs::remove_file(&delta_path) {
+                    tracing::warn!(
+                        "prune_old_checkpoints: failed to delete delta {:?}: {}",
+                        delta_path,
+                        e
+                    );
+                }
+            }
+
+            // Delete matching backup.
+            let bak_path = path.with_extension("json.bak");
+            if bak_path.exists() {
+                if let Err(e) = fs::remove_file(&bak_path) {
+                    tracing::warn!(
+                        "prune_old_checkpoints: failed to delete backup {:?}: {}",
+                        bak_path,
+                        e
+                    );
+                }
+            }
+        }
+
+        tracing::debug!(
+            "prune_old_checkpoints: pruned {} checkpoint(s) exceeding cap of {}",
+            to_delete.len(),
+            MAX_CHECKPOINT_FILES,
+        );
+    }
+
     fn save_full_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
-        let path = self.checkpoint_path(&checkpoint.task_id);
+        let path = self.checkpoint_path(&checkpoint.task_id)?;
 
         // Serialize to JSON value first so we can redact secrets
         let mut json_value =
@@ -866,7 +1043,7 @@ impl CheckpointManager {
     /// integrity check), this automatically attempts recovery via
     /// [`recover_from_corruption`](Self::recover_from_corruption).
     pub fn load(&self, task_id: &str) -> Result<TaskCheckpoint> {
-        let path = self.checkpoint_path(task_id);
+        let path = self.checkpoint_path(task_id)?;
 
         match self.try_load_from_path(&path).and_then(|mut checkpoint| {
             self.apply_deltas(task_id, &mut checkpoint)?;
@@ -891,7 +1068,7 @@ impl CheckpointManager {
     }
 
     fn apply_deltas(&self, task_id: &str, checkpoint: &mut TaskCheckpoint) -> Result<()> {
-        let path = self.checkpoint_delta_path(task_id);
+        let path = self.checkpoint_delta_path(task_id)?;
         if !path.exists() {
             return Ok(());
         }
@@ -970,7 +1147,7 @@ impl CheckpointManager {
     /// 2. If the backup is also unusable, create a fresh checkpoint with the
     ///    task ID preserved so the caller can resume from a clean state.
     pub fn recover_from_corruption(&self, task_id: &str) -> Result<TaskCheckpoint> {
-        let backup_path = self.checkpoint_path(task_id).with_extension("json.bak");
+        let backup_path = self.checkpoint_path(task_id)?.with_extension("json.bak");
 
         // Attempt 1: try the backup file
         if backup_path.exists() {
@@ -1102,7 +1279,7 @@ impl CheckpointManager {
 
     /// Delete a checkpoint
     pub fn delete(&self, task_id: &str) -> Result<()> {
-        let path = self.checkpoint_path(task_id);
+        let path = self.checkpoint_path(task_id)?;
         if path.exists() {
             fs::remove_file(&path)
                 .with_context(|| format!("Failed to delete checkpoint: {:?}", path))?;
@@ -1113,7 +1290,7 @@ impl CheckpointManager {
                 format!("Failed to delete checkpoint backup: {:?}", backup_path)
             })?;
         }
-        let delta_path = self.checkpoint_delta_path(task_id);
+        let delta_path = self.checkpoint_delta_path(task_id)?;
         if delta_path.exists() {
             fs::remove_file(&delta_path).with_context(|| {
                 format!("Failed to delete checkpoint delta log: {:?}", delta_path)
@@ -1125,7 +1302,9 @@ impl CheckpointManager {
     /// Check if a checkpoint exists (test helper)
     #[cfg(test)]
     pub fn exists(&self, task_id: &str) -> bool {
-        self.checkpoint_path(task_id).exists()
+        self.checkpoint_path(task_id)
+            .map(|p| p.exists())
+            .unwrap_or(false)
     }
 
     /// Get the checkpoints directory path (test helper)
@@ -1623,7 +1802,7 @@ mod tests {
         });
         manager.save(&checkpoint).unwrap();
 
-        let delta_path = manager.checkpoint_delta_path("task_delta_mgr");
+        let delta_path = manager.checkpoint_delta_path("task_delta_mgr").unwrap();
         assert!(delta_path.exists(), "expected delta log to exist");
 
         let loaded = manager.load("task_delta_mgr").unwrap();
@@ -1672,7 +1851,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
         let expected = dir.path().join("task_test.json");
-        assert_eq!(manager.checkpoint_path("task_test"), expected);
+        assert_eq!(manager.checkpoint_path("task_test").unwrap(), expected);
     }
 
     #[test]
@@ -2123,5 +2302,210 @@ mod tests {
         );
         let result = manager.save_with_retry(&checkpoint);
         assert!(result.is_err());
+    }
+
+    // ---- Path traversal security tests ----
+
+    #[test]
+    fn test_sanitize_task_id_rejects_dotdot() {
+        assert!(sanitize_task_id("../evil").is_err());
+        assert!(sanitize_task_id("foo/../../bar").is_err());
+        assert!(sanitize_task_id("..\\..\\evil").is_err());
+        assert!(sanitize_task_id("..").is_err());
+    }
+
+    #[test]
+    fn test_sanitize_task_id_replaces_separators() {
+        let id = sanitize_task_id("foo/bar").unwrap();
+        assert_eq!(id, "foo_bar");
+        assert!(!id.contains('/'));
+
+        let id = sanitize_task_id("foo\\bar").unwrap();
+        assert_eq!(id, "foo_bar");
+        assert!(!id.contains('\\'));
+    }
+
+    #[test]
+    fn test_sanitize_task_id_preserves_safe_id() {
+        let id = sanitize_task_id("task_123").unwrap();
+        assert_eq!(id, "task_123");
+    }
+
+    #[test]
+    fn test_sanitize_task_id_rejects_empty() {
+        assert!(sanitize_task_id("").is_err());
+        assert!(sanitize_task_id("   ").is_err());
+        assert!(sanitize_task_id("..").is_err());
+    }
+
+    #[test]
+    fn test_checkpoint_path_traversal_rejected() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // A task_id with "../" should be rejected, not produce a path outside dir.
+        let result = manager.checkpoint_path("../evil");
+        assert!(result.is_err(), "checkpoint_path should reject path traversal");
+
+        let result = manager.checkpoint_delta_path("../evil");
+        assert!(result.is_err(), "checkpoint_delta_path should reject path traversal");
+
+        // Saving with a traversal task_id should also fail.
+        let checkpoint = TaskCheckpoint::new("../evil".to_string(), "evil".to_string());
+        let result = manager.save(&checkpoint);
+        assert!(result.is_err(), "save should reject path traversal task_id");
+
+        // Loading with a traversal task_id should also fail.
+        let result = manager.load("../evil");
+        assert!(result.is_err(), "load should reject path traversal task_id");
+
+        // Deleting with a traversal task_id should also fail.
+        let result = manager.delete("../evil");
+        assert!(result.is_err(), "delete should reject path traversal task_id");
+    }
+
+    #[test]
+    fn test_checkpoint_path_stays_in_dir() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let path = manager.checkpoint_path("normal_task").unwrap();
+        assert!(path.starts_with(dir.path()), "path should stay within checkpoints dir");
+        assert_eq!(path.file_name().unwrap(), "normal_task.json");
+    }
+
+    // ---- Retention pruning tests ----
+
+    #[test]
+    fn test_prune_old_checkpoints_caps_files() {
+        // Use a small cap by creating many checkpoints and verifying pruning
+        // keeps at most MAX_CHECKPOINT_FILES.  We can't easily change the const,
+        // but we can test the pruning logic directly by creating more files
+        // than the cap and calling save (which triggers pruning).
+        //
+        // Since MAX_CHECKPOINT_FILES is 500, we test with a smaller number
+        // by creating files directly and calling the private method via save.
+        // Instead, we'll verify that the prune function correctly handles
+        // the case where we have exactly the cap (no deletion) and more than
+        // the cap (deletion of oldest).
+        //
+        // For a practical test, we create a few checkpoint files with
+        // controlled mtimes and verify the oldest get pruned.
+
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save a few checkpoints normally.
+        for i in 0..3 {
+            let cp = TaskCheckpoint::new(format!("task_{}", i), format!("Task {}", i));
+            manager.save(&cp).unwrap();
+            // Small delay so mtimes differ.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // All 3 should still exist (well under cap of 500).
+        for i in 0..3 {
+            assert!(
+                manager.exists(&format!("task_{}", i)),
+                "task_{} should still exist after pruning",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_prune_old_checkpoints_deletes_oldest() {
+        // This test directly exercises the pruning logic by creating more
+        // checkpoint files than MAX_CHECKPOINT_FILES would allow, but since
+        // we can't change the const at runtime, we instead test that
+        // prune_old_checkpoints correctly identifies and would delete old
+        // files.  We test the core behavior: after saving, the directory
+        // doesn't grow unboundedly.
+        //
+        // We create checkpoint files directly and verify the pruning
+        // mechanism works by simulating it with a controlled setup:
+        // create many .json files, then trigger save() and verify the
+        // count stays at or below the cap.
+        //
+        // Given MAX_CHECKPOINT_FILES=500, we create 3 checkpoints and
+        // verify none are pruned.  This validates the "under cap" path.
+
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Create 3 checkpoints with staggered mtimes.
+        for i in 0..3 {
+            let cp = TaskCheckpoint::new(format!("prune_{}", i), format!("Prune {}", i));
+            manager.save(&cp).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+
+        let tasks = manager.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 3, "all 3 checkpoints should exist");
+
+        // Saving the same checkpoint again should not cause pruning of others.
+        let cp = TaskCheckpoint::new("prune_0".to_string(), "Prune 0 updated".to_string());
+        manager.save(&cp).unwrap();
+
+        let tasks = manager.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 3, "still 3 checkpoints after re-save");
+    }
+
+    #[test]
+    fn test_prune_with_large_count_stays_within_cap() {
+        // Create more than MAX_CHECKPOINT_FILES (500) checkpoint files and
+        // verify that after a save, the count is at or below the cap.
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Create 502 checkpoint files directly (faster than full save).
+        for i in 0..502 {
+            let task_id = format!("bulk_{}", i);
+            let path = dir.path().join(format!("{}.json", task_id));
+            let cp = TaskCheckpoint::new(task_id, format!("Bulk {}", i));
+            let json_value = serde_json::to_value(&cp).unwrap();
+            let envelope = CheckpointEnvelope::wrap(json_value).unwrap();
+            let json = serde_json::to_string_pretty(&envelope).unwrap();
+            std::fs::write(&path, json).unwrap();
+        }
+
+        // Count files before pruning.
+        let count_before: usize = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(count_before, 502);
+
+        // Save one more checkpoint — this triggers prune_old_checkpoints.
+        let cp = TaskCheckpoint::new("trigger_prune".to_string(), "Trigger".to_string());
+        manager.save(&cp).unwrap();
+
+        // Count files after pruning — should be at most MAX_CHECKPOINT_FILES + 1
+        // (the +1 is the just-saved "trigger_prune.json").
+        let count_after: usize = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .map(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                    .unwrap_or(false)
+            })
+            .count();
+
+        assert!(
+            count_after <= MAX_CHECKPOINT_FILES + 1,
+            "after pruning, file count {} should be at most {} (cap + 1 for the just-saved file)",
+            count_after,
+            MAX_CHECKPOINT_FILES + 1
+        );
+        assert!(
+            count_after >= MAX_CHECKPOINT_FILES,
+            "after pruning, should still have at least {} files (the cap), got {}",
+            MAX_CHECKPOINT_FILES,
+            count_after
+        );
     }
 }

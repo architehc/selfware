@@ -92,6 +92,11 @@ impl RetryConfig {
 #[derive(Clone)]
 pub struct ApiClient {
     client: Client,
+    /// HTTP client used for **streaming** requests.  Built without a total
+    /// `.timeout()` so that long SSE streams from slow models are not
+    /// truncated mid-generation.  Stall detection is handled per-chunk by
+    /// [`StreamingResponse`] using `stream_chunk_timeout_secs`.
+    stream_client: Client,
     config: crate::config::Config,
     pub(crate) base_url: String,
     pub(crate) retry_config: RetryConfig,
@@ -112,6 +117,15 @@ impl ApiClient {
             .build()
             .context("Failed to build HTTP client")?;
 
+        // Streaming client: NO total `.timeout()` — the per-chunk timeout
+        // (`stream_chunk_timeout_secs`) inside `StreamingResponse` is
+        // sufficient to detect stalls.  A total timeout here would truncate
+        // long but healthy SSE streams from slow models.
+        let stream_client = Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .context("Failed to build streaming HTTP client")?;
+
         if config.endpoint.starts_with("http://")
             && !crate::config::is_local_endpoint(&config.endpoint)
         {
@@ -124,6 +138,7 @@ impl ApiClient {
 
         Ok(Self {
             client,
+            stream_client,
             base_url: config.endpoint.clone(),
             config: config.clone(),
             retry_config: RetryConfig::from_settings(&config.retry),
@@ -436,7 +451,7 @@ impl ApiClient {
 
         for attempt in 1..=max_attempts {
             let mut request = self
-                .client
+                .stream_client
                 .post(&url)
                 .header("Content-Type", "application/json");
 
