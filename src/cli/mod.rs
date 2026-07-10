@@ -3145,23 +3145,36 @@ max_recovery_attempts = 3
         }
 
         Commands::Runs { command } => {
-            use crate::supervision::run_supervisor::{RunId, RunStatus, RunSupervisor};
+            use crate::supervision::run_registry::{AbortOutcome, RunRecord, RunRegistry};
+            use crate::supervision::run_supervisor::{RunStatus, RunSupervisor};
             use args::RunsCommand;
 
-            let supervisor = RunSupervisor::new();
+            let registry = RunRegistry::new()?;
 
             match command {
                 RunsCommand::Start { task } => {
+                    let supervisor = RunSupervisor::new();
                     if !quiet {
                         println!("{} Starting supervised run…", Glyphs::gear());
                     }
                     let id = supervisor.start(task.clone(), config.clone()).await;
-                    println!("started run {}", id);
+                    let composite = format!("{}-{}", std::process::id(), id.0);
+                    let now = chrono::Utc::now().timestamp();
+                    let record = RunRecord {
+                        id: composite.clone(),
+                        pid: std::process::id(),
+                        task: task.clone(),
+                        status: "Running".to_string(),
+                        started_unix: now,
+                        updated_unix: now,
+                    };
+                    if let Err(e) = registry.write(&record) {
+                        warn!("failed to persist run record: {}", e);
+                    }
+                    println!("started {}", composite);
 
                     if let Some(mut rx) = supervisor.attach(&id).await {
                         loop {
-                            // Check for terminal status first so we don't
-                            // block forever on a closed-but-drained channel.
                             if let Some(st) = supervisor.status(&id).await {
                                 if matches!(
                                     st,
@@ -3175,8 +3188,7 @@ max_recovery_attempts = 3
                             match rx.recv().await {
                                 Ok(ev) => {
                                     if !quiet {
-                                        // Concise one-line summary of the event.
-                                        println!("  [{id}] {ev:?}");
+                                        println!("  [{composite}] {ev:?}");
                                     }
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -3187,40 +3199,61 @@ max_recovery_attempts = 3
                         }
                     }
 
-                    // Print the final status.
-                    match supervisor.status(&id).await {
-                        Some(st) => println!("run {} final status: {:?}", id, st),
-                        None => println!("run {} status: unknown (run vanished)", id),
-                    }
+                    let status_str = match supervisor.status(&id).await {
+                        Some(RunStatus::Completed) => "Completed",
+                        Some(RunStatus::Failed) => "Failed",
+                        Some(RunStatus::Aborted) => "Aborted",
+                        Some(RunStatus::Running) | Some(RunStatus::Paused) => "Running",
+                        None => "Failed",
+                    };
+                    let _ = registry.update_status(
+                        &composite,
+                        status_str,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    println!("{} final status: {}", composite, status_str);
                 }
 
                 RunsCommand::List => {
-                    let runs = supervisor.list().await;
+                    let runs = registry.list()?;
                     if runs.is_empty() {
                         println!(
-                            "No runs in this process. \
-                             (Cross-invocation run tracking requires a persistent \
-                             supervisor/daemon — planned.)"
+                            "No runs recorded. (Runs are persisted under \
+                             ~/.selfware/runs/ as they start.)"
                         );
                     } else {
-                        println!("{:<10} {}", "ID", "STATUS");
-                        for (rid, st) in runs {
-                            println!("run-{:<7} {:?}", rid.0, st);
+                        println!("{:<22} {:<10} {}", "ID", "STATUS", "TASK");
+                        for r in runs {
+                            let task_short: String = r.task.chars().take(50).collect();
+                            println!(
+                                "{:<22} {:<10} {}",
+                                r.id,
+                                r.effective_status(),
+                                task_short
+                            );
                         }
                     }
                 }
 
                 RunsCommand::Abort { id } => {
-                    let ok = supervisor.abort(&RunId(id)).await;
-                    if ok {
-                        println!("Aborted run-{}.", id);
-                    } else {
-                        println!(
-                            "Run-{} not found in this process. \
-                             (Cross-invocation run tracking requires a persistent \
-                             supervisor/daemon — planned.)",
+                    match registry.abort(&id, chrono::Utc::now().timestamp())? {
+                        AbortOutcome::NotFound => println!(
+                            "No run '{}' in the registry (~/.selfware/runs/).",
                             id
-                        );
+                        ),
+                        AbortOutcome::AlreadyDone => {
+                            println!("Run '{}' is already finished.", id)
+                        }
+                        AbortOutcome::WasStale => println!(
+                            "Run '{}' owner process was already gone; marked Aborted.",
+                            id
+                        ),
+                        AbortOutcome::Signalled(pid) => println!(
+                            "Sent SIGTERM to process {} for run '{}'. \
+                             Note: this terminates that whole process (which may \
+                             host other runs).",
+                            pid, id
+                        ),
                     }
                 }
             }

@@ -844,10 +844,10 @@ pub(crate) enum RunsCommand {
     /// visible.
     List,
 
-    /// Abort a run by id (current process only).
+    /// Abort a run by its registry id (e.g. `12345-1`), across processes.
     Abort {
-        /// The numeric run id to abort.
-        id: u64,
+        /// The run id to abort, as shown by `selfware runs list`.
+        id: String,
     },
 }
 
