@@ -1054,10 +1054,19 @@ pub fn run_tui_dashboard_with_events(
                     // Connect agent responses to the chat pane
                     match &event {
                         TuiEvent::AgentCompleted { message } => {
-                            // The streamed buffer is superseded by the authoritative
-                            // final message — clear it first so the text isn't shown twice.
-                            app.clear_streaming();
-                            app.add_assistant_message(message);
+                            // Finalize the final turn's live stream (what the user
+                            // watched) into a committed message. Only fall back to
+                            // the terminal event's `message` when nothing streamed
+                            // this turn (e.g. a synthesized/replayed answer) — this
+                            // avoids showing the answer twice or a placeholder line.
+                            let had_live = app
+                                .streaming_assistant
+                                .as_ref()
+                                .is_some_and(|s| !s.trim().is_empty());
+                            app.commit_streaming();
+                            if !had_live && !message.trim().is_empty() {
+                                app.add_assistant_message(message);
+                            }
                             app.clear_progress();
                         }
                         TuiEvent::AgentError { message } => {

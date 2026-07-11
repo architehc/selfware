@@ -478,6 +478,9 @@ pub struct Agent {
     edit_history: EditHistory,
     /// Last assistant response content (for /copy command)
     last_assistant_response: String,
+    /// Whether the single authoritative terminal event has been emitted for the
+    /// current run (see [`Agent::emit_terminal_event_once`]). Reset at run start.
+    terminal_event_emitted: bool,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
     /// Cancellation token set by Ctrl+C while a task is running
@@ -1154,6 +1157,7 @@ To call a tool, use this EXACT XML structure:
             progress_emitter: Arc::new(progress::NoopProgressEmitter),
             edit_history,
             last_assistant_response: String::new(),
+            terminal_event_emitted: false,
             chat_store,
             cancelled: Arc::new(AtomicBool::new(false)),
             pending_messages: VecDeque::new(),
@@ -1329,6 +1333,19 @@ To call a tool, use this EXACT XML structure:
     /// Emit an event to the TUI / event listener (no-op when no emitter is configured).
     fn emit_event(&self, event: AgentEvent) {
         self.events.emit(event);
+    }
+
+    /// Emit a single authoritative terminal event (`Completed`/`Error`) for the
+    /// run, at most once. The inner loop has many exit points and previously
+    /// most success paths emitted nothing (leaving the TUI's live stream
+    /// dangling); a run-end wrapper calls this so exactly one terminal event
+    /// always fires, while a richer inline failure message (emitted first) still
+    /// wins over the generic fallback.
+    pub(crate) fn emit_terminal_event_once(&mut self, event: AgentEvent) {
+        if !self.terminal_event_emitted {
+            self.terminal_event_emitted = true;
+            self.emit_event(event);
+        }
     }
 
     /// Swap in a custom [`progress::ProgressEmitter`].  Used by the headless
