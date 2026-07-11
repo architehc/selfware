@@ -105,8 +105,9 @@ pub(crate) struct Cli {
     )]
     pub(crate) debug: Option<String>,
 
-    /// Output format for headless mode: text, json, or stream-json
-    #[arg(long, value_enum, default_value = "text")]
+    /// Output format for headless mode: text, json, or stream-json.
+    /// `global` so it may follow a subcommand too (e.g. `runs list --output-format json`).
+    #[arg(long, value_enum, default_value = "text", global = true)]
     pub(crate) output_format: HeadlessOutputFormat,
 
     /// Maximum number of agent loop iterations (hard limit)
