@@ -10,13 +10,31 @@ async fn main() -> ExitCode {
     // can poll `selfware::is_shutdown_requested()` to wind down.
     // After the grace period, force-exit to avoid hanging on stuck I/O.
     tokio::spawn(async {
-        shutdown_signal().await;
-        selfware::request_shutdown();
-        eprintln!("\nReceived shutdown signal, exiting gracefully...");
+        let mut signals = ShutdownSignals::new();
 
-        tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)).await;
-        eprintln!("Shutdown grace period expired, forcing exit.");
-        std::process::exit(1);
+        // First signal: ask every component to wind down and start a bounded
+        // grace timer.
+        signals.recv().await;
+        selfware::request_shutdown();
+        eprintln!(
+            "\nReceived shutdown signal, winding down... \
+             (press Ctrl-C again to force quit)"
+        );
+
+        // Race the grace period against a SECOND signal. An impatient operator
+        // pressing Ctrl-C again should exit immediately instead of waiting out
+        // the full grace period (the previous handler ignored further signals,
+        // so an active run could hang for the whole window).
+        tokio::select! {
+            _ = signals.recv() => {
+                eprintln!("\nSecond signal received, forcing immediate exit.");
+                std::process::exit(130); // 128 + SIGINT
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)) => {
+                eprintln!("Shutdown grace period expired, forcing exit.");
+                std::process::exit(1);
+            }
+        }
     });
 
     // Optional localhost health endpoint for container probes.
@@ -39,22 +57,46 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = tokio::signal::ctrl_c();
+/// A re-armable source of shutdown signals. Unlike a bare `tokio::signal::ctrl_c()`
+/// future (which must be recreated per await), `recv()` can be awaited any number
+/// of times, so the caller can distinguish the first shutdown request from a
+/// second "force quit" press.
+#[cfg(unix)]
+struct ShutdownSignals {
+    sigint: tokio::signal::unix::Signal,
+    sigterm: tokio::signal::unix::Signal,
+}
 
-    #[cfg(unix)]
-    {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-        tokio::select! {
-            _ = ctrl_c => {},
-            _ = sigterm.recv() => {},
+#[cfg(unix)]
+impl ShutdownSignals {
+    fn new() -> Self {
+        use tokio::signal::unix::{signal, SignalKind};
+        Self {
+            sigint: signal(SignalKind::interrupt()).expect("failed to register SIGINT handler"),
+            sigterm: signal(SignalKind::terminate()).expect("failed to register SIGTERM handler"),
         }
     }
 
-    #[cfg(not(unix))]
-    {
-        ctrl_c.await.ok();
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = self.sigint.recv() => {},
+            _ = self.sigterm.recv() => {},
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ShutdownSignals;
+
+#[cfg(not(unix))]
+impl ShutdownSignals {
+    fn new() -> Self {
+        Self
+    }
+
+    async fn recv(&mut self) {
+        // ctrl_c() yields a fresh future each call, so it is naturally re-armable.
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
