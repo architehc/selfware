@@ -455,10 +455,11 @@ impl Agent {
             .map(|cp| {
                 cp.tool_calls.iter().any(|tc| {
                     tc.success
-                        && matches!(
+                        && (matches!(
                             tc.tool_name.as_str(),
                             "cargo_check" | "cargo_test" | "cargo_clippy"
-                        )
+                        ) || (matches!(tc.tool_name.as_str(), "shell_exec" | "pty_shell")
+                            && Self::shell_command_is_verification(&tc.arguments)))
                 })
             })
             .unwrap_or(false);
@@ -487,6 +488,52 @@ impl Agent {
             verification_status,
             guidance
         ))
+    }
+
+    /// Heuristic: does a shell_exec/pty_shell argument JSON invoke a recognized
+    /// test or type-check runner? Used only to soften the "Verification: NOT YET
+    /// RUN" progress nudge for non-Rust projects — it does NOT affect any hard
+    /// completion gate.
+    fn shell_command_is_verification(arguments_json: &str) -> bool {
+        let cmd = serde_json::from_str::<serde_json::Value>(arguments_json)
+            .ok()
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default()
+            .to_lowercase();
+        if cmd.is_empty() {
+            return false;
+        }
+        const RUNNERS: &[&str] = &[
+            "pytest",
+            "py.test",
+            "unittest",
+            "npm test",
+            "npm run test",
+            "yarn test",
+            "pnpm test",
+            "jest",
+            "mocha",
+            "vitest",
+            "go test",
+            "cargo test",
+            "cargo check",
+            "cargo clippy",
+            "tox",
+            "make test",
+            "make check",
+            "gradle test",
+            "mvn test",
+            "mvn verify",
+            "rspec",
+            "phpunit",
+            "dotnet test",
+            "ctest",
+        ];
+        RUNNERS.iter().any(|r| cmd.contains(r))
     }
 
     pub async fn analyze(&mut self, path: &str) -> Result<()> {
@@ -1492,6 +1539,38 @@ mod tests {
     use crate::config::{AgentConfig, Config, ExecutionMode, SafetyConfig};
     use crate::testing::mock_api::MockLlmServer;
     use chrono::Utc;
+
+    #[test]
+    fn shell_command_is_verification_recognizes_non_cargo_runners() {
+        let yes = [
+            r#"{"command":"pytest -q tests/"}"#,
+            r#"{"command":"npm test"}"#,
+            r#"{"command":"npm run test -- --watch=false"}"#,
+            r#"{"command":"go test ./..."}"#,
+            r#"{"command":"npx jest"}"#,
+            r#"{"command":"cargo test --all"}"#,
+            r#"{"command":"make check"}"#,
+        ];
+        for a in yes {
+            assert!(
+                Agent::shell_command_is_verification(a),
+                "should count as verification: {a}"
+            );
+        }
+        let no = [
+            r#"{"command":"ls -la"}"#,
+            r#"{"command":"cat src/main.rs"}"#,
+            r#"{"command":"echo hello"}"#,
+            r#"{}"#,
+            "not json at all",
+        ];
+        for a in no {
+            assert!(
+                !Agent::shell_command_is_verification(a),
+                "should NOT count as verification: {a}"
+            );
+        }
+    }
 
     #[derive(Default)]
     struct RecordingEventEmitter {
