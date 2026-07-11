@@ -539,6 +539,10 @@ impl Tool for GitPush {
                     "type": "boolean",
                     "description": "Force push (blocked by safety checker)",
                     "default": false
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Timeout in seconds for the network push (default: 120)"
                 }
             }
         })
@@ -588,7 +592,15 @@ impl Tool for GitPush {
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("push").arg("--").arg(remote).arg(&branch);
 
-        let output = cmd.output().await.context("Failed to execute git push")?;
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(120);
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                .await
+                .context("git push timed out (network hang?)")?
+                .context("Failed to execute git push")?;
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

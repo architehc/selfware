@@ -53,6 +53,10 @@ impl Tool for NpmInstall {
                 "global": {
                     "type": "boolean",
                     "description": "Install globally (-g)"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default: 300)"
                 }
             }
         })
@@ -96,7 +100,15 @@ impl Tool for NpmInstall {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to run npm install")?;
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                .await
+                .context("npm install timed out")?
+                .context("Failed to run npm install")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -312,6 +324,10 @@ impl Tool for PipInstall {
                 "user": {
                     "type": "boolean",
                     "description": "Install to user site-packages (--user)"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default: 300)"
                 }
             }
         })
@@ -362,7 +378,15 @@ impl Tool for PipInstall {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        let output = cmd.output().await.context("Failed to run pip install")?;
+        let timeout_secs = args
+            .get("timeout_secs")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(300);
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
+                .await
+                .context("pip install timed out")?
+                .context("Failed to run pip install")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -685,6 +709,18 @@ mod tests {
         let schema = tool.schema();
         assert!(schema.get("properties").is_some());
         assert!(schema["properties"].get("packages").is_some());
+    }
+
+    #[test]
+    fn install_tools_expose_timeout_secs() {
+        // The hang-prevention timeout must be a real, discoverable arg so the
+        // model (and operators) can override the default bound.
+        for schema in [NpmInstall.schema(), PipInstall.schema()] {
+            assert!(
+                schema["properties"].get("timeout_secs").is_some(),
+                "install tool should expose timeout_secs: {schema}"
+            );
+        }
     }
 
     #[test]
