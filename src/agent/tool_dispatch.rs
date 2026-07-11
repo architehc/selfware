@@ -354,13 +354,24 @@ fn summarize_shell_exec(raw: &str) -> String {
 }
 
 fn summarize_generic(raw: &str) -> String {
-    // Show first 15K chars + stats
+    // Keep the head AND the tail, eliding only the middle. Head-only truncation
+    // silently drops trailing markers the completion gate relies on (FAILED,
+    // <verification_failed>, error tails), which can make a failed verification
+    // read as passing.
+    const HEAD_CHARS: usize = 12_000;
+    const TAIL_CHARS: usize = 3_000;
     let char_count = raw.chars().count();
     let line_count = raw.lines().count();
-    let preview: String = raw.chars().take(15_000).collect();
+    if char_count <= HEAD_CHARS + TAIL_CHARS {
+        return raw.to_string();
+    }
+    let head: String = raw.chars().take(HEAD_CHARS).collect();
+    let tail: String = raw.chars().skip(char_count - TAIL_CHARS).collect();
+    let omitted = char_count - HEAD_CHARS - TAIL_CHARS;
     format!(
-        "{}\n\n[... {} total chars, {} lines — see raw file for full output]",
-        preview, char_count, line_count
+        "{}\n\n[... {} chars omitted from the middle — {} total chars, {} lines; \
+         see raw file for full output ...]\n\n{}",
+        head, omitted, char_count, line_count, tail
     )
 }
 
@@ -4070,6 +4081,31 @@ mod tests {
     }
 
     #[test]
+    fn summarize_generic_preserves_tail_marker() {
+        // A large result whose FAILURE marker is at the very end must survive
+        // summarization — head-only truncation would drop it and the gate would
+        // miss the failure.
+        let middle = "x".repeat(60_000);
+        let raw = format!("START\n{}\n<verification_failed>tests FAILED</verification_failed>", middle);
+        let summary = summarize_generic(&raw);
+        assert!(summary.contains("START"), "head kept");
+        assert!(
+            summary.contains("<verification_failed>") && summary.contains("FAILED"),
+            "tail failure marker must survive summarization: {}",
+            &summary[summary.len().saturating_sub(200)..]
+        );
+        // Middle was actually elided (summary far smaller than raw).
+        assert!(summary.chars().count() < raw.chars().count());
+        assert!(summary.contains("omitted from the middle"));
+    }
+
+    #[test]
+    fn summarize_generic_keeps_small_input_verbatim() {
+        let raw = "short output\nline 2\n<verification_failed>nope</verification_failed>";
+        assert_eq!(summarize_generic(raw), raw);
+    }
+
+    #[test]
     fn test_canonicalize_tool_args_valid_json() {
         let input = r#"{"key": "value", "num": 42}"#;
         let result = canonicalize_tool_args(input);
@@ -4675,9 +4711,10 @@ mod tests {
 
     #[test]
     fn test_summarize_generic_short() {
+        // Small results are now returned verbatim (no head/tail elision needed),
+        // so no summary/stats banner is added.
         let summary = summarize_generic("hello world");
-        assert!(summary.contains("hello world"));
-        assert!(summary.contains("total chars"));
+        assert_eq!(summary, "hello world");
     }
 
     #[test]
