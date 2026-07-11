@@ -239,6 +239,28 @@ impl App {
         self.state = AppState::RunningTask;
     }
 
+    /// Update just the step counters of the progress gauge from a live
+    /// "Step X/Y" signal, so the gauge advances during a run instead of being
+    /// frozen at its initial value. Creates the progress entry if a run is
+    /// active but none was set yet.
+    pub fn update_step_progress(&mut self, current_step: usize, total_steps: usize) {
+        match self.task_progress.as_mut() {
+            Some(p) => {
+                p.current_step = current_step;
+                p.total_steps = Some(total_steps);
+            }
+            None => {
+                self.set_progress(TaskProgress {
+                    description: "Processing...".into(),
+                    current_step,
+                    total_steps: Some(total_steps),
+                    current_action: "Working".into(),
+                    elapsed_secs: 0,
+                });
+            }
+        }
+    }
+
     /// Clear task progress
     pub fn clear_progress(&mut self) {
         self.task_progress = None;
@@ -313,9 +335,26 @@ impl App {
         }
     }
 
+    /// Build the header title, appending live step progress while a task runs.
+    fn header_title(&self) -> String {
+        match (&self.state, self.task_progress.as_ref()) {
+            (AppState::RunningTask, Some(p)) => {
+                let steps = match p.total_steps {
+                    Some(total) => format!("{}/{}", p.current_step, total),
+                    None => p.current_step.to_string(),
+                };
+                format!(
+                    " 🦊 Selfware Workshop — {} · step {} · {} ",
+                    self.model, steps, p.current_action
+                )
+            }
+            _ => format!(" 🦊 Selfware Workshop — {} ", self.model),
+        }
+    }
+
     /// Render the header
     fn render_header(&self, frame: &mut Frame, area: Rect) {
-        let title = format!(" 🦊 Selfware Workshop — {} ", self.model);
+        let title = self.header_title();
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(TuiPalette::border_style())
@@ -1119,6 +1158,28 @@ mod tests {
         assert!(app.streaming_assistant.is_none());
         app.add_assistant_message("Hello");
         assert_eq!(app.messages.len(), n + 1);
+    }
+
+    #[test]
+    fn update_step_progress_drives_gauge_and_header() {
+        let mut app = App::new("glm-5.2");
+        // Idle: header has no step segment.
+        assert!(!app.header_title().contains("step"));
+
+        // A live "Step 3/200" signal advances the gauge from nothing.
+        app.update_step_progress(3, 200);
+        let p = app.task_progress.as_ref().expect("progress created");
+        assert_eq!(p.current_step, 3);
+        assert_eq!(p.total_steps, Some(200));
+        assert_eq!(app.state, AppState::RunningTask);
+        let title = app.header_title();
+        assert!(title.contains("step 3/200"), "header shows step: {title}");
+        assert!(title.contains("glm-5.2"));
+
+        // A later signal updates in place (no duplicate progress entry).
+        app.update_step_progress(4, 200);
+        assert_eq!(app.task_progress.as_ref().unwrap().current_step, 4);
+        assert!(app.header_title().contains("step 4/200"));
     }
 
     #[test]

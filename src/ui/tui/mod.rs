@@ -1096,6 +1096,20 @@ pub fn run_tui_dashboard_with_events(
                             // streamed prose so turns render as separate messages
                             // instead of one ever-growing block.
                             app.commit_streaming();
+                            // Drive the progress gauge from "Step {cur}/{max}" so
+                            // it advances during a run instead of sitting at 0.
+                            if let Some(rest) = message.strip_prefix("Step ") {
+                                if let Some(tok) = rest.split_whitespace().next() {
+                                    if let Some((c, m)) = tok.split_once('/') {
+                                        if let (Ok(cur), Ok(max)) = (
+                                            c.trim().parse::<usize>(),
+                                            m.trim().parse::<usize>(),
+                                        ) {
+                                            app.update_step_progress(cur, max);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         TuiEvent::ToolCompleted {
                             name,
