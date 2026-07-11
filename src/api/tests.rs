@@ -71,6 +71,7 @@ fn test_stream_chunk_usage() {
         prompt_tokens: 100,
         completion_tokens: 50,
         total_tokens: 150,
+        cost: None,
     };
     let chunk = StreamChunk::Usage(usage.clone());
     if let StreamChunk::Usage(u) = chunk {
@@ -3033,6 +3034,7 @@ fn test_stream_chunk_usage_clone() {
         prompt_tokens: 100,
         completion_tokens: 50,
         total_tokens: 150,
+        cost: None,
     };
     let chunk = StreamChunk::Usage(usage);
     let cloned = chunk.clone();

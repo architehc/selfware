@@ -277,6 +277,7 @@ mod chat_response_tests {
                 prompt_tokens: 10,
                 completion_tokens: 5,
                 total_tokens: 15,
+                cost: None,
             },
         }
     }
@@ -357,6 +358,7 @@ mod chat_response_tests {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                cost: None,
             },
         };
 
@@ -379,6 +381,7 @@ mod usage_tests {
             prompt_tokens: 100,
             completion_tokens: 200,
             total_tokens: 300,
+            cost: None,
         };
 
         assert_eq!(usage.prompt_tokens, 100);
@@ -392,6 +395,7 @@ mod usage_tests {
             prompt_tokens: 50,
             completion_tokens: 25,
             total_tokens: 75,
+            cost: None,
         };
 
         let json = serde_json::to_string(&usage).unwrap();
@@ -406,6 +410,7 @@ mod usage_tests {
             prompt_tokens: 10,
             completion_tokens: 20,
             total_tokens: 30,
+            cost: None,
         };
 
         let cloned = original.clone();
