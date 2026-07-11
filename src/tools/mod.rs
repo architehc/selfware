@@ -1360,4 +1360,21 @@ mod tests {
         assert!(find_dangerous_shell_pattern("echo hello").is_none());
         assert!(find_dangerous_shell_pattern("cargo test").is_none());
     }
+    #[test]
+    fn every_registered_tool_has_explicit_safety_metadata() {
+        let registry = ToolRegistry::new();
+        let missing: Vec<String> = registry
+            .list()
+            .iter()
+            .map(|t| t.name().to_string())
+            .filter(|name| {
+                crate::safety::tool_metadata::classify_tool_metadata(name).is_none()
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "registered tools missing an explicit safety-metadata entry — add them to              classify_tool_metadata in src/safety/tool_metadata.rs: {:?}",
+            missing
+        );
+    }
 }

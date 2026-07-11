@@ -357,12 +357,12 @@ fn is_protected_tool(tool_name: &str) -> bool {
     )
 }
 
-/// Get default metadata for a tool by name
-///
-/// This provides a fallback for tools that don't implement metadata methods.
-/// New tools should implement the metadata methods on the Tool trait instead.
-pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
-    match tool_name {
+/// Explicit safety classification for a tool, or `None` if the tool name is not
+/// listed. `default_tool_metadata` wraps this with a permissive fallback; the
+/// parity test asserts every REGISTERED tool is explicitly listed here so a new
+/// tool cannot silently inherit an under-specified (permissive) default.
+pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
+    let meta = match tool_name {
         // Read-only file operations
         "file_read" | "directory_tree" => ToolMetadata::read_only(),
 
@@ -451,9 +451,50 @@ pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
         "radarcam_test" => ToolMetadata::shell(),
         "radarcam_introspect" => ToolMetadata::custom(false, false, RiskLevel::Medium, true, false),
 
-        // Default: medium risk
-        _ => ToolMetadata::custom(false, false, RiskLevel::Medium, false, false),
-    }
+        // Additional file editors — these MUTATE files (found missing by the
+        // registry↔safety parity test; the permissive default under-classified
+        // them as non-mutating).
+        "file_multi_edit" | "patch_apply" => ToolMetadata::file_write(),
+
+        // LSP queries — read-only (diagnostics/navigation, no mutation).
+        "lsp_diagnostics"
+        | "lsp_goto_definition"
+        | "lsp_goto_implementation"
+        | "lsp_find_references"
+        | "lsp_document_symbols"
+        | "lsp_workspace_symbols" => ToolMetadata::read_only(),
+
+        // Issue localization + user prompt — read-only, no side effects.
+        "localize_issue" | "ask_user" => ToolMetadata::read_only(),
+
+        // Browser page navigation.
+        "page_control" => ToolMetadata::network(),
+
+        // Container build/pull — state-changing.
+        "container_build" => ToolMetadata::shell(),
+        "container_pull" => ToolMetadata::network(),
+
+        // Worktree management.
+        "list_worktrees" => ToolMetadata::read_only(),
+        "enter_worktree" | "exit_worktree" => {
+            ToolMetadata::custom(false, false, RiskLevel::Medium, false, false)
+        }
+
+        // Hot reload — state change.
+        "hot_reload" => ToolMetadata::custom(false, false, RiskLevel::Medium, false, false),
+
+        // Unlisted tool: signal that no explicit classification exists.
+        _ => return None,
+    };
+    Some(meta)
+}
+
+/// Safety metadata for a tool, falling back to a conservative default for any
+/// name not explicitly classified. Prefer `classify_tool_metadata` when you
+/// need to know whether the tool was explicitly listed.
+pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
+    classify_tool_metadata(tool_name)
+        .unwrap_or_else(|| ToolMetadata::custom(false, false, RiskLevel::Medium, false, false))
 }
 
 #[cfg(test)]
