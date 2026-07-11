@@ -48,6 +48,38 @@ pub fn pid_alive(pid: u32) -> bool {
     kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
+/// Whether a status string is a terminal (final) run state. Terminal
+/// states are sticky — see [`RunRegistry::update_status`].
+pub fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "Completed" | "Failed" | "Aborted")
+}
+
+/// Best-effort check that `pid` still belongs to a *selfware* process, to
+/// guard against PID reuse: after the original owner exits, the OS may
+/// reassign its PID to an unrelated process, and we must never signal that.
+/// On Linux we read `/proc/<pid>/comm` (and fall back to the full cmdline).
+/// On other platforms we cannot verify and assume it is still ours.
+pub fn pid_is_selfware(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // comm is the (<=15 char) executable name; "selfware" fits.
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+            if comm.trim().contains("selfware") {
+                return true;
+            }
+        }
+        if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+            return String::from_utf8_lossy(&cmdline).contains("selfware");
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
 /// Result of a cross-process abort attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbortOutcome {
@@ -120,8 +152,22 @@ impl RunRegistry {
     }
 
     /// Update status + `updated_unix` of an existing record. No-op if absent.
+    ///
+    /// Terminal states are STICKY: once a run is `Aborted`, `Completed`, or
+    /// `Failed`, a later `update_status` call must not move it away. This is
+    /// the fix for an aborted run being re-recorded as `Completed` by a
+    /// SIGTERM'd owner that returns `Ok` and reports its final in-process
+    /// status.
     pub fn update_status(&self, id: &str, status: &str, now_unix: i64) -> Result<()> {
         if let Some(mut rec) = self.get(id)? {
+            // Terminal states are STICKY: once a run is
+            // Aborted/Completed/Failed, a later update must not move it away.
+            // This is the fix for an aborted run being re-recorded as
+            // Completed by a SIGTERM'd owner that returns Ok and reports its
+            // final in-process status.
+            if is_terminal_status(&rec.status) {
+                return Ok(());
+            }
             rec.status = status.to_string();
             rec.updated_unix = now_unix;
             self.write(&rec)?;
@@ -170,12 +216,17 @@ impl RunRegistry {
         if matches!(rec.status.as_str(), "Completed" | "Failed" | "Aborted") {
             return Ok(AbortOutcome::AlreadyDone);
         }
-        let outcome = if pid_alive(rec.pid) {
+        // Only signal if the PID is still alive AND still a selfware
+        // process — never SIGTERM a reused PID belonging to an unrelated
+        // program.
+        let outcome = if pid_alive(rec.pid) && pid_is_selfware(rec.pid) {
             use nix::sys::signal::{kill, Signal};
             use nix::unistd::Pid;
             let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM);
             AbortOutcome::Signalled(rec.pid)
         } else {
+            // Owner gone, or its PID was reused by an unrelated process — do
+            // not signal; the run is effectively dead, so record it Aborted.
             AbortOutcome::WasStale
         };
         rec.status = "Aborted".to_string();
@@ -268,10 +319,12 @@ mod tests {
     }
 
     #[test]
-    fn abort_live_process_signals_and_marks_aborted() {
+    fn abort_live_non_selfware_pid_is_not_signalled() {
         let dir = tempfile::tempdir().unwrap();
         let reg = RunRegistry::with_dir(dir.path().to_path_buf()).unwrap();
-        // Spawn a real, long-lived child to signal.
+        // A live process whose PID matches the record but which is NOT a
+        // selfware process (i.e. a reused PID). It must NOT be signalled;
+        // the run is recorded Aborted regardless.
         let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
@@ -279,9 +332,28 @@ mod tests {
         let pid = child.id();
         reg.write(&rec("live-1", pid, "Running", 100)).unwrap();
         let outcome = reg.abort("live-1", 200).unwrap();
-        assert_eq!(outcome, AbortOutcome::Signalled(pid));
+        assert_eq!(outcome, AbortOutcome::WasStale);
         assert_eq!(reg.get("live-1").unwrap().unwrap().status, "Aborted");
-        // Reap the child so it doesn't linger (SIGTERM should have ended it).
+        // The unrelated process must be untouched (still alive) — reap it.
+        let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn update_status_terminal_states_are_sticky() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = RunRegistry::with_dir(dir.path().to_path_buf()).unwrap();
+        // Running -> Completed is allowed.
+        reg.write(&rec("r1", 1, "Running", 100)).unwrap();
+        reg.update_status("r1", "Completed", 110).unwrap();
+        assert_eq!(reg.get("r1").unwrap().unwrap().status, "Completed");
+        // Aborted must NOT be overwritten by a late Completed (the P0).
+        reg.write(&rec("r2", 1, "Aborted", 100)).unwrap();
+        reg.update_status("r2", "Completed", 120).unwrap();
+        assert_eq!(reg.get("r2").unwrap().unwrap().status, "Aborted");
+        // Completed/Failed are likewise sticky.
+        reg.write(&rec("r3", 1, "Completed", 100)).unwrap();
+        reg.update_status("r3", "Running", 130).unwrap();
+        assert_eq!(reg.get("r3").unwrap().unwrap().status, "Completed");
     }
 }
