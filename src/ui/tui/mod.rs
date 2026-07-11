@@ -1380,6 +1380,9 @@ pub fn run_tui_dashboard_with_events(
                             match cmd {
                                 "/clear" => {
                                     app.clear_chat();
+                                    // Also reset the Agent's model conversation so a
+                                    // cleared chat truly starts fresh, not just the view.
+                                    let _ = user_input_tx.send("/clear".to_string());
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Chat cleared");
                                     });

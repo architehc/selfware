@@ -1906,6 +1906,19 @@ To call a tool, use this EXACT XML structure:
         self.cancelled.store(false, Ordering::Relaxed);
     }
 
+    /// Reset the model conversation back to the initial system prompt so a
+    /// subsequent task starts fresh (used by `/clear` / new-session). Without
+    /// this, a "cleared" chat still carries the prior task into the next answer.
+    pub fn clear_conversation(&mut self) {
+        // Keep only the leading system prompt; drop all user/assistant/tool turns.
+        let system = self.messages.iter().find(|m| m.role == "system").cloned();
+        self.messages.clear();
+        if let Some(s) = system {
+            self.messages.push(s);
+        }
+        self.last_assistant_response.clear();
+    }
+
     /// Check if plan mode is active.
     pub fn is_plan_mode(&self) -> bool {
         self.plan_mode
