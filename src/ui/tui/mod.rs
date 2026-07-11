@@ -1311,17 +1311,18 @@ pub fn run_tui_dashboard_with_events(
                         }
                     });
                 }
-                KeyCode::Char('z') => {
+                KeyCode::Char('z') if !in_input_mode => {
                     layout_engine.toggle_zoom();
                 }
-                // Animation speed controls
-                KeyCode::Char('+') | KeyCode::Char('=') => {
+                // Animation speed controls — only when NOT typing, so these
+                // characters reach the input editor while the chat has focus.
+                KeyCode::Char('+') | KeyCode::Char('=') if !in_input_mode => {
                     app.on_plus();
                     with_dashboard_state(&shared_state, |state| {
                         state.log(LogLevel::Info, &app.status);
                     });
                 }
-                KeyCode::Char('-') | KeyCode::Char('_') => {
+                KeyCode::Char('-') | KeyCode::Char('_') if !in_input_mode => {
                     app.on_minus();
                     with_dashboard_state(&shared_state, |state| {
                         state.log(LogLevel::Info, &app.status);

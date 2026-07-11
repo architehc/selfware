@@ -468,10 +468,20 @@ impl App {
         self.palette.render(frame, palette_area, self.selected);
     }
 
+    /// Byte offset in `self.input` for the current char-index cursor.
+    fn cursor_byte_offset(&self) -> usize {
+        self.input
+            .char_indices()
+            .nth(self.cursor)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
+    }
+
     /// Handle character input
     pub fn on_char(&mut self, c: char) {
         if self.state == AppState::Chatting {
-            self.input.insert(self.cursor, c);
+            let byte_idx = self.cursor_byte_offset();
+            self.input.insert(byte_idx, c);
             self.cursor += 1;
         } else if self.state == AppState::Palette {
             self.palette.on_char(c);
@@ -482,7 +492,8 @@ impl App {
     pub fn on_backspace(&mut self) {
         if self.state == AppState::Chatting && self.cursor > 0 {
             self.cursor -= 1;
-            self.input.remove(self.cursor);
+            let byte_idx = self.cursor_byte_offset();
+            self.input.remove(byte_idx);
         } else if self.state == AppState::Palette {
             self.palette.on_backspace();
         }
@@ -497,7 +508,8 @@ impl App {
 
     /// Handle right arrow
     pub fn on_right(&mut self) {
-        if self.cursor < self.input.len() {
+        // Bound by CHARACTER count (cursor is a char index), not byte length.
+        if self.cursor < self.input.chars().count() {
             self.cursor += 1;
         }
     }
@@ -1068,6 +1080,24 @@ mod tests {
         let mut app = App::new("test");
         app.animation_speed = 1.5;
         assert_eq!(app.animation_speed_display(), "150%");
+    }
+
+    #[test]
+    fn multibyte_input_does_not_panic_and_edits_correctly() {
+        let mut app = App::new("m");
+        app.state = AppState::Chatting;
+        // Type an emoji then ASCII — byte offsets must stay on char boundaries.
+        for c in "a🦊b".chars() {
+            app.on_char(c);
+        }
+        assert_eq!(app.input, "a🦊b");
+        assert_eq!(app.cursor, 3);
+        // Backspace removes the ASCII 'b', then the multibyte fox — no panic.
+        app.on_backspace();
+        assert_eq!(app.input, "a🦊");
+        app.on_backspace();
+        assert_eq!(app.input, "a");
+        assert_eq!(app.cursor, 1);
     }
 
     #[test]
