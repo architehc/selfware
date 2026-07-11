@@ -77,6 +77,14 @@ impl FailureKind {
     pub fn is_success(&self) -> bool {
         matches!(self, FailureKind::Success)
     }
+
+    /// Whether this outcome is NOT a failure — a real edit (`Success`) or an
+    /// honest no-op (`NoChange`). These render a "✅" banner and must emit a
+    /// `TaskCompleted` progress event, not `TaskFailed`. Mirrors `cli_banner`'s
+    /// ✅-vs-❌ split so the banner and the event stream never disagree.
+    pub fn is_nonfailure(&self) -> bool {
+        matches!(self, FailureKind::Success | FailureKind::NoChange)
+    }
 }
 
 /// Structured failure-mode verdict for a single run.
@@ -674,6 +682,31 @@ mod tests {
             assert!(!a.contains("completion gate"), "advice leaks selfware internals: {}", m.advice);
             assert!(!a.contains("block threshold"), "advice leaks selfware internals: {}", m.advice);
         }
+    }
+
+    #[test]
+    fn nonfailure_covers_success_and_no_change_only() {
+        assert!(FailureKind::Success.is_nonfailure());
+        assert!(FailureKind::NoChange.is_nonfailure());
+        // Everything else is a failure.
+        for k in [
+            FailureKind::BudgetExhausted,
+            FailureKind::Timeout,
+            FailureKind::FakeComplete,
+            FailureKind::ReadLoop,
+            FailureKind::MaxIterations,
+            FailureKind::Unknown,
+        ] {
+            assert!(!k.is_nonfailure(), "{:?} must be a failure", k);
+        }
+        // A NoChange banner must read as completed, never aborted.
+        let m = FailureMode {
+            kind: FailureKind::NoChange,
+            evidence: "e".to_string(),
+            advice: "a".to_string(),
+        };
+        assert!(m.cli_banner().contains("✅"));
+        assert!(!m.cli_banner().contains("❌"));
     }
 
     #[test]
