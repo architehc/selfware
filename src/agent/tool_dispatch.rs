@@ -3684,7 +3684,11 @@ impl Agent {
 
         // Budget check: if the result exceeds the per-result token budget,
         // spill the raw data to disk and store a structured summary + reference.
-        let result_to_store = if success {
+        // Applies to BOTH success AND error results — an oversized error was
+        // previously stored verbatim, which could blow the context-token budget
+        // (an OOM surface). summarize_and_spill keeps head+tail, so trailing
+        // failure markers still survive.
+        let result_to_store = {
             let estimated_tokens = crate::token_count::estimate_content_tokens(result);
             if estimated_tokens > MAX_TOOL_RESULT_TOKENS {
                 info!(
@@ -3695,8 +3699,6 @@ impl Agent {
             } else {
                 result.to_string()
             }
-        } else {
-            result.to_string()
         };
 
         if use_native_fc {
