@@ -267,10 +267,26 @@ const OLLAMA_LOCAL_ENDPOINT: &str = "http://localhost:11434/v1";
 impl LocalEndpointFallback {
     /// Determine the best local endpoint to fall back to.
     ///
-    /// Currently this is the well-known Ollama default.  Future increments
-    /// may inspect a list of configured local endpoints and prefer the first
-    /// reachable one.
+    /// An explicit `SELFWARE_LOCAL_ENDPOINT` override wins, so operators running
+    /// llama.cpp (:8080), LM Studio (:1234), or vLLM (:8000) instead of Ollama
+    /// get a fallback that actually points at their server. Without an override
+    /// we use the well-known Ollama default. (Reachability probing of multiple
+    /// candidates is the async caller's responsibility — this resolver stays
+    /// offline/synchronous.)
     fn pick_local_endpoint(_config: &crate::config::Config) -> String {
+        Self::choose_local_endpoint(std::env::var("SELFWARE_LOCAL_ENDPOINT").ok().as_deref())
+    }
+
+    /// Pure decision used by `pick_local_endpoint`: a non-empty override string
+    /// wins; otherwise fall back to the Ollama default. Kept separate so it is
+    /// deterministically unit-testable without touching process environment.
+    fn choose_local_endpoint(override_endpoint: Option<&str>) -> String {
+        if let Some(ep) = override_endpoint {
+            let ep = ep.trim();
+            if !ep.is_empty() {
+                return ep.to_string();
+            }
+        }
         OLLAMA_LOCAL_ENDPOINT.to_string()
     }
 }
@@ -616,6 +632,25 @@ impl DeadlockDetector {
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    #[test]
+    fn choose_local_endpoint_prefers_override() {
+        // A non-empty override wins over the Ollama default (llama.cpp/:8080 etc.).
+        assert_eq!(
+            LocalEndpointFallback::choose_local_endpoint(Some("http://localhost:8080/v1")),
+            "http://localhost:8080/v1"
+        );
+        // Blank / whitespace-only overrides are ignored.
+        assert_eq!(
+            LocalEndpointFallback::choose_local_endpoint(Some("   ")),
+            OLLAMA_LOCAL_ENDPOINT
+        );
+        // No override -> Ollama default.
+        assert_eq!(
+            LocalEndpointFallback::choose_local_endpoint(None),
+            OLLAMA_LOCAL_ENDPOINT
+        );
+    }
 
     // ------------------------------------------------------------------
     // classify()
