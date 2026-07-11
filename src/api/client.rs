@@ -481,11 +481,23 @@ impl ApiClient {
             // unaffected.  The body is then streamed as before (per-chunk
             // timeout only — NO total timeout on the body).
             let hdr_timeout_secs = self.config.agent.step_timeout_secs.max(120);
-            let send_result = tokio::time::timeout(
-                Duration::from_secs(hdr_timeout_secs),
-                request.json(&body).send(),
-            )
-            .await;
+            // Race the header wait against a shutdown request so a single Ctrl-C
+            // interrupts a stalled provider connection instead of blocking for
+            // up to hdr_timeout_secs waiting for response headers.
+            let send_result = tokio::select! {
+                biased;
+                _ = crate::shutdown_requested() => {
+                    return Err(ApiError::Network(
+                        "Shutdown requested while waiting for provider response headers"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                r = tokio::time::timeout(
+                    Duration::from_secs(hdr_timeout_secs),
+                    request.json(&body).send(),
+                ) => r,
+            };
             match send_result {
                 Err(_elapsed) => {
                     if attempt < max_attempts {

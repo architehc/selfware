@@ -180,6 +180,17 @@ pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_FLAG.load(Ordering::SeqCst)
 }
 
+/// Await until a graceful shutdown has been requested.
+///
+/// The shutdown state is a one-way latch, so a simple poll loop is race-free
+/// and lets long async waits (e.g. a stalled provider connection) abort
+/// promptly on Ctrl-C. Returns immediately if shutdown was already requested.
+pub async fn shutdown_requested() {
+    while !is_shutdown_requested() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 // ============================================================================
 // Backward-compatible re-exports for UI submodules
 // ============================================================================
