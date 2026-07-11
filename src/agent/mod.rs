@@ -707,6 +707,9 @@ impl Agent {
                 allow_destructive_shell: config.yolo.allow_destructive_shell,
                 audit_log_path: config.yolo.audit_log_path.clone(),
                 status_interval: config.yolo.status_interval,
+                // Extend the file-op deny-globs to shell_exec command strings so
+                // a shell reader can't exfiltrate a denied path (e.g. **/.env).
+                denied_paths: config.safety.denied_paths.clone(),
                 ..Default::default()
             })
         };

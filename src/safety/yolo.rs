@@ -29,6 +29,13 @@ pub struct YoloConfig {
     pub forbidden_operations: Vec<String>,
     /// Paths that should never be modified
     pub protected_paths: Vec<String>,
+    /// Deny-glob patterns (from the safety config's `denied_paths`) that also
+    /// apply to `shell_exec` command strings: a shell command that reads a
+    /// path matching one of these is gated just like a file operation would be.
+    /// File-op path validation already honors these; this closes the gap where
+    /// `cat`/`grep`/etc. could exfiltrate a denied path via the shell.
+    #[serde(default)]
+    pub denied_paths: Vec<String>,
     /// Whether to allow git push operations
     pub allow_git_push: bool,
     /// Whether to allow destructive shell commands
@@ -64,6 +71,7 @@ impl Default for YoloConfig {
                 "~/.ssh".to_string(),
                 "~/.gnupg".to_string(),
             ],
+            denied_paths: Vec::new(),
             allow_git_push: true,
             // SAFETY: Default to false - destructive commands require explicit opt-in
             allow_destructive_shell: false,
@@ -339,6 +347,12 @@ impl YoloManager {
                             "Shell command reads a sensitive path ({secret}) — requires confirmation. \
                              File path-deny globs do not cover shell_exec; set allow_destructive_shell \
                              to bypass."
+                        ));
+                    }
+                    if let Some(pattern) = reads_denied_path(cmd, &self.config.denied_paths) {
+                        return YoloDecision::RequireConfirmation(format!(
+                            "Shell command reads a path matching a denied glob ('{pattern}') — \
+                             requires confirmation. Set allow_destructive_shell to bypass."
                         ));
                     }
                 }
@@ -675,6 +689,71 @@ fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// Shell reader commands that consume file *contents* (as opposed to merely
+/// listing). Shared by the sensitive-path and denied-glob heuristics.
+const SHELL_READERS: &[&str] = &[
+    "cat", "less", "more", "head", "tail", "bat", "nl", "tac", "xxd", "od", "strings", "base64",
+    "grep", "awk", "sed", "cp", "rsync", "scp", "curl", "dd",
+];
+
+/// Split a shell command into candidate path tokens: whitespace and common
+/// shell metacharacters/quotes are separators, and a leading `./` is stripped
+/// so `./secret.env` matches a `*.env` glob.
+fn shell_path_tokens(cmd: &str) -> Vec<&str> {
+    cmd.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '=' | '|' | ';' | '&' | '(' | ')' | '<' | '>' | '`' | ','
+            )
+    })
+    .map(|t| t.trim_start_matches("./"))
+    .filter(|t| !t.is_empty())
+    .collect()
+}
+
+/// Check whether a shell command *reads* a path matching one of the operator's
+/// configured `denied_paths` globs. This extends the same deny-globs that guard
+/// file operations to `shell_exec` command strings, closing the gap where a
+/// reader like `cat`/`grep` could exfiltrate a denied path via the shell.
+///
+/// Defense-in-depth only (like [`reads_sensitive_path`]) — it flags reads, not
+/// listings, and a determined command can still evade token-level matching.
+/// Returns the matched glob pattern so the confirmation reason can name it.
+fn reads_denied_path(cmd: &str, denied_paths: &[String]) -> Option<String> {
+    if denied_paths.is_empty() {
+        return None;
+    }
+    let lower = cmd.to_lowercase();
+    if !SHELL_READERS.iter().any(|r| lower.contains(r)) {
+        return None;
+    }
+    let tokens = shell_path_tokens(cmd);
+    for pattern in denied_paths {
+        let compiled = match glob::Pattern::new(pattern) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        // A filename-only pattern (no '/', e.g. ".env") should match by the
+        // token's basename; a path pattern (e.g. "**/.ssh/**") matches the
+        // whole token.
+        let filename_only = !pattern.contains('/');
+        for tok in &tokens {
+            if compiled.matches(tok) {
+                return Some(pattern.clone());
+            }
+            if filename_only {
+                if let Some(base) = std::path::Path::new(tok).file_name().and_then(|s| s.to_str()) {
+                    if compiled.matches(base) {
+                        return Some(pattern.clone());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Summarize arguments for audit log (truncate long values)
@@ -1184,6 +1263,69 @@ mod tests {
         assert!(reads_sensitive_path("cargo test").is_none());
         // Mentions a secret path but does not read contents (listing only):
         assert!(reads_sensitive_path("ls ~/.ssh/").is_none());
+    }
+
+    #[test]
+    fn reads_denied_path_honors_config_globs() {
+        let denied = vec![
+            "**/.env".to_string(),
+            "**/secrets/**".to_string(),
+            "**/.ssh/**".to_string(),
+            "vault_token".to_string(),
+        ];
+
+        // Filename-only-final-segment globs match a bare token by basename.
+        assert_eq!(
+            reads_denied_path("cat .env", &denied).as_deref(),
+            Some("**/.env")
+        );
+        assert_eq!(
+            reads_denied_path("grep TOKEN ./config/.env", &denied).as_deref(),
+            Some("**/.env")
+        );
+        // Directory globs match a full path token.
+        assert_eq!(
+            reads_denied_path("base64 ~/.ssh/id_rsa", &denied).as_deref(),
+            Some("**/.ssh/**")
+        );
+        assert_eq!(
+            reads_denied_path("cat project/secrets/db.key", &denied).as_deref(),
+            Some("**/secrets/**")
+        );
+        // A custom non-secret glob (not in the hardcoded SENSITIVE list) is caught.
+        assert_eq!(
+            reads_denied_path("head -c9 vault_token", &denied).as_deref(),
+            Some("vault_token")
+        );
+
+        // Listing only (no reader command) is not flagged.
+        assert!(reads_denied_path("ls ~/.ssh/", &denied).is_none());
+        // A benign command matching no denied glob.
+        assert!(reads_denied_path("cat src/main.rs", &denied).is_none());
+        // Empty deny-list short-circuits.
+        assert!(reads_denied_path("cat .env", &[]).is_none());
+    }
+
+    #[test]
+    fn shell_exec_denied_glob_requires_confirmation() {
+        // A YOLO config with a custom deny-glob that is NOT in the hardcoded
+        // sensitive list; a shell read of it must still require confirmation.
+        let mut config = YoloConfig::fully_autonomous();
+        config.denied_paths = vec!["**/vault/**".to_string()];
+        let manager = YoloManager::new(config);
+
+        let args = serde_json::json!({ "command": "cat app/vault/master.key" });
+        assert!(matches!(
+            manager.should_auto_approve("shell_exec", &args),
+            YoloDecision::RequireConfirmation(_)
+        ));
+
+        // A path outside the deny-glob is still auto-approved.
+        let ok = serde_json::json!({ "command": "cat app/README.md" });
+        assert_eq!(
+            manager.should_auto_approve("shell_exec", &ok),
+            YoloDecision::AutoApprove
+        );
     }
 
     #[test]
