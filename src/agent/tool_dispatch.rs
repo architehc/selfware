@@ -799,15 +799,61 @@ pub(crate) fn parse_confirm_response(response: &str) -> ConfirmDecision {
     }
 }
 
+/// Detect an output redirect to a FILE (`>`, `>>`, `cat>file`, `echo x>y`)
+/// while ignoring (a) descriptor duplication that writes no file (`2>&1`,
+/// `>&2`) and (b) any `>` inside single/double quotes (`grep "->" f`). The
+/// crude `" >"` substring marker missed redirects without a leading space, so
+/// `echo x>y` was misclassified as read-only — a silently missed mutation.
+fn has_file_redirect(command: &str) -> bool {
+    let chars: Vec<char> = command.chars().collect();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '>' if !in_single && !in_double => {
+                // Skip a second '>' (append), then any spaces.
+                let mut j = i + 1;
+                if chars.get(j) == Some(&'>') {
+                    j += 1;
+                }
+                while chars.get(j) == Some(&' ') {
+                    j += 1;
+                }
+                // '>&' duplicates a descriptor (e.g. 2>&1) — no file is written.
+                if chars.get(j) != Some(&'&') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 pub(super) fn shell_command_is_observational(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
         return false;
     }
 
+    // A redirect writes a file even without surrounding spaces (echo x>y).
+    if has_file_redirect(&normalized) {
+        return false;
+    }
+
     let mutating_markers = [
-        " >",
-        ">>",
         "| tee",
         " tee ",
         "touch ",
@@ -4204,6 +4250,26 @@ mod tests {
         assert!(shell_command_is_observational("cargo check"));
         assert!(!shell_command_is_observational("cargo fmt"));
         assert!(!shell_command_is_observational("mkdir tmp"));
+    }
+
+    #[test]
+    fn test_shell_redirect_writes_are_not_observational() {
+        // Redirects WITHOUT a leading space used to slip through (#22).
+        assert!(!shell_command_is_observational("echo x>y"));
+        assert!(!shell_command_is_observational("cat>file"));
+        assert!(!shell_command_is_observational("echo hi > out.txt"));
+        assert!(!shell_command_is_observational("cat a >> b"));
+        assert!(!shell_command_is_observational("echo data >/etc/thing"));
+    }
+
+    #[test]
+    fn test_shell_fd_dup_and_quoted_gt_stay_observational() {
+        // 2>&1 duplicates a descriptor — it writes no file.
+        assert!(shell_command_is_observational("cargo test 2>&1"));
+        assert!(shell_command_is_observational("grep foo bar 2>&1"));
+        // A '>' inside quotes is data, not a redirect.
+        assert!(shell_command_is_observational(r#"grep "->" file"#));
+        assert!(shell_command_is_observational("echo 'a>b'"));
     }
 
     #[test]
