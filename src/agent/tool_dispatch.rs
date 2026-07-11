@@ -580,6 +580,12 @@ where
         }
     }
 
+    // A negated mention must never become a completion requirement. Without
+    // this precedence rule, "don't use `shell_exec`" both required and
+    // prohibited the same tool, leaving the agent in an impossible loop.
+    let disallowed = extract_explicit_disallowed_tools(task_context);
+    required.retain(|tool_name| !disallowed.contains(tool_name));
+
     required
 }
 
@@ -588,13 +594,28 @@ fn extract_explicit_disallowed_tools(task_context: &str) -> std::collections::BT
 
     for line in task_context.lines() {
         let lower = line.to_lowercase();
-        if lower.contains("never call")
+        let contains_denial = lower.contains("never call")
             || lower.contains("do not use")
             || lower.contains("don't use")
             || lower.contains("never use")
-            || lower.contains("avoid ")
-        {
+            || lower.contains("do not run")
+            || lower.contains("don't run")
+            || lower.contains("never run")
+            || lower.contains("without shell")
+            || lower.contains("no shell")
+            || lower.contains("avoid ");
+
+        if contains_denial {
             disallowed.extend(extract_backticked_tool_names(line));
+
+            // Users normally describe a capability ("shell commands"), not
+            // Selfware's concrete implementation names. Treat the shell
+            // category as covering both execution tools so the restriction is
+            // enforced before either tool can prompt or run.
+            if lower.contains("shell") {
+                disallowed.insert("shell_exec".to_string());
+                disallowed.insert("pty_shell".to_string());
+            }
         }
     }
 
@@ -1418,6 +1439,10 @@ impl Agent {
             ),
             "task_policy" => format!(
                 "RETRY SUPPRESSED: `{}` is blocked by the task's explicit tool constraints. Use a tool that matches the task instructions instead. Last error: {}",
+                failure.tool_name, failure.error_preview
+            ),
+            "operator_denied" => format!(
+                "RETRY SUPPRESSED: the operator denied `{}` with these exact arguments. Do not ask for the same permission again; choose a different approach or explain that the task cannot continue without it. Last response: {}",
                 failure.tool_name, failure.error_preview
             ),
             "progress_guard" => format!(
@@ -3090,10 +3115,12 @@ impl Agent {
             });
             let approved = self.await_tui_permission_response().await;
             if !approved {
+                let denial = "Tool execution denied via TUI permission prompt";
+                self.record_failed_tool_attempt(name, args_str, "operator_denied", denial);
                 self.push_tool_skip_message(
                     call_id,
                     use_native_fc,
-                    "Tool execution denied via TUI permission prompt",
+                    denial,
                 );
             }
             return Ok(approved);
@@ -3137,6 +3164,7 @@ impl Agent {
         }
 
         let skip_msg = "Tool execution skipped by user";
+        self.record_failed_tool_attempt(name, args_str, "operator_denied", skip_msg);
         cli_println!("{} {}", "⏭️".bright_yellow(), skip_msg);
         self.push_tool_skip_message(call_id, use_native_fc, skip_msg);
         Ok(false)
@@ -4111,6 +4139,28 @@ mod tests {
     }
 
     #[test]
+    fn test_negated_tool_mention_is_not_a_required_tool() {
+        let required = extract_explicit_requested_tools(
+            "Create notes.txt, but don't use `shell_exec`.",
+            ["shell_exec", "file_write"].iter().copied(),
+        );
+        assert!(!required.contains("shell_exec"));
+    }
+
+    #[test]
+    fn test_shell_category_denial_overrides_plain_tool_mention() {
+        let task = "Create user-check_1+2=3.txt using file_write. Do not run shell commands or use pty_shell.";
+        let required = extract_explicit_requested_tools(
+            task,
+            ["file_write", "shell_exec", "pty_shell"].iter().copied(),
+        );
+
+        assert!(required.contains("file_write"));
+        assert!(!required.contains("shell_exec"));
+        assert!(!required.contains("pty_shell"));
+    }
+
+    #[test]
     fn test_shell_exec_verification_commands_are_observational() {
         assert!(shell_command_is_observational("cargo test --quiet"));
         assert!(shell_command_is_observational("cargo check"));
@@ -4157,6 +4207,32 @@ mod tests {
             .recent_failed_tool_attempts
             .back()
             .is_some_and(|attempt| attempt.failure_kind == "task_policy"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_operator_denial_is_remembered_for_exact_retry() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        let args = r#"{"path":"notes.txt","content":"hello"}"#;
+
+        agent.record_failed_tool_attempt(
+            "file_write",
+            args,
+            "operator_denied",
+            "Tool execution denied via TUI permission prompt",
+        );
+
+        let failure = agent
+            .recent_failed_tool_attempts
+            .back()
+            .expect("operator denial should be task-local retry memory");
+        assert_eq!(failure.failure_kind, "operator_denied");
+        let retry_message = agent.build_failed_tool_retry_suppressed_message(failure);
+        assert!(retry_message.contains("operator denied `file_write`"));
+        assert!(retry_message.contains("Do not ask for the same permission again"));
 
         server.stop().await;
     }
@@ -5139,6 +5215,14 @@ mod tests {
         let task = "Avoid `git_commit` for now.";
         let disallowed = extract_explicit_disallowed_tools(task);
         assert!(disallowed.contains("git_commit"));
+    }
+
+    #[test]
+    fn test_extract_disallowed_shell_category() {
+        let task = "Do not run shell commands or use pty_shell.";
+        let disallowed = extract_explicit_disallowed_tools(task);
+        assert!(disallowed.contains("shell_exec"));
+        assert!(disallowed.contains("pty_shell"));
     }
 
     #[test]
