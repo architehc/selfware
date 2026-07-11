@@ -702,6 +702,9 @@ pub async fn run() -> Result<()> {
     // Initialize output control with merged settings
     output::init(compact, verbose, show_tokens);
     output::set_quiet(cli.quiet);
+    // Streaming responses are printed live, so final_answer must not re-print
+    // the same content afterward (prevents the double-printed answer).
+    output::set_streaming_mode(config.agent.streaming);
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 

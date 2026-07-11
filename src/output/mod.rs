@@ -30,6 +30,10 @@ static QUIET_MODE: AtomicBool = AtomicBool::new(false);
 /// stdout (banners, "Final answer:", ANSI escapes) so only valid JSON goes out.
 static JSON_MODE: AtomicBool = AtomicBool::new(false);
 
+/// When true, assistant responses are streamed live to stdout token-by-token,
+/// so `final_answer` must not re-print the content (it would duplicate it).
+static STREAMING_MODE: AtomicBool = AtomicBool::new(false);
+
 /// When true, stdout is not a terminal (piped/captured) — strip ANSI and emoji.
 static PLAIN_MODE: AtomicBool = AtomicBool::new(false);
 
@@ -64,6 +68,15 @@ pub(crate) fn set_quiet(quiet: bool) {
 /// functions become no-ops so that only valid JSON is emitted on stdout.
 pub(crate) fn set_json_mode(json: bool) {
     JSON_MODE.store(json, Ordering::SeqCst);
+}
+
+pub(crate) fn set_streaming_mode(streaming: bool) {
+    STREAMING_MODE.store(streaming, Ordering::SeqCst);
+}
+
+/// True when responses stream live to stdout (so `final_answer` skips re-print).
+pub(crate) fn is_streaming_mode() -> bool {
+    STREAMING_MODE.load(Ordering::Relaxed)
 }
 
 /// Returns true when JSON output mode is enabled (json or stream-json).
@@ -824,6 +837,12 @@ pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
 /// Print final answer
 pub(crate) fn final_answer(content: &str) {
     if should_suppress_output() {
+        return;
+    }
+    // In streaming mode the assistant response was already displayed live,
+    // token-by-token, on stdout; re-printing it here duplicates the final
+    // answer on screen. (JSON/quiet/TUI are already handled above.)
+    if is_streaming_mode() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
