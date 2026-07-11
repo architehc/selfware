@@ -706,6 +706,15 @@ pub async fn run() -> Result<()> {
     // Streaming responses are printed live, so final_answer must not re-print
     // the same content afterward (prevents the double-printed answer).
     output::set_streaming_mode(config.agent.streaming);
+    // A structured output format applies to ALL commands (e.g.
+    // `runs list --output-format json`), not only the headless prompt path, so
+    // machine-readable output isn't polluted by human tables/prose.
+    if matches!(
+        cli.output_format,
+        HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson
+    ) {
+        output::set_json_mode(true);
+    }
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 
@@ -3257,7 +3266,27 @@ max_recovery_attempts = 3
 
                 RunsCommand::List => {
                     let runs = registry.list()?;
-                    if runs.is_empty() {
+                    if crate::output::is_json_mode() {
+                        // Machine-readable: a JSON array (empty array when none).
+                        let arr: Vec<serde_json::Value> = runs
+                            .iter()
+                            .map(|r| {
+                                serde_json::json!({
+                                    "id": r.id,
+                                    "pid": r.pid,
+                                    "task": r.task,
+                                    "status": r.effective_status(),
+                                    "started_unix": r.started_unix,
+                                    "updated_unix": r.updated_unix,
+                                })
+                            })
+                            .collect();
+                        println!(
+                            "{}",
+                            serde_json::to_string(&arr)
+                                .unwrap_or_else(|_| "[]".to_string())
+                        );
+                    } else if runs.is_empty() {
                         println!(
                             "No runs recorded. (Runs are persisted under \
                              ~/.selfware/runs/ as they start.)"
