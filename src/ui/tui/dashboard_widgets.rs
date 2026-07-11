@@ -8,7 +8,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 use std::sync::{Arc, Mutex};
@@ -624,12 +624,10 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
 /// `run_tui_dashboard_with_events` for the key-interception logic that
 /// pairs with this.
 pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str, reason: &str) {
-    let width = 60.min(area.width.saturating_sub(4)).max(20);
-    let height = 8.min(area.height.saturating_sub(4)).max(6);
-    let x = (area.width.saturating_sub(width)) / 2;
-    let y = (area.height.saturating_sub(height)) / 2;
-
-    let modal_area = Rect::new(x, y, width, height);
+    let modal_area = permission_modal_area(area);
+    if modal_area.width < 4 || modal_area.height < 4 {
+        return;
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -643,10 +641,32 @@ pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str,
         ));
 
     let inner = block.inner(modal_area);
+    frame.render_widget(Clear, modal_area);
     frame.render_widget(block, modal_area);
 
-    let lines = vec![
-        Line::from(vec![
+    if inner.height < 3 || inner.width == 0 {
+        return;
+    }
+
+    let tool_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let footer_area = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(1),
+        inner.width,
+        1,
+    );
+    // Reserve the tool row, a spacer above the footer, and the footer itself.
+    // The details paragraph may be clipped by an exceptionally small terminal,
+    // but it can never overwrite the user's permission choices.
+    let details_area = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(3),
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
             Span::styled("Tool: ", TuiPalette::muted_style()),
             Span::styled(
                 tool_name,
@@ -654,10 +674,19 @@ pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str,
                     .fg(TuiPalette::PARCHMENT)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(Span::styled(reason, TuiPalette::muted_style())),
-        Line::from(""),
-        Line::from(vec![
+        ])),
+        tool_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(reason)
+            .style(TuiPalette::muted_style())
+            .wrap(Wrap { trim: false }),
+        details_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
             Span::styled(
                 "[y]",
                 Style::default()
@@ -672,15 +701,122 @@ pub fn render_permission_overlay(frame: &mut Frame, area: Rect, tool_name: &str,
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" deny"),
-        ]),
-    ];
+        ])),
+        footer_area,
+    );
+}
 
-    frame.render_widget(Paragraph::new(lines), inner);
+fn permission_modal_area(area: Rect) -> Rect {
+    let max_width = area.width.saturating_sub(2);
+    let max_height = area.height.saturating_sub(2);
+
+    let min_width = 40.min(max_width);
+    let max_preferred_width = 120.min(max_width);
+    let width = area
+        .width
+        .saturating_mul(4)
+        .checked_div(5)
+        .unwrap_or_default()
+        .max(min_width)
+        .min(max_preferred_width);
+
+    let min_height = 8.min(max_height);
+    let max_preferred_height = 24.min(max_height);
+    let height = area
+        .height
+        .saturating_mul(3)
+        .checked_div(5)
+        .unwrap_or_default()
+        .max(min_height)
+        .min(max_preferred_height);
+
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn buffer_row(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area().width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn permission_overlay_wraps_details_and_keeps_footer_visible() {
+        let backend = TestBackend::new(150, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let reason = "Write a file at /workspace/a/very/deep/project/path/that/needs/to/remain/visible/configuration.json with arguments: { content: this permission explanation is deliberately long enough to wrap onto another line }";
+
+        terminal
+            .draw(|frame| {
+                render_permission_overlay(frame, frame.area(), "file_write", reason);
+            })
+            .unwrap();
+
+        let modal = permission_modal_area(Rect::new(0, 0, 150, 50));
+        assert!(modal.width > 60, "modal should expand on a wide terminal");
+        assert!(modal.height > 8, "modal should expand on a tall terminal");
+
+        let inner = Rect::new(
+            modal.x + 1,
+            modal.y + 1,
+            modal.width.saturating_sub(2),
+            modal.height.saturating_sub(2),
+        );
+        let rendered_details = ((inner.y + 1)..(inner.y + inner.height.saturating_sub(2)))
+            .filter(|&y| !buffer_row(&terminal, y).trim().is_empty())
+            .count();
+        assert!(rendered_details >= 2, "long details should wrap");
+
+        let footer = buffer_row(&terminal, inner.y + inner.height - 1);
+        assert!(footer.contains("[y] allow"));
+        assert!(footer.contains("[n/Esc] deny"));
+    }
+
+    #[test]
+    fn permission_overlay_clears_background_and_preserves_footer_when_compact() {
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| {
+                let background = vec![Line::from("X".repeat(40)); 12];
+                frame.render_widget(Paragraph::new(background), frame.area());
+                render_permission_overlay(
+                    frame,
+                    frame.area(),
+                    "shell",
+                    "Run a deliberately long command with several arguments that must wrap cleanly",
+                );
+            })
+            .unwrap();
+
+        let modal = permission_modal_area(Rect::new(0, 0, 40, 12));
+        let inner = Rect::new(
+            modal.x + 1,
+            modal.y + 1,
+            modal.width.saturating_sub(2),
+            modal.height.saturating_sub(2),
+        );
+        let spacer_y = inner.y + inner.height - 2;
+        assert_eq!(
+            terminal.backend().buffer()[(inner.x, spacer_y)].symbol(),
+            " "
+        );
+
+        let footer = buffer_row(&terminal, inner.y + inner.height - 1);
+        assert!(footer.contains("[y] allow"));
+        assert!(footer.contains("[n/Esc] deny"));
+    }
 
     #[test]
     fn test_dashboard_state_default() {
