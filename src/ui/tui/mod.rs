@@ -1075,7 +1075,18 @@ pub fn run_tui_dashboard_with_events(
                             });
                         }
                         TuiEvent::ToolStarted { name } => {
+                            // The prose that led to this tool call is a complete
+                            // turn — commit it as its own message before the tool.
+                            app.commit_streaming();
                             app.add_tool_message(name, "started");
+                        }
+                        TuiEvent::StatusUpdate { message }
+                            if message.starts_with("Step ") =>
+                        {
+                            // A new step began — finalize the previous turn's
+                            // streamed prose so turns render as separate messages
+                            // instead of one ever-growing block.
+                            app.commit_streaming();
                         }
                         TuiEvent::ToolCompleted {
                             name,
@@ -1895,7 +1906,12 @@ pub(crate) fn wrap_chat_message<'a>(
 /// Render a chat pane
 fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     use ratatui::text::Span;
-    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+    use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
+
+    // Wipe the pane area first so stale cells from a previous frame (e.g. a
+    // taller streaming line that has since committed/shrunk) cannot ghost
+    // through — otherwise old text bleeds onto continuation lines and the border.
+    frame.render_widget(Clear, area);
 
     let border_style = if focused {
         TuiPalette::title_style()

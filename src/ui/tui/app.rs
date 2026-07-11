@@ -170,6 +170,20 @@ impl App {
         self.streaming_assistant = None;
     }
 
+    /// Finalize the in-progress streamed turn: commit it as a static assistant
+    /// message and clear the live buffer. Called at each turn boundary (tool
+    /// start, new step) so a multi-turn run renders as separate messages
+    /// instead of one ever-growing run-on block. No-op when the buffer is
+    /// empty or whitespace-only.
+    pub fn commit_streaming(&mut self) {
+        if let Some(text) = self.streaming_assistant.take() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                self.add_assistant_message(trimmed);
+            }
+        }
+    }
+
     /// Add an assistant message
     pub fn add_assistant_message(&mut self, content: &str) {
         self.messages.push(ChatMessage {

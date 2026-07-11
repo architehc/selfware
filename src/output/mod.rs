@@ -686,7 +686,10 @@ pub(crate) fn safety_blocked(message: &str) {
 
 /// Print thinking/reasoning output
 pub(crate) fn thinking(text: &str, inline: bool) {
-    if is_compact() || is_quiet() || is_json_mode() {
+    // should_suppress_output() covers quiet + JSON + TUI. The TUI case is
+    // critical: a raw stdout print here corrupts the rendered frame (reasoning
+    // text bleeds across pane borders). is_compact() is additionally suppressed.
+    if is_compact() || should_suppress_output() {
         return;
     }
 
