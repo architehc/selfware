@@ -90,6 +90,8 @@ impl Agent {
         self.task_start_time = std::time::Instant::now();
         // Fresh task → no prior segments; the budget starts at zero.
         self.prior_elapsed_secs = 0;
+        // Arm the single-terminal-event guard for this run.
+        self.terminal_event_emitted = false;
         self.last_run_failure_mode = None;
         // Capture the set of paths already dirty relative to HEAD so the
         // completion gate can exclude pre-existing uncommitted changes.
@@ -540,6 +542,8 @@ impl Agent {
         // resumed after any real pause could time out immediately (found by
         // GLM-5.2 reviewing task_runner.rs; verified + fixed by Claude).
         self.task_start_time = std::time::Instant::now();
+        // Arm the single-terminal-event guard for this resumed run.
+        self.terminal_event_emitted = false;
         let task_description = self
             .current_checkpoint
             .as_ref()
@@ -580,7 +584,39 @@ impl Agent {
     /// This is the single source of truth for the Planning → Executing →
     /// ErrorRecovery → Completed/Failed state machine. `mode` controls minor
     /// behavioral differences (event emission, progress tracking, labels).
+    /// Run the execution loop and emit exactly one authoritative terminal event
+    /// (`Completed` with the final answer, or `Error`) so the TUI / RunSupervisor
+    /// can always finalize the run — commit+clear the live stream, show the
+    /// final answer, unlock input. Previously most success exits emitted no
+    /// terminal event (leaving the stream dangling) and the one that did sent
+    /// failure-mode evidence instead of the answer.
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
+        let result = self
+            .run_execution_loop_inner(task_description, mode)
+            .await;
+        match &result {
+            Ok(()) => {
+                // Carry the final answer (may be empty if it already streamed
+                // live and was committed turn-by-turn — the TUI treats an empty
+                // message as "just finalize", avoiding a duplicate/placeholder
+                // line).
+                let message = self.last_assistant_response.trim().to_string();
+                self.emit_terminal_event_once(AgentEvent::Completed { message });
+            }
+            Err(e) => {
+                self.emit_terminal_event_once(AgentEvent::Error {
+                    message: e.to_string(),
+                });
+            }
+        }
+        result
+    }
+
+    async fn run_execution_loop_inner(
+        &mut self,
+        task_description: &str,
+        mode: LoopMode,
+    ) -> Result<()> {
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
         // Ungated hard backstop: count error-recovery entries between successful
@@ -761,13 +797,11 @@ impl Agent {
                             record_state_transition("Executing", "Completed");
                             self.record_task_outcome(task_description, Outcome::Success, None);
                             let fm = self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
-                            if mode == LoopMode::NewTask {
-                                self.emit_event(AgentEvent::Completed {
-                                    message: format!(
-                                        "Task completed ({}): {}",
-                                        fm.kind.tag(),
-                                        fm.evidence
-                                    ),
+                            {
+                                let _ = &fm;
+                                let message = self.last_assistant_response.trim().to_string();
+                                self.emit_terminal_event_once(AgentEvent::Completed {
+                                    message,
                                 });
                             }
                             if let Err(e) = self.complete_checkpoint() {
@@ -1294,11 +1328,9 @@ impl Agent {
                     let fm = self.finalize_failure_mode(RunOutcome::Failed {
                         reason: reason.clone(),
                     }).await;
-                    if mode == LoopMode::NewTask {
-                        self.emit_event(AgentEvent::Error {
-                            message: format!("Task aborted ({}): {}", fm.kind.tag(), fm.evidence),
-                        });
-                    }
+                    self.emit_terminal_event_once(AgentEvent::Error {
+                        message: format!("Task aborted ({}): {}", fm.kind.tag(), fm.evidence),
+                    });
                     self.record_task_outcome(
                         task_description,
                         Outcome::Failure,
