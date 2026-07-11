@@ -1,6 +1,8 @@
 use chrono::Utc;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -273,6 +275,194 @@ fn configured_visual_verifier(
     Some(crate::testing::visual_verification::VisualVerifier::from_model_profile(profile))
 }
 
+/// Completion evidence for task-owned, non-code artifacts.
+///
+/// `missing_paths` contains artifacts that have not been read back after their
+/// most recent successful write. `artifact_only` is false when the checkpoint
+/// also contains a source/unknown mutation, so source-code completion gates
+/// continue to apply even after the artifact readback succeeds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NonCodeArtifactReadback {
+    missing_paths: Vec<String>,
+    artifact_only: bool,
+}
+
+/// Normalize a checkpoint path without requiring it to be tracked by git.
+///
+/// Joining relative paths to the current task directory makes `notes.txt`,
+/// `./notes.txt`, and an absolute path to the same file compare equally. The
+/// lexical pass handles prospective paths; the safety normalizer additionally
+/// canonicalizes an existing artifact after it has been written.
+fn normalize_checkpoint_path(raw: &str) -> Option<PathBuf> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.contains('\0') {
+        return None;
+    }
+
+    let path = Path::new(raw);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let lexical = crate::safety::path_validator::lexical_normalize_path(&absolute);
+    Some(crate::safety::checker::normalize_path(&lexical))
+}
+
+/// Deliberately conservative allow-list for text/document/config artifacts.
+/// Unknown extensions continue through the existing source-code gate rather
+/// than gaining a new completion bypass.
+fn path_is_non_code_artifact(path: &Path) -> bool {
+    let basename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(
+        basename.as_str(),
+        "readme"
+            | "license"
+            | "notice"
+            | "changelog"
+            | "contributing"
+            | ".gitignore"
+            | ".dockerignore"
+            | ".editorconfig"
+    ) {
+        return true;
+    }
+
+    let extension = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "txt"
+            | "md"
+            | "markdown"
+            | "rst"
+            | "adoc"
+            | "json"
+            | "jsonl"
+            | "toml"
+            | "yaml"
+            | "yml"
+            | "ini"
+            | "cfg"
+            | "conf"
+            | "csv"
+            | "tsv"
+            | "xml"
+            | "lock"
+            | "log"
+    )
+}
+
+/// Avoid letting an incidental `notes.txt` write satisfy a source repair task.
+/// A non-code artifact is considered task-owned only when the prompt names its
+/// path (or basename), and source-oriented prompts never become artifact-only.
+fn task_mentions_artifact_path(task: &str, raw_path: &str) -> bool {
+    let task = task.replace('\\', "/");
+    let raw = raw_path.trim().replace('\\', "/");
+    let without_dot = raw.strip_prefix("./").unwrap_or(&raw);
+    let basename = Path::new(without_dot)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+
+    (!raw.is_empty() && task.contains(&raw))
+        || (!without_dot.is_empty() && task.contains(without_dot))
+        || (!basename.is_empty() && task.contains(basename))
+}
+
+fn task_has_source_change_intent(task: &str) -> bool {
+    let lower = task.to_ascii_lowercase();
+    let mentions_extension = |extension: &str| {
+        lower.match_indices(extension).any(|(index, _)| {
+            lower[index + extension.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_ascii_alphanumeric() && next != '_')
+        })
+    };
+    let names_source_path = [
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".cs", ".c", ".cc", ".cpp", ".cxx", ".h",
+        ".hh", ".hpp", ".sql", ".go", ".swift", ".rs",
+    ]
+    .iter()
+    .any(|extension| mentions_extension(extension));
+    if names_source_path || lower.contains("source code") || lower.contains("code change") {
+        return true;
+    }
+
+    let source_action = ["fix", "implement", "refactor"]
+        .iter()
+        .any(|verb| lower.contains(verb));
+    let source_subject = [
+        " bug",
+        "function",
+        "method",
+        "struct",
+        "class",
+        "module",
+        "crate",
+        "parser",
+        "failing test",
+        "tests pass",
+    ]
+    .iter()
+    .any(|subject| lower.contains(subject));
+    source_action && source_subject
+}
+
+fn patch_target_paths(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|line| line.strip_prefix("+++ "))
+        .map(|path| path.split('\t').next().unwrap_or(path).trim())
+        .filter(|path| !path.is_empty() && *path != "/dev/null")
+        .map(|path| path.strip_prefix("b/").unwrap_or(path).to_string())
+        .collect()
+}
+
+fn written_paths(tool_name: &str, args: &Value) -> Vec<String> {
+    match tool_name {
+        "file_write" | "file_edit" | "file_fim_edit" => args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|path| vec![path.to_string()])
+            .unwrap_or_default(),
+        "file_multi_edit" => args
+            .get("edits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|edit| edit.get("path").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect(),
+        "patch_apply" => args
+            .get("diff")
+            .and_then(Value::as_str)
+            .map(patch_target_paths)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn artifact_readback_guidance(paths: &[String]) -> String {
+    let calls = paths
+        .iter()
+        .map(|path| serde_json::json!({"path": path}).to_string())
+        .map(|args| format!("`file_read` with `{args}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "ArtifactReadbackRequired: verify each non-code artifact after its most recent write using only {calls}. \
+         A successful full-file `file_read` is sufficient; do not run a build or test command for this artifact."
+    )
+}
+
 impl Agent {
     /// Tool categories that inherently bypass the Rust/cargo verification gate.
     /// These tools indicate non-Rust tasks (browser automation, vision analysis,
@@ -469,6 +659,146 @@ impl Agent {
         )
     }
 
+    /// Derive task-owned non-code artifacts and verify each one was read back
+    /// after its latest successful write. Checkpoint order is authoritative:
+    /// it naturally handles untracked files and rejects write/read/write as
+    /// stale until another read occurs.
+    fn non_code_artifact_readback(&self) -> Option<NonCodeArtifactReadback> {
+        let checkpoint = self.current_checkpoint.as_ref()?;
+        let task = if self.current_task_context.trim().is_empty() {
+            checkpoint.task_description.as_str()
+        } else {
+            self.task_context_for_classification()
+        };
+
+        // normalized path -> (latest user-facing spelling, latest write index)
+        let mut latest_writes: BTreeMap<PathBuf, (String, usize)> = BTreeMap::new();
+        let mut artifact_only = !task_has_source_change_intent(task);
+
+        for (index, call) in checkpoint.tool_calls.iter().enumerate() {
+            if !call.success {
+                continue;
+            }
+
+            let args = match serde_json::from_str::<Value>(&call.arguments) {
+                Ok(args) => args,
+                Err(_) => {
+                    // A successful mutating call should always have valid JSON.
+                    // Fail closed if a restored/corrupt checkpoint says otherwise.
+                    if matches!(
+                        call.tool_name.as_str(),
+                        "file_write"
+                            | "file_edit"
+                            | "file_fim_edit"
+                            | "file_multi_edit"
+                            | "patch_apply"
+                            | "file_delete"
+                            | "shell_exec"
+                            | "pty_shell"
+                    ) {
+                        artifact_only = false;
+                    }
+                    continue;
+                }
+            };
+
+            if !super::tool_dispatch::tool_call_is_mutating(&call.tool_name, &args) {
+                continue;
+            }
+
+            let paths = written_paths(&call.tool_name, &args);
+            if paths.is_empty() {
+                // Deletes, shell/git mutations, and unknown mutators cannot use
+                // the artifact-only completion path.
+                artifact_only = false;
+                continue;
+            }
+
+            for raw_path in paths {
+                let Some(normalized) = normalize_checkpoint_path(&raw_path) else {
+                    artifact_only = false;
+                    continue;
+                };
+                if path_is_non_code_artifact(&normalized)
+                    && task_mentions_artifact_path(task, &raw_path)
+                {
+                    latest_writes.insert(normalized, (raw_path, index));
+                } else {
+                    // Source, unknown, or incidental output: preserve the
+                    // existing source mutation and verification gates.
+                    artifact_only = false;
+                }
+            }
+        }
+
+        if latest_writes.is_empty() {
+            return None;
+        }
+
+        let mut missing_paths = Vec::new();
+        for (normalized_write, (display_path, write_index)) in latest_writes {
+            // String forms of the written path, used to recognize a shell-based
+            // read of it (normalized_write is a PathBuf).
+            let write_basename = normalized_write
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let write_full = normalized_write.to_string_lossy().to_string();
+            let has_fresh_readback = checkpoint
+                .tool_calls
+                .iter()
+                .enumerate()
+                .skip(write_index + 1)
+                .any(|(_, call)| {
+                    if !call.success {
+                        return false;
+                    }
+                    let Ok(args) = serde_json::from_str::<Value>(&call.arguments) else {
+                        return false;
+                    };
+                    // (a) A full-file `file_read` of the same path.
+                    if call.tool_name == "file_read" && call.result.is_some() {
+                        // A line range proves only a slice, not the complete artifact.
+                        if args.get("line_range").is_some_and(|range| !range.is_null()) {
+                            return false;
+                        }
+                        return args
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .and_then(normalize_checkpoint_path)
+                            .is_some_and(|read_path| read_path == normalized_write);
+                    }
+                    // (b) A shell/PTY read of the same file (cat/grep/head/tail/…)
+                    // counts as content-verification for a NON-CODE artifact — the
+                    // model legitimately confirms a docs/markdown/config edit this
+                    // way, and demanding a `file_read` instead caused a doom-loop.
+                    if matches!(call.tool_name.as_str(), "shell_exec" | "pty_shell") {
+                        if let Some(cmd) = args.get("command").and_then(Value::as_str) {
+                            const READERS: &[&str] = &[
+                                "cat ", "grep ", "head ", "tail ", "less ", "more ",
+                                "nl ", "tac ", "rg ", "diff ", "sed -n", "awk ",
+                            ];
+                            let is_reader = READERS.iter().any(|r| cmd.contains(r));
+                            let mentions_file = (!write_basename.is_empty()
+                                && cmd.contains(&write_basename))
+                                || cmd.contains(&write_full);
+                            return is_reader && mentions_file;
+                        }
+                    }
+                    false
+                });
+            if !has_fresh_readback {
+                missing_paths.push(display_path);
+            }
+        }
+
+        Some(NonCodeArtifactReadback {
+            missing_paths,
+            artifact_only,
+        })
+    }
+
     async fn mutation_completion_gate(&self) -> Option<String> {
         if !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification()) {
             return None;
@@ -620,6 +950,19 @@ impl Agent {
                  Use the tools that are available and answer directly from their results instead of giving a capability disclaimer."
                     .to_string(),
             );
+        }
+
+        // Non-code artifacts use exact same-path readback rather than a build
+        // or supported-source diff. This is checkpoint-based, so a newly
+        // created, still-untracked `.txt` file is handled correctly. Mixed
+        // source+artifact tasks continue through every existing source gate.
+        if let Some(readback) = self.non_code_artifact_readback() {
+            if !readback.missing_paths.is_empty() {
+                return Some(artifact_readback_guidance(&readback.missing_paths));
+            }
+            if readback.artifact_only {
+                return None;
+            }
         }
 
         // Reject completion if the last assistant response contains code that
@@ -1289,6 +1632,225 @@ mod tests {
                 success,
                 duration_ms: Some(100),
             }
+        }
+
+        fn checkpoint_call(tool_name: &str, arguments: Value, success: bool) -> ToolCallLog {
+            ToolCallLog {
+                timestamp: chrono::Utc::now(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.to_string(),
+                result: Some(if success {
+                    "ok".to_string()
+                } else {
+                    "failed".to_string()
+                }),
+                success,
+                duration_ms: Some(10),
+            }
+        }
+
+        async fn artifact_agent(task: &str, tool_calls: Vec<ToolCallLog>) -> Agent {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            let mut checkpoint = TaskCheckpoint::new("artifact_task".to_string(), task.to_string());
+            for tc in tool_calls {
+                checkpoint.log_tool_call(tc);
+            }
+            agent.current_task_context = task.to_string();
+            agent.current_checkpoint = Some(checkpoint);
+            agent.has_written_any_file = true;
+            agent.last_assistant_response = "Done.".to_string();
+            agent
+        }
+
+        #[tokio::test]
+        async fn non_code_live_flow_txt_accepts_normalized_fresh_readback() {
+            let agent = artifact_agent(
+                "Create user-check_1+2=3.txt using file_write. Do not run shell commands or use pty_shell.",
+                vec![
+                    checkpoint_call(
+                        "file_write",
+                        json!({"path": "./user-check_1+2=3.txt", "content": "hello\n"}),
+                        true,
+                    ),
+                    checkpoint_call(
+                        "file_read",
+                        json!({"path": "user-check_1+2=3.txt"}),
+                        true,
+                    ),
+                ],
+            )
+            .await;
+
+            let readback = agent
+                .non_code_artifact_readback()
+                .expect("the task-owned text artifact should be recognized from tool logs");
+            assert!(readback.artifact_only);
+            assert!(readback.missing_paths.is_empty());
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "a successful same-path readback should complete without build/test evidence"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_code_edit_verified_via_shell_cat_completes() {
+            // The doom-loop fix: a non-code (markdown) edit confirmed with a
+            // shell `cat` must be accepted as content-verified — previously only
+            // a `file_read` tool read-back was recognized, so shell verification
+            // looped the run to the iteration cap.
+            let agent = artifact_agent(
+                "Edit only notes.md: add a line, then verify with shell.",
+                vec![
+                    checkpoint_call(
+                        "file_write",
+                        json!({"path": "./notes.md", "content": "hi\n"}),
+                        true,
+                    ),
+                    checkpoint_call("shell_exec", json!({"command": "cat notes.md"}), true),
+                ],
+            )
+            .await;
+
+            let readback = agent
+                .non_code_artifact_readback()
+                .expect("the task-owned markdown artifact should be recognized");
+            assert!(readback.artifact_only, "markdown-only edit should be artifact_only");
+            assert!(
+                readback.missing_paths.is_empty(),
+                "a `cat <file>` shell read should count as read-back"
+            );
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "a shell-verified non-code edit should complete without build/test evidence"
+            );
+        }
+
+        #[tokio::test]
+        async fn non_code_artifact_without_readback_guides_to_file_read_only() {
+            let agent = artifact_agent(
+                "Create notes.txt containing hello.",
+                vec![checkpoint_call(
+                    "file_write",
+                    json!({"path": "notes.txt", "content": "hello\n"}),
+                    true,
+                )],
+            )
+            .await;
+
+            let message = agent
+                .check_completion_gate()
+                .await
+                .expect("missing readback must block completion");
+            assert!(message.contains("file_read"));
+            assert!(message.contains("notes.txt"));
+            assert!(!message.to_ascii_lowercase().contains("shell"));
+            assert!(!message.contains("cargo"));
+            assert!(!message.contains("pytest"));
+        }
+
+        #[tokio::test]
+        async fn non_code_readback_before_latest_write_is_stale() {
+            let agent = artifact_agent(
+                "Update notes.txt.",
+                vec![
+                    checkpoint_call(
+                        "file_write",
+                        json!({"path": "notes.txt", "content": "first\n"}),
+                        true,
+                    ),
+                    checkpoint_call("file_read", json!({"path": "./notes.txt"}), true),
+                    checkpoint_call(
+                        "file_edit",
+                        json!({"path": "notes.txt", "old_string": "first", "new_string": "final"}),
+                        true,
+                    ),
+                ],
+            )
+            .await;
+
+            let readback = agent
+                .non_code_artifact_readback()
+                .expect("the text artifact should be tracked");
+            assert_eq!(readback.missing_paths, vec!["notes.txt"]);
+        }
+
+        #[tokio::test]
+        async fn non_code_partial_or_failed_readback_does_not_count() {
+            for read_call in [
+                checkpoint_call(
+                    "file_read",
+                    json!({"path": "notes.txt", "line_range": [1, 1]}),
+                    true,
+                ),
+                checkpoint_call("file_read", json!({"path": "notes.txt"}), false),
+            ] {
+                let agent = artifact_agent(
+                    "Create notes.txt.",
+                    vec![
+                        checkpoint_call(
+                            "file_write",
+                            json!({"path": "notes.txt", "content": "hello\n"}),
+                            true,
+                        ),
+                        read_call,
+                    ],
+                )
+                .await;
+
+                let readback = agent
+                    .non_code_artifact_readback()
+                    .expect("the text artifact should be tracked");
+                assert_eq!(readback.missing_paths, vec!["notes.txt"]);
+            }
+        }
+
+        #[tokio::test]
+        async fn non_code_patch_target_uses_the_same_readback_policy() {
+            let agent = artifact_agent(
+                "Update CHANGELOG.md.",
+                vec![
+                    checkpoint_call(
+                        "patch_apply",
+                        json!({
+                            "diff": "--- a/CHANGELOG.md\n+++ b/CHANGELOG.md\n@@ -1 +1 @@\n-old\n+new\n"
+                        }),
+                        true,
+                    ),
+                    checkpoint_call("file_read", json!({"path": "./CHANGELOG.md"}), true),
+                ],
+            )
+            .await;
+
+            let readback = agent
+                .non_code_artifact_readback()
+                .expect("patch target should be recognized as a written artifact");
+            assert!(readback.artifact_only);
+            assert!(readback.missing_paths.is_empty());
+        }
+
+        #[tokio::test]
+        async fn non_code_readback_does_not_bypass_source_task_gates() {
+            let agent = artifact_agent(
+                "Fix the bug in src/lib.rs and create notes.txt.",
+                vec![
+                    checkpoint_call(
+                        "file_write",
+                        json!({"path": "notes.txt", "content": "hello\n"}),
+                        true,
+                    ),
+                    checkpoint_call("file_read", json!({"path": "notes.txt"}), true),
+                ],
+            )
+            .await;
+
+            let readback = agent
+                .non_code_artifact_readback()
+                .expect("the named text artifact should still be recognized");
+            assert!(!readback.artifact_only);
+            assert!(
+                agent.check_completion_gate().await.is_some(),
+                "artifact evidence must not loosen completion for a source repair task"
+            );
         }
 
         #[tokio::test]
