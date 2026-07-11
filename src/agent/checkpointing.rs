@@ -305,8 +305,12 @@ impl Agent {
             }
         }
 
+        let final_step = self.loop_control.current_step();
+        let final_iter = self.loop_control.current_iteration();
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Completed);
+            checkpoint.set_step(final_step);
+            checkpoint.set_iteration(final_iter);
         }
         if let Some(plan) = self.cognitive_state.active_tactical_plan.as_mut() {
             plan.status = crate::cognitive::StepStatus::Completed;
@@ -337,7 +341,8 @@ impl Agent {
 
         if let Some(ref checkpoint) = self.current_checkpoint {
             if let Some(ref manager) = self.checkpoint_manager {
-                manager.save(checkpoint)?;
+                // Full write so the base reflects the terminal Completed/step.
+                manager.save_final(checkpoint)?;
                 self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
                 self.last_checkpoint_persisted_at = Instant::now();
                 self.checkpoint_persisted_once = true;
@@ -572,11 +577,16 @@ impl Agent {
         }
         self.cognitive_state
             .fail_operational_step(self.loop_control.current_step() + 1, reason);
+        let final_step = self.loop_control.current_step();
+        let final_iter = self.loop_control.current_iteration();
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Failed);
-            checkpoint.log_error(self.loop_control.current_step(), reason.to_string(), false);
+            checkpoint.set_step(final_step);
+            checkpoint.set_iteration(final_iter);
+            checkpoint.log_error(final_step, reason.to_string(), false);
             if let Some(ref manager) = self.checkpoint_manager {
-                manager.save(checkpoint)?;
+                // Full write so the base reflects the terminal Failed/step.
+                manager.save_final(checkpoint)?;
                 self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
                 self.last_checkpoint_persisted_at = Instant::now();
                 self.checkpoint_persisted_once = true;

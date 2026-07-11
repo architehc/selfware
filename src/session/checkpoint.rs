@@ -806,6 +806,17 @@ impl CheckpointManager {
         Ok(())
     }
 
+    /// Persist a terminal checkpoint as a FULL write (not a delta) and clear the
+    /// delta log, so the base checkpoint file itself reflects the final
+    /// status/step. Used at task finalization — a delta save would leave the
+    /// base frozen at in_progress/step 1 for anything that reads the base file.
+    pub fn save_final(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        self.save_full_checkpoint(checkpoint)?;
+        self.clear_delta_log(&checkpoint.task_id)?;
+        self.prune_old_checkpoints();
+        Ok(())
+    }
+
     fn delta_is_efficient(
         &self,
         checkpoint: &TaskCheckpoint,
@@ -2582,5 +2593,32 @@ mod tests {
         reconstructed.apply_delta(&delta).unwrap();
         assert_eq!(reconstructed.cumulative_tokens, 500);
         assert_eq!(reconstructed.elapsed_wall_secs, 90);
+    }
+
+    #[test]
+    fn save_final_makes_base_reflect_terminal_state() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Base written mid-run: in-progress at step 1.
+        let mut cp = TaskCheckpoint::new("t-final".to_string(), "d".to_string());
+        cp.set_status(TaskStatus::InProgress);
+        cp.set_step(1);
+        manager.save(&cp).unwrap();
+
+        // A delta advances progress (as periodic saves do).
+        cp.set_step(4);
+        manager.save(&cp).unwrap();
+
+        // Finalize: full write so the base itself is terminal.
+        cp.set_status(TaskStatus::Completed);
+        cp.set_step(7);
+        cp.set_iteration(3);
+        manager.save_final(&cp).unwrap();
+
+        let loaded = manager.load("t-final").unwrap();
+        assert_eq!(loaded.status, TaskStatus::Completed);
+        assert_eq!(loaded.current_step, 7);
+        assert_eq!(loaded.current_iteration, 3);
     }
 }
