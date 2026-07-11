@@ -690,7 +690,9 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
 
 /// Print safety check failure
 pub(crate) fn safety_blocked(message: &str) {
-    if is_quiet() || is_json_mode() {
+    // Raw stdout corrupts ratatui's alternate-screen frame. The safety result
+    // is already delivered through the agent event/message path in TUI mode.
+    if should_suppress_output() {
         return;
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());

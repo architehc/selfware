@@ -7,8 +7,8 @@
 //! (NONTERM_PROSE failures, gate refusals, oscillation loops) tractable
 //! without rerunning under multiple `SELFWARE_DEBUG_*` env vars.
 //!
-//! Capture is on by default. Set `agent.disable_turn_artifacts = true`
-//! in `selfware.toml` (or env equivalent) to opt out.
+//! Capture is off by default. Set `agent.disable_turn_artifacts = false`
+//! in `selfware.toml` (or env equivalent) to opt in for diagnostics.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
