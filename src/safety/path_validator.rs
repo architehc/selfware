@@ -468,9 +468,17 @@ impl PathValidator {
                 }
             }
 
-            // Fallback: for "./**" pattern, do a simple prefix check
-            if pattern == "./**" && canonical_normalized.starts_with(&*working_dir_normalized) {
-                return Ok(true);
+            // Fallback: for "./**" pattern, allow the working dir itself and any
+            // path strictly BELOW it. A raw string starts_with would also match a
+            // SIBLING that merely shares the name prefix (e.g. `<wd>-evil`), so
+            // require an exact match or a path-separator boundary.
+            if pattern == "./**" {
+                let wd = working_dir_normalized.trim_end_matches('/');
+                if canonical_normalized == wd
+                    || canonical_normalized.starts_with(&format!("{}/", wd))
+                {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -946,5 +954,35 @@ mod tests {
         // Classic path traversal
         let result = validator.validate("../../etc/passwd");
         assert!(result.is_err(), "Classic path traversal should be blocked");
+    }
+
+    #[test]
+    fn test_validate_rejects_sibling_prefix_escape() {
+        let base = tempfile::tempdir().unwrap();
+        let proj = base.path().join("proj");
+        let evil = base.path().join("proj-evil");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&evil).unwrap();
+        let secret = evil.join("secret.txt");
+        std::fs::write(&secret, b"x").unwrap();
+
+        let config = make_config(vec!["./**"], vec![]);
+        let validator = PathValidator::new(&config, proj.clone());
+
+        // A sibling dir sharing only the name PREFIX must be rejected.
+        let result = validator.validate(secret.to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "sibling-prefix path must be rejected, got: {:?}",
+            result
+        );
+
+        // A genuine child of the working dir is still allowed.
+        let child = proj.join("ok.txt");
+        std::fs::write(&child, b"y").unwrap();
+        assert!(
+            validator.validate(child.to_str().unwrap()).is_ok(),
+            "real child of working dir must be allowed"
+        );
     }
 }
