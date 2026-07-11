@@ -3307,10 +3307,13 @@ max_recovery_attempts = 3
 
                 RunsCommand::Abort { id } => {
                     match registry.abort(&id, chrono::Utc::now().timestamp())? {
-                        AbortOutcome::NotFound => println!(
-                            "No run '{}' in the registry (~/.selfware/runs/).",
-                            id
-                        ),
+                        AbortOutcome::NotFound => {
+                            anyhow::bail!(
+                                "No run '{}' in the registry (~/.selfware/runs/). \
+                                 Run `selfware runs list` to see known runs.",
+                                id
+                            );
+                        }
                         AbortOutcome::AlreadyDone => {
                             println!("Run '{}' is already finished.", id)
                         }
