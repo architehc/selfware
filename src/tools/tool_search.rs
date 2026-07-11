@@ -178,9 +178,27 @@ impl Tool for ToolSearchTool {
             })
             .collect();
 
+        let count = found_tools.len();
+        if count == 0 {
+            // An empty match is not a success — report it as such and steer the
+            // model away from re-running the identical query in a loop.
+            return Ok(json!({
+                "success": false,
+                "found_tools": [],
+                "count": 0,
+                "query": query,
+                "note": format!(
+                    "No tools matched '{}'. Try different keywords, or proceed with \
+                     the tools you already have — do NOT repeat the same tool_search.",
+                    query
+                )
+            }));
+        }
+
         Ok(json!({
+            "success": true,
             "found_tools": found_tools,
-            "count": found_tools.len(),
+            "count": count,
             "query": query,
             "note": "These tools are now available for use in this session."
         }))
@@ -301,6 +319,38 @@ mod tests {
         let tool = ToolSearchTool::new(Arc::new(std::sync::RwLock::new(index)));
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_no_match_reports_failure() {
+        // An empty index yields no matches; the result must signal success=false
+        // with anti-loop guidance rather than the "now available" success note.
+        let index: Vec<ToolSearchResult> = vec![];
+        let tool = ToolSearchTool::new(Arc::new(std::sync::RwLock::new(index)));
+        let result = tool
+            .execute(json!({"query": "nonexistent_capability"}))
+            .await
+            .unwrap();
+        assert_eq!(result["success"], false);
+        assert_eq!(result["count"], 0);
+        let note = result["note"].as_str().unwrap();
+        assert!(note.contains("No tools matched"));
+        assert!(note.contains("do NOT repeat"));
+    }
+
+    #[tokio::test]
+    async fn test_tool_search_match_reports_success() {
+        let index = vec![ToolSearchResult {
+            name: "git_status".to_string(),
+            description: "show git status".to_string(),
+            schema: json!({}),
+            is_critical: false,
+            category: "git".to_string(),
+        }];
+        let tool = ToolSearchTool::new(Arc::new(std::sync::RwLock::new(index)));
+        let result = tool.execute(json!({"query": "git"})).await.unwrap();
+        assert_eq!(result["success"], true);
+        assert!(result["count"].as_u64().unwrap() >= 1);
     }
 
     #[test]
