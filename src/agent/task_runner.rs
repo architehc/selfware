@@ -1413,7 +1413,10 @@ impl Agent {
         // Emit a structured progress event so non-TUI consumers can see the
         // run's terminal state. Successful runs emit `TaskCompleted`; every
         // other classification emits `TaskFailed { reason }`.
-        if mode.kind.is_success() {
+        // NoChange is an honest non-failure (its banner is "✅ Completed — no
+        // file changes"), so it must emit TaskCompleted, not TaskFailed —
+        // keeping the banner, the exit status, and the event stream consistent.
+        if mode.kind.is_nonfailure() {
             self.emit_progress(super::progress::ProgressEvent::TaskCompleted {
                 outcome: mode.kind.tag().to_string(),
             });
