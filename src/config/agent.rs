@@ -84,11 +84,10 @@ pub struct AgentConfig {
     pub compression_detail: String,
     /// Disable per-turn debug artifact capture under `<workdir>/.selfware/turns/`.
     ///
-    /// Capture is on by default — every LLM call writes a `turn_NNNN.json`
-    /// containing the sanitized request body, the response, parsed tool
-    /// calls, and the agent's decision. Set this to `true` to suppress
-    /// that output (e.g. to avoid disk noise on a read-only workdir).
-    #[serde(default)]
+    /// Capture is off by default because these files contain model responses,
+    /// parsed tool calls, and agent decisions. Set this to `false` explicitly
+    /// when per-turn diagnostic artifacts are needed.
+    #[serde(default = "default_true")]
     pub disable_turn_artifacts: bool,
 
     /// Prompt profile used for benchmark / evaluation runs.
@@ -109,6 +108,11 @@ pub struct AgentConfig {
     /// CLI-only; not persisted in config files.
     #[serde(skip)]
     pub max_wall_secs: Option<u64>,
+
+    /// Hard limit: stop when accumulated provider-reported USD cost exceeds this.
+    /// CLI-only; not persisted in config files.
+    #[serde(skip)]
+    pub max_cost_usd: Option<f64>,
 }
 
 impl Default for AgentConfig {
@@ -133,6 +137,7 @@ impl Default for AgentConfig {
             post_edit_test_command: None,
             max_budget_tokens: None,
             max_wall_secs: None,
+            max_cost_usd: None,
         }
     }
 }
@@ -328,6 +333,7 @@ mod tests {
         assert_eq!(cfg.post_edit_test_command, None);
         assert_eq!(cfg.max_budget_tokens, None);
         assert_eq!(cfg.max_wall_secs, None);
+        assert_eq!(cfg.max_cost_usd, None);
     }
 
     #[test]
@@ -365,6 +371,7 @@ mod tests {
             post_edit_test_command: Some("cargo test".to_string()),
             max_budget_tokens: Some(99999),
             max_wall_secs: Some(600),
+            max_cost_usd: Some(1.5),
         };
 
         let json = serde_json::to_string(&cfg).unwrap();
@@ -390,6 +397,7 @@ mod tests {
         // serde(skip) fields should reset to their Default value on deserialize
         assert_eq!(back.max_budget_tokens, None);
         assert_eq!(back.max_wall_secs, None);
+        assert_eq!(back.max_cost_usd, None);
     }
 
     #[test]
@@ -397,12 +405,14 @@ mod tests {
         let cfg = AgentConfig {
             max_budget_tokens: Some(50000),
             max_wall_secs: Some(120),
+            max_cost_usd: Some(0.5),
             ..AgentConfig::default()
         };
         let json = serde_json::to_string(&cfg).unwrap();
         // The skip fields should not appear in the JSON output
         assert!(!json.contains("max_budget_tokens"));
         assert!(!json.contains("max_wall_secs"));
+        assert!(!json.contains("max_cost_usd"));
     }
 
     #[test]
@@ -430,11 +440,12 @@ mod tests {
             (back.context_thinking_ratio - default_context_thinking_ratio()).abs() < f32::EPSILON
         );
         assert_eq!(back.compression_detail, default_compression_detail());
-        assert!(!back.disable_turn_artifacts); // #[serde(default)] → false
+        assert!(back.disable_turn_artifacts); // omitted capture remains privacy-safe
         assert_eq!(back.prompt_profile, default_prompt_profile());
         assert_eq!(back.post_edit_test_command, None); // #[serde(default)] → None
         assert_eq!(back.max_budget_tokens, None);
         assert_eq!(back.max_wall_secs, None);
+        assert_eq!(back.max_cost_usd, None);
     }
 
     #[test]

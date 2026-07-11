@@ -121,6 +121,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) max_wall_secs: Option<u64>,
 
+    /// Maximum provider-reported USD cost before stopping (e.g. OpenRouter usage.cost)
+    #[arg(long)]
+    pub(crate) max_cost_usd: Option<f64>,
+
     /// Configuration profile to apply (e.g. `architect`, `swarm-8`, `batch-16`,
     /// `batch-32`, `visual`, `quick`).  Overrides `max_tokens` and
     /// `temperature` from the profile's built-in defaults.

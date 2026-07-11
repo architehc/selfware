@@ -534,6 +534,7 @@ pub async fn run() -> Result<()> {
     }
     config.agent.max_budget_tokens = cli.max_budget_tokens;
     config.agent.max_wall_secs = cli.max_wall_secs;
+    config.agent.max_cost_usd = cli.max_cost_usd;
 
     // ── Validate config and exit if requested ──
     if cli.validate_config {

@@ -284,6 +284,7 @@ impl Agent {
         let mut captured_prompt_tokens: Option<u32> = None;
         let mut captured_completion_tokens: Option<u32> = None;
         let mut captured_total_tokens: Option<u32> = None;
+        let mut captured_cost: Option<f64> = None;
 
         let mut rx = stream.into_channel().await;
         let mut content = String::new();
@@ -510,6 +511,7 @@ impl Agent {
                     captured_prompt_tokens = Some(u.prompt_tokens as u32);
                     captured_completion_tokens = Some(u.completion_tokens as u32);
                     captured_total_tokens = Some(u.total_tokens as u32);
+                    captured_cost = u.cost;
 
                     self.emit_event(AgentEvent::TokenUsage {
                         prompt_tokens: u.prompt_tokens as u64,
@@ -588,6 +590,7 @@ impl Agent {
                 prompt_tokens: captured_prompt_tokens,
                 completion_tokens: captured_completion_tokens,
                 total_tokens: captured_total_tokens,
+                cost: captured_cost,
             };
         }
 

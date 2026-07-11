@@ -466,6 +466,9 @@ impl Agent {
                 self.cumulative_token_usage.total =
                     self.cumulative_token_usage.input + self.cumulative_token_usage.output;
             }
+            if let Some(cost) = meta.cost {
+                self.cumulative_cost_usd += cost;
+            }
         }
 
         let response = AssistantStepResponse {
