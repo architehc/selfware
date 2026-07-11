@@ -171,6 +171,7 @@ impl StreamingResponse {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            cost: None,
         };
         let mut finish_reason: Option<String> = None;
 
@@ -207,6 +208,7 @@ impl StreamingResponse {
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 total_tokens: 0,
+                cost: None,
             };
         }
 

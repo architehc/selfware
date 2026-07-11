@@ -307,6 +307,7 @@ impl ApiClient {
             prompt_tokens: Some(resp.usage.prompt_tokens as u32),
             completion_tokens: Some(resp.usage.completion_tokens as u32),
             total_tokens: Some(resp.usage.total_tokens as u32),
+            cost: resp.usage.cost,
         };
         Ok((resp, meta))
     }
@@ -362,6 +363,18 @@ impl ApiClient {
         });
 
         attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
+
+        // OpenRouter reports per-call cost in `usage.cost` only when usage
+        // accounting is requested. Enable it (OpenRouter-specific, guarded so we
+        // never send it to a plain OpenAI/vLLM endpoint that would reject it) so
+        // the run-level cost cap has real cost data. For streaming, also request
+        // usage in the final chunk.
+        if self.config.endpoint.contains("openrouter.ai") {
+            body["usage"] = serde_json::json!({ "include": true });
+            if stream {
+                body["stream_options"] = serde_json::json!({ "include_usage": true });
+            }
+        }
 
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({
@@ -438,6 +451,7 @@ impl ApiClient {
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: None,
+            cost: None,
         };
         Ok((stream, meta))
     }

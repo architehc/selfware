@@ -634,6 +634,9 @@ pub struct Agent {
     prefill_breaker_open: bool,
     /// Cumulative token usage across all LLM calls in the current task.
     cumulative_token_usage: crate::observability::dashboard::TokenUsage,
+    /// Accumulated provider-reported USD cost for the current run (see
+    /// `max_cost_usd`). 0.0 for providers that don't report cost.
+    cumulative_cost_usd: f64,
     /// Failure mode from the most recent run (set by `finalize_failure_mode`).
     last_run_failure_mode: Option<failure_mode::FailureMode>,
     /// Wall-clock start time of the CURRENT run segment. Reset on resume so a
@@ -1217,6 +1220,7 @@ To call a tool, use this EXACT XML structure:
             prefill_400_count: 0,
             prefill_breaker_open: false,
             cumulative_token_usage: crate::observability::dashboard::TokenUsage::default(),
+            cumulative_cost_usd: 0.0,
             last_run_failure_mode: None,
             task_start_time: Instant::now(),
             prior_elapsed_secs: 0,

@@ -283,6 +283,7 @@ pub mod mock {
                     prompt_tokens: 0,
                     completion_tokens: 0,
                     total_tokens: 0,
+                    cost: None,
                 },
             };
             let r2 = ChatResponse {

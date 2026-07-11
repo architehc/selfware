@@ -654,6 +654,7 @@ pub struct Choice {
 ///     prompt_tokens: 50,
 ///     completion_tokens: 30,
 ///     total_tokens: 80,
+///     cost: None,
 /// };
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -664,6 +665,10 @@ pub struct Usage {
     pub completion_tokens: usize,
     /// Total tokens used (prompt + completion).
     pub total_tokens: usize,
+    /// Provider-reported cost in USD for this call, when available (e.g.
+    /// OpenRouter's `usage.cost`). `None` for providers that don't report it.
+    #[serde(default)]
+    pub cost: Option<f64>,
 }
 
 /// Side-channel metadata produced alongside a chat call.
@@ -693,6 +698,8 @@ pub struct ChatMetadata {
     /// Total tokens reported by the backend (prompt + completion + reasoning,
     /// per backend convention). `None` when the backend doesn't report it.
     pub total_tokens: Option<u32>,
+    /// Provider-reported cost in USD for this call, when available.
+    pub cost: Option<f64>,
 }
 
 /// A streaming chunk of a chat completion response.
@@ -985,6 +992,7 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
+            cost: None,
         };
         assert_eq!(
             usage.prompt_tokens + usage.completion_tokens,

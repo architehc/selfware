@@ -87,6 +87,7 @@ impl Agent {
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
+        self.cumulative_cost_usd = 0.0;
         self.task_start_time = std::time::Instant::now();
         // Fresh task → no prior segments; the budget starts at zero.
         self.prior_elapsed_secs = 0;
@@ -672,8 +673,7 @@ impl Agent {
                     self.config.agent.max_iterations
                 ),
             });
-
-            // Hard limits: token budget and wall-clock timeout
+            // Hard limits: token budget, USD cost, and wall-clock timeout
             if let Some(max_budget) = self.config.agent.max_budget_tokens {
                 let total = self.cumulative_token_usage.total;
                 if total >= max_budget {
@@ -683,7 +683,23 @@ impl Agent {
                     self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
                     self.finalize_failure_mode(RunOutcome::Failed {
                         reason: reason.clone(),
-                    }).await;
+                    })
+                    .await;
+                    anyhow::bail!("{}", reason);
+                }
+            }
+            if let Some(max_cost) = self.config.agent.max_cost_usd {
+                if self.cumulative_cost_usd >= max_cost {
+                    let reason = format!(
+                        "Cost budget exhausted: ${:.4} >= ${:.4}",
+                        self.cumulative_cost_usd, max_cost
+                    );
+                    warn!("{}", reason);
+                    self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                    self.finalize_failure_mode(RunOutcome::Failed {
+                        reason: reason.clone(),
+                    })
+                    .await;
                     anyhow::bail!("{}", reason);
                 }
             }
@@ -695,7 +711,8 @@ impl Agent {
                     self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
                     self.finalize_failure_mode(RunOutcome::Failed {
                         reason: reason.clone(),
-                    }).await;
+                    })
+                    .await;
                     anyhow::bail!("{}", reason);
                 }
             }
@@ -709,7 +726,14 @@ impl Agent {
                     Outcome::Abandoned,
                     Some("Task interrupted by user"),
                 );
-                return Ok(());
+                // Preserve resumable state, then return a typed cancellation.
+                // `run_execution_loop` maps errors to the single authoritative
+                // terminal Error event; returning Ok here would emit a
+                // misleading Completed event and make headless callers exit 0.
+                if let Err(e) = self.save_checkpoint(task_description) {
+                    warn!("Failed to save cancelled checkpoint: {}", e);
+                }
+                return Err(crate::errors::AgentError::Cancelled.into());
             }
 
             match state {
@@ -1468,6 +1492,23 @@ mod tests {
     use crate::config::{AgentConfig, Config, ExecutionMode, SafetyConfig};
     use crate::testing::mock_api::MockLlmServer;
     use chrono::Utc;
+
+    #[derive(Default)]
+    struct RecordingEventEmitter {
+        events: std::sync::Mutex<Vec<AgentEvent>>,
+    }
+
+    impl super::super::tui_events::EventEmitter for RecordingEventEmitter {
+        fn emit(&self, event: AgentEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    impl RecordingEventEmitter {
+        fn events(&self) -> Vec<AgentEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
 
     fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
         Config {
@@ -2259,17 +2300,43 @@ mod tests {
             .build()
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
-        let mut agent = Agent::new(config).await.unwrap();
+        let recorder = std::sync::Arc::new(RecordingEventEmitter::default());
+        let mut agent = Agent::new(config)
+            .await
+            .unwrap()
+            .with_event_emitter(recorder.clone());
         agent
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        let result = agent.run_task("Should cancel").await;
-        assert!(result.is_ok());
+        let error = agent
+            .run_task("Should cancel")
+            .await
+            .expect_err("cancellation must not report successful completion");
+        assert!(matches!(
+            error.downcast_ref::<crate::errors::AgentError>(),
+            Some(crate::errors::AgentError::Cancelled)
+        ));
         let has_interrupted = agent
             .messages
             .iter()
             .any(|m| m.content.text().contains("interrupted"));
         assert!(has_interrupted);
+
+        let events = recorder.events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AgentEvent::Error { .. }))
+                .count(),
+            1,
+            "cancellation must emit exactly one terminal Error event"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::Completed { .. })),
+            "cancellation must never emit Completed"
+        );
         agent.reset_cancellation();
         assert!(!agent.is_cancelled());
         server.stop().await;
@@ -2457,7 +2524,14 @@ mod tests {
         agent
             .cancelled
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(agent.continue_execution().await.is_ok());
+        let error = agent
+            .continue_execution()
+            .await
+            .expect_err("cancellation must not report successful completion");
+        assert!(matches!(
+            error.downcast_ref::<crate::errors::AgentError>(),
+            Some(crate::errors::AgentError::Cancelled)
+        ));
         assert!(agent
             .messages
             .iter()
