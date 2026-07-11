@@ -541,6 +541,20 @@ impl ProcessManager {
             cmd.current_dir(cwd);
         }
 
+        // Clear the inherited environment to prevent secret leakage (e.g.
+        // SELFWARE_API_KEY) into child processes, then set a minimal base. This
+        // matches spawn_child_process (the restart path already does this); the
+        // initial spawn must be consistent.
+        cmd.env_clear();
+        if let Ok(path) = std::env::var("PATH") {
+            cmd.env("PATH", path);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
+        if let Ok(lang) = std::env::var("LANG") {
+            cmd.env("LANG", lang);
+        }
         for (key, value) in &config.env {
             cmd.env(key, value);
         }
@@ -2340,6 +2354,52 @@ mod tests {
         assert_eq!(inventory.reserved_ports, vec![port]);
 
         assert!(manager.release_reserved_port(port).await);
+    }
+
+    /// Sentinel secret in the parent env must NOT leak into the child.
+    #[tokio::test]
+    async fn start_does_not_leak_parent_env_to_child() {
+        // A sentinel secret present in the PARENT environment.
+        std::env::set_var("SELFWARE_SENTINEL_SECRET", "leaked-value-123");
+
+        let mgr = ProcessManager::new();
+        let config = ProcessConfig {
+            id: "env-leak-test".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "env".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        // `env` exits immediately, so start() returns Err — that's fine; the
+        // output is captured before the process exits.
+        let _ = mgr.start(config).await;
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        let logs = mgr.logs("env-leak-test", 200).await.unwrap();
+        let output: String = logs
+            .iter()
+            .map(|l| l.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        std::env::remove_var("SELFWARE_SENTINEL_SECRET");
+
+        assert!(
+            !output.contains("leaked-value-123"),
+            "child environment leaked the parent secret: {output}"
+        );
+        // The minimal allowlist still passes PATH through.
+        assert!(
+            output.contains("PATH="),
+            "PATH should be present in child env, got: {output}"
+        );
     }
 
     #[tokio::test(start_paused = true)]
