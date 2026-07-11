@@ -1845,14 +1845,21 @@ pub fn create_event_channel() -> (
 /// The first line carries the timestamp + role prefix; continuation lines are indented
 /// to align with the message body.  Splits are always placed on character boundaries
 /// so UTF-8 text is never broken mid-codepoint.
-pub(crate) fn wrap_chat_message<'a>(
+/// Compute the rendered text of each wrapped line for a chat message.
+///
+/// Splits `content` on embedded newlines FIRST so multi-line content (e.g.
+/// `/help`) keeps its intended line breaks, then wraps each logical line to the
+/// pane `width`. The first segment of the first logical line carries
+/// `prefix_str` (e.g. "12:00 🦊 "); every other segment/line is indented to
+/// match the prefix width. Returns one `String` per rendered terminal row.
+///
+/// Kept separate from [`wrap_chat_message`] so the wrapping logic is unit
+/// testable without inspecting an opaque `ListItem`.
+pub(crate) fn wrap_chat_message_lines(
     prefix_str: &str,
     content: &str,
-    style: ratatui::style::Style,
     width: usize,
-) -> ratatui::widgets::ListItem<'a> {
-    use ratatui::text::{Line, Span, Text};
-    use ratatui::widgets::ListItem;
+) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
     fn split_at_display_width(s: &str, max_width: usize) -> (&str, &str) {
@@ -1879,39 +1886,62 @@ pub(crate) fn wrap_chat_message<'a>(
 
     // Guard against extremely narrow panes
     if width == 0 {
-        return ListItem::new(Text::from(Vec::<Line>::new()));
+        return Vec::new();
     }
 
     let prefix_width = UnicodeWidthStr::width(prefix_str);
-    let first_avail = width.saturating_sub(prefix_width);
-
-    if UnicodeWidthStr::width(content) <= first_avail {
-        // Entire message fits on a single line
-        let full = format!("{}{}", prefix_str, content);
-        return ListItem::new(Line::from(Span::styled(full, style)));
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // First line: prefix + as many characters as fit
-    let (first_part, rest) = split_at_display_width(content, first_avail);
-    lines.push(Line::from(Span::styled(
-        format!("{}{}", prefix_str, first_part),
-        style,
-    )));
-
-    // Continuation lines with indent matching the prefix width
     let indent: String = " ".repeat(prefix_width);
     let cont_width = width.saturating_sub(prefix_width).max(1);
-    let mut remaining = rest;
-    while !remaining.is_empty() {
-        let (chunk, rest) = split_at_display_width(remaining, cont_width);
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", indent, chunk),
-            style,
-        )));
-        remaining = rest;
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Previously the whole string was width-wrapped and `\n` (display width 0)
+    // was swallowed, collapsing multi-line messages into a run-on paragraph.
+    for (li, logical) in content.split('\n').enumerate() {
+        let first_lead = if li == 0 { prefix_str } else { indent.as_str() };
+        let first_avail = if li == 0 {
+            width.saturating_sub(prefix_width).max(1)
+        } else {
+            cont_width
+        };
+
+        if logical.is_empty() {
+            // Preserve blank lines between paragraphs.
+            lines.push(first_lead.to_string());
+            continue;
+        }
+
+        let mut remaining = logical;
+        let mut is_first_seg = true;
+        while !remaining.is_empty() {
+            let (lead, avail) = if is_first_seg {
+                (first_lead, first_avail)
+            } else {
+                (indent.as_str(), cont_width)
+            };
+            let (chunk, rest) = split_at_display_width(remaining, avail);
+            lines.push(format!("{}{}", lead, chunk));
+            remaining = rest;
+            is_first_seg = false;
+        }
     }
+
+    lines
+}
+
+pub(crate) fn wrap_chat_message<'a>(
+    prefix_str: &str,
+    content: &str,
+    style: ratatui::style::Style,
+    width: usize,
+) -> ratatui::widgets::ListItem<'a> {
+    use ratatui::text::{Line, Span, Text};
+    use ratatui::widgets::ListItem;
+
+    let lines: Vec<Line> = wrap_chat_message_lines(prefix_str, content, width)
+        .into_iter()
+        .map(|s| Line::from(Span::styled(s, style)))
+        .collect();
 
     ListItem::new(Text::from(lines))
 }
@@ -2271,6 +2301,40 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wrap_chat_message_splits_embedded_newlines() {
+        // A multi-line message (e.g. /help) must render as SEPARATE rows, not a
+        // single run-on paragraph. Three logical lines -> at least three rows,
+        // and no rendered row may contain a literal '\n'.
+        let content = "Commands:\n/help - show help\n/quit - exit";
+        let lines = wrap_chat_message_lines("> ", content, 80);
+        assert_eq!(lines.len(), 3, "expected 3 rows, got {:?}", lines);
+        assert!(lines.iter().all(|l| !l.contains('\n')));
+        assert_eq!(lines[0], "> Commands:");
+        // Continuation logical lines are indented to the prefix width (2).
+        assert_eq!(lines[1], "  /help - show help");
+        assert_eq!(lines[2], "  /quit - exit");
+    }
+
+    #[test]
+    fn wrap_chat_message_preserves_blank_lines() {
+        let lines = wrap_chat_message_lines("> ", "a\n\nb", 80);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "> a");
+        assert_eq!(lines[1], "  "); // blank line keeps indent
+        assert_eq!(lines[2], "  b");
+    }
+
+    #[test]
+    fn wrap_chat_message_wraps_long_logical_line() {
+        // A single logical line longer than the pane wraps onto continuation
+        // rows indented to the prefix width.
+        let lines = wrap_chat_message_lines("> ", "abcdefghij", 6);
+        assert!(lines.len() > 1, "long line should wrap: {:?}", lines);
+        assert_eq!(lines[0], "> abcd"); // width 6, prefix 2 -> 4 chars
+        assert!(lines[1].starts_with("  ")); // continuation indented
+    }
 
     #[test]
     fn test_palette_default_colors() {
