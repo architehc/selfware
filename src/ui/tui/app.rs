@@ -218,6 +218,13 @@ impl App {
     pub fn clear_chat(&mut self) {
         self.messages.clear();
         self.clear_streaming();
+        // /clear resets the underlying model conversation (see the /clear
+        // handler), so a "partial" clear that wiped only the transcript left
+        // stale task progress and token/context counters on screen. Reset those
+        // too so the cleared view truthfully reflects a fresh conversation.
+        self.task_progress = None;
+        self.state = AppState::Chatting;
+        self.status_line.reset_usage();
         self.messages.push(ChatMessage {
             role: MessageRole::System,
             content: "Chat cleared.".into(),
@@ -1112,5 +1119,35 @@ mod tests {
         assert!(app.streaming_assistant.is_none());
         app.add_assistant_message("Hello");
         assert_eq!(app.messages.len(), n + 1);
+    }
+
+    #[test]
+    fn clear_chat_resets_task_progress_and_usage() {
+        let mut app = App::new("m");
+        // Simulate an active task with accumulated usage.
+        app.set_progress(TaskProgress {
+            description: "task".into(),
+            current_step: 1,
+            total_steps: Some(3),
+            current_action: "working".into(),
+            elapsed_secs: 5,
+        });
+        app.status_line.tokens_used = (1234, 567);
+        app.status_line.context_percent = 42.0;
+        app.append_streaming("partial");
+        assert!(app.task_progress.is_some());
+        assert_eq!(app.state, AppState::RunningTask);
+
+        app.clear_chat();
+
+        // Everything tied to the (now-reset) conversation is gone.
+        assert!(app.task_progress.is_none());
+        assert_eq!(app.state, AppState::Chatting);
+        assert!(app.streaming_assistant.is_none());
+        assert_eq!(app.status_line.tokens_used, (0, 0));
+        assert_eq!(app.status_line.context_percent, 0.0);
+        // Only the "Chat cleared." system message remains.
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.scroll, 0);
     }
 }

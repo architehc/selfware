@@ -120,6 +120,15 @@ impl StatusLine {
         self.tokens_used.0 + self.tokens_used.1
     }
 
+    /// Reset per-conversation usage counters. Called when the conversation is
+    /// cleared (`/clear`) so the token totals and context gauge don't keep
+    /// reporting the now-discarded conversation. Session identity and model are
+    /// preserved — the TUI session itself continues.
+    pub fn reset_usage(&mut self) {
+        self.tokens_used = (0, 0);
+        self.context_percent = 0.0;
+    }
+
     /// Format tokens with K/M suffix for large numbers
     fn fmt_tokens(n: usize) -> String {
         if n >= 1_000_000 {
