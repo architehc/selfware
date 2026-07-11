@@ -937,7 +937,13 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
         match input {
             Ok(ref input) if input == "exit" || input == "quit" => break,
             Ok(input) => {
-                // Slash commands must NOT be sent to the LLM as prompts.
+                // /clear resets the model conversation so the next task starts
+                // fresh (the TUI already cleared the display).
+                if input == "/clear" {
+                    agent.clear_conversation();
+                    continue;
+                }
+                // Other slash commands must NOT be sent to the LLM as prompts.
                 // In TUI dashboard mode the full interactive command
                 // dispatcher is not available, so we skip LLM routing
                 // for any input starting with '/'.

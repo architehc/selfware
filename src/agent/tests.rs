@@ -1223,3 +1223,29 @@ async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
     }
     server.stop().await;
 }
+
+// =========================================================================
+// Test: clear_conversation resets the model context
+// =========================================================================
+
+#[tokio::test]
+async fn clear_conversation_keeps_only_system_prompt() {
+    let server = MockLlmServer::builder()
+        .with_response("ok")
+        .build()
+        .await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.expect("agent::new");
+    let before = agent.messages.len();
+    agent.messages.push(Message::user("remember: my name is Bob"));
+    agent.messages.push(Message::assistant("Noted."));
+    agent.last_assistant_response = "Noted.".to_string();
+    assert!(agent.messages.len() > before);
+
+    agent.clear_conversation();
+
+    assert_eq!(agent.messages.len(), 1, "only the system prompt should remain");
+    assert_eq!(agent.messages[0].role, "system");
+    assert!(agent.last_assistant_response.is_empty());
+    server.stop().await;
+}
