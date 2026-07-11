@@ -850,6 +850,56 @@ pub(super) fn shell_command_is_observational(command: &str) -> bool {
     })
 }
 
+/// Canonical predicate: does a SUCCESSFUL call to this tool mutate the
+/// workspace? Single source of truth for mutation accounting so the progress
+/// guard, the completion gate, and FailureMode all agree what "a real edit" is.
+/// Previously two duplicated hardcoded lists under-counted edits made via
+/// file_multi_edit / patch_apply / git writes, producing spurious
+/// StaleVerification / ReadLoop / FakeComplete verdicts.
+pub(super) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> bool {
+    // Direct file-content or file-tree mutations.
+    if matches!(
+        name,
+        "file_edit"
+            | "file_write"
+            | "file_delete"
+            | "file_fim_edit"
+            | "file_multi_edit"
+            | "patch_apply"
+    ) {
+        return true;
+    }
+    // Mutating version-control operations (index / tree / history changes).
+    // Observational git (status/log/diff/show) is intentionally excluded.
+    if matches!(
+        name,
+        "git_commit"
+            | "git_add"
+            | "git_checkout"
+            | "git_apply"
+            | "git_reset"
+            | "git_stash"
+            | "git_merge"
+            | "git_rebase"
+            | "git_cherry_pick"
+            | "git_revert"
+            | "git_rm"
+            | "git_mv"
+    ) {
+        return true;
+    }
+    // Shell / PTY running a NON-observational command (rm, mv, sed -i, package
+    // installers, output redirects, `git add`/`git commit` via the CLI, etc.).
+    if matches!(name, "shell_exec" | "pty_shell") {
+        return args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|cmd| !shell_command_is_observational(cmd))
+            .unwrap_or(false);
+    }
+    false
+}
+
 pub(super) fn shell_command_is_verification(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {
@@ -2277,23 +2327,15 @@ impl Agent {
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
 
-            let is_mutating_shell = vt.name == "shell_exec"
-                && vt
-                    .args
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .map(|cmd| !shell_command_is_observational(cmd))
-                    .unwrap_or(false);
-            if success
-                && (matches!(
-                    vt.name.as_str(),
-                    "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
-                ) || is_mutating_shell)
-            {
+            if success && tool_call_is_mutating(&vt.name, &vt.args) {
                 self.note_mutating_tool_call();
                 if matches!(
                     vt.name.as_str(),
-                    "file_edit" | "file_write" | "file_fim_edit"
+                    "file_edit"
+                        | "file_write"
+                        | "file_fim_edit"
+                        | "file_multi_edit"
+                        | "patch_apply"
                 ) {
                     self.has_written_any_file = true;
                     self.terminal_guard_hits = 0;
@@ -3424,20 +3466,8 @@ impl Agent {
                 // `sed -i`, redirects).  Observational shell calls like
                 // `cargo check` / `git status` / `ls` should NOT bump the
                 // mutating counter.
-                let is_mutating_shell = name == "shell_exec"
-                    && args
-                        .get("command")
-                        .and_then(|v| v.as_str())
-                        .map(|cmd| !shell_command_is_observational(cmd))
-                        .unwrap_or(false);
-                if matches!(
-                    name,
-                    "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
-                ) || is_mutating_shell
-                {
-                    if tool_success {
-                        self.note_mutating_tool_call();
-                    }
+                if tool_call_is_mutating(name, args) && tool_success {
+                    self.note_mutating_tool_call();
                 }
 
                 if tool_success
@@ -5531,5 +5561,47 @@ mod tests {
         let fut = async { Ok(serde_json::json!({})) };
         let out = run_tool_bounded(fut, std::time::Duration::from_secs(5), cancel).await;
         assert_eq!(out.unwrap_err(), ToolHalt::Cancelled);
+    }
+
+    #[test]
+    fn mutating_predicate_covers_all_real_editors() {
+        use serde_json::json;
+        let empty = json!({});
+        // Direct editors — including the previously-missed ones.
+        for t in [
+            "file_edit",
+            "file_write",
+            "file_delete",
+            "file_fim_edit",
+            "file_multi_edit",
+            "patch_apply",
+        ] {
+            assert!(tool_call_is_mutating(t, &empty), "{t} should be mutating");
+        }
+        // Mutating git ops.
+        for t in ["git_commit", "git_add", "git_apply", "git_reset"] {
+            assert!(tool_call_is_mutating(t, &empty), "{t} should be mutating");
+        }
+        // Observational tools are NOT mutating.
+        for t in ["file_read", "git_status", "git_log", "git_diff", "grep", "list_dir"] {
+            assert!(!tool_call_is_mutating(t, &empty), "{t} should NOT be mutating");
+        }
+        // Shell is mutating only for non-observational commands.
+        assert!(tool_call_is_mutating(
+            "shell_exec",
+            &json!({"command": "rm -rf build"})
+        ));
+        assert!(tool_call_is_mutating(
+            "shell_exec",
+            &json!({"command": "npm install"})
+        ));
+        assert!(!tool_call_is_mutating(
+            "shell_exec",
+            &json!({"command": "cargo check"})
+        ));
+        assert!(!tool_call_is_mutating(
+            "shell_exec",
+            &json!({"command": "git status"})
+        ));
     }
 }
