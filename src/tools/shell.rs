@@ -171,19 +171,71 @@ impl Tool for ShellExec {
         }
         cmd.envs(&args.env);
 
-        let start = std::time::Instant::now();
-        let output =
-            tokio::time::timeout(Duration::from_secs(args.timeout_secs), cmd.output()).await;
+        // Run the child in its own process group so a timeout can reap the
+        // ENTIRE process tree (grandchildren included), not just the direct
+        // shell. `kill_on_drop`/`child.kill()` only signal the immediate child,
+        // so a backgrounded subprocess would otherwise orphan into a defunct
+        // zombie that `timeout`/systemd can't clean up.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
-        let (exit_code, stdout, stderr, timed_out) = match output {
-            Ok(Ok(output)) => (
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-                false,
-            ),
+        let start = std::time::Instant::now();
+        let mut child = cmd.spawn()?;
+        let child_pid = child.id();
+
+        // Drain stdout/stderr concurrently so a chatty process can't deadlock on
+        // a full pipe while we wait for it to exit.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            if let Some(mut s) = stdout_pipe {
+                let _ = s.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buf = Vec::new();
+            if let Some(mut s) = stderr_pipe {
+                let _ = s.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+
+        let wait_result =
+            tokio::time::timeout(Duration::from_secs(args.timeout_secs), child.wait()).await;
+
+        let (exit_code, timed_out) = match wait_result {
+            Ok(Ok(status)) => (status.code().unwrap_or(-1), false),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => (-1, "".to_string(), "Command timed out".to_string(), true),
+            Err(_) => {
+                // Timed out: kill the whole process group, then reap the child.
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    use nix::sys::signal::{killpg, Signal};
+                    use nix::unistd::Pid;
+                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                (-1, true)
+            }
+        };
+
+        // Always await the drain tasks so they don't leak; the pipes close once
+        // the process (and its group) exit.
+        let stdout_bytes = stdout_task.await.unwrap_or_default();
+        let stderr_bytes = stderr_task.await.unwrap_or_default();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+        let stderr = if timed_out {
+            "Command timed out".to_string()
+        } else {
+            String::from_utf8_lossy(&stderr_bytes).into_owned()
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -233,6 +285,51 @@ mod tests {
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["command"].is_object());
         assert!(schema["properties"]["timeout_secs"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_timeout_reaps_process_group() {
+        // A backgrounded grandchild (`sleep 30 &`) must be killed when the
+        // shell_exec times out — otherwise it orphans into a defunct zombie.
+        // The grandchild records its PID so we can assert it's gone.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("gc.pid");
+        let tool = ShellExec::new();
+        let args = serde_json::json!({
+            "command": format!(
+                "sleep 30 & echo $! > {}; wait",
+                pidfile.display()
+            ),
+            "timeout_secs": 1
+        });
+
+        let start = std::time::Instant::now();
+        let result = tool.execute(args).await.unwrap();
+        // It returned near the 1s timeout, not the 30s sleep.
+        assert!(start.elapsed().as_secs() < 10, "should return at timeout");
+        assert_eq!(result["timed_out"], true);
+
+        let gc_pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("grandchild wrote its pid")
+            .trim()
+            .parse()
+            .expect("valid pid");
+
+        // Give SIGKILL a moment to propagate through the group.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::kill;
+            use nix::unistd::Pid;
+            // kill(pid, None) probes existence; Err (ESRCH) == the group was reaped.
+            let alive = kill(Pid::from_raw(gc_pid), None).is_ok();
+            assert!(
+                !alive,
+                "grandchild pid {} should have been reaped with the group",
+                gc_pid
+            );
+        }
     }
 
     #[tokio::test]
