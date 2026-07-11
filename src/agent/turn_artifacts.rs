@@ -150,6 +150,49 @@ pub fn artifact_dir(workdir: &Path) -> PathBuf {
     workdir.join(".selfware").join("turns")
 }
 
+/// Maximum number of turn-artifact files to retain per workdir. Older files
+/// are pruned so long-running or repeated sessions don't grow unbounded
+/// (mirrors the checkpoint retention cap).
+const MAX_TURN_ARTIFACTS: usize = 500;
+
+/// Delete the oldest `turn_*.json` files in `dir` when their count exceeds
+/// `MAX_TURN_ARTIFACTS`, ordered by last-modified time. Best-effort: any error
+/// is logged and never propagated — pruning must never break the agent loop.
+async fn prune_old_artifacts(dir: &Path) {
+    let mut entries: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        let is_turn = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| n.starts_with("turn_") && n.ends_with(".json"))
+            .unwrap_or(false);
+        if !is_turn {
+            continue;
+        }
+        let mtime = match entry.metadata().await.and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        entries.push((mtime, path));
+    }
+    if entries.len() <= MAX_TURN_ARTIFACTS {
+        return;
+    }
+    // Oldest first, then remove the overflow.
+    entries.sort_by_key(|(t, _)| *t);
+    let remove_count = entries.len() - MAX_TURN_ARTIFACTS;
+    for (_, path) in entries.into_iter().take(remove_count) {
+        if let Err(e) = tokio::fs::remove_file(&path).await {
+            tracing::warn!("Failed to prune turn artifact {:?}: {}", path, e);
+        }
+    }
+}
+
 /// Write a `TurnArtifact` to `<workdir>/.selfware/turns/turn_{step:04}.json`.
 ///
 /// Errors are logged but never propagated — debug capture must never break
@@ -170,7 +213,9 @@ pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
     };
     if let Err(e) = tokio::fs::write(&path, json).await {
         tracing::warn!("Failed to write turn artifact {:?}: {}", path, e);
+        return;
     }
+    prune_old_artifacts(&dir).await;
 }
 
 #[cfg(test)]
@@ -385,5 +430,33 @@ mod tests {
         let content = std::fs::read_to_string(&written).expect("read written artifact");
         let _decoded: TurnArtifact =
             serde_json::from_str(&content).expect("written artifact must be valid JSON");
+    }
+
+    #[tokio::test]
+    async fn write_artifact_prunes_to_cap() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        // Write more than the retention cap; the directory must stay bounded.
+        let over = MAX_TURN_ARTIFACTS + 25;
+        for step in 1..=over {
+            let mut a = sample_artifact();
+            a.step = step;
+            write_artifact(dir.path(), &a).await;
+        }
+        let turns = artifact_dir(dir.path());
+        let count = std::fs::read_dir(&turns)
+            .expect("turns dir exists")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("turn_") && n.ends_with(".json"))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            count, MAX_TURN_ARTIFACTS,
+            "turns dir must be capped at {} files, found {}",
+            MAX_TURN_ARTIFACTS, count
+        );
     }
 }
