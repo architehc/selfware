@@ -684,6 +684,13 @@ impl CheckpointManager {
                 )
             })?;
         }
+        // Checkpoints may contain conversation data and tool output — keep the
+        // directory owner-only on Unix.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&checkpoints_dir, fs::Permissions::from_mode(0o700));
+        }
         Ok(Self { checkpoints_dir })
     }
 
@@ -1008,9 +1015,14 @@ impl CheckpointManager {
             suffix
         ));
         {
-            let mut tmp_file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
+            let mut open_opts = fs::OpenOptions::new();
+            open_opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                open_opts.mode(0o600);
+            }
+            let mut tmp_file = open_opts
                 .open(&tmp_path)
                 .with_context(|| format!("Failed to create checkpoint temp file {:?}", tmp_path))?;
             tmp_file
@@ -1492,6 +1504,29 @@ mod tests {
 
         let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, TaskStatus::InProgress);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn checkpoint_dir_0700_and_files_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let cpdir = dir.path().join("cps");
+        let manager = CheckpointManager::new(cpdir.clone()).unwrap();
+
+        let dmode = fs::metadata(&cpdir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dmode, 0o700, "dir should be 0700, got {:o}", dmode);
+
+        let cp = TaskCheckpoint::new("perm-test".to_string(), "d".to_string());
+        manager.save(&cp).unwrap();
+
+        let file = fs::read_dir(&cpdir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().extension().map_or(false, |x| x == "json"))
+            .expect("a checkpoint json file should exist");
+        let fmode = fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(fmode, 0o600, "checkpoint file should be 0600, got {:o}", fmode);
     }
 
     #[test]
