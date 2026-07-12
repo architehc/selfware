@@ -1,4 +1,4 @@
-use crate::api::types::Message;
+use crate::api::types::{Message, Usage};
 use crate::api::ApiClient;
 use crate::api::ThinkingMode;
 use crate::token_count::estimate_tokens_with_overhead;
@@ -77,10 +77,23 @@ impl ContextCompressor {
         self.compression_threshold
     }
 
-    pub async fn compress(&self, client: &ApiClient, messages: &[Message]) -> Result<Vec<Message>> {
+    /// Returns the (possibly) compressed messages and the token usage the
+    /// summarizer LLM call consumed (zero when no call was made), so the caller
+    /// can account it against the budget.
+    pub async fn compress(
+        &self,
+        client: &ApiClient,
+        messages: &[Message],
+    ) -> Result<(Vec<Message>, Usage)> {
+        let zero_usage = || Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost: None,
+        };
         if messages.len() <= self.min_messages_to_keep + 1 {
             warn!("Too few messages to compress, returning as-is");
-            return Ok(messages.to_vec());
+            return Ok((messages.to_vec(), zero_usage()));
         }
 
         info!("Compressing context: {} messages", messages.len());
@@ -91,7 +104,7 @@ impl ContextCompressor {
         let to_summarize = &messages[1..recent_start];
 
         if to_summarize.is_empty() {
-            return Ok(messages.to_vec());
+            return Ok((messages.to_vec(), zero_usage()));
         }
 
         let summary_content = format!(
@@ -125,6 +138,9 @@ impl ContextCompressor {
             .map(|c| c.message.content.text().to_string())
             .unwrap_or_else(|| "[Context compression failed: empty API response]".to_string());
         info!("Generated summary: {} chars", summary.len());
+        // The summarizer call already spent tokens — carry them out on every
+        // post-call return path (including the "compression didn't help" one).
+        let usage = response.usage.clone();
 
         let mut compressed = Vec::new();
         if let Some(sys) = system_msg {
@@ -152,7 +168,7 @@ impl ContextCompressor {
                 "Compression increased token count ({} -> {}), returning original",
                 original_estimate, new_estimate
             );
-            return Ok(messages.to_vec());
+            return Ok((messages.to_vec(), usage));
         }
 
         info!(
@@ -165,7 +181,7 @@ impl ContextCompressor {
             messages.len()
         );
 
-        Ok(compressed)
+        Ok((compressed, usage))
     }
 
     pub fn hard_compress(&self, messages: &[Message]) -> Vec<Message> {

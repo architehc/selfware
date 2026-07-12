@@ -468,10 +468,19 @@ impl Agent {
 
         println!("{} Compressing context...", "🗜️".bright_cyan());
 
-        self.messages = self
+        let (compressed, usage) = self
             .compressor
             .compress(&self.client, &self.messages)
             .await?;
+        self.messages = compressed;
+        // Account the summarizer LLM call against the budget.
+        self.cumulative_token_usage.input += usage.prompt_tokens;
+        self.cumulative_token_usage.output += usage.completion_tokens;
+        self.cumulative_token_usage.total =
+            self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        if let Some(cost) = usage.cost {
+            self.cumulative_cost_usd += cost;
+        }
 
         let after = self.compressor.estimate_tokens(&self.messages);
         let saved = before.saturating_sub(after);

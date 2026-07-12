@@ -109,8 +109,16 @@ impl Agent {
         if self.compressor.should_compress(&self.messages) {
             info!("Context compression triggered");
             match self.compressor.compress(&self.client, &self.messages).await {
-                Ok(compressed) => {
+                Ok((compressed, usage)) => {
                     self.messages = compressed;
+                    // Account the summarizer LLM call against the budget.
+                    self.cumulative_token_usage.input += usage.prompt_tokens;
+                    self.cumulative_token_usage.output += usage.completion_tokens;
+                    self.cumulative_token_usage.total =
+                        self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+                    if let Some(cost) = usage.cost {
+                        self.cumulative_cost_usd += cost;
+                    }
                     self.log_context_compression_event(
                         super::session_log::ContextCompressionLogDetails {
                             strategy: "summary",
