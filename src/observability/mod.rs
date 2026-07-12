@@ -7,11 +7,8 @@
 //! - Carbon tracking
 //! - Test dashboards
 
-pub mod analytics;
-pub mod carbon_tracker;
 pub mod dashboard;
 pub mod telemetry;
-pub mod test_dashboard;
 
 #[cfg(feature = "log-analysis")]
 pub mod log_analysis;
