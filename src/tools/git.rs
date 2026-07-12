@@ -416,7 +416,7 @@ impl Tool for GitCommit {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "files": {"type": "array", "items": {"type": "string"}, "description": "Files to stage (empty = all)"},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "Files to stage. Empty stages tracked modifications only (git add -u); list new/untracked files explicitly to include them."},
                 "message": {"type": "string", "description": "Commit message"},
                 "commit_type": {"type": "string", "enum": ["feat", "fix", "refactor", "docs", "test", "chore"]}
             },
@@ -447,11 +447,16 @@ impl Tool for GitCommit {
 
         // Stage files
         if files.is_empty() {
+            // Empty list stages tracked modifications/deletions only (`-u`), NOT
+            // new untracked files. `git add -A` would sweep in whatever happens
+            // to be untracked in the tree — a stray .env, a build artifact, a
+            // spilled secret — and (with push allowed by default) publish it.
+            // To commit a NEW file, pass it explicitly in `files`.
             tokio::process::Command::new("git")
                 .arg("-C")
                 .arg(repo_path)
                 .arg("add")
-                .arg("-A")
+                .arg("-u")
                 .output()
                 .await?;
         } else {
@@ -815,6 +820,36 @@ mod tests {
         let result = tool.execute(args).await;
         // We accept both Ok (committed) and Err (nothing to commit)
         assert!(result.is_ok() || result.is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_files_commit_excludes_untracked() {
+        let (_guard, dir) = isolated_git_repo();
+        // Modify a tracked file and drop a new untracked one (a stray secret).
+        std::fs::write(dir.path().join("f.txt"), "modified content").unwrap();
+        std::fs::write(dir.path().join("untracked_secret.txt"), "ghp_secret").unwrap();
+
+        let tool = GitCommit::new();
+        let args = serde_json::json!({ "message": "commit tracked only", "files": [] });
+        tool.execute(args).await.expect("commit of tracked change");
+
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let status_str = String::from_utf8_lossy(&status.stdout);
+
+        // The untracked file must NOT have been swept into the commit.
+        assert!(
+            status_str.contains("untracked_secret.txt"),
+            "empty-files commit must leave untracked files untracked; status: {status_str}"
+        );
+        // The tracked modification WAS committed (no longer pending).
+        assert!(
+            !status_str.contains("f.txt"),
+            "tracked modification should have been committed; status: {status_str}"
+        );
     }
 
     #[tokio::test]
