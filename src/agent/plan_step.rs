@@ -167,6 +167,20 @@ impl Agent {
             None
         };
 
+        // Sanitize before these enter history AND before they're dispatched
+        // below: a truncated stream can leave a tool_call with invalid-JSON
+        // args, and storing it as assistant.tool_calls with no matching
+        // role=tool reply produces an unpaired tool_call that strict backends
+        // 400 on the next request — the same hazard fixed in
+        // get_assistant_step_response, on the planning path.
+        let native_tool_calls = native_tool_calls.and_then(|calls| {
+            let (kept, dropped) = super::assistant_response::sanitize_tool_calls(calls);
+            if dropped > 0 {
+                debug!("Sanitized {} malformed planning tool call(s)", dropped);
+            }
+            (!kept.is_empty()).then_some(kept)
+        });
+
         // Snapshot reasoning_content before the message-push moves it, so the
         // turn artifact can capture the model's <think> output too.
         let reasoning_for_artifact = assistant_msg.reasoning_content.clone();

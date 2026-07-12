@@ -144,6 +144,29 @@ impl LspServerConnection {
             .stderr(Stdio::piped())
             .current_dir(root);
 
+        // A language server is third-party code that should not inherit the
+        // agent's secrets (SELFWARE_API_KEY, AWS_*, GITHUB_TOKEN, …). Clear the
+        // environment down to the minimal base, then re-add only non-secret
+        // toolchain-discovery vars language servers legitimately need — so
+        // rust-analyzer/pyright/tsserver still resolve their toolchains.
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
+        for key in [
+            "CARGO_HOME",
+            "RUSTUP_HOME",
+            "NODE_PATH",
+            "NVM_DIR",
+            "npm_config_prefix",
+            "PYTHONPATH",
+            "VIRTUAL_ENV",
+            "GOPATH",
+            "GOROOT",
+            "JAVA_HOME",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
+
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to spawn LSP server: {} {:?}", command, args))?;
