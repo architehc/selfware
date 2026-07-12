@@ -571,7 +571,7 @@ impl Agent {
                 if cmd.is_empty() {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
                 } else {
-                    let (shell, flag) = crate::tools::shell::default_shell();
+                    let (shell, flag) = crate::tools::shell_exec::default_shell();
                     let status = tokio::process::Command::new(shell)
                         .args([flag, cmd])
                         .stdout(std::process::Stdio::inherit())

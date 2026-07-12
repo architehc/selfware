@@ -1471,7 +1471,7 @@ impl WorkflowExecutor {
                     None,
                 );
 
-                let (shell, flag) = crate::tools::shell::default_shell();
+                let (shell, flag) = crate::tools::shell_exec::default_shell();
                 let shell_future = Command::new(shell)
                     .arg(flag)
                     .arg(&resolved_cmd)

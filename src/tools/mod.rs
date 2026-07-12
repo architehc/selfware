@@ -53,7 +53,6 @@ pub mod prompt;
 pub mod pty_shell;
 pub mod screen_capture;
 pub mod search;
-pub mod shell;
 pub mod shell_exec;
 pub mod task_focus;
 pub mod tool_search;

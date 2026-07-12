@@ -11,7 +11,7 @@ use selfware::config::SafetyConfig;
 use selfware::tools::file::{DirectoryTree, FileEdit, FileRead, FileWrite};
 use selfware::tools::git::GitStatus;
 use selfware::tools::search::GrepSearch;
-use selfware::tools::shell::ShellExec;
+use selfware::tools::shell_exec::ShellExec;
 use selfware::tools::Tool;
 
 use serde_json::{json, Value};
@@ -279,7 +279,7 @@ async fn file_edit_old_str_not_found() {
 
 #[tokio::test]
 async fn shell_exec_schema_contract() {
-    let tool = ShellExec::new();
+    let tool = ShellExec;
     assert_metadata(&tool);
     assert_valid_schema(&tool.schema(), tool.name());
 
@@ -292,7 +292,7 @@ async fn shell_exec_schema_contract() {
 
 #[tokio::test]
 async fn shell_exec_valid_execution() {
-    let tool = ShellExec::new();
+    let tool = ShellExec;
     let result = tool
         .execute(json!({"command": "echo hello", "timeout_secs": 5}))
         .await;
@@ -309,7 +309,7 @@ async fn shell_exec_valid_execution() {
 
 #[tokio::test]
 async fn shell_exec_invalid_args() {
-    let tool = ShellExec::new();
+    let tool = ShellExec;
     // Missing required "command"
     let result = tool.execute(json!({})).await;
     assert!(
@@ -474,7 +474,7 @@ async fn all_core_tools_schema_has_required_subset_of_properties() {
         Box::new(FileWrite::new()),
         Box::new(FileEdit::new()),
         Box::new(DirectoryTree::new()),
-        Box::new(ShellExec::new()),
+        Box::new(ShellExec),
         Box::new(GrepSearch),
         Box::new(GitStatus::default()),
     ];

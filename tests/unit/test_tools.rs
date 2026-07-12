@@ -1,6 +1,6 @@
 use selfware::tools::{
     file::{DirectoryTree, FileEdit, FileRead, FileWrite},
-    shell::ShellExec,
+    shell_exec::ShellExec,
     Tool, ToolRegistry,
 };
 use serde_json::json;
@@ -26,7 +26,7 @@ async fn test_file_read_not_found() {
 
 #[tokio::test]
 async fn test_shell_exec_echo() {
-    let tool = ShellExec::new();
+    let tool = ShellExec;
     let args = json!({"command": "echo 'hello'", "timeout_secs": 5});
 
     let result = tool.execute(args).await.unwrap();
@@ -158,7 +158,7 @@ async fn test_directory_tree_nonexistent_directory_returns_error() {
 /// returning either an error or a non-zero exit code instead of panicking.
 #[tokio::test]
 async fn test_shell_exec_empty_command_returns_error_or_nonzero() {
-    let tool = ShellExec::new();
+    let tool = ShellExec;
     let args = json!({"command": "", "timeout_secs": 5});
 
     let result = tool.execute(args).await;

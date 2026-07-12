@@ -1,7 +1,7 @@
 //! PTY-based interactive shell sessions.
 //!
 //! Provides persistent shell sessions that survive across multiple tool
-//! invocations, unlike the one-shot [`ShellExec`](super::shell::ShellExec).
+//! invocations, unlike the one-shot [`ShellExec`](super::shell_exec::ShellExec).
 //! Each session maintains a child shell process with piped stdin/stdout/stderr
 //! and uses a completion marker to detect when a command has finished.
 
