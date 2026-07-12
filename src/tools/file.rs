@@ -329,7 +329,19 @@ impl Tool for FileRead {
         validate_tool_path(&args.path, &safety)?;
         let path = PathBuf::from(&args.path);
 
-        // Check file size before reading to prevent OOM on huge files
+        // A line_range lets us stream ONLY the requested slice, so a large file
+        // can be sliced without loading it whole or tripping the size limit.
+        if let Some((start, end)) = args.line_range {
+            let (selected_content, lines_scanned) = read_line_slice(&path, start, end).await?;
+            return Ok(serde_json::json!({
+                "content": selected_content,
+                "total_lines": lines_scanned,
+                "truncated": true,
+                "encoding": "utf-8"
+            }));
+        }
+
+        // Whole-file read: guard against OOM on huge files.
         if let Ok(metadata) = tokio::fs::metadata(&path).await {
             if metadata.len() > MAX_READ_SIZE {
                 return Err(ToolError::FileTooLarge {
@@ -346,19 +358,11 @@ impl Tool for FileRead {
         record_file_snapshot(&args.path, &content);
 
         let total_lines = content.lines().count();
-        let (start, end) = args.line_range.unwrap_or((1, total_lines));
-
-        let selected_content: String = content
-            .lines()
-            .skip(start.saturating_sub(1))
-            .take(end.saturating_sub(start) + 1)
-            .collect::<Vec<_>>()
-            .join("\n");
 
         Ok(serde_json::json!({
-            "content": selected_content,
+            "content": content,
             "total_lines": total_lines,
-            "truncated": args.line_range.is_some(),
+            "truncated": false,
             "encoding": "utf-8"
         }))
     }
@@ -1118,6 +1122,45 @@ fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
     })
 }
 
+/// Read only lines `start..=end` (1-based, inclusive) by streaming the file, so
+/// a large file can be sliced without loading it all into memory. Bytes are
+/// decoded as UTF-8 lossily (adequate for a line slice of source/text files).
+/// Returns the joined slice and the number of lines scanned (== the true total
+/// only when the scan reached EOF).
+async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(String, usize)> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    // Preserve the legacy contract that an inverted range (end < start) yields
+    // the single line at `start`.
+    let effective_end = end.max(start);
+    let file = tokio::fs::File::open(path).await?;
+    let mut reader = BufReader::new(file);
+    let mut selected: Vec<String> = Vec::new();
+    let mut lineno = 0usize;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        let n = reader.read_until(b'\n', &mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        lineno += 1;
+        if lineno >= start && lineno <= effective_end {
+            let mut line = String::from_utf8_lossy(&buf).into_owned();
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            selected.push(line);
+        }
+        if lineno >= effective_end {
+            break; // stop early — don't read the rest of a huge file
+        }
+    }
+    Ok((selected.join("\n"), lineno))
+}
+
 /// Write content to a file atomically using a temporary file and rename.
 pub(crate) async fn write_atomic(path: &Path, content: &str) -> Result<()> {
     let parent = path
@@ -1241,6 +1284,37 @@ mod tests {
         assert!(content.contains("line2"));
         assert!(content.contains("line4"));
         assert!(!content.contains("line1"));
+    }
+
+    #[tokio::test]
+    async fn file_read_line_range_streams_exact_slice() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("big.txt");
+        // 10k lines; slicing must return exactly the requested window and stop
+        // early (lines_scanned == end), not read/return the whole file.
+        let body: String = (1..=10_000).map(|i| format!("line{i}\n")).collect();
+        fs::write(&file_path, &body).unwrap();
+
+        let tool = FileRead::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "line_range": [3, 5]
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["content"].as_str().unwrap(), "line3\nline4\nline5");
+        assert_eq!(result["truncated"], true);
+        // Scanned only up to `end` (5), proving it stopped early.
+        assert_eq!(result["total_lines"], 5);
+
+        // A CRLF file slices cleanly (carriage returns stripped).
+        let crlf = temp_dir.path().join("crlf.txt");
+        fs::write(&crlf, "a\r\nb\r\nc\r\n").unwrap();
+        let args = serde_json::json!({
+            "path": crlf.to_str().unwrap(),
+            "line_range": [2, 2]
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["content"].as_str().unwrap(), "b");
     }
 
     #[tokio::test]
