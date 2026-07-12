@@ -526,6 +526,12 @@ impl Agent {
                 StreamChunk::FinishReason(reason) => {
                     captured_finish_reason = Some(reason);
                 }
+                StreamChunk::Error(msg) => {
+                    return Err(anyhow::anyhow!(
+                        "Provider streamed an error mid-response: {}",
+                        msg
+                    ));
+                }
                 StreamChunk::Done => break,
             }
         }

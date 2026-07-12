@@ -195,6 +195,12 @@ impl StreamingResponse {
                 StreamChunk::FinishReason(reason) => {
                     finish_reason = Some(reason);
                 }
+                StreamChunk::Error(msg) => {
+                    return Err(anyhow::anyhow!(
+                        "Provider streamed an error mid-response: {}",
+                        msg
+                    ));
+                }
                 StreamChunk::Done => break,
             }
         }
@@ -294,6 +300,9 @@ pub enum StreamChunk {
     /// the backend includes it on the SSE choice; consumers that don't care
     /// can safely ignore it.
     FinishReason(String),
+    /// The provider sent an error event mid-stream (e.g. an OpenAI-style
+    /// `{"error": {...}}` object). Carries the error message.
+    Error(String),
     /// Stream is complete
     Done,
 }
@@ -431,6 +440,15 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Content(text) if text == "hello"));
     }
+
+    #[test]
+    fn parse_sse_event_handles_mid_stream_error() {
+        let event = "data: {\"error\":{\"message\":\"boom\"}}\n\n";
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = parse_sse_event(event, &mut acc);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::Error(msg) if msg == "boom"));
+    }
 }
 
 /// Parse a Server-Sent Events (SSE) event, returning zero or more StreamChunks.
@@ -463,6 +481,17 @@ pub(crate) fn parse_sse_event(
                 continue;
             }
         };
+
+        if let Some(err) = json.get("error") {
+            let msg = err
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| err.to_string());
+            chunks.push(StreamChunk::Error(msg));
+            continue;
+        }
+
         let choice = json.get("choices").and_then(|c| c.get(0));
         let delta = choice.and_then(|c| c.get("delta"));
 
