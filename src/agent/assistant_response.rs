@@ -479,6 +479,11 @@ impl Agent {
             native_tool_calls = if kept.is_empty() { None } else { Some(kept) };
         }
 
+        // Estimate the prompt size BEFORE appending the assistant reply, so the
+        // usage fallback below (used when the backend omits `usage`) doesn't
+        // double-count this response in the input total.
+        let prompt_token_estimate = self.estimate_messages_tokens();
+
         self.messages.push(crate::api::types::Message {
             role: "assistant".to_string(),
             content: history_content.into(),
@@ -488,23 +493,52 @@ impl Agent {
             name: None,
         });
 
-        // Accumulate token usage from this assistant step.
-        if let Some(ref meta) = chat_metadata {
-            if let Some(prompt) = meta.prompt_tokens {
-                self.cumulative_token_usage.input += prompt as usize;
-            }
-            if let Some(completion) = meta.completion_tokens {
-                self.cumulative_token_usage.output += completion as usize;
-            }
-            if let Some(total) = meta.total_tokens {
+        // Accumulate token usage from this assistant step. Prefer the provider-
+        // reported numbers, but fall back to a tokenizer estimate when the
+        // backend omits `usage` (common on local vLLM/SGLang). Without this,
+        // cumulative usage never grows on those backends and `max_budget_tokens`
+        // silently never trips. The estimate is intentionally conservative — a
+        // hard cap should err toward stopping slightly early, not overshooting.
+        let reported_prompt = chat_metadata
+            .as_ref()
+            .and_then(|m| m.prompt_tokens)
+            .map(|p| p as usize);
+        let reported_completion = chat_metadata
+            .as_ref()
+            .and_then(|m| m.completion_tokens)
+            .map(|c| c as usize);
+        let reported_total = chat_metadata.as_ref().and_then(|m| m.total_tokens);
+
+        let output_estimate = crate::token_count::estimate_content_tokens(&content)
+            + reasoning
+                .as_ref()
+                .map(|r| crate::token_count::estimate_content_tokens(r))
+                .unwrap_or(0);
+        let (input_tokens, output_tokens) = resolve_step_token_counts(
+            reported_prompt,
+            reported_completion,
+            prompt_token_estimate,
+            output_estimate,
+        );
+
+        self.cumulative_token_usage.input += input_tokens;
+        self.cumulative_token_usage.output += output_tokens;
+        // Trust a provider-reported total only when it also reported both
+        // components; otherwise derive it from the (possibly estimated)
+        // running input/output so the total can't disagree with the parts.
+        if reported_prompt.is_some() && reported_completion.is_some() {
+            if let Some(total) = reported_total {
                 self.cumulative_token_usage.total += total as usize;
             } else {
                 self.cumulative_token_usage.total =
                     self.cumulative_token_usage.input + self.cumulative_token_usage.output;
             }
-            if let Some(cost) = meta.cost {
-                self.cumulative_cost_usd += cost;
-            }
+        } else {
+            self.cumulative_token_usage.total =
+                self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        }
+        if let Some(cost) = chat_metadata.as_ref().and_then(|m| m.cost) {
+            self.cumulative_cost_usd += cost;
         }
 
         let response = AssistantStepResponse {
@@ -559,6 +593,49 @@ pub(super) fn sanitize_tool_calls(
         .collect();
     let dropped = before - kept.len();
     (kept, dropped)
+}
+
+/// Resolve a step's (input, output) token counts, preferring provider-reported
+/// values and falling back to tokenizer estimates when the backend omits
+/// `usage`. Keeping this pure makes the fallback behavior directly testable.
+pub(super) fn resolve_step_token_counts(
+    reported_prompt: Option<usize>,
+    reported_completion: Option<usize>,
+    prompt_estimate: usize,
+    output_estimate: usize,
+) -> (usize, usize) {
+    (
+        reported_prompt.unwrap_or(prompt_estimate),
+        reported_completion.unwrap_or(output_estimate),
+    )
+}
+
+#[cfg(test)]
+mod usage_fallback_tests {
+    use super::resolve_step_token_counts;
+
+    #[test]
+    fn uses_reported_values_when_present() {
+        let (input, output) = resolve_step_token_counts(Some(1200), Some(300), 999, 999);
+        assert_eq!(input, 1200);
+        assert_eq!(output, 300);
+    }
+
+    #[test]
+    fn falls_back_to_estimates_when_usage_absent() {
+        // Backend omitted usage entirely (common on local vLLM/SGLang).
+        let (input, output) = resolve_step_token_counts(None, None, 1500, 220);
+        assert_eq!(input, 1500);
+        assert_eq!(output, 220);
+    }
+
+    #[test]
+    fn mixes_reported_and_estimated_per_field() {
+        // Provider gave prompt tokens but not completion tokens.
+        let (input, output) = resolve_step_token_counts(Some(1200), None, 999, 220);
+        assert_eq!(input, 1200);
+        assert_eq!(output, 220);
+    }
 }
 
 #[cfg(test)]
