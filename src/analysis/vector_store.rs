@@ -1596,6 +1596,11 @@ impl VectorStore {
             .get_mut(collection_name)
             .with_context(|| format!("index for collection '{}' not found", collection_name))?;
 
+        // Clear any previously-indexed chunks for this file before re-adding, so
+        // re-indexing a changed file replaces its chunks instead of accumulating
+        // stale ones (which would grow the collection unbounded toward MAX_CHUNKS).
+        collection.remove_file(file_path);
+
         // Add chunks with embeddings
         for (chunk, embedding) in chunks.into_iter().zip(embeddings) {
             let chunk_id = chunk.id.clone();
@@ -2486,6 +2491,39 @@ impl Point {
 
         let collection = store.get_collection("project").unwrap();
         assert!(!collection.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reindex_file_replaces_chunks_not_accumulates() {
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut store = VectorStore::new(provider);
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        store.collection("project", CollectionScope::Project);
+
+        // First index of a 3-function file.
+        std::fs::write(&file_path, "pub fn a() {}\npub fn b() {}\npub fn c() {}").unwrap();
+        store.index_file("project", &file_path).await.unwrap();
+        let first = store.get_collection("project").unwrap().len();
+        assert!(first >= 1);
+
+        // Re-index the SAME file with SHRUNK content: stale chunks must be
+        // removed, not accumulated on top of the old ones.
+        std::fs::write(&file_path, "pub fn a() {}").unwrap();
+        store.index_file("project", &file_path).await.unwrap();
+        let second = store.get_collection("project").unwrap().len();
+        assert!(
+            second <= first,
+            "re-index of a smaller file must not leave stale chunks (first={first}, second={second})"
+        );
+
+        // Re-indexing identical content again is idempotent — no growth.
+        store.index_file("project", &file_path).await.unwrap();
+        let third = store.get_collection("project").unwrap().len();
+        assert_eq!(
+            second, third,
+            "repeated re-index must not accumulate chunks (second={second}, third={third})"
+        );
     }
 
     #[tokio::test]
