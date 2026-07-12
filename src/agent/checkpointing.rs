@@ -12,7 +12,7 @@ use crate::self_healing::ErrorOccurrence;
 
 impl Agent {
     /// Resume a task from a checkpoint
-    pub async fn resume(config: Config, task_id: &str) -> Result<Self> {
+    pub async fn resume(mut config: Config, task_id: &str) -> Result<Self> {
         // Wrap the sync CheckpointManager::default_path() in spawn_blocking to
         // avoid stalling the async runtime with blocking fs I/O.
         let checkpoint_manager = tokio::task::spawn_blocking(CheckpointManager::default_path)
@@ -44,6 +44,32 @@ impl Agent {
             "   Current step: {}, Status: {:?}",
             checkpoint.current_step, checkpoint.status
         );
+
+        // Restore the hard budget caps persisted at checkpoint time, unless the
+        // resume command re-passed a flag (CLI override wins). Without this a
+        // resume that omits the flags would run uncapped even though cumulative
+        // consumption is restored — the "uncapped resume = unbounded spend"
+        // gap. `config.agent.max_*` here already reflects any CLI/env override.
+        if config.agent.max_budget_tokens.is_none() {
+            config.agent.max_budget_tokens = checkpoint.max_budget_tokens;
+        }
+        if config.agent.max_wall_secs.is_none() {
+            config.agent.max_wall_secs = checkpoint.max_wall_secs;
+        }
+        if config.agent.max_cost_usd.is_none() {
+            config.agent.max_cost_usd = checkpoint.max_cost_usd;
+        }
+        if checkpoint.max_budget_tokens.is_some()
+            || checkpoint.max_wall_secs.is_some()
+            || checkpoint.max_cost_usd.is_some()
+        {
+            println!(
+                "   Budget caps: tokens={:?}, wall_secs={:?}, cost_usd={:?}",
+                config.agent.max_budget_tokens,
+                config.agent.max_wall_secs,
+                config.agent.max_cost_usd
+            );
+        }
 
         // Build all restored state in temporary variables first, then commit
         // atomically to the agent. This prevents partial state if any step fails.
@@ -220,6 +246,13 @@ impl Agent {
             mutation_gate_rejections: self.mutation_gate_rejections,
             prefill_400_count: self.prefill_400_count,
         };
+
+        // Persist the hard budget caps themselves (CLI-only, `#[serde(skip)]` on
+        // AgentConfig) so a resumed run keeps its limits instead of running
+        // uncapped when the resume command omits the flags.
+        checkpoint.max_budget_tokens = self.config.agent.max_budget_tokens;
+        checkpoint.max_wall_secs = self.config.agent.max_wall_secs;
+        checkpoint.max_cost_usd = self.config.agent.max_cost_usd;
 
         checkpoint
     }

@@ -353,6 +353,19 @@ pub struct TaskCheckpoint {
     /// can't reset its way out of the guards on every restart.
     #[serde(default)]
     pub guard_counters: GuardCounters,
+
+    /// Hard budget caps themselves, carried across resume. `AgentConfig` marks
+    /// these `#[serde(skip)]` (CLI-only), so without persisting them here a
+    /// resume that doesn't re-pass `--max-budget-tokens`/`--max-wall-secs`/
+    /// `--max-cost-usd` would run uncapped — even though the cumulative
+    /// consumption above is restored. Restored on resume unless the CLI
+    /// overrides them.
+    #[serde(default)]
+    pub max_budget_tokens: Option<usize>,
+    #[serde(default)]
+    pub max_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
 }
 
 impl TaskCheckpoint {
@@ -563,6 +576,9 @@ impl TaskCheckpoint {
             elapsed_wall_secs: 0,
             cumulative_cost_usd: 0.0,
             guard_counters: GuardCounters::default(),
+            max_budget_tokens: None,
+            max_wall_secs: None,
+            max_cost_usd: None,
         }
     }
 
@@ -1702,6 +1718,39 @@ mod tests {
         assert_eq!(loaded.status, TaskStatus::Paused);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn budget_caps_survive_serialization_round_trip() {
+        let mut checkpoint =
+            TaskCheckpoint::new("task_caps".to_string(), "Capped task".to_string());
+        checkpoint.max_budget_tokens = Some(500_000);
+        checkpoint.max_wall_secs = Some(21_600);
+        checkpoint.max_cost_usd = Some(4.50);
+
+        let json = serde_json::to_string(&checkpoint).unwrap();
+        let loaded: TaskCheckpoint = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(loaded.max_budget_tokens, Some(500_000));
+        assert_eq!(loaded.max_wall_secs, Some(21_600));
+        assert_eq!(loaded.max_cost_usd, Some(4.50));
+    }
+
+    #[test]
+    fn budget_caps_default_to_none_on_legacy_checkpoint() {
+        // A checkpoint written before the caps existed (no cap keys in the JSON)
+        // must deserialize with the caps as None via serde(default), not fail.
+        let checkpoint = TaskCheckpoint::new("old".to_string(), "d".to_string());
+        let mut value = serde_json::to_value(&checkpoint).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("max_budget_tokens");
+        obj.remove("max_wall_secs");
+        obj.remove("max_cost_usd");
+
+        let loaded: TaskCheckpoint = serde_json::from_value(value).unwrap();
+        assert_eq!(loaded.max_budget_tokens, None);
+        assert_eq!(loaded.max_wall_secs, None);
+        assert_eq!(loaded.max_cost_usd, None);
     }
 
     #[test]
