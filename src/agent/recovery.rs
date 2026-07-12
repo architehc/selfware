@@ -1001,11 +1001,11 @@ mod tests {
     #[test]
     fn extract_mentioned_image_paths_finds_absolute_image() {
         let paths = extract_mentioned_image_paths(
-            "Use vision_analyze on /home/ivo/radarcam/samples/sample_3_00000693.jpg and answer.",
+            "Use vision_analyze on /tmp/project/samples/frame_00000693.jpg and answer.",
         );
         assert_eq!(
             paths,
-            vec!["/home/ivo/radarcam/samples/sample_3_00000693.jpg".to_string()]
+            vec!["/tmp/project/samples/frame_00000693.jpg".to_string()]
         );
     }
 
@@ -1026,10 +1026,10 @@ mod tests {
     #[test]
     fn extract_mentioned_path_finds_absolute_markdown_file() {
         let path = extract_mentioned_path(
-            "Use file_read on /home/ivo/radarcam/AGENTS.md and answer in one line.",
+            "Use file_read on /tmp/project/AGENTS.md and answer in one line.",
         )
         .expect("expected path");
-        assert_eq!(path, "/home/ivo/radarcam/AGENTS.md");
+        assert_eq!(path, "/tmp/project/AGENTS.md");
     }
 
     #[test]

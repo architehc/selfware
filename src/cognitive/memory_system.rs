@@ -470,7 +470,7 @@ mod tests {
             .canonicalize()
             .unwrap_or_else(|_| temp.path().to_path_buf());
         let home = temp_root.join("home");
-        let project = home.join("projects").join("radarcam");
+        let project = home.join("projects").join("myproject");
         let src = project.join("src");
         std::fs::create_dir_all(&src).unwrap();
 
@@ -503,14 +503,14 @@ mod tests {
     fn test_format_workspace_guidance_for_prompt() {
         let files = vec![WorkspaceGuidanceFile {
             path: PathBuf::from("/project/AGENTS.md"),
-            content: "Operate on /home/ivo/radarcam.".to_string(),
+            content: "Operate on /tmp/project.".to_string(),
         }];
 
         let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files);
         assert!(formatted.contains("## Workspace Guidance"));
         assert!(formatted.contains("Follow the most local guidance file"));
         assert!(formatted.contains("### From `/project/AGENTS.md`"));
-        assert!(formatted.contains("Operate on /home/ivo/radarcam."));
+        assert!(formatted.contains("Operate on /tmp/project."));
     }
 
     #[test]

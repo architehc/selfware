@@ -353,7 +353,7 @@ impl PermissionChecker {
 fn is_protected_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "file_delete" | "shell_exec" | "container_remove" | "compose_down" | "radarcam_test"
+        "file_delete" | "shell_exec" | "container_remove" | "compose_down"
     )
 }
 
@@ -444,12 +444,6 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
 
         // Code map
         "code_map" | "context_budget" | "context_action" => ToolMetadata::read_only(),
-
-        // RadarCam tools
-        "radarcam_status" | "radarcam_frame" | "radarcam_logs" => ToolMetadata::network(),
-        "radarcam_control" => ToolMetadata::custom(false, false, RiskLevel::Medium, true, false),
-        "radarcam_test" => ToolMetadata::shell(),
-        "radarcam_introspect" => ToolMetadata::custom(false, false, RiskLevel::Medium, true, false),
 
         // Additional file editors — these MUTATE files (found missing by the
         // registry↔safety parity test; the permissive default under-classified
@@ -580,24 +574,24 @@ mod tests {
     }
 
     #[test]
-    fn test_radarcam_test_prompts_in_auto_mode() {
-        // radarcam_test executes shell commands and must require confirmation in Auto mode
+    fn test_shell_meta_prompts_in_auto_mode() {
+        // A shell tool executes commands and must require confirmation in Auto mode.
         let checker = PermissionChecker::new(ExecutionMode::Auto);
-        let radarcam_test_meta = ToolMetadata::shell();
-        let result = checker.check("radarcam_test", &radarcam_test_meta, &Value::Null);
+        let shell_meta = ToolMetadata::shell();
+        let result = checker.check("shell_exec", &shell_meta, &Value::Null);
         assert!(
             matches!(result, PermissionResult::Prompt { .. }),
-            "radarcam_test should prompt in Auto mode, got {:?}",
+            "a shell tool should prompt in Auto mode, got {:?}",
             result
         );
     }
 
     #[test]
-    fn test_radarcam_control_auto_approved_in_auto_mode() {
-        // radarcam_control is Medium risk — should be auto-approved in Auto mode
+    fn test_medium_risk_auto_approved_in_auto_mode() {
+        // A Medium-risk, non-destructive tool should be auto-approved in Auto mode.
         let checker = PermissionChecker::new(ExecutionMode::Auto);
-        let control_meta = ToolMetadata::custom(false, false, RiskLevel::Medium, true, false);
-        let result = checker.check("radarcam_control", &control_meta, &Value::Null);
+        let meta = ToolMetadata::custom(false, false, RiskLevel::Medium, true, false);
+        let result = checker.check("http_request", &meta, &Value::Null);
         assert_eq!(result, PermissionResult::Allow);
     }
 

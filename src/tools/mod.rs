@@ -51,7 +51,6 @@ pub mod patch_apply;
 pub mod process;
 pub mod prompt;
 pub mod pty_shell;
-pub mod radarcam;
 pub mod screen_capture;
 pub mod search;
 pub mod shell;
@@ -81,9 +80,6 @@ use page_controller::PageControlTool;
 use patch_apply::PatchApply;
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
 use pty_shell::PtyShellTool;
-use radarcam::{
-    RadarCamControl, RadarCamFrame, RadarCamIntrospect, RadarCamLogs, RadarCamStatus, RadarCamTest,
-};
 use screen_capture::ScreenCapture;
 use search::{GlobFind, SymbolSearch};
 use shell_exec::ShellExec;
@@ -450,14 +446,6 @@ impl ToolRegistry {
         registry.register_deferred(ContainerRemove);
         registry.register_deferred(ComposeUp);
         registry.register_deferred(ComposeDown);
-
-        // Deferred: RadarCam integration tools
-        registry.register_deferred(RadarCamStatus);
-        registry.register_deferred(RadarCamFrame);
-        registry.register_deferred(RadarCamControl);
-        registry.register_deferred(RadarCamLogs);
-        registry.register_deferred(RadarCamTest);
-        registry.register_deferred(RadarCamIntrospect);
 
         // Deferred: Screen capture
         registry.register_deferred(ScreenCapture);

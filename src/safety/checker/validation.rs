@@ -312,12 +312,6 @@ impl SafetyChecker {
             | "lsp_document_symbols"
             | "lsp_workspace_symbols"
             | "lsp_diagnostics"
-            | "radarcam_status"
-            | "radarcam_frame"
-            | "radarcam_logs"
-            | "radarcam_introspect"
-            | "radarcam_control"
-            | "radarcam_test"
             // Analysis / context / interaction tools: no filesystem or shell
             // mutation (metadata-classified read-only).
             | "code_metrics"
