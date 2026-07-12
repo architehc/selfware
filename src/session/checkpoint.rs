@@ -279,6 +279,8 @@ pub struct CheckpointDelta {
     pub cumulative_tokens: Option<usize>,
     #[serde(default)]
     pub elapsed_wall_secs: Option<u64>,
+    #[serde(default)]
+    pub cumulative_cost_usd: Option<f64>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
 
     // Visual assertion state (changes are always recorded, None means no change)
@@ -326,6 +328,10 @@ pub struct TaskCheckpoint {
     /// time the task was paused/not running).
     #[serde(default)]
     pub elapsed_wall_secs: u64,
+    /// Total USD cost consumed so far across every segment, so a resumed run
+    /// keeps counting against `max_cost_usd` instead of resetting the cap.
+    #[serde(default)]
+    pub cumulative_cost_usd: f64,
 }
 
 impl TaskCheckpoint {
@@ -350,6 +356,8 @@ impl TaskCheckpoint {
             (self.cumulative_tokens != base.cumulative_tokens).then_some(self.cumulative_tokens);
         let elapsed_wall_secs =
             (self.elapsed_wall_secs != base.elapsed_wall_secs).then_some(self.elapsed_wall_secs);
+        let cumulative_cost_usd = (self.cumulative_cost_usd != base.cumulative_cost_usd)
+            .then_some(self.cumulative_cost_usd);
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
             // Delta format cannot encode "explicitly clear git checkpoint".
             // Force a full checkpoint write for this transition.
@@ -403,6 +411,7 @@ impl TaskCheckpoint {
             || updated_tokens.is_some()
             || cumulative_tokens.is_some()
             || elapsed_wall_secs.is_some()
+            || cumulative_cost_usd.is_some()
             || git_checkpoint.is_some()
             || pending_changed;
 
@@ -426,6 +435,7 @@ impl TaskCheckpoint {
             updated_tokens,
             cumulative_tokens,
             elapsed_wall_secs,
+            cumulative_cost_usd,
             git_checkpoint,
             pending_visual_assertion,
         })
@@ -476,6 +486,9 @@ impl TaskCheckpoint {
         if let Some(secs) = delta.elapsed_wall_secs {
             self.elapsed_wall_secs = secs;
         }
+        if let Some(cost) = delta.cumulative_cost_usd {
+            self.cumulative_cost_usd = cost;
+        }
         if let Some(ref git) = delta.git_checkpoint {
             self.git_checkpoint = Some(git.clone());
         }
@@ -520,6 +533,7 @@ impl TaskCheckpoint {
             git_checkpoint: None,
             cumulative_tokens: 0,
             elapsed_wall_secs: 0,
+            cumulative_cost_usd: 0.0,
         }
     }
 
@@ -2592,10 +2606,12 @@ mod tests {
         let mut cp = TaskCheckpoint::new("t1".to_string(), "desc".to_string());
         cp.cumulative_tokens = 12345;
         cp.elapsed_wall_secs = 678;
+        cp.cumulative_cost_usd = 1.2345;
         let json = serde_json::to_string(&cp).unwrap();
         let back: TaskCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(back.cumulative_tokens, 12345);
         assert_eq!(back.elapsed_wall_secs, 678);
+        assert_eq!(back.cumulative_cost_usd, 1.2345);
 
         // Legacy checkpoints without these fields must default to 0, not fail.
         let mut legacy_value = serde_json::to_value(&TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
@@ -2603,10 +2619,12 @@ mod tests {
         if let serde_json::Value::Object(ref mut map) = legacy_value {
             map.remove("cumulative_tokens");
             map.remove("elapsed_wall_secs");
+            map.remove("cumulative_cost_usd");
         }
         let restored: TaskCheckpoint = serde_json::from_value(legacy_value).unwrap();
         assert_eq!(restored.cumulative_tokens, 0);
         assert_eq!(restored.elapsed_wall_secs, 0);
+        assert_eq!(restored.cumulative_cost_usd, 0.0);
     }
 
     #[test]
@@ -2614,20 +2632,24 @@ mod tests {
         let mut base = TaskCheckpoint::new("t".to_string(), "d".to_string());
         base.cumulative_tokens = 100;
         base.elapsed_wall_secs = 30;
+        base.cumulative_cost_usd = 0.10;
         // A newer checkpoint that consumed more budget.
         let mut newer = base.clone();
         newer.version = base.version + 1;
         newer.current_step = base.current_step + 1;
         newer.cumulative_tokens = 500;
         newer.elapsed_wall_secs = 90;
+        newer.cumulative_cost_usd = 0.75;
         let delta = newer.compute_delta(&base).expect("delta should exist");
         assert_eq!(delta.cumulative_tokens, Some(500));
         assert_eq!(delta.elapsed_wall_secs, Some(90));
+        assert_eq!(delta.cumulative_cost_usd, Some(0.75));
         // Applying the delta to the base must update the budget (not keep it stale).
         let mut reconstructed = base.clone();
         reconstructed.apply_delta(&delta).unwrap();
         assert_eq!(reconstructed.cumulative_tokens, 500);
         assert_eq!(reconstructed.elapsed_wall_secs, 90);
+        assert_eq!(reconstructed.cumulative_cost_usd, 0.75);
     }
 
     #[test]

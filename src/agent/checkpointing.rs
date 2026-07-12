@@ -86,6 +86,7 @@ impl Agent {
         // accumulating across resume instead of restarting from zero.
         agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
         agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
+        agent.cumulative_cost_usd = checkpoint.cumulative_cost_usd;
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -211,6 +212,7 @@ impl Agent {
         // consume N× the configured token/wall budget).
         checkpoint.cumulative_tokens = self.cumulative_token_usage.total;
         checkpoint.elapsed_wall_secs = self.budget_elapsed_secs();
+        checkpoint.cumulative_cost_usd = self.cumulative_cost_usd;
 
         checkpoint
     }
@@ -1483,6 +1485,7 @@ mod tests {
             updated_tokens: None,
             cumulative_tokens: None,
             elapsed_wall_secs: None,
+            cumulative_cost_usd: None,
             git_checkpoint: None,
         };
         let result = cp.apply_delta(&delta);
@@ -1514,6 +1517,7 @@ mod tests {
             updated_tokens: None,
             cumulative_tokens: None,
             elapsed_wall_secs: None,
+            cumulative_cost_usd: None,
             git_checkpoint: None,
         };
         let result = cp.apply_delta(&delta);
@@ -1564,6 +1568,7 @@ mod tests {
             updated_tokens: Some(9999),
             cumulative_tokens: None,
             elapsed_wall_secs: None,
+            cumulative_cost_usd: None,
             git_checkpoint: Some(GitCheckpointInfo {
                 branch: "dev".to_string(),
                 commit_hash: "xyz789".to_string(),
@@ -1613,6 +1618,7 @@ mod tests {
             updated_tokens: None, // should not change
             cumulative_tokens: None,
             elapsed_wall_secs: None,
+            cumulative_cost_usd: None,
             git_checkpoint: None,
         };
 
@@ -1649,6 +1655,7 @@ mod tests {
             updated_tokens: Some(15000),
             cumulative_tokens: None,
             elapsed_wall_secs: None,
+            cumulative_cost_usd: None,
             git_checkpoint: None,
         };
 
