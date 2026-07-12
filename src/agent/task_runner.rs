@@ -4,7 +4,7 @@ use tracing::warn;
 
 use super::*;
 
-use super::failure_mode::{FailureMode, RunOutcome};
+use super::failure_mode::{FailureKind, FailureMode, RunOutcome};
 use super::tui_events::AgentEvent;
 
 enum PlannedToolExecution {
@@ -866,8 +866,7 @@ impl Agent {
                         Ok(PlannedToolExecution::Interrupted) => continue,
                         Ok(PlannedToolExecution::Completed) => {
                             record_state_transition("Executing", "Completed");
-                            self.record_task_outcome(task_description, Outcome::Success, None);
-                            let fm = self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
+                            let fm = self.finalize_natural_completion(task_description).await;
                             {
                                 let _ = &fm;
                                 let message = self.last_assistant_response.trim().to_string();
@@ -1027,8 +1026,7 @@ impl Agent {
                                 if mode == LoopMode::NewTask {
                                     progress.complete_phase();
                                 }
-                                self.record_task_outcome(task_description, Outcome::Success, None);
-                                self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
+                                self.finalize_natural_completion(task_description).await;
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -1061,8 +1059,7 @@ impl Agent {
                                 if mode == LoopMode::NewTask {
                                     progress.complete_phase();
                                 }
-                                self.record_task_outcome(task_description, Outcome::Success, None);
-                                self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
+                                self.finalize_natural_completion(task_description).await;
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -1383,8 +1380,7 @@ impl Agent {
                     if mode == LoopMode::NewTask {
                         progress.complete_phase();
                     }
-                    self.record_task_outcome(task_description, Outcome::Success, Some("[green]"));
-                    self.finalize_failure_mode(RunOutcome::NaturalCompletion).await;
+                    self.finalize_natural_completion(task_description).await;
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -1466,6 +1462,31 @@ impl Agent {
     /// Build a `FailureMode` for the current run state and surface it on the
     /// CLI. Also writes a `failure_mode.json` artifact next to the agent's
     /// checkpoint directory (best-effort; never fails the run).
+    /// Finalize a natural completion: classify the run FIRST, then record the
+    /// telemetry outcome from the verdict. Previously every natural-completion
+    /// site recorded `Outcome::Success` *before* classification ran, so a no-op
+    /// run (NoChange — zero mutating tool calls) was logged as a full success,
+    /// inflating the success rate (#43). NoChange (and any future non-Success
+    /// non-failure) is recorded as `Partial`: honest completion, but not a real
+    /// edit. Returns the classified `FailureMode`.
+    async fn finalize_natural_completion(&mut self, task_description: &str) -> FailureMode {
+        let fm = self
+            .finalize_failure_mode(RunOutcome::NaturalCompletion)
+            .await;
+        let (outcome, detail) = if fm.kind == FailureKind::Success {
+            (Outcome::Success, format!("[green] [{}]", fm.kind.tag()))
+        } else {
+            // NoChange and other non-failure completions: completed cleanly but
+            // changed nothing — don't claim a full success.
+            (
+                Outcome::Partial,
+                format!("no file changes [{}]", fm.kind.tag()),
+            )
+        };
+        self.record_task_outcome(task_description, outcome, Some(&detail));
+        fm
+    }
+
     async fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
         let mode = FailureMode::classify(self, outcome);
         self.last_run_failure_mode = Some(mode.clone());
