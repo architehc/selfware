@@ -49,17 +49,28 @@ impl ActionRateLimiter {
             .unwrap_or_default()
             .as_millis() as u64;
 
-        let last = self.last_action_ms.load(Ordering::Relaxed);
         let window_ms = 1000; // 1 second window
 
-        if now_ms - last > window_ms {
-            // New window
-            self.last_action_ms.store(now_ms, Ordering::Relaxed);
-            self.actions_in_window.store(1, Ordering::Relaxed);
-            true
-        } else {
-            let count = self.actions_in_window.fetch_add(1, Ordering::Relaxed) + 1;
-            count <= self.max_actions_per_sec as u64
+        loop {
+            let last = self.last_action_ms.load(Ordering::Acquire);
+            // saturating_sub avoids underflow to a huge value on clock skew
+            // (last > now), which would spuriously open a new window.
+            if now_ms.saturating_sub(last) > window_ms {
+                // Only the thread that wins this CAS opens the new window and
+                // resets the counter; losers retry and count against it.
+                if self
+                    .last_action_ms
+                    .compare_exchange(last, now_ms, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    self.actions_in_window.store(1, Ordering::Release);
+                    return true;
+                }
+                continue;
+            } else {
+                let count = self.actions_in_window.fetch_add(1, Ordering::AcqRel) + 1;
+                return count <= self.max_actions_per_sec as u64;
+            }
         }
     }
 }
@@ -144,6 +155,39 @@ mod tests {
         assert_eq!(limiter.max_actions_per_sec, 10);
         // First action should always pass
         assert!(limiter.check());
+    }
+
+    #[test]
+    fn rate_limiter_caps_concurrent_burst() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        // Many threads hammering a fresh limiter within one ~1s window must not
+        // let a burst through: the CAS window-claim prevents multiple threads
+        // from each resetting the counter (the old Relaxed load/store race).
+        let limiter = Arc::new(ActionRateLimiter::new(10));
+        let allowed = Arc::new(AtomicU64::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let l = Arc::clone(&limiter);
+            let a = Arc::clone(&allowed);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..50 {
+                    if l.check() {
+                        a.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let total = allowed.load(Ordering::Relaxed);
+        // 400 attempts complete in microseconds (~1 window). Allow 2 windows of
+        // slack for a rare boundary crossing; without the fix this blew far past.
+        assert!(
+            total >= 1 && total <= 20,
+            "concurrent burst must be capped near the limit, got {total}"
+        );
     }
 
     #[test]
