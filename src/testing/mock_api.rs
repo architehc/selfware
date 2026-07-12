@@ -295,6 +295,10 @@ async fn handle_connection(
     let is_post = request.starts_with("POST");
     let is_chat = is_post && request.contains("/v1/chat/completions");
     let is_completion = is_post && request.contains("/v1/completions") && !is_chat;
+    // A streaming request must be answered with SSE, not a plain JSON body —
+    // otherwise the client's streaming parser gets no events and the run stalls.
+    let is_streaming =
+        request.contains("\"stream\":true") || request.contains("\"stream\": true");
 
     if !is_chat && !is_completion {
         let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
@@ -321,8 +325,12 @@ async fn handle_connection(
 
     match mock_response {
         MockResponse::Text(text) => {
-            let body = format_chat_response(&config.model, &text, None);
-            write_http_response(&mut stream, 200, &body, &[]).await?;
+            if is_streaming {
+                write_sse_text_response(&mut stream, &text).await?;
+            } else {
+                let body = format_chat_response(&config.model, &text, None);
+                write_http_response(&mut stream, 200, &body, &[]).await?;
+            }
         }
         MockResponse::ToolCalls(calls) => {
             let tool_calls_json = format_tool_calls(&calls);
@@ -371,6 +379,33 @@ fn format_chat_response(model: &str, content: &str, tool_calls: Option<&str>) ->
         r#"{{"id":"mock-resp-1","object":"chat.completion","created":1700000000,"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"{}}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#,
         model, escaped_content, tool_calls_field, finish_reason,
     )
+}
+
+/// Write a Server-Sent Events (SSE) streaming chat response: the content as a
+/// single delta chunk, a final `finish_reason:"stop"` chunk with usage, then
+/// `[DONE]` — chunked-transfer-encoded like a real OpenAI-compatible stream.
+async fn write_sse_text_response(
+    stream: &mut tokio::net::TcpStream,
+    content: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let escaped = serde_json::to_string(content).unwrap_or_else(|_| "\"\"".to_string());
+    let escaped = &escaped[1..escaped.len() - 1];
+
+    let events = format!(
+        "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
+         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}}}\n\n\
+         data: [DONE]\n\n",
+        escaped
+    );
+    let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}0\r\n\r\n",
+        chunk
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
 }
 
 /// Serialize a list of [`MockToolCall`]s into the JSON array format expected

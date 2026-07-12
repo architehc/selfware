@@ -664,6 +664,10 @@ impl Agent {
         // Executing so the normal iteration budget and progress guards apply.
         let mut consecutive_planning_no_progress = 0u32;
         const MAX_CONSECUTIVE_PLANNING_NO_PROGRESS: u32 = 4;
+        // Planning is the run's first, most fragile turn. A transient provider
+        // outage that outlasts the client's per-request retry budget must not
+        // instantly kill an unattended run — retry a few times with backoff.
+        const MAX_PLANNING_RETRIES: u32 = 3;
 
         let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
         if mode == LoopMode::NewTask {
@@ -781,20 +785,47 @@ impl Agent {
 
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
-                    let has_tool_calls = match self.plan().await {
-                        Ok(has_tool_calls) => has_tool_calls,
-                        Err(e) => {
-                            if mode == LoopMode::NewTask {
-                                self.emit_event(AgentEvent::Error {
-                                    message: format!("Planning failed: {}", e),
-                                });
+                    let has_tool_calls = {
+                        let mut planning_attempt = 0u32;
+                        loop {
+                            match self.plan().await {
+                                Ok(has_tool_calls) => break has_tool_calls,
+                                Err(e) => {
+                                    // Persist resumable state before we risk giving up,
+                                    // so the task can be resumed even if planning
+                                    // ultimately fails on the first turn.
+                                    if let Err(ce) = self.save_checkpoint(task_description) {
+                                        warn!(
+                                            "Failed to checkpoint after planning error: {}",
+                                            ce
+                                        );
+                                    }
+                                    planning_attempt += 1;
+                                    if self.is_cancelled()
+                                        || planning_attempt >= MAX_PLANNING_RETRIES
+                                    {
+                                        if mode == LoopMode::NewTask {
+                                            self.emit_event(AgentEvent::Error {
+                                                message: format!("Planning failed: {}", e),
+                                            });
+                                        }
+                                        self.record_task_outcome(
+                                            task_description,
+                                            Outcome::Failure,
+                                            Some(&e.to_string()),
+                                        );
+                                        return Err(e);
+                                    }
+                                    let backoff = std::time::Duration::from_secs(
+                                        2u64.saturating_pow(planning_attempt).min(30),
+                                    );
+                                    warn!(
+                                        "Planning failed (attempt {}/{}): {} — retrying in {:?}",
+                                        planning_attempt, MAX_PLANNING_RETRIES, e, backoff
+                                    );
+                                    tokio::time::sleep(backoff).await;
+                                }
                             }
-                            self.record_task_outcome(
-                                task_description,
-                                Outcome::Failure,
-                                Some(&e.to_string()),
-                            );
-                            return Err(e);
                         }
                     };
 
@@ -2431,14 +2462,23 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_run_task_streaming_mode() {
+        // A substantial (>= 40 char) tool-less final answer completes a
+        // non-mutation task via the read-only acceptance path. (Earlier this
+        // test relied on an empty response being accepted as done, which is no
+        // longer valid — an empty/dropped response is not a completion.)
         let server = MockLlmServer::builder()
-            .with_response("Streaming plan.")
-            .with_response("Streaming done.")
+            .with_response("Streaming plan: I will read the stream and summarize it.")
+            .with_response(
+                "The streaming request has been fully processed and here is the \
+                 complete final summary of the result.",
+            )
             .build()
             .await;
         let config = mock_agent_config(format!("{}/v1", server.url()), true);
         let mut agent = Agent::new(config).await.unwrap();
-        assert!(agent.run_task("Stream this").await.is_ok());
+        // A read-only prose task ("describe ...") so a substantial tool-less
+        // answer is accepted as completion (exercising streaming end-to-end).
+        assert!(agent.run_task("Describe the streaming pipeline").await.is_ok());
         server.stop().await;
     }
 
