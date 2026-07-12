@@ -456,6 +456,29 @@ impl Agent {
         // need to include the thinking content."
         // Strip inline <think> blocks from content and omit reasoning_content.
         let history_content = super::recovery::strip_think_blocks(&content);
+
+        // Sanitize native tool calls before they enter history. A truncated
+        // stream can leave `ToolCallAccumulator::flush` emitting a tool_call
+        // whose arguments are not valid JSON (flush only checks id/name).
+        // Stored as `assistant.tool_calls` with no matching `role=tool` reply,
+        // that call is an unpaired tool_call — which strict backends
+        // (vLLM/SGLang) reject with a 400 on the *next* request, sending the
+        // run into a recovery death spiral. Dropping the malformed call makes
+        // the turn a no-op the loop nudges/retries instead. Sanitizing here
+        // (before both the history push and the dispatched response) keeps
+        // history and dispatch consistent, and covers native FC from the
+        // non-streaming path too.
+        if let Some(calls) = native_tool_calls.take() {
+            let (kept, dropped) = sanitize_tool_calls(calls);
+            if dropped > 0 {
+                debug!(
+                    "Sanitized {} malformed native tool call(s) from assistant step",
+                    dropped
+                );
+            }
+            native_tool_calls = if kept.is_empty() { None } else { Some(kept) };
+        }
+
         self.messages.push(crate::api::types::Message {
             role: "assistant".to_string(),
             content: history_content.into(),
@@ -508,5 +531,90 @@ impl Agent {
             }),
         );
         Ok(response)
+    }
+}
+
+/// Drop structurally-invalid tool calls (missing id/name, wrong type, or
+/// non-JSON arguments) before they enter conversation history.
+///
+/// See the call site in `get_assistant_step_response` for why an unpaired,
+/// malformed tool_call is dangerous (400 death spiral on strict backends).
+/// Returns the retained calls and the count dropped.
+pub(super) fn sanitize_tool_calls(
+    calls: Vec<crate::api::types::ToolCall>,
+) -> (Vec<crate::api::types::ToolCall>, usize) {
+    let before = calls.len();
+    let kept: Vec<_> = calls
+        .into_iter()
+        .filter(|tc| match tc.validate_structure() {
+            Ok(()) => true,
+            Err(e) => {
+                warn!(
+                    "Dropping malformed tool call '{}' before history push: {}",
+                    tc.function.name, e
+                );
+                false
+            }
+        })
+        .collect();
+    let dropped = before - kept.len();
+    (kept, dropped)
+}
+
+#[cfg(test)]
+mod sanitize_tool_calls_tests {
+    use super::sanitize_tool_calls;
+    use crate::api::types::{ToolCall, ToolFunction};
+
+    fn call(id: &str, name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: id.to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn keeps_well_formed_calls() {
+        let (kept, dropped) = sanitize_tool_calls(vec![
+            call("id1", "file_read", r#"{"path":"a.rs"}"#),
+            call("id2", "shell_exec", r#"{"command":"ls"}"#),
+        ]);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn drops_call_with_truncated_json_args() {
+        // Simulates a stream cut mid-arguments: valid id+name, invalid JSON.
+        let (kept, dropped) = sanitize_tool_calls(vec![
+            call("id1", "file_read", r#"{"path":"a.rs"}"#),
+            call("id2", "file_write", r#"{"path":"b.rs","content":"partial"#),
+        ]);
+        assert_eq!(dropped, 1);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "id1");
+    }
+
+    #[test]
+    fn drops_call_missing_name_or_id() {
+        let (kept, dropped) = sanitize_tool_calls(vec![
+            call("", "file_read", "{}"),
+            call("id2", "", "{}"),
+            call("id3", "file_read", "{}"),
+        ]);
+        assert_eq!(dropped, 2);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, "id3");
+    }
+
+    #[test]
+    fn empty_input_yields_empty_output() {
+        let (kept, dropped) = sanitize_tool_calls(vec![]);
+        assert!(kept.is_empty());
+        assert_eq!(dropped, 0);
     }
 }
