@@ -14,6 +14,92 @@ use tokio::process::Command;
 
 use crate::tools::cargo::{parse_cargo_json_messages, CompilerError, Severity};
 
+/// Captured result of a reaped verification command (see `run_reaped`).
+struct ReapedOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run a verification command with a timeout, capturing output and reaping the
+/// ENTIRE process group on timeout. A hung `cargo check` (or the `rustc`
+/// children it spawns) would otherwise stall the agent forever and leave
+/// orphaned processes holding `target/` locks — a self-reinforcing stall for
+/// unattended runs.
+async fn run_reaped(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    timeout_secs: u64,
+) -> Result<ReapedOutput> {
+    use tokio::io::AsyncReadExt;
+
+    let mut cmd = Command::new(program);
+    cmd.args(args).current_dir(cwd);
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed to spawn {}", program))?;
+    let pid = child.id();
+
+    let mut so = child.stdout.take();
+    let mut se = child.stderr.take();
+    let so_task = tokio::spawn(async move {
+        let mut b = Vec::new();
+        if let Some(ref mut s) = so {
+            let _ = s.read_to_end(&mut b).await;
+        }
+        b
+    });
+    let se_task = tokio::spawn(async move {
+        let mut b = Vec::new();
+        if let Some(ref mut s) = se {
+            let _ = s.read_to_end(&mut b).await;
+        }
+        b
+    });
+
+    let timeout = tokio::time::Duration::from_secs(timeout_secs.max(1));
+    let (success, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => (status.success(), false),
+        Ok(Err(e)) => return Err(e).with_context(|| format!("{} wait failed", program)),
+        Err(_) => {
+            #[cfg(unix)]
+            if let Some(p) = pid {
+                use nix::sys::signal::{killpg, Signal};
+                use nix::unistd::Pid;
+                let _ = killpg(Pid::from_raw(p as i32), Signal::SIGKILL);
+            }
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            (false, true)
+        }
+    };
+
+    let stdout = so_task.await.unwrap_or_default();
+    let mut stderr = se_task.await.unwrap_or_default();
+    if timed_out {
+        stderr.extend_from_slice(
+            format!(
+                "\n[selfware] {} timed out after {}s and its process group was killed.\n",
+                program, timeout_secs
+            )
+            .as_bytes(),
+        );
+    }
+
+    Ok(ReapedOutput {
+        success,
+        stdout,
+        stderr,
+    })
+}
+
 /// Verification result for a single check
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
@@ -717,13 +803,13 @@ impl VerificationGate {
     async fn run_cargo_check(&self) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = Command::new("cargo")
-            .arg("check")
-            .arg("--message-format=json")
-            .current_dir(&self.project_root)
-            .output()
-            .await
-            .context("Failed to run cargo check")?;
+        let output = run_reaped(
+            "cargo",
+            &["check", "--message-format=json"],
+            &self.project_root,
+            self.config.check_timeout_secs,
+        )
+        .await?;
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -733,9 +819,9 @@ impl VerificationGate {
 
         Ok(CheckResult {
             check_type: CheckType::TypeCheck,
-            passed: output.status.success(),
+            passed: output.success,
             duration_ms: duration,
-            output: if output.status.success() {
+            output: if output.success {
                 "Type check passed".to_string()
             } else {
                 stderr.to_string()
@@ -750,28 +836,29 @@ impl VerificationGate {
     async fn run_cargo_fmt_check(&self) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = Command::new("cargo")
-            .args(["fmt", "--check"])
-            .current_dir(&self.project_root)
-            .output()
-            .await
-            .context("Failed to run cargo fmt")?;
+        let output = run_reaped(
+            "cargo",
+            &["fmt", "--check"],
+            &self.project_root,
+            self.config.check_timeout_secs,
+        )
+        .await?;
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         Ok(CheckResult {
             check_type: CheckType::Format,
-            passed: output.status.success(),
+            passed: output.success,
             duration_ms: duration,
-            output: if output.status.success() {
+            output: if output.success {
                 "Formatting check passed".to_string()
             } else {
                 stdout.to_string()
             },
             errors: vec![],
             warnings: vec![],
-            suggestions: if !output.status.success() {
+            suggestions: if !output.success {
                 vec!["Run `cargo fmt` to fix formatting".to_string()]
             } else {
                 vec![]
@@ -839,12 +926,13 @@ impl VerificationGate {
     async fn run_cargo_clippy(&self) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = Command::new("cargo")
-            .args(["clippy", "--message-format=json", "--", "-D", "warnings"])
-            .current_dir(&self.project_root)
-            .output()
-            .await
-            .context("Failed to run cargo clippy")?;
+        let output = run_reaped(
+            "cargo",
+            &["clippy", "--message-format=json", "--", "-D", "warnings"],
+            &self.project_root,
+            self.config.check_timeout_secs,
+        )
+        .await?;
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -854,7 +942,7 @@ impl VerificationGate {
 
         Ok(CheckResult {
             check_type: CheckType::Lint,
-            passed: output.status.success(),
+            passed: output.success,
             duration_ms: duration,
             output: stderr.to_string(),
             errors,
@@ -867,12 +955,14 @@ impl VerificationGate {
     async fn run_custom_check(&self, check: &CustomCheck) -> Result<CheckResult> {
         let start = Instant::now();
 
-        let output = Command::new(&check.command)
-            .args(&check.args)
-            .current_dir(&self.project_root)
-            .output()
-            .await
-            .context(format!("Failed to run custom check: {}", check.name))?;
+        let args_ref: Vec<&str> = check.args.iter().map(|s| s.as_str()).collect();
+        let output = run_reaped(
+            &check.command,
+            &args_ref,
+            &self.project_root,
+            self.config.check_timeout_secs,
+        )
+        .await?;
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -880,7 +970,7 @@ impl VerificationGate {
 
         Ok(CheckResult {
             check_type: CheckType::Custom,
-            passed: output.status.success(),
+            passed: output.success,
             duration_ms: duration,
             output: format!("{}\n{}", stdout, stderr),
             errors: vec![],
@@ -1733,6 +1823,29 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn run_reaped_times_out_and_does_not_report_success() {
+        let dir = tempfile::tempdir().unwrap();
+        // A command that runs far longer than the 1s timeout must be killed and
+        // reported as not-successful (not hang the verifier forever).
+        let start = std::time::Instant::now();
+        let out = run_reaped("sleep", &["30"], dir.path(), 1).await.unwrap();
+        assert!(start.elapsed().as_secs() < 10, "should return at the timeout");
+        assert!(!out.success, "a timed-out check must not report success");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("timed out"),
+            "stderr should note the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_reaped_captures_a_normal_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_reaped("printf", &["hello"], dir.path(), 5).await.unwrap();
+        assert!(out.success);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
+    }
 
     #[test]
     fn test_verification_config_default() {
