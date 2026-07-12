@@ -724,10 +724,35 @@ impl ApiClient {
                     let status = response.status();
 
                     if status.is_success() {
-                        let body_text = response
-                            .text()
-                            .await
-                            .context("Failed to read response body")?;
+                        // Bound the body read too: with stream_client there is no
+                        // total reqwest timeout, so a backend that sends headers
+                        // then stalls mid-body would otherwise hang forever. Reuse
+                        // the generous response timeout and treat an elapse as a
+                        // retryable network error.
+                        let body_text = match tokio::time::timeout(
+                            Duration::from_secs(response_timeout_secs),
+                            response.text(),
+                        )
+                        .await
+                        {
+                            Ok(r) => r.context("Failed to read response body")?,
+                            Err(_elapsed) => {
+                                warn!(
+                                    "Non-streaming response body read timed out after {}s (attempt {}/{})",
+                                    response_timeout_secs,
+                                    attempt + 1,
+                                    self.retry_config.max_retries + 1
+                                );
+                                last_error = Some(
+                                    ApiError::Network(format!(
+                                        "Response body read timed out after {}s",
+                                        response_timeout_secs
+                                    ))
+                                    .into(),
+                                );
+                                continue;
+                            }
+                        };
 
                         debug!("API response body ({} chars)", body_text.len());
                         if self.config.debug.should_log_responses() {
