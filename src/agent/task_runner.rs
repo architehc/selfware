@@ -1026,6 +1026,27 @@ impl Agent {
                                     info!("Synthesis produced unwritable code — continuing loop");
                                     continue;
                                 }
+                                // A synthesized answer must clear the same gates as a normal final
+                                // answer, otherwise phase-2 synthesis is a backdoor that completes a task
+                                // the completion gate would reject.
+                                if super::recovery::strip_think_blocks(&answer)
+                                    .trim()
+                                    .is_empty()
+                                {
+                                    info!("Synthesis produced an empty answer after stripping think blocks — continuing normal loop");
+                                    continue;
+                                }
+                                if let Some(gate_msg) = self.check_completion_gate().await {
+                                    info!(
+                                        "Synthesis answer rejected by completion gate: {}",
+                                        gate_msg
+                                    );
+                                    self.messages.push(Message::user(format!(
+                                        "<selfware_system_directive>\n{}\n</selfware_system_directive>",
+                                        gate_msg
+                                    )));
+                                    continue;
+                                }
                                 output::final_answer(&answer);
                                 self.last_assistant_response = answer;
                                 record_state_transition("Executing", "Completed");
