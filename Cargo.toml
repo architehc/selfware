@@ -88,7 +88,6 @@ fuzzy-matcher = "0.3"
 syntect = "5.2"
 nu-ansi-term = "0.50"
 dirs = "6.0"
-nucleo = "0.5"  # Fast fuzzy matcher
 pulldown-cmark = "0.13"  # Markdown parsing (0.12+ has breaking API changes)
 similar = "2.4"  # Diff algorithm
 unicode-width = "0.2"  # Unicode character display width
@@ -130,20 +129,16 @@ syn = { version = "2.0", features = ["full", "parsing"] }
 nix = { version = "0.29", features = ["signal"] }
 
 [features]
-default = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement"]
+default = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "self-improvement"]
 integration = []  # Enable with: cargo test --features integration
 
 # Semantic feature flags (replacing monolithic "extras")
 # TUI dashboard mode with animations and demos
 tui = []
-# Workflow automation and parallel execution
-workflows = []
 # Self-healing and graceful degradation
 resilience = []
 # Execution control modes (dry-run, confirm, yolo)
 execution-modes = []
-# Caching layer for responses
-cache = []
 # Log analysis and diagnostics
 log-analysis = []
 # Token counting and management
@@ -179,12 +174,8 @@ redis = ["dep:redis"]
 # Browser automation module (currently stub implementation)
 browser = []
 
-# Legacy SWE-bench API (deprecated; kept only for source compatibility with
-# older experiments and integration tests).
-legacy-swebench = []
-
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser", "legacy-swebench"]
+extras = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser"]
 
 [dev-dependencies]
 tokio-test = "0.4"
