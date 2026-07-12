@@ -65,7 +65,7 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // Generic secret/password patterns
             compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"']{8,})["']?"#),
             // Private keys
-            compile_pattern("private_key", r#"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA\s+)?PRIVATE\s+KEY-----"#),
+            compile_pattern("private_key", r#"-----BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----"#),
             // Database connection strings
             compile_pattern("db_connection", r#"(?i)(mongodb|postgres|mysql|redis)://[^\s"'<>]+"#),
             // JWT tokens - full three-part tokens
@@ -551,5 +551,23 @@ MIIBOgIBAAJBALRiMLAj+6y3uqsVLr
         assert!(output.contains("Before"));
         assert!(output.contains("After"));
         assert!(output.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redact_openssh_private_key() {
+        // The modern ssh-keygen default (BEGIN OPENSSH PRIVATE KEY) was missed
+        // by the old (RSA )? prefix; obviously-fake key material below.
+        let input = "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+                     abc123fakekeymaterialnotreal\n\
+                     -----END OPENSSH PRIVATE KEY-----";
+        let output = redact_secrets(input);
+        assert!(
+            output.contains("[REDACTED]"),
+            "OpenSSH private key block should be redacted"
+        );
+        assert!(
+            !output.contains("fakekeymaterial"),
+            "fake key material must not survive redaction"
+        );
     }
 }

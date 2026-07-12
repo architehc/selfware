@@ -303,6 +303,18 @@ impl SafetyChecker {
                     self.check_path(path)?;
                 }
             }
+            // Runtime dynamic-library loader (feature-gated, off by default) —
+            // a native-code execution vector. Validate the library path it
+            // loads so it can't pull code in from a denied location.
+            "hot_reload" => {
+                if let Ok(args) =
+                    serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                {
+                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                        self.check_path(path)?;
+                    }
+                }
+            }
             // Read-only / introspection tools: no filesystem or shell mutation.
             "list_worktrees"
             | "lsp_goto_definition"

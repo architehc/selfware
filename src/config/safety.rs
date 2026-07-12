@@ -47,6 +47,12 @@ pub fn default_denied_paths() -> Vec<String> {
         "**/.env.local".to_string(),
         "**/.ssh/**".to_string(),
         "**/secrets/**".to_string(),
+        // Block writing into git executable-config vectors: an agent could
+        // plant a hook script or rewrite git config to later execute in the
+        // user's shell.  Legitimate git operations go through the git tool, not
+        // through file_write/file_edit into .git/.
+        "**/.git/hooks/**".to_string(),
+        "**/.git/config".to_string(),
     ]
 }
 pub fn default_protected_branches() -> Vec<String> {
@@ -58,4 +64,22 @@ pub fn default_require_confirmation() -> Vec<String> {
         "file_delete".to_string(),
         "shell_exec".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_denied_paths_includes_git_hooks_and_config() {
+        let denied = default_denied_paths();
+        assert!(
+            denied.contains(&"**/.git/hooks/**".to_string()),
+            "default_denied_paths must deny **/.git/hooks/**"
+        );
+        assert!(
+            denied.contains(&"**/.git/config".to_string()),
+            "default_denied_paths must deny **/.git/config"
+        );
+    }
 }
