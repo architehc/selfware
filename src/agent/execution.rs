@@ -955,6 +955,43 @@ impl Agent {
                 return Ok(false);
             }
 
+            // An empty response is a provider hiccup / dropped stream, not a valid
+            // completion — never accept it as the final answer (that would paint a
+            // ✅ banner with no content). Nudge the model to actually answer.
+            let clean_final = super::recovery::strip_think_blocks(&content)
+                .trim()
+                .to_string();
+            if clean_final.is_empty() {
+                info!("Rejected empty response as final answer — nudging for an actual answer");
+                self.messages.push(crate::api::types::Message::user(
+                    "<selfware_system_directive>\n\
+                     Your last response was empty. Provide your actual final answer now \
+                     (a concise summary of the completed work).\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+                return Ok(false);
+            }
+
+            // A response cut off by the token limit (finish_reason == "length") is
+            // incomplete — don't accept the truncated text as the final answer; ask
+            // the model to finish.
+            if chat_metadata
+                .as_ref()
+                .and_then(|m| m.finish_reason.as_deref())
+                == Some("length")
+            {
+                info!("Rejected length-truncated response as final answer — asking to continue");
+                self.messages.push(crate::api::types::Message::user(
+                    "<selfware_system_directive>\n\
+                     Your previous response was cut off by the length limit before it \
+                     finished. Continue and complete your answer concisely.\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+                return Ok(false);
+            }
+
             // Fire Stop hooks before completing
             let stop_ctx = HookContext::stop();
             self.hook_registry.fire(&stop_ctx).await;
@@ -4661,8 +4698,14 @@ pub fn other() -> i32 {
         let mut agent = Agent::new(config).await.unwrap();
 
         let result = agent.execute_step_internal(false).await;
+        // An empty response is a provider hiccup, NOT a successful completion:
+        // the step must NOT report done (it nudges and continues instead of
+        // painting a ✅ banner with no content).
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(
+            !result.unwrap(),
+            "an empty response must not be accepted as a completed step"
+        );
 
         server.stop().await;
     }
