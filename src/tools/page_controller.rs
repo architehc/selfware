@@ -112,6 +112,11 @@ impl PlaywrightBridge {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Clear the inherited environment first; the bridge loads and executes
+        // page content, so it must not carry the agent's secrets. The specific
+        // SELFWARE_* vars the bridge needs are re-added explicitly below.
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
+
         // Forward the private-network env var
         if let Ok(val) = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK") {
             cmd.env("SELFWARE_ALLOW_PRIVATE_NETWORK", val);

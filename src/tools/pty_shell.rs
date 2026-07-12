@@ -93,6 +93,11 @@ impl PtySession {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
+        // Clear the inherited environment (SELFWARE_API_KEY, AWS_*, …) before
+        // adding our own vars, matching shell_exec — an interactive shell must
+        // not hand the agent's secrets to whatever the operator types.
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
+
         // Disable history and prompts to keep output clean.
         cmd.env("HISTFILE", "/dev/null")
             .env("PS1", "")

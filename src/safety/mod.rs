@@ -12,6 +12,7 @@ pub mod autonomy;
 pub mod checker;
 pub mod path_validator;
 pub mod permissions;
+pub mod process_env;
 pub mod redact;
 pub mod sandbox;
 pub mod scanner;

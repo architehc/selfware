@@ -156,6 +156,11 @@ impl StdioTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Clear the inherited environment before applying the server's declared
+        // env. An MCP server is third-party code; without this it would receive
+        // SELFWARE_API_KEY and every operator-exported credential.
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
+
         for (key, value) in env {
             cmd.env(key, value);
         }
