@@ -411,7 +411,7 @@ impl DiagnosisSummary {
 
         // Most common failing tools
         let mut tool_vec: Vec<(String, u64)> = tool_failures.into_iter().collect();
-        tool_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        tool_vec.sort_by_key(|b| std::cmp::Reverse(b.1));
         summary.most_common_failing_tools = tool_vec.into_iter().take(10).collect();
 
         // Median turns to first edit
@@ -438,7 +438,7 @@ fn median_f64(sorted: &[f64]) -> f64 {
         return 0.0;
     }
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]

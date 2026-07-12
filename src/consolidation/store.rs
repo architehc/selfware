@@ -263,13 +263,15 @@ impl LongTermStore {
             return Ok(Vec::new());
         }
 
-        // If the in-memory index is empty, populate from disk.
-        {
+        // If the in-memory index is empty, populate from disk. Compute
+        // emptiness in a tight scope so the read guard is released before the
+        // await (never held across it).
+        let needs_index = {
             let emb_map = self.embeddings.read().unwrap_or_else(|e| e.into_inner());
-            if emb_map.is_empty() {
-                drop(emb_map);
-                self.index_existing().await?;
-            }
+            emb_map.is_empty()
+        };
+        if needs_index {
+            self.index_existing().await?;
         }
 
         // Embed the query with the same offline embedder.

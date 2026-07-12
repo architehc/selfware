@@ -316,7 +316,7 @@ fn parse_dhat_json(content: &str) -> Option<Vec<AllocationHotspot>> {
         None
     } else {
         // Sort by total bytes descending
-        hotspots.sort_by(|a, b| b.total_bytes.cmp(&a.total_bytes));
+        hotspots.sort_by_key(|b| std::cmp::Reverse(b.total_bytes));
         Some(hotspots)
     }
 }

@@ -3247,7 +3247,7 @@ max_recovery_attempts = 3
                              ~/.selfware/runs/ as they start.)"
                         );
                     } else {
-                        println!("{:<22} {:<10} {}", "ID", "STATUS", "TASK");
+                        println!("{:<22} {:<10} TASK", "ID", "STATUS");
                         for r in runs {
                             let task_short: String = r.task.chars().take(50).collect();
                             println!("{:<22} {:<10} {}", r.id, r.effective_status(), task_short);

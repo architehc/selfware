@@ -419,7 +419,9 @@ impl YoloManager {
         }
 
         // Print status update at intervals
-        if self.config.status_interval > 0 && op_id > 0 && op_id % self.config.status_interval == 0
+        if self.config.status_interval > 0
+            && op_id > 0
+            && op_id.is_multiple_of(self.config.status_interval)
         {
             self.print_status();
         }

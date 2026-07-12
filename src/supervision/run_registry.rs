@@ -190,7 +190,7 @@ impl RunRegistry {
                 }
             }
         }
-        out.sort_by(|a, b| b.started_unix.cmp(&a.started_unix));
+        out.sort_by_key(|b| std::cmp::Reverse(b.started_unix));
         Ok(out)
     }
 

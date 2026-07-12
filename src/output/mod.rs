@@ -851,7 +851,7 @@ pub(crate) fn final_answer(content: &str) {
     if is_plain_mode() || is_json_mode() {
         // In plain/JSON mode, emit only the content with no prefix or
         // decoration so machine-readable output is not corrupted.
-        print!("{}\n", content);
+        println!("{}", content);
     } else if is_compact() {
         print!("\r\x1b[2K{}\n", content);
     } else {
@@ -1304,7 +1304,7 @@ pub(crate) fn step_start(step: usize, name: &str) {
     }
     let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if is_plain_mode() {
-        print!("[Step {}] {}...\n", step, name);
+        println!("[Step {}] {}...", step, name);
     } else if is_compact() {
         print!("\r\x1b[2K[Step {}] ", step);
     } else {

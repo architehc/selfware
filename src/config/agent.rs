@@ -7,18 +7,14 @@ use super::types::default_true;
 /// Policy for mutation-required tasks that keep issuing read-only tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ReadLoopPolicy {
     /// Preserve the historical behavior: block read-only tools and nudge.
     Nudge,
     /// Require the next action to mutate state, then abort if the model keeps
     /// trying read-only actions. This is the default for SWE-style tasks.
+    #[default]
     ForceMutation,
-}
-
-impl Default for ReadLoopPolicy {
-    fn default() -> Self {
-        Self::ForceMutation
-    }
 }
 
 /// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.

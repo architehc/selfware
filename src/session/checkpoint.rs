@@ -1006,7 +1006,7 @@ impl CheckpointManager {
         }
 
         // Sort by mtime descending (most recent first).
-        json_files.sort_by(|a, b| b.1.cmp(&a.1));
+        json_files.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         let to_delete = &json_files[MAX_CHECKPOINT_FILES..];
         for (path, _) in to_delete {
@@ -1078,7 +1078,7 @@ impl CheckpointManager {
         if dirs.len() <= MAX_CHECKPOINT_FILES {
             return;
         }
-        dirs.sort_by(|a, b| b.1.cmp(&a.1)); // most recent first
+        dirs.sort_by_key(|b| std::cmp::Reverse(b.1)); // most recent first
         for (path, _) in &dirs[MAX_CHECKPOINT_FILES..] {
             if let Err(e) = fs::remove_dir_all(path) {
                 tracing::warn!("prune_old_task_dirs: failed to remove {:?}: {}", path, e);

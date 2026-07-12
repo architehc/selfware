@@ -414,7 +414,7 @@ impl Agent {
     /// Build a progress injection message for periodic budget awareness.
     /// Returns `Some(message)` every 5 steps to remind the agent of budget and status.
     fn build_progress_injection(&self, step: usize) -> Option<String> {
-        if step == 0 || (step + 1) % 5 != 0 {
+        if step == 0 || !(step + 1).is_multiple_of(5) {
             return None;
         }
 
@@ -1696,7 +1696,7 @@ mod tests {
         max_iterations: usize,
         has_verification: bool,
     ) -> Option<String> {
-        if step == 0 || (step + 1) % 5 != 0 {
+        if step == 0 || !(step + 1).is_multiple_of(5) {
             return None;
         }
         let pct = ((step + 1) as f64 / max_iterations as f64 * 100.0).min(100.0);

@@ -2311,19 +2311,16 @@ impl Agent {
             let extractor = ConceptExtractor::new();
             let mut all_concepts = Vec::new();
 
-            match tokio::fs::read_dir(dir_path).await {
-                Ok(mut entries) => {
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        let path = entry.path();
-                        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                                let concepts = extractor.extract_from_code(&content, &path);
-                                all_concepts.extend(concepts);
-                            }
+            if let Ok(mut entries) = tokio::fs::read_dir(dir_path).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                            let concepts = extractor.extract_from_code(&content, &path);
+                            all_concepts.extend(concepts);
                         }
                     }
                 }
-                Err(_) => {}
             }
 
             if all_concepts.is_empty() {

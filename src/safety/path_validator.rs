@@ -386,11 +386,11 @@ impl PathValidator {
         for pattern in &self.config.allowed_paths {
             // Expand a leading "~" to the user's home directory so that
             // patterns like "~/project" match the real canonical path.
-            let home_expanded: String = if pattern.starts_with("~/") {
+            let home_expanded: String = if let Some(rest) = pattern.strip_prefix("~/") {
                 if let Some(home) = std::env::var_os("HOME") {
-                    format!("{}/{}", home.to_string_lossy(), &pattern[2..])
+                    format!("{}/{}", home.to_string_lossy(), rest)
                 } else if let Some(home) = dirs::home_dir() {
-                    format!("{}/{}", home.display(), &pattern[2..])
+                    format!("{}/{}", home.display(), rest)
                 } else {
                     pattern.clone()
                 }

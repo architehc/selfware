@@ -649,7 +649,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     .current_dir(repo_root)
                     .output();
 
-                let git_tag = if generation % config.checkpoint_interval == 0 {
+                let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                     let tag = format!("evolve-gen-{}", generation);
                     let _ = Command::new("git")
                         .args(["tag", &tag])

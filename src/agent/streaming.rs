@@ -550,10 +550,9 @@ impl Agent {
         }
 
         // Trailing newline is DISPLAY output — suppress it in json/quiet mode.
-        if !tui_active && !suppress_stream_stdout {
-            if !content.is_empty() || !reasoning.is_empty() {
-                println!();
-            }
+        if !tui_active && !suppress_stream_stdout && (!content.is_empty() || !reasoning.is_empty())
+        {
+            println!();
         }
 
         // Response caching is NOT display — it must run regardless of output

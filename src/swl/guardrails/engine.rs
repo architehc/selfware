@@ -415,7 +415,6 @@ impl GuardrailEngine {
         // Evaluate every non-let, non-comment line as a boolean condition.
         // All such lines must pass for the guard to pass; this correctly
         // handles multi-line Rust conditions rather than only the last line.
-        let mut saw_expression = false;
         for line in lines.iter() {
             let line = line.trim();
             if line.is_empty() || line.starts_with("//") {
@@ -425,18 +424,14 @@ impl GuardrailEngine {
                 // let bindings are not boolean conditions — skip them.
                 continue;
             }
-            saw_expression = true;
             let result = self.evaluate_inline_expression(line, context);
             if !result.is_pass() {
                 return result;
             }
         }
 
-        if saw_expression {
-            EvaluationResult::Pass
-        } else {
-            EvaluationResult::Pass
-        }
+        // No inline expression failed (or none were present) → pass.
+        EvaluationResult::Pass
     }
 
     /// Evaluate JSON logic

@@ -263,7 +263,7 @@ impl GuardedSwlRuntime {
         let workflow_start = std::time::Instant::now();
 
         // Pre-workflow guardrail check for all agents
-        for (agent_name, _) in &doc.agents {
+        for agent_name in doc.agents.keys() {
             let pre_context = self
                 .build_guardrail_context(Some(agent_name), None, None)
                 .await;

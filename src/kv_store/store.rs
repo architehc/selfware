@@ -202,12 +202,10 @@ impl KvStore {
         match fs::read_to_string(path.as_ref()) {
             Ok(json) => {
                 match <HashMap<String, Entry> as StoreSerializer>::deserialize_from_json(&json) {
-                    Ok(store_data) => {
-                        return Ok(Self {
-                            data: store_data,
-                            path: Some(path.as_ref().to_string_lossy().to_string()),
-                        });
-                    }
+                    Ok(store_data) => Ok(Self {
+                        data: store_data,
+                        path: Some(path.as_ref().to_string_lossy().to_string()),
+                    }),
                     Err(structured_error) => {
                         // Backward compatibility for legacy stores that persisted
                         // as `{ "key": "value" }` and had no tags/metadata.
@@ -218,16 +216,16 @@ impl KvStore {
                                     .map(|(k, v)| (k.clone(), Entry::new(k.clone(), v)))
                                     .collect();
 
-                                return Ok(Self {
+                                Ok(Self {
                                     data: store_data,
                                     path: Some(path.as_ref().to_string_lossy().to_string()),
-                                });
+                                })
                             }
                             Err(legacy_error) => {
-                                return Err(KvStoreError::SerializationError(format!(
+                                Err(KvStoreError::SerializationError(format!(
                                     "Failed to deserialize store as structured entries ({}) or legacy map ({})",
                                     structured_error, legacy_error
-                                )));
+                                )))
                             }
                         }
                     }
