@@ -945,6 +945,12 @@ impl CheckpointManager {
     /// This is best-effort — any delete errors are logged and swallowed so a
     /// pruning failure never fails a `save`.
     fn prune_old_checkpoints(&self) {
+        // Prune the per-task subdirectories FIRST — they grow independently of
+        // the flat `.json` files (one `<task_id>/failure_mode.json` dir per run)
+        // and the `.json` logic below early-returns when few checkpoints exist,
+        // which is exactly when the dirs still pile up (observed: thousands).
+        self.prune_old_task_dirs();
+
         let entries = match fs::read_dir(&self.checkpoints_dir) {
             Ok(e) => e,
             Err(e) => {
@@ -1027,6 +1033,36 @@ impl CheckpointManager {
             to_delete.len(),
             MAX_CHECKPOINT_FILES,
         );
+    }
+
+    /// Cap the per-task subdirectories in the checkpoints dir at
+    /// [`MAX_CHECKPOINT_FILES`], deleting the oldest (by mtime). Best-effort:
+    /// errors are logged and swallowed.
+    fn prune_old_task_dirs(&self) {
+        let entries = match fs::read_dir(&self.checkpoints_dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let mtime = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            dirs.push((entry.path(), mtime));
+        }
+        if dirs.len() <= MAX_CHECKPOINT_FILES {
+            return;
+        }
+        dirs.sort_by(|a, b| b.1.cmp(&a.1)); // most recent first
+        for (path, _) in &dirs[MAX_CHECKPOINT_FILES..] {
+            if let Err(e) = fs::remove_dir_all(path) {
+                tracing::warn!("prune_old_task_dirs: failed to remove {:?}: {}", path, e);
+            }
+        }
     }
 
     fn save_full_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
@@ -2627,6 +2663,40 @@ mod tests {
             "after pruning, should still have at least {} files (the cap), got {}",
             MAX_CHECKPOINT_FILES,
             count_after
+        );
+    }
+
+    #[test]
+    fn prune_caps_per_task_subdirs() {
+        let dir = tempdir().unwrap();
+        let cpdir = dir.path().join("cps");
+        let manager = CheckpointManager::new(cpdir.clone()).unwrap();
+
+        // Create more than the cap of stale per-task subdirs (as the
+        // failure_mode.json artifact writer does — one per run). These are
+        // exactly what the flat-.json prune ignored, so they leaked unbounded.
+        let over = MAX_CHECKPOINT_FILES + 20;
+        for i in 0..over {
+            let d = cpdir.join(format!("task-{i:04}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("failure_mode.json"), "{}").unwrap();
+        }
+
+        // A save triggers prune_old_checkpoints -> prune_old_task_dirs even
+        // though there are few .json files (the early-return case).
+        let cp = TaskCheckpoint::new("live-task".to_string(), "d".to_string());
+        manager.save(&cp).unwrap();
+
+        let remaining = std::fs::read_dir(&cpdir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .count();
+        assert!(
+            remaining <= MAX_CHECKPOINT_FILES,
+            "per-task subdirs must be capped at {}, found {}",
+            MAX_CHECKPOINT_FILES,
+            remaining
         );
     }
 
