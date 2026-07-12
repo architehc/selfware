@@ -40,6 +40,10 @@ pub struct CompressionMetrics {
     pub messages_before: usize,
     pub messages_after: usize,
     pub duration_ms: u64,
+    /// LLM prompt tokens consumed by the summarizer call (0 for local Micro path).
+    pub llm_input_tokens: usize,
+    /// LLM completion tokens consumed by the summarizer call (0 for local Micro path).
+    pub llm_output_tokens: usize,
 }
 
 impl CompressionMetrics {
@@ -60,6 +64,8 @@ impl CompressionMetrics {
             messages_before,
             messages_after,
             duration_ms,
+            llm_input_tokens: 0,
+            llm_output_tokens: 0,
         }
     }
 
@@ -74,6 +80,13 @@ impl CompressionMetrics {
             self.messages_after,
             self.duration_ms
         )
+    }
+
+    /// Set the LLM token cost from the summarizer call (builder-style).
+    pub fn with_llm_tokens(mut self, input: usize, output: usize) -> Self {
+        self.llm_input_tokens = input;
+        self.llm_output_tokens = output;
+        self
     }
 }
 
@@ -497,6 +510,10 @@ pub async fn auto_compact(
         messages_before,
         messages_after,
         start.elapsed().as_millis() as u64,
+    )
+    .with_llm_tokens(
+        response.usage.prompt_tokens,
+        response.usage.completion_tokens,
     );
 
     *messages = compressed;
@@ -623,6 +640,10 @@ pub async fn full_compact(
         messages_before,
         messages_after,
         start.elapsed().as_millis() as u64,
+    )
+    .with_llm_tokens(
+        response.usage.prompt_tokens,
+        response.usage.completion_tokens,
     );
 
     *messages = compressed;
@@ -1419,5 +1440,25 @@ mod tests {
             orchestrator.metrics_history[0].tokens_saved
                 + orchestrator.metrics_history[1].tokens_saved
         );
+    }
+
+    #[test]
+    fn test_compression_metrics_llm_token_fields_round_trip() {
+        // Construct a metrics with non-zero LLM token counts and verify round-trip.
+        let metrics = CompressionMetrics::new(CompressionMethod::Auto, 1000, 600, 20, 8, 150)
+            .with_llm_tokens(42, 58);
+
+        assert_eq!(metrics.llm_input_tokens, 42);
+        assert_eq!(metrics.llm_output_tokens, 58);
+
+        // Cloning should preserve the fields.
+        let cloned = metrics.clone();
+        assert_eq!(cloned.llm_input_tokens, 42);
+        assert_eq!(cloned.llm_output_tokens, 58);
+
+        // Default (without with_llm_tokens) should be 0.
+        let default_metrics = CompressionMetrics::new(CompressionMethod::Micro, 100, 80, 5, 4, 1);
+        assert_eq!(default_metrics.llm_input_tokens, 0);
+        assert_eq!(default_metrics.llm_output_tokens, 0);
     }
 }

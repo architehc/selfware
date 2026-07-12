@@ -239,6 +239,15 @@ impl Agent {
                 .chat(messages, None, crate::api::ThinkingMode::Disabled)
                 .await
             {
+                // Account the reflection call's token usage against the budget.
+                self.cumulative_token_usage.input += response.usage.prompt_tokens;
+                self.cumulative_token_usage.output += response.usage.completion_tokens;
+                self.cumulative_token_usage.total =
+                    self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+                if let Some(cost) = response.usage.cost {
+                    self.cumulative_cost_usd += cost;
+                }
+
                 if let Some(choice) = response.choices.first() {
                     let text = choice.message.content.clone();
                     if !text.is_empty() {

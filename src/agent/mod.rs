@@ -2045,6 +2045,16 @@ To call a tool, use this EXACT XML structure:
     // Three-Layer Context Compression Methods
     // ========================================================================
 
+    /// Account LLM summarizer token usage from a compression operation into the
+    /// agent's cumulative budget. For the local Micro path the LLM token counts
+    /// are 0, so this is harmless.
+    fn account_compression_tokens(&mut self, metrics: &compression::CompressionMetrics) {
+        self.cumulative_token_usage.input += metrics.llm_input_tokens;
+        self.cumulative_token_usage.output += metrics.llm_output_tokens;
+        self.cumulative_token_usage.total =
+            self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+    }
+
     /// Run MicroCompact - fast local compression with no API call
     pub fn compact_micro(&mut self) -> compression::CompressionMetrics {
         let metrics = self.compression_orchestrator.run_micro(&mut self.messages);
@@ -2058,6 +2068,7 @@ To call a tool, use this EXACT XML structure:
             .compression_orchestrator
             .run_auto(&self.client, &mut self.messages)
             .await?;
+        self.account_compression_tokens(&metrics);
         info!("AutoCompact: {}", metrics.summary());
         Ok(metrics)
     }
@@ -2068,6 +2079,7 @@ To call a tool, use this EXACT XML structure:
             .compression_orchestrator
             .run_full(&self.client, &mut self.messages)
             .await?;
+        self.account_compression_tokens(&metrics);
         info!("FullCompact: {}", metrics.summary());
         Ok(metrics)
     }
@@ -2077,14 +2089,20 @@ To call a tool, use this EXACT XML structure:
         let current_tokens = self.total_tokens_used();
         let context_window = self.max_context_tokens;
 
-        self.compression_orchestrator
+        let metrics = self
+            .compression_orchestrator
             .check_and_compress(
                 &self.client,
                 &mut self.messages,
                 current_tokens,
                 context_window,
             )
-            .await
+            .await;
+
+        if let Some(ref metrics) = metrics {
+            self.account_compression_tokens(metrics);
+        }
+        metrics
     }
 
     /// Record a file access for FullCompact re-injection
