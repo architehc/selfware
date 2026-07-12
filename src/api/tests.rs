@@ -1998,6 +1998,13 @@ async fn test_api_client_chat_stream_success() {
         let request = String::from_utf8_lossy(&buf[..n]);
         // Verify it's a streaming request
         assert!(request.contains("\"stream\":true"));
+        // #98: stream_options.include_usage is standard OpenAI and must be sent
+        // to EVERY streaming endpoint (this one is a plain non-OpenRouter host),
+        // so usage is reported and the token/cost budgets don't undercount.
+        assert!(
+            request.contains("include_usage"),
+            "streaming request must request usage via stream_options: {request}"
+        );
 
         let events =
             "data: {\"choices\":[{\"delta\":{\"content\":\"streamed\"}}]}\n\ndata: [DONE]\n\n";
