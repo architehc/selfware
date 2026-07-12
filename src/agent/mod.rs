@@ -1904,8 +1904,15 @@ To call a tool, use this EXACT XML structure:
     }
 
     /// True when the current task should stop as soon as possible.
+    ///
+    /// Observes BOTH the agent's own programmatic cancellation token
+    /// (`self.cancelled`, e.g. a TUI abort button) AND the process-global
+    /// shutdown latch owned by `main` (set from the sole SIGINT/SIGTERM handler
+    /// there). Routing both through one predicate makes `main` the single
+    /// signal owner while every cancellation check in the agent, tools, and
+    /// streaming paths observes the same unified state.
     pub(crate) fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Relaxed) || crate::is_shutdown_requested()
     }
 
     /// Clear cancellation state after handling an interrupt.
