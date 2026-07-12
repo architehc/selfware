@@ -102,3 +102,8 @@ new_template_results_*/
 __pycache__/
 /.selfware/turns/
 .selfware/
+
+# Machine-specific / personal config (untracked 2026-07-12, kept locally)
+.claude/settings.local.json
+.zed/
+selfware.toml

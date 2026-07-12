@@ -1,8 +1,0 @@
-[extension]
-id = "selfware-codemap"
-name = "Selfware Code Map"
-version = "0.1.0"
-description = "Interactive code graph for selfware"
-
-[language_servers.selfware]
-language = "Rust"
