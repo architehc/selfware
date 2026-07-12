@@ -252,6 +252,21 @@ pub struct GitCheckpointInfo {
     pub modified_files: Vec<String>,
 }
 
+/// Anti-thrash guard counters persisted across resume. These are in-memory on
+/// the agent and otherwise reset to 0 on every restart — so a watchdog that
+/// auto-resumes a crash-looping task would hand it fresh rope forever, turning
+/// crash-loops into amnesiac infinite loops. Persisting them lets the guards
+/// (prefill breaker, mutation-gate abort, no-action abort) fire ACROSS resumes.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct GuardCounters {
+    #[serde(default)]
+    pub consecutive_no_action_prompts: usize,
+    #[serde(default)]
+    pub mutation_gate_rejections: usize,
+    #[serde(default)]
+    pub prefill_400_count: usize,
+}
+
 /// Represents the delta/diff between two checkpoints
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointDelta {
@@ -281,6 +296,8 @@ pub struct CheckpointDelta {
     pub elapsed_wall_secs: Option<u64>,
     #[serde(default)]
     pub cumulative_cost_usd: Option<f64>,
+    #[serde(default)]
+    pub guard_counters: Option<GuardCounters>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
 
     // Visual assertion state (changes are always recorded, None means no change)
@@ -332,6 +349,10 @@ pub struct TaskCheckpoint {
     /// keeps counting against `max_cost_usd` instead of resetting the cap.
     #[serde(default)]
     pub cumulative_cost_usd: f64,
+    /// Anti-thrash guard counters carried across resume so a crash-looping task
+    /// can't reset its way out of the guards on every restart.
+    #[serde(default)]
+    pub guard_counters: GuardCounters,
 }
 
 impl TaskCheckpoint {
@@ -358,6 +379,8 @@ impl TaskCheckpoint {
             (self.elapsed_wall_secs != base.elapsed_wall_secs).then_some(self.elapsed_wall_secs);
         let cumulative_cost_usd = (self.cumulative_cost_usd != base.cumulative_cost_usd)
             .then_some(self.cumulative_cost_usd);
+        let guard_counters = (self.guard_counters != base.guard_counters)
+            .then(|| self.guard_counters.clone());
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
             // Delta format cannot encode "explicitly clear git checkpoint".
             // Force a full checkpoint write for this transition.
@@ -412,6 +435,7 @@ impl TaskCheckpoint {
             || cumulative_tokens.is_some()
             || elapsed_wall_secs.is_some()
             || cumulative_cost_usd.is_some()
+            || guard_counters.is_some()
             || git_checkpoint.is_some()
             || pending_changed;
 
@@ -436,6 +460,7 @@ impl TaskCheckpoint {
             cumulative_tokens,
             elapsed_wall_secs,
             cumulative_cost_usd,
+            guard_counters,
             git_checkpoint,
             pending_visual_assertion,
         })
@@ -489,6 +514,9 @@ impl TaskCheckpoint {
         if let Some(cost) = delta.cumulative_cost_usd {
             self.cumulative_cost_usd = cost;
         }
+        if let Some(ref gc) = delta.guard_counters {
+            self.guard_counters = gc.clone();
+        }
         if let Some(ref git) = delta.git_checkpoint {
             self.git_checkpoint = Some(git.clone());
         }
@@ -534,6 +562,7 @@ impl TaskCheckpoint {
             cumulative_tokens: 0,
             elapsed_wall_secs: 0,
             cumulative_cost_usd: 0.0,
+            guard_counters: GuardCounters::default(),
         }
     }
 
@@ -2607,11 +2636,18 @@ mod tests {
         cp.cumulative_tokens = 12345;
         cp.elapsed_wall_secs = 678;
         cp.cumulative_cost_usd = 1.2345;
+        cp.guard_counters = GuardCounters {
+            consecutive_no_action_prompts: 3,
+            mutation_gate_rejections: 5,
+            prefill_400_count: 2,
+        };
         let json = serde_json::to_string(&cp).unwrap();
         let back: TaskCheckpoint = serde_json::from_str(&json).unwrap();
         assert_eq!(back.cumulative_tokens, 12345);
         assert_eq!(back.elapsed_wall_secs, 678);
         assert_eq!(back.cumulative_cost_usd, 1.2345);
+        assert_eq!(back.guard_counters.mutation_gate_rejections, 5);
+        assert_eq!(back.guard_counters.prefill_400_count, 2);
 
         // Legacy checkpoints without these fields must default to 0, not fail.
         let mut legacy_value = serde_json::to_value(&TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
@@ -2620,11 +2656,13 @@ mod tests {
             map.remove("cumulative_tokens");
             map.remove("elapsed_wall_secs");
             map.remove("cumulative_cost_usd");
+            map.remove("guard_counters");
         }
         let restored: TaskCheckpoint = serde_json::from_value(legacy_value).unwrap();
         assert_eq!(restored.cumulative_tokens, 0);
         assert_eq!(restored.elapsed_wall_secs, 0);
         assert_eq!(restored.cumulative_cost_usd, 0.0);
+        assert_eq!(restored.guard_counters, GuardCounters::default());
     }
 
     #[test]
@@ -2640,16 +2678,26 @@ mod tests {
         newer.cumulative_tokens = 500;
         newer.elapsed_wall_secs = 90;
         newer.cumulative_cost_usd = 0.75;
+        newer.guard_counters = GuardCounters {
+            consecutive_no_action_prompts: 2,
+            mutation_gate_rejections: 4,
+            prefill_400_count: 1,
+        };
         let delta = newer.compute_delta(&base).expect("delta should exist");
         assert_eq!(delta.cumulative_tokens, Some(500));
         assert_eq!(delta.elapsed_wall_secs, Some(90));
         assert_eq!(delta.cumulative_cost_usd, Some(0.75));
+        assert_eq!(delta.guard_counters.as_ref().unwrap().mutation_gate_rejections, 4);
         // Applying the delta to the base must update the budget (not keep it stale).
         let mut reconstructed = base.clone();
         reconstructed.apply_delta(&delta).unwrap();
         assert_eq!(reconstructed.cumulative_tokens, 500);
         assert_eq!(reconstructed.elapsed_wall_secs, 90);
         assert_eq!(reconstructed.cumulative_cost_usd, 0.75);
+        // Guard counters carry across the delta apply so resume can't reset them.
+        assert_eq!(reconstructed.guard_counters.mutation_gate_rejections, 4);
+        assert_eq!(reconstructed.guard_counters.prefill_400_count, 1);
+        assert_eq!(reconstructed.guard_counters.consecutive_no_action_prompts, 2);
     }
 
     #[test]

@@ -87,6 +87,11 @@ impl Agent {
         agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
         agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
         agent.cumulative_cost_usd = checkpoint.cumulative_cost_usd;
+        // Restore anti-thrash guard counters so a crash-looping task can't reset
+        // its way out of the guards on every resume.
+        agent.consecutive_no_action_prompts = checkpoint.guard_counters.consecutive_no_action_prompts;
+        agent.mutation_gate_rejections = checkpoint.guard_counters.mutation_gate_rejections;
+        agent.prefill_400_count = checkpoint.guard_counters.prefill_400_count;
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -213,6 +218,13 @@ impl Agent {
         checkpoint.cumulative_tokens = self.cumulative_token_usage.total;
         checkpoint.elapsed_wall_secs = self.budget_elapsed_secs();
         checkpoint.cumulative_cost_usd = self.cumulative_cost_usd;
+        // Persist anti-thrash guard counters so they survive resume — otherwise
+        // an auto-resumed crash-looping task resets them to 0 every restart.
+        checkpoint.guard_counters = crate::checkpoint::GuardCounters {
+            consecutive_no_action_prompts: self.consecutive_no_action_prompts,
+            mutation_gate_rejections: self.mutation_gate_rejections,
+            prefill_400_count: self.prefill_400_count,
+        };
 
         checkpoint
     }
@@ -1486,6 +1498,7 @@ mod tests {
             cumulative_tokens: None,
             elapsed_wall_secs: None,
             cumulative_cost_usd: None,
+            guard_counters: None,
             git_checkpoint: None,
         };
         let result = cp.apply_delta(&delta);
@@ -1518,6 +1531,7 @@ mod tests {
             cumulative_tokens: None,
             elapsed_wall_secs: None,
             cumulative_cost_usd: None,
+            guard_counters: None,
             git_checkpoint: None,
         };
         let result = cp.apply_delta(&delta);
@@ -1569,6 +1583,7 @@ mod tests {
             cumulative_tokens: None,
             elapsed_wall_secs: None,
             cumulative_cost_usd: None,
+            guard_counters: None,
             git_checkpoint: Some(GitCheckpointInfo {
                 branch: "dev".to_string(),
                 commit_hash: "xyz789".to_string(),
@@ -1619,6 +1634,7 @@ mod tests {
             cumulative_tokens: None,
             elapsed_wall_secs: None,
             cumulative_cost_usd: None,
+            guard_counters: None,
             git_checkpoint: None,
         };
 
@@ -1656,6 +1672,7 @@ mod tests {
             cumulative_tokens: None,
             elapsed_wall_secs: None,
             cumulative_cost_usd: None,
+            guard_counters: None,
             git_checkpoint: None,
         };
 
