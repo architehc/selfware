@@ -185,7 +185,7 @@ mod tests {
         // 400 attempts complete in microseconds (~1 window). Allow 2 windows of
         // slack for a rare boundary crossing; without the fix this blew far past.
         assert!(
-            total >= 1 && total <= 20,
+            (1..=20).contains(&total),
             "concurrent burst must be capped near the limit, got {total}"
         );
     }

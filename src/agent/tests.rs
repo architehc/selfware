@@ -1208,9 +1208,8 @@ async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
     );
 
     // Restore env.
-    match saved {
-        Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
-        None => {}
+    if let Some(v) = saved {
+        std::env::set_var("SELFWARE_API_KEY", v)
     }
     server.stop().await;
 }

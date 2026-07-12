@@ -1014,7 +1014,7 @@ mod tests {
             suggestions: vec![],
         };
         // base = 3, code = 40, total = 43, 43/4 = 10 (integer division)
-        assert_eq!(sic.estimate_tokens(), (3 + 40) / 4);
+        assert_eq!(sic.estimate_tokens(), 40_usize.div_ceil(4));
     }
 
     #[test]

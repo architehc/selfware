@@ -561,7 +561,7 @@ impl Config {
 mod tests {
     use super::*;
     use crate::config::test_helpers::clear_env;
-    use crate::config::{default_context_length, default_max_tokens, ExecutionMode};
+    use crate::config::{default_context_length, ExecutionMode};
     use std::io::Write;
     use std::path::PathBuf;
 

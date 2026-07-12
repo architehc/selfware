@@ -603,8 +603,8 @@ fn score(problem: &Problem, sel: &Selection, budget: usize, corpus: &[Doc]) -> M
             .map(|d| d.full_tokens)
             .unwrap_or(0);
         gold_total_tok += doc_tokens;
-        match sel.pick(g) {
-            Some(p) => match p.level {
+        if let Some(p) = sel.pick(g) {
+            match p.level {
                 Level::Full => {
                     any += 1.0;
                     full += 1.0;
@@ -617,8 +617,7 @@ fn score(problem: &Problem, sel: &Selection, budget: usize, corpus: &[Doc]) -> M
                     gold_code_tok += p.tokens.min(doc_tokens);
                 }
                 Level::Skeleton => any += 1.0,
-            },
-            None => {}
+            }
         }
     }
     let gold_paths: std::collections::HashSet<&str> = problem.gold.iter().copied().collect();

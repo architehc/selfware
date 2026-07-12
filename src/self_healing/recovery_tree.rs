@@ -1230,9 +1230,8 @@ mod tests {
         std::env::remove_var("SELFWARE_API_KEY");
         // This call may hit the OS keyring — that's fine, it must not panic.
         let _ = CredentialReload::find_available_key();
-        match saved {
-            Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
-            None => {}
+        if let Some(v) = saved {
+            std::env::set_var("SELFWARE_API_KEY", v)
         }
     }
 

@@ -706,7 +706,7 @@ step_timeout_secs = {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{default_endpoint, default_model, provenance::ConfigSource, Config};
+    use crate::config::{default_endpoint, default_model, Config};
     use std::sync::Mutex;
 
     /// Mutex to serialize tests that change the working directory.
@@ -1072,9 +1072,8 @@ mod tests {
 
         let result = auto_calibrate(&mut config).await;
         assert!(result.is_ok(), "auto_calibrate should not error");
-        assert_eq!(
-            result.unwrap(),
-            false,
+        assert!(
+            !result.unwrap(),
             "should return false when config is already explicit"
         );
 
@@ -1110,9 +1109,8 @@ mod tests {
         let result = auto_calibrate(&mut config).await;
         assert!(result.is_ok(), "auto_calibrate should not error");
         // It should return true because it tried to calibrate (even if nothing found)
-        assert_eq!(
+        assert!(
             result.unwrap(),
-            true,
             "should return true when at least one field is still default"
         );
     }
@@ -1549,9 +1547,8 @@ mod tests {
         let result = auto_calibrate(&mut config).await;
         assert!(result.is_ok());
         // Should proceed with calibration since endpoint is a known default
-        assert_eq!(
+        assert!(
             result.unwrap(),
-            true,
             "should proceed when endpoint is a known default"
         );
     }
@@ -1564,7 +1561,7 @@ mod tests {
 
         let result = auto_calibrate(&mut config).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     #[tokio::test]
@@ -1580,7 +1577,7 @@ mod tests {
         let result = auto_calibrate(&mut config).await;
         assert!(result.is_ok());
         // Should proceed because one of the two is still default
-        assert_eq!(result.unwrap(), true);
+        assert!(result.unwrap());
     }
 
     // =========================================================================

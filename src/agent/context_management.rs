@@ -828,10 +828,10 @@ mod tests {
             .messages
             .push(Message::system("SYSTEM_PROMPT_SENTINEL: obey the rules"));
         for i in 0..10 {
-            agent.messages.push(Message::user(&format!(
+            agent.messages.push(Message::user(format!(
                 "history message {i} with enough words to cost some tokens for the estimator"
             )));
-            agent.messages.push(Message::assistant(&format!(
+            agent.messages.push(Message::assistant(format!(
                 "reply {i} acknowledging the work is progressing"
             )));
         }

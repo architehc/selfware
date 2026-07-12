@@ -3079,20 +3079,6 @@ mod tests {
     }
 
     #[test]
-    fn test_completion_requires_verification_logic() {
-        // Pure logic test for the gate condition:
-        //   completion_requires_verification = config_flag || rigor_mode
-        // config_flag=false, rigor_mode=false -> false
-        assert!(!(false || false));
-        // config_flag=false, rigor_mode=true -> true
-        assert!((false || true));
-        // config_flag=true, rigor_mode=false -> true
-        assert!((true || false));
-        // config_flag=true, rigor_mode=true -> true
-        assert!((true || true));
-    }
-
-    #[test]
     fn test_careful_mode_directive_is_nonempty_and_specific() {
         let directive = Agent::careful_mode_directive();
         assert!(!directive.is_empty());

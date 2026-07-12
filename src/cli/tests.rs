@@ -487,7 +487,6 @@ fn bench_swebench_pro_basic_parsing() {
                 assert!(!args.resume);
                 assert!(!args.force_rerun);
             }
-            other => panic!("expected SwebenchPro, got {:?}", other),
         },
         other => panic!("expected Bench, got {:?}", other),
     }
@@ -512,7 +511,6 @@ fn bench_swebench_pro_defaults() {
                 assert!(!args.force_rerun);
                 assert_eq!(args.prompt_mode, "official");
             }
-            other => panic!("expected SwebenchPro, got {:?}", other),
         },
         other => panic!("expected Bench, got {:?}", other),
     }
@@ -535,7 +533,6 @@ fn bench_swebench_pro_instance_ids_overrides_count() {
             BenchCommand::SwebenchPro(args) => {
                 assert_eq!(args.instance_ids.as_deref(), Some("foo-1,foo-2"));
             }
-            other => panic!("expected SwebenchPro, got {:?}", other),
         },
         other => panic!("expected Bench, got {:?}", other),
     }
@@ -581,7 +578,6 @@ fn bench_swebench_pro_official_eval_flags_parse() {
                 assert!(args.official_eval_redo);
                 assert!(args.official_eval_block_network);
             }
-            other => panic!("expected SwebenchPro, got {:?}", other),
         },
         other => panic!("expected Bench, got {:?}", other),
     }

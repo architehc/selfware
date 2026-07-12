@@ -15,7 +15,6 @@ use selfware::tools::computer::{ComputerKeyboardTool, ComputerMouseTool, Compute
 use selfware::tools::vision::{VisionAnalyze, VisionCompare};
 use selfware::tools::Tool;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,

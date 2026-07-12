@@ -1623,7 +1623,7 @@ mod tests {
         let file = fs::read_dir(&cpdir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .find(|e| e.path().extension().map_or(false, |x| x == "json"))
+            .find(|e| e.path().extension().is_some_and(|x| x == "json"))
             .expect("a checkpoint json file should exist");
         let fmode = fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(
@@ -2791,7 +2791,7 @@ mod tests {
 
         // Legacy checkpoints without these fields must default to 0, not fail.
         let mut legacy_value =
-            serde_json::to_value(&TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
+            serde_json::to_value(TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
         // Remove the new budget fields to simulate a legacy checkpoint.
         if let serde_json::Value::Object(ref mut map) = legacy_value {
             map.remove("cumulative_tokens");
