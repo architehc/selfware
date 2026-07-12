@@ -681,6 +681,10 @@ impl Agent {
         // messages and wasted context — GLM-5.2 finding on task_runner.rs).
         let mut last_warned_band = 0u8;
         while let Some(state) = self.loop_control.next_state() {
+            // Liveness heartbeat: a turning loop stays healthy on the health
+            // endpoint; a hung process stops pinging and goes stale so a
+            // systemd/k8s watchdog can restart it.
+            crate::supervision::health::record_heartbeat();
             let band = self.loop_control.approaching_limit_band();
             if band > last_warned_band {
                 if let Some(warning) = self.loop_control.approaching_limit_warning() {

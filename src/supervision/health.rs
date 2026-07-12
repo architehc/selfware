@@ -400,6 +400,53 @@ pub fn set_global_healthy(healthy: bool) {
     GLOBAL_HEALTHY.store(healthy, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Epoch-milliseconds of the last agent-loop heartbeat. 0 means "no heartbeat
+/// has ever been recorded" (bare-bones deployments), which is treated as
+/// healthy so liveness isn't failed for callers that don't ping.
+static LAST_HEARTBEAT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Record a liveness heartbeat. Call this once per agent-loop iteration so the
+/// health endpoint reflects real progress: a process whose loop is turning stays
+/// healthy; one that hangs stops pinging and goes stale, so `systemd
+/// WatchdogSec=` (or a k8s liveness probe) can actually restart it.
+pub fn record_heartbeat() {
+    // Never store 0 — that's the "never pinged" sentinel.
+    LAST_HEARTBEAT_MS.store(now_ms().max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Staleness threshold (seconds) before a heartbeat is considered dead. Default
+/// is generous (a single step may legitimately take up to the step timeout);
+/// operators can tune it via `SELFWARE_HEARTBEAT_STALE_SECS`.
+fn heartbeat_stale_secs() -> u64 {
+    std::env::var("SELFWARE_HEARTBEAT_STALE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(900)
+}
+
+/// True unless a heartbeat was being recorded and has since gone stale.
+fn heartbeat_healthy() -> bool {
+    let last = LAST_HEARTBEAT_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if last == 0 {
+        return true; // never pinged — don't fail liveness for non-supervised runs
+    }
+    now_ms().saturating_sub(last) <= heartbeat_stale_secs() * 1000
+}
+
+#[cfg(test)]
+fn set_last_heartbeat_ms_for_test(ms: u64) {
+    LAST_HEARTBEAT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Start a minimal HTTP health endpoint on the given port.
 ///
 /// Returns **200** with body `healthy\n` when the supervised component is
@@ -415,7 +462,8 @@ pub async fn start_health_endpoint(port: u16) -> anyhow::Result<()> {
 
     loop {
         if let Ok((mut stream, _)) = listener.accept().await {
-            let healthy = GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed);
+            let healthy = GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed)
+                && heartbeat_healthy();
             let response = if healthy {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nhealthy\n"
             } else {
@@ -438,6 +486,37 @@ pub fn maybe_start_health_endpoint() {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    #[test]
+    fn never_pinged_is_healthy() {
+        set_last_heartbeat_ms_for_test(0);
+        assert!(heartbeat_healthy(), "no heartbeat wired -> healthy (bare-bones)");
+    }
+
+    #[test]
+    fn fresh_heartbeat_is_healthy() {
+        record_heartbeat();
+        assert!(heartbeat_healthy(), "a just-recorded heartbeat is healthy");
+    }
+
+    #[test]
+    fn stale_heartbeat_is_unhealthy() {
+        // A heartbeat far older than the default 900s threshold is stale.
+        let old = now_ms().saturating_sub(2_000_000); // ~2000s ago
+        set_last_heartbeat_ms_for_test(old.max(1));
+        assert!(
+            !heartbeat_healthy(),
+            "a heartbeat older than the staleness threshold must be unhealthy"
+        );
+        // Restore a fresh heartbeat so we don't leave the global stale for other
+        // tests that might observe it.
+        record_heartbeat();
     }
 }
 
