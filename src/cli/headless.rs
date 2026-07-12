@@ -240,36 +240,63 @@ impl Default for JsonlProgressEmitter {
     }
 }
 
-impl ProgressEmitter for JsonlProgressEmitter {
-    fn emit(&self, event: ProgressEvent) {
-        let headless = match event {
+impl JsonlProgressEmitter {
+    /// Build the JSONL line for a progress event, or `None` if the event is not
+    /// surfaced in stream-json. Split out from `emit` so it is unit-testable
+    /// without capturing stdout.
+    fn event_json_line(event: ProgressEvent) -> Option<String> {
+        match event {
             ProgressEvent::StepStarted { step, model, .. } => {
-                Some(HeadlessEvent::step_started(step, model))
+                serde_json::to_string(&HeadlessEvent::step_started(step, model)).ok()
             }
             ProgressEvent::ToolCallStarted { tool, args_short } => {
-                Some(HeadlessEvent::tool_call_started(tool, args_short))
+                serde_json::to_string(&HeadlessEvent::tool_call_started(tool, args_short)).ok()
             }
             ProgressEvent::ToolCallCompleted { tool, ok, .. } => {
-                Some(HeadlessEvent::tool_call_completed(tool, ok))
+                serde_json::to_string(&HeadlessEvent::tool_call_completed(tool, ok)).ok()
             }
-            ProgressEvent::StepCompleted { step, .. } => Some(HeadlessEvent::step_completed(step)),
+            ProgressEvent::StepCompleted { step, .. } => {
+                serde_json::to_string(&HeadlessEvent::step_completed(step)).ok()
+            }
             ProgressEvent::TaskCompleted { outcome } => {
-                Some(HeadlessEvent::task_completed(outcome))
+                serde_json::to_string(&HeadlessEvent::task_completed(outcome)).ok()
             }
-            ProgressEvent::TaskFailed { reason } => Some(HeadlessEvent::task_failed(reason)),
+            ProgressEvent::TaskFailed { reason } => {
+                serde_json::to_string(&HeadlessEvent::task_failed(reason)).ok()
+            }
             ProgressEvent::TurnDecision { decision, detail } => {
-                Some(HeadlessEvent::turn_decision(decision, detail))
+                serde_json::to_string(&HeadlessEvent::turn_decision(decision, detail)).ok()
             }
+            ProgressEvent::LlmRequestSent { tokens } => Some(
+                serde_json::json!({
+                    "event": "llm_request_sent",
+                    "prompt_tokens": tokens,
+                })
+                .to_string(),
+            ),
+            ProgressEvent::LlmResponseReceived {
+                finish_reason,
+                completion_tokens,
+            } => Some(
+                serde_json::json!({
+                    "event": "llm_response_received",
+                    "finish_reason": finish_reason,
+                    "completion_tokens": completion_tokens,
+                })
+                .to_string(),
+            ),
             _ => None,
-        };
+        }
+    }
+}
 
-        if let Some(ev) = headless {
+impl ProgressEmitter for JsonlProgressEmitter {
+    fn emit(&self, event: ProgressEvent) {
+        if let Some(line) = Self::event_json_line(event) {
             let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
             let mut stdout = std::io::stdout().lock();
-            if let Ok(json) = serde_json::to_string(&ev) {
-                let _ = writeln!(stdout, "{}", json);
-                let _ = stdout.flush();
-            }
+            let _ = writeln!(stdout, "{}", line);
+            let _ = stdout.flush();
         }
     }
 }
@@ -421,6 +448,28 @@ mod tests {
         let ev = HeadlessEvent::tool_call_completed("shell_exec".to_string(), false);
         assert_eq!(ev.ok, Some(false));
         assert_eq!(ev.tool.as_deref(), Some("shell_exec"));
+    }
+
+    #[test]
+    fn jsonl_emits_llm_events_with_tokens_and_finish_reason() {
+        // stream-json previously dropped the LLM events entirely.
+        let req = JsonlProgressEmitter::event_json_line(ProgressEvent::LlmRequestSent {
+            tokens: 1234,
+        })
+        .expect("llm_request_sent must be emitted");
+        let req: Value = serde_json::from_str(&req).unwrap();
+        assert_eq!(req["event"], "llm_request_sent");
+        assert_eq!(req["prompt_tokens"], 1234);
+
+        let resp = JsonlProgressEmitter::event_json_line(ProgressEvent::LlmResponseReceived {
+            finish_reason: "stop".to_string(),
+            completion_tokens: 56,
+        })
+        .expect("llm_response_received must be emitted");
+        let resp: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(resp["event"], "llm_response_received");
+        assert_eq!(resp["finish_reason"], "stop");
+        assert_eq!(resp["completion_tokens"], 56);
     }
 
     #[test]
