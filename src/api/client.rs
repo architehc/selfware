@@ -91,11 +91,15 @@ impl RetryConfig {
 /// thinking/reasoning modes, and configurable retry logic.
 #[derive(Clone)]
 pub struct ApiClient {
+    /// HTTP client with a total `.timeout()`, used only by the short FIM
+    /// completion path (`complete`). The chat/stream paths use `stream_client`
+    /// and bound their own response wait instead.
     client: Client,
-    /// HTTP client used for **streaming** requests.  Built without a total
-    /// `.timeout()` so that long SSE streams from slow models are not
-    /// truncated mid-generation.  Stall detection is handled per-chunk by
-    /// [`StreamingResponse`] using `stream_chunk_timeout_secs`.
+    /// HTTP client for chat/stream requests.  Built without a total
+    /// `.timeout()` so that long generations from slow models are not truncated
+    /// mid-flight; each request bounds its own response wait (streaming:
+    /// per-chunk stall timeout; non-streaming: a generous header/response
+    /// `tokio::time::timeout`).
     stream_client: Client,
     config: crate::config::Config,
     pub(crate) base_url: String,
@@ -110,6 +114,7 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(config: &crate::config::Config) -> Result<Self> {
+        // Total-timeout client, used only by the short FIM `complete` path.
         let request_timeout = config.agent.step_timeout_secs.max(60);
         let client = Client::builder()
             .timeout(Duration::from_secs(request_timeout))
@@ -117,10 +122,11 @@ impl ApiClient {
             .build()
             .context("Failed to build HTTP client")?;
 
-        // Streaming client: NO total `.timeout()` — the per-chunk timeout
-        // (`stream_chunk_timeout_secs`) inside `StreamingResponse` is
-        // sufficient to detect stalls.  A total timeout here would truncate
-        // long but healthy SSE streams from slow models.
+        // Chat/stream client: NO total `.timeout()`. Both the streaming and the
+        // non-streaming chat paths bound their own response wait (streaming: a
+        // header timeout + per-chunk stall detection; non-streaming: a generous
+        // header/response `tokio::time::timeout`) so a slow-but-healthy
+        // generation from a local model is never aborted mid-flight.
         let stream_client = Client::builder()
             .connect_timeout(Duration::from_secs(30))
             .build()
@@ -656,8 +662,15 @@ impl ApiClient {
 
             debug!("Sending request to {} (attempt {})", url, attempt + 1);
 
+            // Use the streaming client, which has NO total `.timeout()`. The
+            // default non-streaming client caps the whole request at
+            // step_timeout_secs (300s default); many backends send response
+            // headers only AFTER the full completion is generated, so on a slow
+            // model (GLM-5.2 ~2.5 t/s → a 1000-token reply is ~400s) that hard
+            // cap aborts a healthy generation, and the fallback then re-sends
+            // the full history and retries — a 30-min-per-turn amplifier.
             let mut request = self
-                .client
+                .stream_client
                 .post(&url)
                 .header("Content-Type", "application/json");
 
@@ -665,11 +678,14 @@ impl ApiClient {
                 request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
 
-            // Race the request against a shutdown request so a single Ctrl-C /
-            // SIGTERM interrupts a stalled provider connection promptly instead
-            // of blocking on the full request timeout (mirrors the streaming
-            // header wait).
-            let result = tokio::select! {
+            // Bound the request generously rather than at the tight step
+            // timeout: non-streaming can't do per-chunk stall detection, and the
+            // "response wait" here effectively covers generation. A >=10-minute
+            // floor (or the step timeout if larger) lets slow-but-healthy models
+            // finish while still bounding a truly-dead connection. Raced against
+            // shutdown so Ctrl-C / SIGTERM interrupts promptly.
+            let response_timeout_secs = self.config.agent.step_timeout_secs.max(600);
+            let send_result = tokio::select! {
                 biased;
                 _ = crate::shutdown_requested() => {
                     return Err(ApiError::Network(
@@ -677,7 +693,30 @@ impl ApiClient {
                     )
                     .into());
                 }
-                r = request.json(body).send() => r,
+                r = tokio::time::timeout(
+                    Duration::from_secs(response_timeout_secs),
+                    request.json(body).send(),
+                ) => r,
+            };
+
+            let result = match send_result {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    warn!(
+                        "Non-streaming request timed out after {}s (attempt {}/{})",
+                        response_timeout_secs,
+                        attempt + 1,
+                        self.retry_config.max_retries + 1
+                    );
+                    last_error = Some(
+                        ApiError::Network(format!(
+                            "Non-streaming request timed out after {}s",
+                            response_timeout_secs
+                        ))
+                        .into(),
+                    );
+                    continue;
+                }
             };
 
             match result {
