@@ -38,6 +38,32 @@ impl ShellExec {
     }
 }
 
+/// Maximum bytes captured per stream from a shell command. Output beyond this
+/// is still drained (so the child never blocks on a full pipe) but discarded,
+/// so a runaway process can't OOM the agent before the timeout reaps it.
+const MAX_CAPTURE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
+/// Read a child pipe to EOF, keeping at most `MAX_CAPTURE_BYTES` in memory while
+/// still consuming the rest so the process isn't blocked on a full pipe.
+async fn drain_capped<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if buf.len() < MAX_CAPTURE_BYTES {
+                    let take = n.min(MAX_CAPTURE_BYTES - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+                // Beyond the cap: keep reading to drain the pipe, discard excess.
+            }
+        }
+    }
+    buf
+}
+
 #[async_trait]
 impl Tool for ShellExec {
     fn name(&self) -> &str {
@@ -191,20 +217,16 @@ impl Tool for ShellExec {
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
         let stdout_task = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            if let Some(mut s) = stdout_pipe {
-                let _ = s.read_to_end(&mut buf).await;
+            match stdout_pipe {
+                Some(s) => drain_capped(s).await,
+                None => Vec::new(),
             }
-            buf
         });
         let stderr_task = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buf = Vec::new();
-            if let Some(mut s) = stderr_pipe {
-                let _ = s.read_to_end(&mut buf).await;
+            match stderr_pipe {
+                Some(s) => drain_capped(s).await,
+                None => Vec::new(),
             }
-            buf
         });
 
         let wait_result =
@@ -330,6 +352,28 @@ mod tests {
                 gc_pid
             );
         }
+    }
+
+    #[tokio::test]
+    async fn shell_exec_large_output_completes_without_hang() {
+        // A command emitting far more than the capture cap must still COMPLETE
+        // (the capped drain keeps consuming the pipe so the child never blocks),
+        // and it must not OOM the agent. Before the cap this buffered the whole
+        // stream unbounded.
+        let tool = ShellExec::new();
+        let args = serde_json::json!({
+            // ~40 MiB, well over the 10 MiB MAX_CAPTURE_BYTES cap.
+            "command": "head -c 41943040 /dev/zero | tr '\\0' 'a'",
+            "timeout_secs": 30
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(
+            result["timed_out"], false,
+            "capped drain must consume the pipe so the child exits, not block to timeout"
+        );
+        assert_eq!(result["exit_code"], 0);
+        // Sanity: MAX_CAPTURE_BYTES is the intended per-stream bound.
+        assert_eq!(MAX_CAPTURE_BYTES, 10 * 1024 * 1024);
     }
 
     #[tokio::test]
