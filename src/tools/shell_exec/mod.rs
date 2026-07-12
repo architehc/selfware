@@ -166,6 +166,32 @@ fn command_is_long_running_build(command: &str) -> bool {
     MARKERS.iter().any(|m| c.contains(m))
 }
 
+/// Maximum bytes captured per stream from a shell command. Output beyond this
+/// is still drained (so the child never blocks on a full pipe) but discarded,
+/// so a runaway process can't OOM the agent before the timeout reaps it.
+const MAX_CAPTURE_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
+/// Read a child pipe to EOF, keeping at most `MAX_CAPTURE_BYTES` in memory while
+/// still consuming the rest so the process isn't blocked on a full pipe.
+async fn drain_capped<R: tokio::io::AsyncRead + Unpin>(mut reader: R) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if buf.len() < MAX_CAPTURE_BYTES {
+                    let take = n.min(MAX_CAPTURE_BYTES - buf.len());
+                    buf.extend_from_slice(&chunk[..take]);
+                }
+                // Beyond the cap: keep reading to drain the pipe, discard excess.
+            }
+        }
+    }
+    buf
+}
+
 /// Shell command execution tool.
 pub struct ShellExec;
 
@@ -309,30 +335,73 @@ impl Tool for ShellExec {
         }
         cmd.envs(&args.env);
 
-        let start = std::time::Instant::now();
-        let output =
-            tokio::time::timeout(Duration::from_secs(args.timeout_secs), cmd.output()).await;
+        // Run the child in its own process group so a timeout can reap the
+        // ENTIRE process tree (grandchildren included, e.g. cargo -> rustc), not
+        // just the direct shell — `kill_on_drop`/`child.kill()` only signal the
+        // immediate child, so a backgrounded subprocess would otherwise orphan
+        // into a defunct zombie holding target/ locks.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
-        let (exit_code, stdout, stderr, timed_out) = match output {
-            Ok(Ok(output)) => (
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-                false,
-            ),
+        let start = std::time::Instant::now();
+        let mut child = cmd.spawn()?;
+        let child_pid = child.id();
+
+        // Drain stdout/stderr concurrently (bounded) so a chatty process can't
+        // deadlock on a full pipe or OOM the agent with unbounded output.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let stdout_task = tokio::spawn(async move {
+            match stdout_pipe {
+                Some(s) => drain_capped(s).await,
+                None => Vec::new(),
+            }
+        });
+        let stderr_task = tokio::spawn(async move {
+            match stderr_pipe {
+                Some(s) => drain_capped(s).await,
+                None => Vec::new(),
+            }
+        });
+
+        let wait_result =
+            tokio::time::timeout(Duration::from_secs(args.timeout_secs), child.wait()).await;
+
+        let (exit_code, timed_out) = match wait_result {
+            Ok(Ok(status)) => (status.code().unwrap_or(-1), false),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => (
-                -1,
-                "".to_string(),
-                format!(
-                    "Command timed out after {}s and was killed (no output captured). \
-                     For long-running builds/tests (e.g. `cargo check`/`build`/`test`), \
-                     retry the SAME command with a larger timeout, e.g. add \
-                     \"timeout_secs\": 600 to the tool arguments.",
-                    args.timeout_secs
-                ),
-                true,
-            ),
+            Err(_) => {
+                // Timed out: kill the whole process group, then reap the child.
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    use nix::sys::signal::{killpg, Signal};
+                    use nix::unistd::Pid;
+                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                }
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                (-1, true)
+            }
+        };
+
+        // Always await the drain tasks so they don't leak; the pipes close once
+        // the process (and its group) exit.
+        let stdout_bytes = stdout_task.await.unwrap_or_default();
+        let stderr_bytes = stderr_task.await.unwrap_or_default();
+        let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+        let stderr = if timed_out {
+            format!(
+                "Command timed out after {}s and was killed (whole process group \
+                 reaped). For long-running builds/tests (e.g. `cargo \
+                 check`/`build`/`test`), retry the SAME command with a larger \
+                 timeout, e.g. add \"timeout_secs\": 600 to the tool arguments.",
+                args.timeout_secs
+            )
+        } else {
+            String::from_utf8_lossy(&stderr_bytes).into_owned()
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -392,6 +461,50 @@ mod tests {
         assert_eq!(result["exit_code"], 0);
         assert!(result["stdout"].as_str().unwrap().contains("hello world"));
         assert_eq!(result["timed_out"], false);
+    }
+
+    #[tokio::test]
+    async fn registered_shell_exec_timeout_reaps_process_group() {
+        // The REGISTERED shell tool must reap the whole tree on timeout — a
+        // backgrounded grandchild (`sleep 30 &`) must be killed, not orphaned.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("gc.pid");
+        let tool = ShellExec;
+        let args = serde_json::json!({
+            "command": format!("sleep 30 & echo $! > {}; wait", pidfile.display()),
+            "timeout_secs": 1
+        });
+        let start = std::time::Instant::now();
+        let result = tool.execute(args).await.unwrap();
+        assert!(start.elapsed().as_secs() < 10, "should return at timeout");
+        assert_eq!(result["timed_out"], true);
+
+        let gc_pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("grandchild wrote its pid")
+            .trim()
+            .parse()
+            .expect("valid pid");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        #[cfg(unix)]
+        {
+            use nix::sys::signal::kill;
+            use nix::unistd::Pid;
+            let alive = kill(Pid::from_raw(gc_pid), None).is_ok();
+            assert!(!alive, "grandchild pid {gc_pid} should have been reaped");
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_shell_exec_large_output_completes() {
+        // ~40 MiB of output must complete without hang/OOM (bounded drain).
+        let tool = ShellExec;
+        let args = serde_json::json!({
+            "command": "head -c 41943040 /dev/zero | tr '\\0' 'a'",
+            "timeout_secs": 30
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["timed_out"], false);
+        assert_eq!(result["exit_code"], 0);
     }
 
     #[tokio::test]
