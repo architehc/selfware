@@ -190,6 +190,18 @@ impl ContextCompressor {
             result.push(first.clone()); // System
         }
 
+        // Preserve the original task objective (the first user message) so an
+        // emergency compaction doesn't make the model forget the task on a long run.
+        let tail_start = messages.len().saturating_sub(3);
+        if let Some((idx, task_msg)) = messages.iter().enumerate().find(|(_, m)| m.role == "user") {
+            if idx < tail_start {
+                result.push(Message::user(format!(
+                    "[Original task, preserved across compression]:\n{}",
+                    task_msg.content.text()
+                )));
+            }
+        }
+
         // Add a note about compression
         result.push(Message::user(
             "[Earlier context was compressed due to length limits]",
@@ -564,5 +576,38 @@ mod tests {
         let estimate = compressor.estimate_tokens(&messages);
         // Should not crash and give reasonable estimate
         assert!(estimate > 0);
+    }
+
+    #[test]
+    fn test_hard_compress_preserves_task_objective() {
+        let compressor = ContextCompressor::new(100000);
+        // 10 messages: system + first user task + alternating so the task
+        // falls well outside the last-3 tail window.
+        let messages = vec![
+            Message::system("sys"),
+            Message::user("THE ORIGINAL TASK: fix the bug"),
+            Message::assistant("Let me start by reading the file."),
+            Message::user("Here is the file."),
+            Message::assistant("I see the issue."),
+            Message::user("Can you fix it?"),
+            Message::assistant("Working on it now."),
+            Message::user("Is it done?"),
+            Message::assistant("Almost there."),
+            Message::user("Please finish up."),
+        ];
+
+        let compressed = compressor.hard_compress(&messages);
+
+        // The original task objective must survive the compaction.
+        assert!(
+            compressed
+                .iter()
+                .any(|m| m.content.text().contains("THE ORIGINAL TASK")),
+            "hard_compress dropped the original task objective: {:?}",
+            compressed
+                .iter()
+                .map(|m| m.content.text().to_string())
+                .collect::<Vec<_>>()
+        );
     }
 }
