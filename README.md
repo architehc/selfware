@@ -17,7 +17,7 @@
       \|     |/
 ```
 
-An **agentic coding harness** for local LLMs that runs entirely on your hardware. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot — all local-first, no cloud required.
+An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware, or point it at a hosted endpoint (e.g. OpenRouter + GLM‑5.2) when you don't have the GPU. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
 
 > **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it work a tool-use (ReAct) loop — reading, editing, running tests, and committing. A lightweight Plan→Execute phase structures each run; it is not a full task decomposer, so scope large goals into concrete tasks. Then let the evolution engine iterate.
 
