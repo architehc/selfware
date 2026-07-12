@@ -658,7 +658,20 @@ impl ApiClient {
                 request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
 
-            let result = request.json(body).send().await;
+            // Race the request against a shutdown request so a single Ctrl-C /
+            // SIGTERM interrupts a stalled provider connection promptly instead
+            // of blocking on the full request timeout (mirrors the streaming
+            // header wait).
+            let result = tokio::select! {
+                biased;
+                _ = crate::shutdown_requested() => {
+                    return Err(ApiError::Network(
+                        "Shutdown requested while waiting for provider response".to_string(),
+                    )
+                    .into());
+                }
+                r = request.json(body).send() => r,
+            };
 
             match result {
                 Ok(response) => {
