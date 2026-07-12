@@ -383,7 +383,6 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
                 | Commands::LlmDoctor
                 | Commands::Test { .. }
                 | Commands::Status { .. }
-                | Commands::Validate { .. }
         )
     );
     if is_diagnostic {
@@ -1908,28 +1907,6 @@ async fn handle_command(
             }
         }
 
-        Commands::Validate {
-            url,
-            dir,
-            iterations,
-            target,
-        } => {
-            let url = url.clone();
-            if !quiet {
-                println!("{}", render_header(ctx));
-            }
-            anyhow::bail!(
-                "Visual validation is not fully wired yet. Screenshot capture exists, but scoring/reporting is still placeholder-only.\n\
-                 Requested target={} iterations={} url={}{}",
-                target,
-                iterations,
-                url,
-                dir.as_ref()
-                    .map(|value| format!(" dir={}", value))
-                    .unwrap_or_default()
-            );
-        }
-
         Commands::Workflow { command } => {
             use crate::swl::{parse_document, validate_document};
             use args::WorkflowCommands;
@@ -2527,24 +2504,6 @@ async fn handle_command(
         Commands::SWEBench { command } => {
             use args::SWEBenchCommands;
             match command {
-                SWEBenchCommands::Run {
-                    dataset,
-                    limit,
-                    output,
-                } => {
-                    if !quiet {
-                        println!("{}", render_header(ctx));
-                    }
-                    anyhow::bail!(
-                        "SWE-bench evaluation is not implemented yet. The current path only uses embedded demo data and placeholder success.\n\
-                         Requested dataset={}{} output={}. Use the repo's experimental examples/scripts instead.",
-                        dataset,
-                        limit
-                            .map(|value| format!(", limit {}", value))
-                            .unwrap_or_default(),
-                        output
-                    );
-                }
                 SWEBenchCommands::Diagnose { output_dir } => {
                     run_swebench_diagnose(&output_dir)?;
                 }
@@ -3682,33 +3641,11 @@ pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
 }
 
 /// Dispatcher for the modern `selfware bench <subcommand>` surface.
-///
-/// `swebench-pro` is implemented; the other planned subcommands stub with a
-/// clear "not yet implemented" error so users see them in `--help` without
-/// hitting an `unimplemented!()` panic.
 async fn dispatch_bench_subcommand(sub: args::BenchCommand, _config: &Config) -> Result<()> {
     use args::BenchCommand;
 
     match sub {
         BenchCommand::SwebenchPro(args) => run_swebench_pro_cli(args).await,
-        BenchCommand::Throughput => {
-            anyhow::bail!(
-                "`bench throughput` subcommand is not yet implemented; use `selfware bench --suite throughput` for the legacy path."
-            )
-        }
-        BenchCommand::Multilang => {
-            anyhow::bail!(
-                "`bench multilang` subcommand is not yet implemented; use `selfware bench --suite multilang` for the legacy path."
-            )
-        }
-        BenchCommand::Browser => {
-            anyhow::bail!("`bench browser` subcommand is not yet implemented.")
-        }
-        BenchCommand::LongRun => {
-            anyhow::bail!(
-                "`bench long-run` subcommand is not yet implemented; use `selfware long-test` for the legacy path."
-            )
-        }
     }
 }
 

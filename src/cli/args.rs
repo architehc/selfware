@@ -506,22 +506,6 @@ pub(crate) enum Commands {
         aggregate: bool,
     },
 
-    /// Experimental visual validation entrypoint (capture exists; scoring is placeholder)
-    #[command(alias = "v")]
-    Validate {
-        /// URL to validate
-        #[arg(short, long, default_value = "http://localhost:8080")]
-        url: String,
-        /// Local directory to serve (if not using external URL)
-        #[arg(short, long)]
-        dir: Option<String>,
-        /// Number of validation iterations
-        #[arg(short, long, default_value = "3")]
-        iterations: usize,
-        /// Target score threshold (0-10)
-        #[arg(short, long, default_value = "8.0")]
-        target: f32,
-    },
 
     /// Workflow commands (SWL and YAML)
     #[command(alias = "w")]
@@ -553,18 +537,6 @@ pub(crate) enum Commands {
 /// Subcommands of `selfware swebench`.
 #[derive(Subcommand, Clone, Debug)]
 pub(crate) enum SWEBenchCommands {
-    /// Run SWE-bench evaluation (legacy/placeholder)
-    Run {
-        /// Dataset to use (public, held-out, commercial)
-        #[arg(short, long, default_value = "public")]
-        dataset: String,
-        /// Number of tasks to evaluate
-        #[arg(short, long)]
-        limit: Option<usize>,
-        /// Output file for results
-        #[arg(short, long, default_value = "swebench_results.json")]
-        output: String,
-    },
     /// Diagnose SWE-bench Pro traces
     Diagnose {
         /// Output directory containing trace.jsonl files
@@ -579,19 +551,6 @@ pub(crate) enum BenchCommand {
     /// Run SWE-bench Pro instances against one or more local quants
     #[command(name = "swebench-pro")]
     SwebenchPro(SwebenchProArgs),
-
-    /// Plain throughput benchmark (TODO: port from `Commands::Bench` legacy path)
-    Throughput,
-
-    /// Multi-language coding benchmark (TODO: port from legacy)
-    Multilang,
-
-    /// Browser automation benchmark (TODO)
-    Browser,
-
-    /// Long-running soak test (TODO: port from `Commands::LongTest`)
-    #[command(name = "long-run")]
-    LongRun,
 }
 
 /// Flags for `selfware bench swebench-pro`.

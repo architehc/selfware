@@ -309,10 +309,6 @@ required-features = ["tool-verify"]
 
 # Benchmarks
 [[bench]]
-name = "token_processing"
-harness = false
-
-[[bench]]
 name = "vlm_benchmark"
 harness = false
 required-features = ["vlm-bench"]

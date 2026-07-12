@@ -597,26 +597,3 @@ fn bench_swebench_pro_official_eval_flags_parse() {
         assert!(!endpoint_is_local("https://api.example.com/v1"));
     }
 
-#[test]
-fn bench_other_subcommands_parse_for_help_visibility() {
-    use args::BenchCommand;
-    use clap::Parser;
-    for sub in ["throughput", "multilang", "browser", "long-run"] {
-        let cli = Cli::try_parse_from(["selfware", "bench", sub])
-            .unwrap_or_else(|e| panic!("failed to parse `bench {}`: {}", sub, e));
-        match cli.command.unwrap() {
-            Commands::Bench { command, .. } => {
-                let cmd = command.expect("subcommand parsed");
-                let label = match cmd {
-                    BenchCommand::Throughput => "throughput",
-                    BenchCommand::Multilang => "multilang",
-                    BenchCommand::Browser => "browser",
-                    BenchCommand::LongRun => "long-run",
-                    BenchCommand::SwebenchPro(_) => "swebench-pro",
-                };
-                assert_eq!(label, sub);
-            }
-            other => panic!("expected Bench, got {:?}", other),
-        }
-    }
-}
