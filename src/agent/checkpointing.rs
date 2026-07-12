@@ -48,17 +48,8 @@ impl Agent {
         // Restore the hard budget caps persisted at checkpoint time, unless the
         // resume command re-passed a flag (CLI override wins). Without this a
         // resume that omits the flags would run uncapped even though cumulative
-        // consumption is restored — the "uncapped resume = unbounded spend"
-        // gap. `config.agent.max_*` here already reflects any CLI/env override.
-        if config.agent.max_budget_tokens.is_none() {
-            config.agent.max_budget_tokens = checkpoint.max_budget_tokens;
-        }
-        if config.agent.max_wall_secs.is_none() {
-            config.agent.max_wall_secs = checkpoint.max_wall_secs;
-        }
-        if config.agent.max_cost_usd.is_none() {
-            config.agent.max_cost_usd = checkpoint.max_cost_usd;
-        }
+        // consumption is restored — the "uncapped resume = unbounded spend" gap.
+        restore_budget_caps_from_checkpoint(&mut config, &checkpoint);
         if checkpoint.max_budget_tokens.is_some()
             || checkpoint.max_wall_secs.is_some()
             || checkpoint.max_cost_usd.is_some()
@@ -720,6 +711,72 @@ impl Agent {
             .reset_retry("agent_execution_error", "run_task");
         self.self_healing
             .reset_retry("agent_execution_error", "continue_execution");
+    }
+}
+
+/// Restore the persisted hard budget caps into `config` on resume, but only for
+/// caps the resume command did not itself supply — a re-passed CLI/env flag
+/// (already reflected in `config.agent.max_*`) wins over the persisted value.
+fn restore_budget_caps_from_checkpoint(
+    config: &mut crate::config::Config,
+    checkpoint: &TaskCheckpoint,
+) {
+    if config.agent.max_budget_tokens.is_none() {
+        config.agent.max_budget_tokens = checkpoint.max_budget_tokens;
+    }
+    if config.agent.max_wall_secs.is_none() {
+        config.agent.max_wall_secs = checkpoint.max_wall_secs;
+    }
+    if config.agent.max_cost_usd.is_none() {
+        config.agent.max_cost_usd = checkpoint.max_cost_usd;
+    }
+}
+
+#[cfg(test)]
+mod budget_cap_restore_tests {
+    use super::restore_budget_caps_from_checkpoint;
+    use crate::checkpoint::TaskCheckpoint;
+    use crate::config::Config;
+
+    fn checkpoint_with_caps(
+        tokens: Option<usize>,
+        secs: Option<u64>,
+        cost: Option<f64>,
+    ) -> TaskCheckpoint {
+        let mut cp = TaskCheckpoint::new("t".to_string(), "d".to_string());
+        cp.max_budget_tokens = tokens;
+        cp.max_wall_secs = secs;
+        cp.max_cost_usd = cost;
+        cp
+    }
+
+    #[test]
+    fn restores_caps_when_config_has_none() {
+        let mut config = Config::default();
+        let cp = checkpoint_with_caps(Some(500_000), Some(3600), Some(4.0));
+        restore_budget_caps_from_checkpoint(&mut config, &cp);
+        assert_eq!(config.agent.max_budget_tokens, Some(500_000));
+        assert_eq!(config.agent.max_wall_secs, Some(3600));
+        assert_eq!(config.agent.max_cost_usd, Some(4.0));
+    }
+
+    #[test]
+    fn cli_override_wins_over_persisted_cap() {
+        let mut config = Config::default();
+        config.agent.max_budget_tokens = Some(10); // as if re-passed on resume
+        let cp = checkpoint_with_caps(Some(500_000), None, None);
+        restore_budget_caps_from_checkpoint(&mut config, &cp);
+        assert_eq!(config.agent.max_budget_tokens, Some(10)); // CLI value kept
+    }
+
+    #[test]
+    fn no_persisted_caps_leaves_config_uncapped() {
+        let mut config = Config::default();
+        let cp = checkpoint_with_caps(None, None, None);
+        restore_budget_caps_from_checkpoint(&mut config, &cp);
+        assert_eq!(config.agent.max_budget_tokens, None);
+        assert_eq!(config.agent.max_wall_secs, None);
+        assert_eq!(config.agent.max_cost_usd, None);
     }
 }
 

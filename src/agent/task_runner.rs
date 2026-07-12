@@ -2211,6 +2211,40 @@ mod tests {
         target_os = "windows",
         ignore = "mock TCP server unreliable on Windows CI"
     )]
+    async fn test_run_task_terminates_at_token_budget() {
+        // Every mock response reports 15 total tokens (see mock_api.rs), and the
+        // budget check runs at the top of each loop iteration against the
+        // cumulative usage the planning + step calls accrue. A 10-token cap must
+        // therefore terminate the run rather than let it complete.
+        let server = MockLlmServer::builder()
+            .with_response("Working on it...")
+            .with_response("Still working...")
+            .with_response("Done.")
+            .build()
+            .await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+        config.agent.max_budget_tokens = Some(10);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("A task the budget should cut off").await;
+
+        assert!(
+            result.is_err(),
+            "run_task should fail on budget exhaustion, got Ok"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Token budget exhausted"),
+            "expected a token-budget error, got: {err}"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
     async fn test_run_task_checkpoint_description() {
         let server = MockLlmServer::builder()
             .with_response("Plan.")
