@@ -78,7 +78,15 @@ async fn summarize_and_spill(
     raw: &str,
     estimated_tokens: usize,
 ) -> String {
-    // Save raw result to disk
+    // Redact secrets BEFORE the result is written to disk or summarized into
+    // context. An oversized tool result — shell output, a file_read of a .env,
+    // a git_diff touching a key — can carry credentials, and the spill file is
+    // plaintext on disk (under .selfware/, gitignored but still on the box).
+    // Redacting here covers both the spill and every summary built from `raw`.
+    let redacted = crate::safety::redact::redact_secrets(raw);
+    let raw: &str = redacted.as_ref();
+
+    // Save the redacted result to disk
     let spill_dir = std::path::Path::new(TOOL_RESULTS_DIR);
     let _ = tokio::fs::create_dir_all(spill_dir).await;
     let spill_file = spill_dir.join(format!(
@@ -4158,6 +4166,36 @@ mod tests {
     fn summarize_generic_keeps_small_input_verbatim() {
         let raw = "short output\nline 2\n<verification_failed>nope</verification_failed>";
         assert_eq!(summarize_generic(raw), raw);
+    }
+
+    #[tokio::test]
+    async fn summarize_and_spill_redacts_secrets_on_disk() {
+        // A large shell result carrying a credential must not land unredacted
+        // in the plaintext spill file under .selfware/tool_results/.
+        let secret = format!("ghp_{}", "a".repeat(36)); // matches the github_token pattern
+        let raw = format!(
+            "{{\"output\":\"export TOKEN={secret}\\n{}\"}}",
+            "x".repeat(60_000)
+        );
+        let call_id = "spillredacttest01";
+
+        let _summary = summarize_and_spill("shell_exec", call_id, &raw, 9999).await;
+
+        let spill_file = std::path::Path::new(TOOL_RESULTS_DIR).join(format!(
+            "shell_exec_{}.json",
+            call_id.chars().take(12).collect::<String>()
+        ));
+        let on_disk = std::fs::read_to_string(&spill_file).expect("spill file should exist");
+        let _ = std::fs::remove_file(&spill_file);
+
+        assert!(
+            !on_disk.contains(&secret),
+            "secret leaked to the spill file on disk"
+        );
+        assert!(
+            on_disk.contains("[REDACTED]"),
+            "spill file should contain the redaction marker"
+        );
     }
 
     #[test]
