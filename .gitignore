@@ -107,3 +107,14 @@ __pycache__/
 .claude/settings.local.json
 .zed/
 selfware.toml
+
+# system_tests: keep compact predictions/leaderboards/configs, ignore generated bulk
+system_tests/**/agent_data/
+system_tests/**/repos/
+system_tests/**/node_modules/
+system_tests/**/build/
+system_tests/**/.cache/
+system_tests/**/reports/
+system_tests/**/*.prompt.txt
+system_tests/**/*.response.md
+system_tests/**/*.recovery.toml

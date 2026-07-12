@@ -1,2 +1,0 @@
-129:2. **`truncate`**: Fixed the off-by-one error by changing `max_len.saturating_sub(1)` to `max_len` in the `take()` call.
-140:2. **`truncate`**: Fixed the off-by-one error by changing `max_len.saturating_sub(1)` to `max_len` in the `take()` call.
