@@ -29,13 +29,19 @@ mod agent_loop_tests {
     fn test_iteration_tracking() {
         let mut agent_loop = AgentLoop::new(5);
 
-        // Each call to next_state increments iteration
+        // The initial Planning turn does not consume an iteration slot.
+        assert!(agent_loop.next_state().is_some());
+        agent_loop
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
+
+        // 5 execution iterations should succeed
         for i in 0..5 {
             let state = agent_loop.next_state();
             assert!(state.is_some(), "Iteration {} should succeed", i);
         }
 
-        // 6th call should fail (exceeds max_iterations)
+        // 6th execution iteration should fail (exceeds max_iterations)
         let state = agent_loop.next_state();
         assert!(matches!(
             state,
@@ -111,7 +117,12 @@ mod agent_loop_tests {
     fn test_zero_max_iterations() {
         let mut agent_loop = AgentLoop::new(0);
 
-        // First call should fail immediately
+        // The Planning turn is free; with 0 iterations the first EXECUTION
+        // turn fails immediately.
+        assert!(agent_loop.next_state().is_some());
+        agent_loop
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
         let state = agent_loop.next_state();
         assert!(matches!(
             state,

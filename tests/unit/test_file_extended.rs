@@ -271,10 +271,12 @@ async fn test_file_edit_multiline() {
     fs::write(&file_path, "fn foo() {\n    println!(\"old\");\n}").unwrap();
 
     let tool = FileEdit::new();
+    // Targeted edit (not the whole file — file_edit now rejects a 100% match
+    // and directs you to file_write for full-file replacement).
     let args = json!({
         "path": file_path.to_str().unwrap(),
-        "old_str": "fn foo() {\n    println!(\"old\");\n}",
-        "new_str": "fn foo() {\n    println!(\"new\");\n}"
+        "old_str": "    println!(\"old\");",
+        "new_str": "    println!(\"new\");"
     });
 
     let result = tool.execute(args).await.unwrap();
@@ -303,6 +305,25 @@ async fn test_file_edit_nonexistent_file() {
 
 // ==================== DirectoryTree Tests ====================
 
+/// Flatten a DirectoryTree result's nested `tree` into every descendant node
+/// (excluding the root). Each node is `{"name", "type", "size"?, "children"?}`.
+/// The tool switched from a flat `entries` array to a nested `tree`.
+fn collect_tree_nodes(result: &serde_json::Value) -> Vec<serde_json::Value> {
+    fn walk(node: &serde_json::Value, out: &mut Vec<serde_json::Value>) {
+        if let Some(children) = node.get("children").and_then(|c| c.as_array()) {
+            for child in children {
+                out.push(child.clone());
+                walk(child, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(tree) = result.get("tree") {
+        walk(tree, &mut out);
+    }
+    out
+}
+
 #[tokio::test]
 async fn test_directory_tree_success() {
     setup_test_mode();
@@ -317,8 +338,8 @@ async fn test_directory_tree_success() {
     });
 
     let result = tool.execute(args).await.unwrap();
-    let entries = result.get("entries").unwrap().as_array().unwrap();
-    assert!(entries.len() >= 3); // root, file1, subdir, file2
+    let nodes = collect_tree_nodes(&result);
+    assert!(nodes.len() >= 3); // file1, subdir, file2
 }
 
 #[tokio::test]
@@ -335,14 +356,12 @@ async fn test_directory_tree_max_depth() {
     });
 
     let result = tool.execute(args).await.unwrap();
-    let entries = result.get("entries").unwrap().as_array().unwrap();
+    let nodes = collect_tree_nodes(&result);
 
     // Should not contain the deep file
-    let paths: Vec<&str> = entries
+    assert!(!nodes
         .iter()
-        .map(|e| e.get("path").unwrap().as_str().unwrap())
-        .collect();
-    assert!(!paths.iter().any(|p| p.contains("deep.txt")));
+        .any(|n| n.get("name").and_then(|v| v.as_str()) == Some("deep.txt")));
 }
 
 #[tokio::test]
@@ -360,10 +379,13 @@ async fn test_directory_tree_hidden_files() {
         "include_hidden": false
     });
     let result = tool.execute(args).await.unwrap();
-    let entries = result.get("entries").unwrap().as_array().unwrap();
-    let has_hidden = entries
-        .iter()
-        .any(|e| e.get("path").unwrap().as_str().unwrap().contains(".hidden"));
+    let nodes = collect_tree_nodes(&result);
+    let has_hidden = nodes.iter().any(|n| {
+        n.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains(".hidden")
+    });
     assert!(!has_hidden);
 
     // With hidden files
@@ -372,10 +394,13 @@ async fn test_directory_tree_hidden_files() {
         "include_hidden": true
     });
     let result = tool.execute(args).await.unwrap();
-    let entries = result.get("entries").unwrap().as_array().unwrap();
-    let has_hidden = entries
-        .iter()
-        .any(|e| e.get("path").unwrap().as_str().unwrap().contains(".hidden"));
+    let nodes = collect_tree_nodes(&result);
+    let has_hidden = nodes.iter().any(|n| {
+        n.get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .contains(".hidden")
+    });
     assert!(has_hidden);
 }
 
@@ -388,9 +413,9 @@ async fn test_directory_tree_nonexistent() {
     });
 
     let result = tool.execute(args).await.unwrap();
-    // WalkDir returns empty for non-existent directories
-    let entries = result.get("entries").unwrap().as_array().unwrap();
-    assert!(entries.is_empty());
+    // WalkDir returns an empty tree for non-existent directories
+    let nodes = collect_tree_nodes(&result);
+    assert!(nodes.is_empty());
 }
 
 #[tokio::test]
@@ -406,17 +431,11 @@ async fn test_directory_tree_file_metadata() {
     });
 
     let result = tool.execute(args).await.unwrap();
-    let entries = result.get("entries").unwrap().as_array().unwrap();
+    let nodes = collect_tree_nodes(&result);
 
-    let file_entry = entries
+    let file_entry = nodes
         .iter()
-        .find(|e| {
-            e.get("path")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .contains("file.txt")
-        })
+        .find(|n| n.get("name").and_then(|v| v.as_str()) == Some("file.txt"))
         .unwrap();
 
     assert_eq!(file_entry.get("type").unwrap(), "file");

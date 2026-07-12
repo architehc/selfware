@@ -61,7 +61,11 @@ mod file_read_error_tests {
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.to_string().contains("Failed to read file"));
+        // FileRead now surfaces the underlying io error from tokio::fs::read.
+        assert!(
+            err.to_string().to_lowercase().contains("no such file"),
+            "unexpected read error: {err}"
+        );
     }
 
     #[tokio::test]

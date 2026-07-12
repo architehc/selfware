@@ -543,7 +543,12 @@ mod git_safety_tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call("git_push", r#"{"branch": "main", "force": false}"#);
+        // Non-force push to a NON-protected branch is allowed. (main/master
+        // are protected by default and are blocked even without --force.)
+        let call = create_test_call(
+            "git_push",
+            r#"{"branch": "feature-branch", "force": false}"#,
+        );
         assert!(checker.check_tool_call(&call).is_ok());
     }
 }
