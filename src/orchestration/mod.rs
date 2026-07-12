@@ -11,21 +11,7 @@
 
 #![allow(unused_imports)] // Re-exports are for public API, not internal use
 
-pub mod coordinator;
 pub mod multiagent;
-pub mod parallel;
-pub mod planning;
-pub mod scratchpad;
 pub mod swarm;
 pub mod visual_loop;
-pub mod workflow_dsl;
 pub mod workflows;
-
-// Re-export coordinator types
-pub use coordinator::{
-    CoordinatorAgent, CoordinatorConfig, CoordinatorStatus, PhaseResult, WorkerAgent, WorkerResult,
-    WorkflowPhase, WorkflowResult, COORDINATOR_ALLOWED_TOOLS, COORDINATOR_DENIED_TOOLS,
-};
-
-// Re-export scratchpad types
-pub use scratchpad::{Scratchpad, ScratchpadEntry, WorkerInfo, WorkerStatus};
