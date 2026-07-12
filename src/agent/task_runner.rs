@@ -611,9 +611,7 @@ impl Agent {
     /// terminal event (leaving the stream dangling) and the one that did sent
     /// failure-mode evidence instead of the answer.
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
-        let result = self
-            .run_execution_loop_inner(task_description, mode)
-            .await;
+        let result = self.run_execution_loop_inner(task_description, mode).await;
         match &result {
             Ok(()) => {
                 // Carry the final answer (may be empty if it already streamed
@@ -795,10 +793,7 @@ impl Agent {
                                     // so the task can be resumed even if planning
                                     // ultimately fails on the first turn.
                                     if let Err(ce) = self.save_checkpoint(task_description) {
-                                        warn!(
-                                            "Failed to checkpoint after planning error: {}",
-                                            ce
-                                        );
+                                        warn!("Failed to checkpoint after planning error: {}", ce);
                                     }
                                     planning_attempt += 1;
                                     if self.is_cancelled()
@@ -839,8 +834,7 @@ impl Agent {
                     // (Planning does not consume the iteration budget).
                     if !has_tool_calls {
                         consecutive_planning_no_progress += 1;
-                        if consecutive_planning_no_progress
-                            >= MAX_CONSECUTIVE_PLANNING_NO_PROGRESS
+                        if consecutive_planning_no_progress >= MAX_CONSECUTIVE_PLANNING_NO_PROGRESS
                         {
                             warn!(
                                 "Planning made no progress {} consecutive turns — forcing transition to Executing",
@@ -884,9 +878,7 @@ impl Agent {
                             {
                                 let _ = &fm;
                                 let message = self.last_assistant_response.trim().to_string();
-                                self.emit_terminal_event_once(AgentEvent::Completed {
-                                    message,
-                                });
+                                self.emit_terminal_event_once(AgentEvent::Completed { message });
                             }
                             if let Err(e) = self.complete_checkpoint() {
                                 warn!("Failed to save completed checkpoint: {}", e);
@@ -1208,8 +1200,7 @@ impl Agent {
                         };
                         let outcome = crate::self_healing::RecoveryTree::with_defaults()
                             .resolve(&signal, &ctx);
-                        if let crate::self_healing::ResolutionOutcome::Resolved(directive) =
-                            outcome
+                        if let crate::self_healing::ResolutionOutcome::Resolved(directive) = outcome
                         {
                             match self.apply_recovery_action(&directive).await {
                                 Ok(true) => {
@@ -1406,9 +1397,11 @@ impl Agent {
                         progress.fail_phase();
                     }
 
-                    let fm = self.finalize_failure_mode(RunOutcome::Failed {
-                        reason: reason.clone(),
-                    }).await;
+                    let fm = self
+                        .finalize_failure_mode(RunOutcome::Failed {
+                            reason: reason.clone(),
+                        })
+                        .await;
                     self.emit_terminal_event_once(AgentEvent::Error {
                         message: format!("Task aborted ({}): {}", fm.kind.tag(), fm.evidence),
                     });
@@ -1890,12 +1883,9 @@ mod tests {
     )]
     async fn test_recovery_failure_advice_returns_empty_for_success_like_state() {
         let server = MockLlmServer::builder().with_response("done").build().await;
-        let mut agent = Agent::new(mock_agent_config(
-            format!("{}/v1", server.url()),
-            false,
-        ))
-        .await
-        .unwrap();
+        let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+            .await
+            .unwrap();
         // Set up a state that looks like success: mutating calls exist and the
         // error reason does not match any known failure pattern.  With mutating
         // > 0, classify on a non-matching Failed reason falls through to
@@ -2478,7 +2468,10 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         // A read-only prose task ("describe ...") so a substantial tool-less
         // answer is accepted as completion (exercising streaming end-to-end).
-        assert!(agent.run_task("Describe the streaming pipeline").await.is_ok());
+        assert!(agent
+            .run_task("Describe the streaming pipeline")
+            .await
+            .is_ok());
         server.stop().await;
     }
 

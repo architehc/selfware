@@ -1089,9 +1089,7 @@ pub fn run_tui_dashboard_with_events(
                             app.commit_streaming();
                             app.add_tool_message(name, "started");
                         }
-                        TuiEvent::StatusUpdate { message }
-                            if message.starts_with("Step ") =>
-                        {
+                        TuiEvent::StatusUpdate { message } if message.starts_with("Step ") => {
                             // A new step began — finalize the previous turn's
                             // streamed prose so turns render as separate messages
                             // instead of one ever-growing block.
@@ -1101,10 +1099,9 @@ pub fn run_tui_dashboard_with_events(
                             if let Some(rest) = message.strip_prefix("Step ") {
                                 if let Some(tok) = rest.split_whitespace().next() {
                                     if let Some((c, m)) = tok.split_once('/') {
-                                        if let (Ok(cur), Ok(max)) = (
-                                            c.trim().parse::<usize>(),
-                                            m.trim().parse::<usize>(),
-                                        ) {
+                                        if let (Ok(cur), Ok(max)) =
+                                            (c.trim().parse::<usize>(), m.trim().parse::<usize>())
+                                        {
                                             app.update_step_progress(cur, max);
                                         }
                                     }
@@ -1230,10 +1227,7 @@ pub fn run_tui_dashboard_with_events(
                             state.log(LogLevel::Info, &format!("Allowed: {}", tool_name));
                         });
                     }
-                    KeyCode::Char('n')
-                    | KeyCode::Char('N')
-                    | KeyCode::Esc
-                    | KeyCode::Enter => {
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
                         let _ = permission_response_tx.send(false);
                         with_dashboard_state(&shared_state, |state| {
                             state.log(LogLevel::Warning, &format!("Denied: {}", tool_name));
@@ -2002,29 +1996,24 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         let style = Style::default().fg(TuiPalette::GARDEN_GREEN);
         items.push(wrap_chat_message("🦊 ▌", live, style, msg_width));
     }
-    items.extend(app
-        .messages
-        .iter()
-        .rev()
-        .skip(app.scroll)
-        .map(|msg| {
-            let style = match msg.role {
-                MessageRole::User => Style::default().fg(TuiPalette::AMBER),
-                MessageRole::Assistant => Style::default().fg(TuiPalette::GARDEN_GREEN),
-                MessageRole::System => TuiPalette::muted_style(),
-                MessageRole::Tool => Style::default().fg(TuiPalette::COPPER),
-            };
+    items.extend(app.messages.iter().rev().skip(app.scroll).map(|msg| {
+        let style = match msg.role {
+            MessageRole::User => Style::default().fg(TuiPalette::AMBER),
+            MessageRole::Assistant => Style::default().fg(TuiPalette::GARDEN_GREEN),
+            MessageRole::System => TuiPalette::muted_style(),
+            MessageRole::Tool => Style::default().fg(TuiPalette::COPPER),
+        };
 
-            let prefix = match msg.role {
-                MessageRole::User => "You",
-                MessageRole::Assistant => "🦊",
-                MessageRole::System => "📋",
-                MessageRole::Tool => "🔧",
-            };
+        let prefix = match msg.role {
+            MessageRole::User => "You",
+            MessageRole::Assistant => "🦊",
+            MessageRole::System => "📋",
+            MessageRole::Tool => "🔧",
+        };
 
-            let prefix_str = format!("{} {} ", msg.timestamp, prefix);
-            wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
-        }));
+        let prefix_str = format!("{} {} ", msg.timestamp, prefix);
+        wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
+    }));
 
     let messages = List::new(items);
     frame.render_widget(messages, chunks[0]);

@@ -565,7 +565,9 @@ fn parse_step_count(stdout: &str) -> Option<u32> {
 }
 
 async fn run_speed_probe(args: &Args) -> Result<SpeedResult> {
-    let api_key = std::env::var("SELFWARE_API_KEY").ok().filter(|s| !s.is_empty());
+    let api_key = std::env::var("SELFWARE_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
     let cfg = Config {
         endpoint: args.endpoint.clone(),
         model: args.model.clone(),

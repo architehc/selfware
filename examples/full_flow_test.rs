@@ -164,7 +164,9 @@ where
 {
     let (error_type, message) = classify_flow_errors(errors);
     let context = format!("{step}@{endpoint}");
-    let recovery = engine.handle_error(ErrorOccurrence::new(error_type, &message, &context)).await?;
+    let recovery = engine
+        .handle_error(ErrorOccurrence::new(error_type, &message, &context))
+        .await?;
 
     if recovery.success {
         Some(run().await)

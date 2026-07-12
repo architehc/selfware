@@ -793,6 +793,9 @@ mod tests {
             .args(["diff", "--cached", "--quiet"])
             .status()
             .unwrap();
-        assert!(real_index_diff.success(), "capture_patch mutated the real git index");
+        assert!(
+            real_index_diff.success(),
+            "capture_patch mutated the real git index"
+        );
     }
 }

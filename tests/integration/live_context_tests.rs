@@ -171,7 +171,9 @@ async fn test_recommend_context_for_real_codebase() {
         map.register_tree_entry(path, size);
     }
 
-    let rec = map.recommend_context("fix the no-action detection in recovery.rs").await;
+    let rec = map
+        .recommend_context("fix the no-action detection in recovery.rs")
+        .await;
     assert!(
         !rec.promote.is_empty() || !rec.evict.is_empty(),
         "should have some recommendations"

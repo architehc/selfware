@@ -371,9 +371,7 @@ pub struct TrackingAllocator<A: GlobalAlloc = System> {
 
 impl TrackingAllocator<System> {
     pub const fn system() -> Self {
-        TrackingAllocator {
-            inner: System,
-        }
+        TrackingAllocator { inner: System }
     }
 }
 

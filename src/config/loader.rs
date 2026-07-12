@@ -615,7 +615,9 @@ mod tests {
 
     #[test]
     fn test_content_sets_agent_token_budget_invalid_toml_returns_false() {
-        assert!(!Config::content_sets_agent_token_budget("this is not toml {{{"));
+        assert!(!Config::content_sets_agent_token_budget(
+            "this is not toml {{{"
+        ));
     }
 
     // =========================================================================
@@ -670,12 +672,7 @@ mod tests {
         let table = toml::from_str::<toml::Value>(content).unwrap();
         let path = PathBuf::from("/tmp/test.toml");
         let mut sources = ConfigSources::new();
-        record_toml_sources(
-            &mut sources,
-            table.as_table().unwrap(),
-            &path,
-            "",
-        );
+        record_toml_sources(&mut sources, table.as_table().unwrap(), &path, "");
 
         assert!(matches!(
             sources.get("endpoint"),
@@ -704,12 +701,7 @@ mod tests {
         let table = toml::from_str::<toml::Value>(content).unwrap();
         let path = PathBuf::from("/tmp/nested.toml");
         let mut sources = ConfigSources::new();
-        record_toml_sources(
-            &mut sources,
-            table.as_table().unwrap(),
-            &path,
-            "",
-        );
+        record_toml_sources(&mut sources, table.as_table().unwrap(), &path, "");
 
         // Nested table itself
         assert!(matches!(
@@ -746,12 +738,7 @@ mod tests {
         let table = toml::from_str::<toml::Value>(content).unwrap();
         let path = PathBuf::from("/custom/path/config.toml");
         let mut sources = ConfigSources::new();
-        record_toml_sources(
-            &mut sources,
-            table.as_table().unwrap(),
-            &path,
-            "",
-        );
+        record_toml_sources(&mut sources, table.as_table().unwrap(), &path, "");
 
         match sources.get("model") {
             Some(ConfigSource::ConfigFile(p)) => {
@@ -773,8 +760,7 @@ mod tests {
         config.agent.token_safety_margin = 100;
         config.normalize_agent_limits();
         assert_eq!(
-            config.agent.token_budget,
-            50000,
+            config.agent.token_budget, 50000,
             "zero token_budget should default to max_tokens"
         );
     }
@@ -786,8 +772,7 @@ mod tests {
         config.agent.token_safety_margin = 100;
         config.normalize_agent_limits();
         assert_eq!(
-            config.agent.token_budget,
-            30000,
+            config.agent.token_budget, 30000,
             "nonzero token_budget should be preserved"
         );
     }
@@ -888,7 +873,10 @@ mod tests {
         let (_dir, path) = write_temp_config("this is {{{ not toml !!!", "bad.toml");
         let result = Config::load(Some(path.to_str().unwrap()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse config"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse config"));
     }
 
     #[test]
@@ -903,7 +891,10 @@ mod tests {
             "synth.toml",
         );
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
-        let default = config.models.get("default").expect("default profile should exist");
+        let default = config
+            .models
+            .get("default")
+            .expect("default profile should exist");
         assert_eq!(default.endpoint, "http://localhost:8000/v1");
         assert_eq!(default.model, "synth-model");
         assert_eq!(default.max_tokens, 1024);
@@ -986,8 +977,14 @@ mod tests {
             "ui.toml",
         );
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
-        assert!(config.compact_mode, "compact_mode should be applied from ui");
-        assert!(config.verbose_mode, "verbose_mode should be applied from ui");
+        assert!(
+            config.compact_mode,
+            "compact_mode should be applied from ui"
+        );
+        assert!(
+            config.verbose_mode,
+            "verbose_mode should be applied from ui"
+        );
         assert!(config.show_tokens, "show_tokens should be applied from ui");
     }
 
@@ -1054,10 +1051,8 @@ mod tests {
     #[test]
     fn test_load_env_endpoint_override() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://file-value:8000/v1""#,
-            "env_ep.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://file-value:8000/v1""#, "env_ep.toml");
         std::env::set_var("SELFWARE_ENDPOINT", "http://env-override:9999/v1");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(config.endpoint, "http://env-override:9999/v1");
@@ -1070,10 +1065,7 @@ mod tests {
     #[test]
     fn test_load_env_model_override() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"model = "file-model""#,
-            "env_model.toml",
-        );
+        let (_dir, path) = write_temp_config(r#"model = "file-model""#, "env_model.toml");
         std::env::set_var("SELFWARE_MODEL", "env-model");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(config.model, "env-model");
@@ -1082,10 +1074,7 @@ mod tests {
     #[test]
     fn test_load_env_max_tokens_override() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"max_tokens = 4096"#,
-            "env_mt.toml",
-        );
+        let (_dir, path) = write_temp_config(r#"max_tokens = 4096"#, "env_mt.toml");
         std::env::set_var("SELFWARE_MAX_TOKENS", "99999");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(config.max_tokens, 99999);
@@ -1094,10 +1083,7 @@ mod tests {
     #[test]
     fn test_load_env_max_tokens_invalid_ignored() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"max_tokens = 4096"#,
-            "env_mt_bad.toml",
-        );
+        let (_dir, path) = write_temp_config(r#"max_tokens = 4096"#, "env_mt_bad.toml");
         std::env::set_var("SELFWARE_MAX_TOKENS", "not_a_number");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(config.max_tokens, 4096, "invalid env var should be ignored");
@@ -1106,10 +1092,7 @@ mod tests {
     #[test]
     fn test_load_env_temperature_override() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"temperature = 0.5"#,
-            "env_temp.toml",
-        );
+        let (_dir, path) = write_temp_config(r#"temperature = 0.5"#, "env_temp.toml");
         std::env::set_var("SELFWARE_TEMPERATURE", "0.123");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert!((config.temperature - 0.123).abs() < f32::EPSILON);
@@ -1118,10 +1101,7 @@ mod tests {
     #[test]
     fn test_load_env_temperature_invalid_ignored() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"temperature = 0.5"#,
-            "env_temp_bad.toml",
-        );
+        let (_dir, path) = write_temp_config(r#"temperature = 0.5"#, "env_temp_bad.toml");
         std::env::set_var("SELFWARE_TEMPERATURE", "not_a_float");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert!((config.temperature - 0.5).abs() < f32::EPSILON);
@@ -1142,10 +1122,8 @@ mod tests {
     #[test]
     fn test_load_env_theme_override() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://localhost:8000/v1""#,
-            "env_theme.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://localhost:8000/v1""#, "env_theme.toml");
         std::env::set_var("SELFWARE_THEME", "ocean");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(config.ui.theme, "ocean");
@@ -1154,13 +1132,14 @@ mod tests {
     #[test]
     fn test_load_env_api_key_override() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://localhost:8000/v1""#,
-            "env_key.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://localhost:8000/v1""#, "env_key.toml");
         std::env::set_var("SELFWARE_API_KEY", "sk-env-key-12345");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
-        assert_eq!(config.api_key.as_ref().unwrap().expose(), "sk-env-key-12345");
+        assert_eq!(
+            config.api_key.as_ref().unwrap().expose(),
+            "sk-env-key-12345"
+        );
     }
 
     #[test]
@@ -1193,10 +1172,8 @@ mod tests {
     #[test]
     fn test_load_env_mode_yolo() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://localhost:8000/v1""#,
-            "mode_yolo.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://localhost:8000/v1""#, "mode_yolo.toml");
         std::env::set_var("SELFWARE_MODE", "yolo");
         let config = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert_eq!(config.execution_mode, ExecutionMode::Yolo);
@@ -1217,10 +1194,8 @@ mod tests {
     #[test]
     fn test_load_env_mode_auto_edit_variants() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://localhost:8000/v1""#,
-            "mode_auto.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://localhost:8000/v1""#, "mode_auto.toml");
         for variant in &["auto-edit", "autoedit", "auto_edit"] {
             std::env::set_var("SELFWARE_MODE", variant);
             let config = Config::load(Some(path.to_str().unwrap())).unwrap();
@@ -1300,10 +1275,8 @@ mod tests {
     #[test]
     fn test_load_explicit_path_overrides_selfware_config_env() {
         let _guard = clear_env();
-        let (_dir_env, env_path) = write_temp_config(
-            r#"endpoint = "http://env-host:8000/v1""#,
-            "env_host.toml",
-        );
+        let (_dir_env, env_path) =
+            write_temp_config(r#"endpoint = "http://env-host:8000/v1""#, "env_host.toml");
         let (_dir_explicit, explicit_path) = write_temp_config(
             r#"endpoint = "http://explicit-host:8000/v1""#,
             "explicit_host.toml",
@@ -1323,10 +1296,7 @@ mod tests {
     #[test]
     fn test_load_fails_on_empty_endpoint() {
         let _guard = clear_env();
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = """#,
-            "empty_ep.toml",
-        );
+        let (_dir, path) = write_temp_config(r#"endpoint = """#, "empty_ep.toml");
         let result = Config::load(Some(path.to_str().unwrap()));
         assert!(result.is_err());
     }
@@ -1357,7 +1327,10 @@ mod tests {
         );
         let result = Config::load(Some(path.to_str().unwrap()));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("http:// or https://"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("http:// or https://"));
     }
 
     #[test]
@@ -1384,7 +1357,10 @@ mod tests {
         let config = Config::default();
         // Default config has no models populated, so resolve_model returns None
         let profile = config.resolve_model(None);
-        assert!(profile.is_none(), "Config::default has no models, so resolve_model(None) should return None");
+        assert!(
+            profile.is_none(),
+            "Config::default has no models, so resolve_model(None) should return None"
+        );
     }
 
     #[test]
@@ -1560,7 +1536,7 @@ mod tests {
     fn test_theme_mapping_logic() {
         // Test the theme name → ThemeId mapping directly (same logic as
         // apply_ui_settings) without relying on global state ordering.
-        use crate::ui::theme::{set_theme, current_theme_id, ThemeId};
+        use crate::ui::theme::{current_theme_id, set_theme, ThemeId};
 
         fn map_theme(name: &str) -> ThemeId {
             match name.to_lowercase().as_str() {
@@ -1580,9 +1556,9 @@ mod tests {
             ("high_contrast", ThemeId::HighContrast),
             ("amber", ThemeId::Amber),
             ("unknown", ThemeId::Amber),
-            ("OCEAN", ThemeId::Ocean),     // case-insensitive
+            ("OCEAN", ThemeId::Ocean), // case-insensitive
             ("High-Contrast", ThemeId::HighContrast),
-            ("", ThemeId::Amber),          // empty string defaults to Amber
+            ("", ThemeId::Amber), // empty string defaults to Amber
         ];
 
         for (name, expected) in &test_cases {
@@ -1593,7 +1569,11 @@ mod tests {
             );
             // Also verify set_theme/current_theme_id round-trip
             set_theme(theme_id);
-            assert_eq!(current_theme_id(), theme_id, "set_theme/current_theme_id round-trip failed for {name}");
+            assert_eq!(
+                current_theme_id(),
+                theme_id,
+                "set_theme/current_theme_id round-trip failed for {name}"
+            );
         }
     }
 
@@ -1763,7 +1743,10 @@ mod tests {
         // UI
         assert_eq!(config.ui.theme, "ocean");
         assert!(config.ui.compact_mode);
-        assert!(config.compact_mode, "compact_mode should be applied to top-level");
+        assert!(
+            config.compact_mode,
+            "compact_mode should be applied to top-level"
+        );
 
         // Concurrency
         assert_eq!(config.concurrency.max_streams, 8);
@@ -1831,10 +1814,8 @@ mod tests {
     fn test_check_config_file_permissions_secure_ok() {
         let _guard = clear_env();
         use std::os::unix::fs::PermissionsExt;
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://localhost:8000/v1""#,
-            "secure.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://localhost:8000/v1""#, "secure.toml");
         // Set permissions to 600 (owner only)
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let result = Config::check_config_file_permissions(path.to_str().unwrap(), false);
@@ -1842,7 +1823,10 @@ mod tests {
 
         // Also test in strict mode
         let result_strict = Config::check_config_file_permissions(path.to_str().unwrap(), true);
-        assert!(result_strict.is_ok(), "secure permissions should not error even in strict mode");
+        assert!(
+            result_strict.is_ok(),
+            "secure permissions should not error even in strict mode"
+        );
     }
 
     #[cfg(unix)]
@@ -1850,15 +1834,16 @@ mod tests {
     fn test_check_config_file_permissions_insecure_warns_non_strict() {
         let _guard = clear_env();
         use std::os::unix::fs::PermissionsExt;
-        let (_dir, path) = write_temp_config(
-            r#"endpoint = "http://localhost:8000/v1""#,
-            "insecure.toml",
-        );
+        let (_dir, path) =
+            write_temp_config(r#"endpoint = "http://localhost:8000/v1""#, "insecure.toml");
         // Set permissions to 644 (world-readable)
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         // Non-strict mode: should warn but NOT error
         let result = Config::check_config_file_permissions(path.to_str().unwrap(), false);
-        assert!(result.is_ok(), "non-strict mode should only warn, not error");
+        assert!(
+            result.is_ok(),
+            "non-strict mode should only warn, not error"
+        );
     }
 
     #[cfg(unix)]
@@ -1873,8 +1858,14 @@ mod tests {
         // Set permissions to 644 (world-readable)
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         let result = Config::check_config_file_permissions(path.to_str().unwrap(), true);
-        assert!(result.is_err(), "strict mode should error on insecure permissions");
-        assert!(result.unwrap_err().to_string().contains("insecure permissions"));
+        assert!(
+            result.is_err(),
+            "strict mode should error on insecure permissions"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("insecure permissions"));
     }
 
     #[cfg(unix)]

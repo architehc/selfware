@@ -302,7 +302,10 @@ pub fn render_event_kv(event: &ProgressEvent) -> String {
             if detail.is_empty() {
                 format!("kind=turn_decision decision={}", decision)
             } else {
-                format!("kind=turn_decision decision={} detail=\"{}\"", decision, detail)
+                format!(
+                    "kind=turn_decision decision={} detail=\"{}\"",
+                    decision, detail
+                )
             }
         }
     }
@@ -425,7 +428,10 @@ mod tests {
             detail: String::new(),
         };
         let s = render_event_kv(&ev);
-        assert!(s.contains("kind=turn_decision decision=no_tool_call"), "line: {s}");
+        assert!(
+            s.contains("kind=turn_decision decision=no_tool_call"),
+            "line: {s}"
+        );
         assert!(!s.contains("detail="), "line: {s}");
     }
 

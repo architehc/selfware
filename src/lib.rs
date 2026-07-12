@@ -55,8 +55,6 @@
 pub mod agent;
 pub mod api;
 pub mod cli;
-#[cfg(test)]
-pub(crate) mod test_support;
 pub mod computer;
 pub mod concurrency;
 pub mod concurrent_queue;
@@ -70,6 +68,8 @@ pub mod mcp;
 pub mod safety;
 pub mod skills;
 pub mod swl;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod tools;
 pub mod ui;
 
@@ -141,7 +141,6 @@ pub use testing::visual_verification;
 // ============================================================================
 // New feature modules
 pub mod profiles;
-
 
 // ============================================================================
 // Utility modules

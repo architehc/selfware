@@ -718,9 +718,17 @@ pub(super) fn task_requires_mutation(task_context: &str) -> bool {
         || (lower.contains("review") && lower.contains("line reference"))
         || prose_command
         || prose_output;
-    let has_edit_verb = ["fix ", "implement ", "refactor ", "rename ", "delete ", "modify ", "edit the"]
-        .iter()
-        .any(|v| lower.contains(v));
+    let has_edit_verb = [
+        "fix ",
+        "implement ",
+        "refactor ",
+        "rename ",
+        "delete ",
+        "modify ",
+        "edit the",
+    ]
+    .iter()
+    .any(|v| lower.contains(v));
     if is_review_deliverable && !has_edit_verb {
         return false;
     }
@@ -1041,8 +1049,11 @@ fn command_contains_at_boundary(command: &str, prefix: &str) -> bool {
     let mut from = 0;
     while let Some(rel) = command[from..].find(prefix) {
         let abs = from + rel;
-        let before_ok =
-            abs == 0 || matches!(bytes[abs - 1], b' ' | b'/' | b'&' | b';' | b'|' | b'\t' | b'(');
+        let before_ok = abs == 0
+            || matches!(
+                bytes[abs - 1],
+                b' ' | b'/' | b'&' | b';' | b'|' | b'\t' | b'('
+            );
         let after = abs + prefix.len();
         let after_ok = after >= command.len()
             || matches!(bytes[after], b' ' | b'-' | b';' | b'&' | b'|' | b'\t');
@@ -1145,9 +1156,10 @@ pub(super) fn tool_call_counts_as_state_change(name: &str, args_str: &str) -> bo
 pub(super) fn read_tool_target(name: &str, args_str: &str) -> Option<String> {
     let args: Value = serde_json::from_str(args_str).ok()?;
     match name {
-        "file_read" | "file_write" | "file_edit" | "file_delete" => {
-            args.get("path").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
+        "file_read" | "file_write" | "file_edit" | "file_delete" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         "directory_tree" => {
             // directory_tree may use "path" or "pattern"
             args.get("path")
@@ -1159,22 +1171,19 @@ pub(super) fn read_tool_target(name: &str, args_str: &str) -> Option<String> {
                         .map(|s| format!("tree:{}", s))
                 })
         }
-        "glob_find" => {
-            args.get("pattern")
-                .and_then(|v| v.as_str())
-                .map(|s| format!("glob:{}", s))
-        }
-        "grep_search" => {
-            args.get("pattern")
-                .and_then(|v| v.as_str())
-                .map(|s| format!("grep:{}", s))
-        }
-        "symbol_search" => {
-            args.get("query")
-                .or_else(|| args.get("pattern"))
-                .and_then(|v| v.as_str())
-                .map(|s| format!("sym:{}", s))
-        }
+        "glob_find" => args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("glob:{}", s)),
+        "grep_search" => args
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| format!("grep:{}", s)),
+        "symbol_search" => args
+            .get("query")
+            .or_else(|| args.get("pattern"))
+            .and_then(|v| v.as_str())
+            .map(|s| format!("sym:{}", s)),
         _ => None,
     }
 }
@@ -2196,14 +2205,7 @@ impl Agent {
             };
 
             if !self
-                .validate_tool_args(
-                    &name,
-                    &args_str,
-                    &args,
-                    &call_id,
-                    use_native_fc,
-                    start_time,
-                )
+                .validate_tool_args(&name, &args_str, &args, &call_id, use_native_fc, start_time)
                 .await
             {
                 continue;
@@ -2453,7 +2455,8 @@ impl Agent {
                                     v.get("content").and_then(|c| c.as_str()).map(String::from)
                                 })
                         {
-                            self.track_file_read_in_context_map(&path_str, &content).await;
+                            self.track_file_read_in_context_map(&path_str, &content)
+                                .await;
                         }
                     }
                 }
@@ -2618,14 +2621,7 @@ impl Agent {
         };
 
         if !self
-            .validate_tool_args(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            )
+            .validate_tool_args(&name, &args_str, &args, &call_id, use_native_fc, start_time)
             .await
         {
             self.emit_event(AgentEvent::ToolCompleted {
@@ -2758,7 +2754,8 @@ impl Agent {
                                 v.get("content").and_then(|c| c.as_str()).map(String::from)
                             })
                         {
-                            self.track_file_read_in_context_map(&path_str, &content).await;
+                            self.track_file_read_in_context_map(&path_str, &content)
+                                .await;
                         }
                     }
                     "file_delete" => {
@@ -3174,11 +3171,7 @@ impl Agent {
             if !approved {
                 let denial = "Tool execution denied via TUI permission prompt";
                 self.record_failed_tool_attempt(name, args_str, "operator_denied", denial);
-                self.push_tool_skip_message(
-                    call_id,
-                    use_native_fc,
-                    denial,
-                );
+                self.push_tool_skip_message(call_id, use_native_fc, denial);
             }
             return Ok(approved);
         }
@@ -3822,7 +3815,10 @@ mod tests {
         assert_eq!(parse_confirm_response("y"), ConfirmDecision::ExecuteOnce);
         assert_eq!(parse_confirm_response("YES"), ConfirmDecision::ExecuteOnce);
         assert_eq!(parse_confirm_response("yolo"), ConfirmDecision::EnableYolo);
-        assert_eq!(parse_confirm_response(" YOLO "), ConfirmDecision::EnableYolo);
+        assert_eq!(
+            parse_confirm_response(" YOLO "),
+            ConfirmDecision::EnableYolo
+        );
         // The old footgun keys must now be harmless skips, not a session downgrade.
         assert_eq!(parse_confirm_response("s"), ConfirmDecision::Skip);
         assert_eq!(parse_confirm_response("skip"), ConfirmDecision::Skip);
@@ -3838,7 +3834,9 @@ mod tests {
         // Regression: full-path / cd-prefixed invocations must be credited too
         // (the model used ~/.cargo/bin/cargo to dodge a PATH issue and looped).
         assert!(shell_command_is_verification("~/.cargo/bin/cargo check"));
-        assert!(shell_command_is_verification("/usr/bin/cargo check --message-format short"));
+        assert!(shell_command_is_verification(
+            "/usr/bin/cargo check --message-format short"
+        ));
         assert!(shell_command_is_verification("cd crates/foo && cargo test"));
         // Non-verification commands are not falsely credited.
         assert!(!shell_command_is_verification("cargo add serde"));
@@ -4140,7 +4138,10 @@ mod tests {
         // summarization — head-only truncation would drop it and the gate would
         // miss the failure.
         let middle = "x".repeat(60_000);
-        let raw = format!("START\n{}\n<verification_failed>tests FAILED</verification_failed>", middle);
+        let raw = format!(
+            "START\n{}\n<verification_failed>tests FAILED</verification_failed>",
+            middle
+        );
         let summary = summarize_generic(&raw);
         assert!(summary.contains("START"), "head kept");
         assert!(
@@ -4694,8 +4695,14 @@ mod tests {
         let raw = serde_json::json!({"total_lines": 150, "content": lines});
         let summary = summarize_file_read(&serde_json::to_string(&raw).unwrap());
         assert!(summary.contains("line 0"), "head present");
-        assert!(summary.contains("line 149"), "last line must not be dropped");
-        assert!(summary.contains("line 120"), "mid-tail line must be present");
+        assert!(
+            summary.contains("line 149"),
+            "last line must not be dropped"
+        );
+        assert!(
+            summary.contains("line 120"),
+            "mid-tail line must be present"
+        );
         assert!(
             !summary.contains("lines omitted"),
             "nothing is actually omitted at 150 lines"
@@ -4892,7 +4899,9 @@ mod tests {
     fn test_task_requires_mutation_prose_deliverable_is_read_only() {
         // Prose deliverables are read-only despite the create/write verbs.
         assert!(!task_requires_mutation("Create a summary of the auth flow"));
-        assert!(!task_requires_mutation("Write a report on the test coverage"));
+        assert!(!task_requires_mutation(
+            "Write a report on the test coverage"
+        ));
         assert!(!task_requires_mutation(
             "Explain how the completion gate works"
         ));
@@ -5707,8 +5716,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_bounded_returns_result_when_fast() {
-        use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
         let cancel = Arc::new(AtomicBool::new(false));
         let fut = async { Ok(serde_json::json!({"ok": true})) };
         let out = run_tool_bounded(fut, std::time::Duration::from_secs(5), cancel).await;
@@ -5718,8 +5727,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_bounded_times_out() {
-        use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
         let cancel = Arc::new(AtomicBool::new(false));
         let slow = async {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -5731,8 +5740,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_bounded_cancels_in_flight() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
         let cancel = Arc::new(AtomicBool::new(false));
         let c2 = cancel.clone();
         tokio::spawn(async move {
@@ -5750,8 +5759,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_tool_bounded_fast_path_already_cancelled() {
-        use std::sync::Arc;
         use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
         let cancel = Arc::new(AtomicBool::new(true));
         let fut = async { Ok(serde_json::json!({})) };
         let out = run_tool_bounded(fut, std::time::Duration::from_secs(5), cancel).await;
@@ -5778,8 +5787,18 @@ mod tests {
             assert!(tool_call_is_mutating(t, &empty), "{t} should be mutating");
         }
         // Observational tools are NOT mutating.
-        for t in ["file_read", "git_status", "git_log", "git_diff", "grep", "list_dir"] {
-            assert!(!tool_call_is_mutating(t, &empty), "{t} should NOT be mutating");
+        for t in [
+            "file_read",
+            "git_status",
+            "git_log",
+            "git_diff",
+            "grep",
+            "list_dir",
+        ] {
+            assert!(
+                !tool_call_is_mutating(t, &empty),
+                "{t} should NOT be mutating"
+            );
         }
         // Shell is mutating only for non-observational commands.
         assert!(tool_call_is_mutating(

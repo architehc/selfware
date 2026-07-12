@@ -587,7 +587,9 @@ mod tests {
         // Build/test commands get a generous timeout floor so they aren't killed
         // at 60s with empty output (which made the model loop on `cargo check`).
         assert!(command_is_long_running_build("cargo check --all-targets"));
-        assert!(command_is_long_running_build("cd foo && cargo build --release"));
+        assert!(command_is_long_running_build(
+            "cd foo && cargo build --release"
+        ));
         assert!(command_is_long_running_build("npm install"));
         assert!(!command_is_long_running_build("ls -la"));
         assert!(!command_is_long_running_build("grep -r foo src/"));

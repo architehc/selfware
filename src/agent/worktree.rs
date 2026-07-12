@@ -111,7 +111,11 @@ impl WorktreeManager {
                 let mut paths = Vec::new();
                 while let Ok(Some(entry)) = rd.next_entry().await {
                     let path = entry.path();
-                    if tokio::fs::metadata(&path).await.map(|m| m.is_dir()).unwrap_or(false) {
+                    if tokio::fs::metadata(&path)
+                        .await
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false)
+                    {
                         paths.push(path);
                     }
                 }

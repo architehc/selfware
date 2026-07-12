@@ -128,7 +128,10 @@ fn measure_compile_test_baseline(
 
     let mut fmt_cmd = Command::new("cargo");
     fmt_cmd.args(["fmt", "--", "--check"]).current_dir(dir);
-    let fmt_ok = fmt_cmd.output().map(|o| o.status.success()).unwrap_or(false);
+    let fmt_ok = fmt_cmd
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
     let mut clippy_cmd = Command::new("cargo");
     clippy_cmd.arg("clippy").current_dir(dir);
@@ -256,7 +259,11 @@ fn metrics_from_sab_result(
     binary_path: &Path,
     max_binary_size_mb: f64,
 ) -> FitnessMetrics {
-    let tests_passed = sab.scenario_scores.iter().filter(|s| s.tests_passed).count();
+    let tests_passed = sab
+        .scenario_scores
+        .iter()
+        .filter(|s| s.tests_passed)
+        .count();
     let tests_total = sab.scenario_scores.len();
     let mut metrics = fitness::build_fitness_metrics(
         sab,
@@ -305,7 +312,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
     let baseline_metrics = if sab_mode {
         let selfware_binary = repo_root.join("target/release/selfware");
         match fitness::run_sab(&selfware_binary, &sab_config) {
-            Ok(r) => metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb),
+            Ok(r) => {
+                metrics_from_sab_result(&r, &selfware_binary, config.safety.max_binary_size_mb)
+            }
             Err(e) => {
                 log_warning(&format!(
                     "SAB baseline failed ({}), using synthetic baseline",
@@ -548,7 +557,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
                 let mutated_binary = worktree.join("target/release/selfware");
                 match fitness::run_sab(&mutated_binary, &sab_config) {
-                    Ok(r) => metrics_from_sab_result(&r, &mutated_binary, config.safety.max_binary_size_mb),
+                    Ok(r) => metrics_from_sab_result(
+                        &r,
+                        &mutated_binary,
+                        config.safety.max_binary_size_mb,
+                    ),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
                         let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
@@ -579,9 +592,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             log_phase(&format!(
                 "  ✓ '{}' passed (score: {:.0}, {:.1}s)",
-                hypothesis.description,
-                winner_metrics.sab_score,
-                winner_metrics.wall_clock_secs
+                hypothesis.description, winner_metrics.sab_score, winner_metrics.wall_clock_secs
             ));
 
             // Keep the first passing hypothesis as winner
@@ -610,12 +621,8 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
             }
         };
 
-        let baseline_composite = config
-            .fitness_weights
-            .composite(&current_baseline_metrics);
-        let winner_composite = config
-            .fitness_weights
-            .composite(&winner_metrics);
+        let baseline_composite = config.fitness_weights.composite(&current_baseline_metrics);
+        let winner_composite = config.fitness_weights.composite(&winner_metrics);
 
         if winner_composite > baseline_composite {
             log_bloom(
@@ -1114,7 +1121,11 @@ pub fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -
     prompt
 }
 
-async fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+async fn call_llm(
+    llm: &LlmConfig,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String, String> {
     let url = format!("{}/chat/completions", llm.endpoint.trim_end_matches('/'));
 
     let mut headers = reqwest::header::HeaderMap::new();

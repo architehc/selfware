@@ -1164,10 +1164,10 @@ impl ContextMap {
                         } else {
                             format!("High relevance score ({:.1})", relevance)
                         },
-                        estimated_tokens: entry
-                            .costs
-                            .l3
-                            .max(self.estimate_level_tokens(&entry.path, ContextLevel::Full).await),
+                        estimated_tokens: entry.costs.l3.max(
+                            self.estimate_level_tokens(&entry.path, ContextLevel::Full)
+                                .await,
+                        ),
                     });
                 } else {
                     keep.push(entry.path.clone());

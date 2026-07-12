@@ -297,8 +297,7 @@ async fn handle_connection(
     let is_completion = is_post && request.contains("/v1/completions") && !is_chat;
     // A streaming request must be answered with SSE, not a plain JSON body —
     // otherwise the client's streaming parser gets no events and the run stalls.
-    let is_streaming =
-        request.contains("\"stream\":true") || request.contains("\"stream\": true");
+    let is_streaming = request.contains("\"stream\":true") || request.contains("\"stream\": true");
 
     if !is_chat && !is_completion {
         let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";

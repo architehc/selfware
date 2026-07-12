@@ -600,10 +600,7 @@ impl VerificationGate {
                     }
                     Ok(Err(e)) => (
                         false,
-                        format!(
-                            "Failed to run post-edit test command '{}': {}",
-                            cmd, e
-                        ),
+                        format!("Failed to run post-edit test command '{}': {}", cmd, e),
                         check_start.elapsed().as_millis() as u64,
                     ),
                     Err(_) => (
@@ -1831,7 +1828,10 @@ mod tests {
         // reported as not-successful (not hang the verifier forever).
         let start = std::time::Instant::now();
         let out = run_reaped("sleep", &["30"], dir.path(), 1).await.unwrap();
-        assert!(start.elapsed().as_secs() < 10, "should return at the timeout");
+        assert!(
+            start.elapsed().as_secs() < 10,
+            "should return at the timeout"
+        );
         assert!(!out.success, "a timed-out check must not report success");
         assert!(
             String::from_utf8_lossy(&out.stderr).contains("timed out"),
@@ -1842,7 +1842,9 @@ mod tests {
     #[tokio::test]
     async fn run_reaped_captures_a_normal_command() {
         let dir = tempfile::tempdir().unwrap();
-        let out = run_reaped("printf", &["hello"], dir.path(), 5).await.unwrap();
+        let out = run_reaped("printf", &["hello"], dir.path(), 5)
+            .await
+            .unwrap();
         assert!(out.success);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hello");
     }

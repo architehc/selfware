@@ -1200,10 +1200,20 @@ impl TaskProgress {
                     }
                 } else {
                     match phase.status {
-                        PhaseStatus::Pending => ("○".dimmed().to_string(), phase.name.dimmed().to_string()),
-                        PhaseStatus::Active => ("●".bright_cyan().to_string(), phase.name.bright_white().to_string()),
-                        PhaseStatus::Completed => ("✓".bright_green().to_string(), phase.name.green().to_string()),
-                        PhaseStatus::Failed => ("✗".bright_red().to_string(), phase.name.red().to_string()),
+                        PhaseStatus::Pending => {
+                            ("○".dimmed().to_string(), phase.name.dimmed().to_string())
+                        }
+                        PhaseStatus::Active => (
+                            "●".bright_cyan().to_string(),
+                            phase.name.bright_white().to_string(),
+                        ),
+                        PhaseStatus::Completed => (
+                            "✓".bright_green().to_string(),
+                            phase.name.green().to_string(),
+                        ),
+                        PhaseStatus::Failed => {
+                            ("✗".bright_red().to_string(), phase.name.red().to_string())
+                        }
                     }
                 };
 

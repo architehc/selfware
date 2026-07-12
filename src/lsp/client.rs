@@ -1131,7 +1131,11 @@ mod tests {
             // The URI should contain percent-encoded versions of space,
             // #, and %
             assert!(uri.starts_with("file:///"));
-            assert!(!uri.contains(' '), "URI should not contain raw spaces: {}", uri);
+            assert!(
+                !uri.contains(' '),
+                "URI should not contain raw spaces: {}",
+                uri
+            );
             assert!(!uri.contains('#'), "URI should not contain raw #: {}", uri);
 
             // Clean up

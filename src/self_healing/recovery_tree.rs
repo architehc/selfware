@@ -117,7 +117,13 @@ pub fn classify(error_message: &str) -> FailureKind {
     }
 
     // ---- AuthError ----
-    let auth_markers = ["401", "403", "unauthorized", "invalid api key", "authentication"];
+    let auth_markers = [
+        "401",
+        "403",
+        "unauthorized",
+        "invalid api key",
+        "authentication",
+    ];
     for marker in &auth_markers {
         if msg.contains(marker) {
             return FailureKind::AuthError;
@@ -141,7 +147,12 @@ pub fn classify(error_message: &str) -> FailureKind {
     }
 
     // ---- ContextOverflow ----
-    let context_markers = ["context", "token limit", "maximum context", "too many tokens"];
+    let context_markers = [
+        "context",
+        "token limit",
+        "maximum context",
+        "too many tokens",
+    ];
     for marker in &context_markers {
         if msg.contains(marker) {
             return FailureKind::ContextOverflow;
@@ -659,7 +670,10 @@ mod tests {
     #[test]
     fn test_classify_llm_unreachable() {
         assert_eq!(classify("Connection refused"), FailureKind::LlmUnreachable);
-        assert_eq!(classify("dns resolution failed"), FailureKind::LlmUnreachable);
+        assert_eq!(
+            classify("dns resolution failed"),
+            FailureKind::LlmUnreachable
+        );
         assert_eq!(classify("host unreachable"), FailureKind::LlmUnreachable);
         assert_eq!(classify("tcp reset"), FailureKind::LlmUnreachable);
         assert_eq!(
@@ -697,7 +711,10 @@ mod tests {
             classify("context length exceeded"),
             FailureKind::ContextOverflow
         );
-        assert_eq!(classify("token limit reached"), FailureKind::ContextOverflow);
+        assert_eq!(
+            classify("token limit reached"),
+            FailureKind::ContextOverflow
+        );
         assert_eq!(
             classify("maximum context window exceeded"),
             FailureKind::ContextOverflow
@@ -711,7 +728,10 @@ mod tests {
             classify("invalid configuration: missing endpoint"),
             FailureKind::ConfigInvalid
         );
-        assert_eq!(classify("missing field 'api_key'"), FailureKind::ConfigInvalid);
+        assert_eq!(
+            classify("missing field 'api_key'"),
+            FailureKind::ConfigInvalid
+        );
         assert_eq!(classify("config parse error"), FailureKind::ConfigInvalid);
     }
 
@@ -778,7 +798,9 @@ mod tests {
         let resolver = LocalEndpointFallback;
         let outcome = resolver.resolve(&ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback { target })) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback {
+                target,
+            })) => {
                 assert!(
                     target.contains("localhost") || target.contains("127.0.0.1"),
                     "expected a local target, got {}",
@@ -844,7 +866,9 @@ mod tests {
         };
         let outcome = tree.resolve(&signal, &ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback { target })) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback {
+                target,
+            })) => {
                 assert!(
                     target.contains("localhost") || target.contains("127.0.0.1"),
                     "expected a local target, got {}",
@@ -924,7 +948,10 @@ mod tests {
         };
         let outcome = tree.resolve(&signal, &ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry { delay_ms, .. })) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Retry {
+                delay_ms,
+                ..
+            })) => {
                 assert_eq!(delay_ms, 500);
             }
             other => panic!("expected Resolved(Action(Retry)), got {:?}", other),
@@ -1093,9 +1120,7 @@ mod tests {
         };
         let outcome = resolver.resolve(&ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryDirective::CompressContext {
-                target_tokens,
-            }) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::CompressContext { target_tokens }) => {
                 assert_eq!(target_tokens, 8000);
             }
             other => panic!("expected Resolved(CompressContext), got {:?}", other),
@@ -1141,9 +1166,7 @@ mod tests {
         };
         let outcome = tree.resolve(&signal, &ctx);
         match outcome {
-            ResolutionOutcome::Resolved(RecoveryDirective::CompressContext {
-                target_tokens,
-            }) => {
+            ResolutionOutcome::Resolved(RecoveryDirective::CompressContext { target_tokens }) => {
                 assert_eq!(target_tokens, 8_000);
             }
             other => panic!("expected Resolved(CompressContext), got {:?}", other),
@@ -1184,19 +1207,13 @@ mod tests {
         // Save and restore the env var to avoid cross-test flakiness.
         let saved = std::env::var("SELFWARE_API_KEY").ok();
         // Set a unique value that won't collide with keyring entries.
-        std::env::set_var(
-            "SELFWARE_API_KEY",
-            "test-credential-reload-finder-key-xyz",
-        );
+        std::env::set_var("SELFWARE_API_KEY", "test-credential-reload-finder-key-xyz");
         let key = CredentialReload::find_available_key();
         assert!(
             key.is_some(),
             "find_available_key should return Some when SELFWARE_API_KEY is set"
         );
-        assert_eq!(
-            key.unwrap(),
-            "test-credential-reload-finder-key-xyz"
-        );
+        assert_eq!(key.unwrap(), "test-credential-reload-finder-key-xyz");
         // Restore.
         match saved {
             Some(v) => std::env::set_var("SELFWARE_API_KEY", v),

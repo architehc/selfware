@@ -1158,7 +1158,10 @@ mod tests {
 
     impl std::io::Write for SharedBuf {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(buf);
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1182,7 +1185,9 @@ mod tests {
             // Simulate a formatter emitting the line via several small
             // write_str calls, with the secret pattern split across two of
             // them -- "Bearer " in one write, the token in the next.
-            writer.write_all(b"401 Unauthorized: Authorization: Bearer ").unwrap();
+            writer
+                .write_all(b"401 Unauthorized: Authorization: Bearer ")
+                .unwrap();
             writer
                 .write_all(b"sk-live-abcdefghijklmnopqrstuvwxyz\n")
                 .unwrap();

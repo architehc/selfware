@@ -122,10 +122,7 @@ impl Agent {
         if self.plan_mode {
             let plan_text = content.text();
             if let Some(plan) = super::plan_mode::parse_plan_from_llm(plan_text) {
-                info!(
-                    "Parsed structured plan with {} step(s)",
-                    plan.steps.len()
-                );
+                info!("Parsed structured plan with {} step(s)", plan.steps.len());
                 self.store_plan(plan);
                 self.plan_mode_manager.store_plan_text(plan_text);
             } else {
@@ -319,11 +316,7 @@ mod tests {
         agent.messages.push(Message::user("Read Cargo.toml"));
 
         let result = agent.plan().await;
-        assert!(
-            result.is_ok(),
-            "plan should succeed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "plan should succeed: {:?}", result.err());
         assert!(
             result.unwrap(),
             "plan should return true when tool calls are present"
@@ -502,10 +495,7 @@ mod tests {
         ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
     )]
     async fn test_plan_handles_empty_content() {
-        let server = MockLlmServer::builder()
-            .with_response("")
-            .build()
-            .await;
+        let server = MockLlmServer::builder().with_response("").build().await;
 
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
@@ -596,7 +586,9 @@ mod tests {
 
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
-        agent.messages.push(Message::user("Find TODOs in the codebase"));
+        agent
+            .messages
+            .push(Message::user("Find TODOs in the codebase"));
 
         let result = agent.plan().await;
         assert!(result.is_ok());
@@ -662,7 +654,9 @@ Let me start by reading the file."#;
         let config = mock_agent_config(format!("{}/v1", server.url()), false);
         let mut agent = Agent::new(config).await.unwrap();
         agent.plan_mode = true;
-        agent.messages.push(Message::user("Fix a bug in the parser"));
+        agent
+            .messages
+            .push(Message::user("Fix a bug in the parser"));
 
         let result = agent.plan().await;
         assert!(
@@ -731,7 +725,11 @@ Let me start by reading the file."#;
             .filter(|m| m.role == "assistant")
             .map(|m| m.content.text())
             .collect();
-        assert_eq!(assistant_texts.len(), 2, "should have two assistant messages");
+        assert_eq!(
+            assistant_texts.len(),
+            2,
+            "should have two assistant messages"
+        );
         assert_eq!(assistant_texts[0], "First planning response.");
         assert_eq!(assistant_texts[1], "Second planning response.");
 
@@ -839,10 +837,7 @@ Let me start by reading the file."#;
         let err = agent.plan().await.unwrap_err();
         let err_str = err.to_string();
         // The error should contain some indication of the failure.
-        assert!(
-            !err_str.is_empty(),
-            "error message should not be empty"
-        );
+        assert!(!err_str.is_empty(), "error message should not be empty");
 
         server.stop().await;
     }
@@ -870,8 +865,7 @@ Let me start by reading the file."#;
         let _ = agent.plan().await;
 
         assert_eq!(
-            agent.turn_artifact_seq,
-            seq_before,
+            agent.turn_artifact_seq, seq_before,
             "turn_artifact_seq should not change when plan fails"
         );
 
@@ -902,13 +896,11 @@ Let me start by reading the file."#;
         let _ = agent.plan().await;
 
         assert_eq!(
-            agent.cumulative_token_usage.input,
-            input_before,
+            agent.cumulative_token_usage.input, input_before,
             "token usage should not change on API error"
         );
         assert_eq!(
-            agent.cumulative_token_usage.output,
-            output_before,
+            agent.cumulative_token_usage.output, output_before,
             "token usage should not change on API error"
         );
 

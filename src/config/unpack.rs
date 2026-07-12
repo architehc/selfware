@@ -706,9 +706,7 @@ step_timeout_secs = {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{
-        default_endpoint, default_model, provenance::ConfigSource, Config,
-    };
+    use crate::config::{default_endpoint, default_model, provenance::ConfigSource, Config};
     use std::sync::Mutex;
 
     /// Mutex to serialize tests that change the working directory.
@@ -1348,10 +1346,7 @@ mod tests {
         with_temp_cwd(|| {
             let mut config = Config::default();
             let mut extra = serde_json::Map::new();
-            extra.insert(
-                "top_p".to_string(),
-                serde_json::json!(0.95),
-            );
+            extra.insert("top_p".to_string(), serde_json::json!(0.95));
             config.extra_body = Some(extra);
 
             let path = save_unpack_config(&config).expect("save should succeed");
@@ -1480,10 +1475,7 @@ mod tests {
         with_temp_cwd(|| {
             // Create a selfware.toml in the temp dir
             std::fs::write("selfware.toml", "# test config").expect("failed to write");
-            assert!(
-                has_config_file(),
-                "should detect selfware.toml in cwd"
-            );
+            assert!(has_config_file(), "should detect selfware.toml in cwd");
         });
     }
 
@@ -1602,10 +1594,7 @@ mod tests {
         if let Some(specs) = &result {
             // Basic sanity checks
             assert!(specs.total_cpu_cores > 0, "should have at least 1 CPU core");
-            assert!(
-                specs.total_ram_gb > 0.0,
-                "should have positive RAM"
-            );
+            assert!(specs.total_ram_gb > 0.0, "should have positive RAM");
         }
         // None is also acceptable in restricted environments
     }

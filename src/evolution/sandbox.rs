@@ -126,9 +126,7 @@ impl Sandbox {
 
         // Canonicalize the temp path so Docker gets a resolved absolute path.
         // On some systems tempdir returns a path with symlinks in /tmp.
-        let workspace_mount = workspace_path
-            .canonicalize()
-            .unwrap_or(workspace_path);
+        let workspace_mount = workspace_path.canonicalize().unwrap_or(workspace_path);
 
         let mut args = vec![
             "run".to_string(),

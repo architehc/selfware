@@ -166,13 +166,7 @@ async fn verify_tool(
         }
     }
 
-    let resp = match http
-        .post(url)
-        .bearer_auth(api_key)
-        .json(&body)
-        .send()
-        .await
-    {
+    let resp = match http.post(url).bearer_auth(api_key).json(&body).send().await {
         Ok(r) => r,
         Err(e) => {
             return Outcome {
@@ -205,10 +199,7 @@ async fn verify_tool(
         };
     }
 
-    let provider = v
-        .get("provider")
-        .and_then(|p| p.as_str())
-        .map(String::from);
+    let provider = v.get("provider").and_then(|p| p.as_str()).map(String::from);
 
     let tool_calls = v
         .pointer("/choices/0/message/tool_calls")

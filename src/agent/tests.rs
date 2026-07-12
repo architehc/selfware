@@ -1090,31 +1090,30 @@ async fn test_apply_recovery_action_compress_context() {
     let mut agent = Agent::new(config).await.unwrap();
 
     // Populate messages so compression has something to work on.
-    agent.messages.push(Message::system("system prompt sentinel"));
-    agent.messages.push(Message::user("original task description here"));
+    agent
+        .messages
+        .push(Message::system("system prompt sentinel"));
+    agent
+        .messages
+        .push(Message::user("original task description here"));
     for i in 0..20 {
-        agent
-            .messages
-            .push(Message::user(format!("history message {i} with enough words to cost some tokens for the estimator")));
-        agent
-            .messages
-            .push(Message::assistant(format!("reply {i} acknowledging the work is progressing")));
+        agent.messages.push(Message::user(format!(
+            "history message {i} with enough words to cost some tokens for the estimator"
+        )));
+        agent.messages.push(Message::assistant(format!(
+            "reply {i} acknowledging the work is progressing"
+        )));
     }
     let before_len = agent.messages.len();
 
-    let directive = crate::self_healing::RecoveryDirective::CompressContext {
-        target_tokens: 1,
-    };
+    let directive = crate::self_healing::RecoveryDirective::CompressContext { target_tokens: 1 };
     let result = agent.apply_recovery_action(&directive).await;
     assert!(
         result.is_ok(),
         "CompressContext should not error: {:?}",
         result.err()
     );
-    assert!(
-        result.unwrap(),
-        "CompressContext should return Ok(true)"
-    );
+    assert!(result.unwrap(), "CompressContext should return Ok(true)");
     // Compression should have reduced message count.
     assert!(
         agent.messages.len() < before_len,
@@ -1147,10 +1146,7 @@ async fn test_apply_recovery_action_reload_credentials_with_env() {
 
     // Set a temporary env var so the reload finds a key.
     let saved = std::env::var("SELFWARE_API_KEY").ok();
-    std::env::set_var(
-        "SELFWARE_API_KEY",
-        "test-reload-credentials-directive-key",
-    );
+    std::env::set_var("SELFWARE_API_KEY", "test-reload-credentials-directive-key");
 
     let directive = crate::self_healing::RecoveryDirective::ReloadCredentials;
     let result = agent.apply_recovery_action(&directive).await;
@@ -1169,12 +1165,7 @@ async fn test_apply_recovery_action_reload_credentials_with_env() {
         "config.api_key should be set after reload"
     );
     assert_eq!(
-        agent
-            .config
-            .api_key
-            .as_ref()
-            .unwrap()
-            .expose(),
+        agent.config.api_key.as_ref().unwrap().expose(),
         "test-reload-credentials-directive-key"
     );
 
@@ -1230,21 +1221,24 @@ async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
 
 #[tokio::test]
 async fn clear_conversation_keeps_only_system_prompt() {
-    let server = MockLlmServer::builder()
-        .with_response("ok")
-        .build()
-        .await;
+    let server = MockLlmServer::builder().with_response("ok").build().await;
     let config = mock_agent_config(format!("{}/v1", server.url()), false);
     let mut agent = Agent::new(config).await.expect("agent::new");
     let before = agent.messages.len();
-    agent.messages.push(Message::user("remember: my name is Bob"));
+    agent
+        .messages
+        .push(Message::user("remember: my name is Bob"));
     agent.messages.push(Message::assistant("Noted."));
     agent.last_assistant_response = "Noted.".to_string();
     assert!(agent.messages.len() > before);
 
     agent.clear_conversation();
 
-    assert_eq!(agent.messages.len(), 1, "only the system prompt should remain");
+    assert_eq!(
+        agent.messages.len(),
+        1,
+        "only the system prompt should remain"
+    );
     assert_eq!(agent.messages[0].role, "system");
     assert!(agent.last_assistant_response.is_empty());
     server.stop().await;

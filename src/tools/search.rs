@@ -153,8 +153,7 @@ impl Tool for GlobFind {
             // independent of how the base path was expressed.
             let match_pattern = full_pattern.strip_prefix("./").unwrap_or(&full_pattern);
 
-            let glob_pattern =
-                glob::Pattern::new(match_pattern).context("Invalid glob pattern")?;
+            let glob_pattern = glob::Pattern::new(match_pattern).context("Invalid glob pattern")?;
 
             // `*` should match within a single path component, while `**` should
             // match across directory boundaries. The default `glob::Pattern`
@@ -801,10 +800,7 @@ mod tests {
             .unwrap();
         let files = result["files"].as_array().unwrap();
         assert_eq!(files.len(), 3, "expected all three .rs files");
-        let names: Vec<&str> = files
-            .iter()
-            .map(|v| v["path"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = files.iter().map(|v| v["path"].as_str().unwrap()).collect();
         assert!(names.iter().any(|p| p.ends_with("top.rs")));
         assert!(names.iter().any(|p| p.ends_with("nested.rs")));
         assert!(names.iter().any(|p| p.ends_with("bottom.rs")));
@@ -818,8 +814,6 @@ mod tests {
         assert_eq!(files.len(), 1, "expected only top-level .rs file");
         assert!(files[0]["path"].as_str().unwrap().ends_with("top.rs"));
     }
-
-
 
     #[test]
     fn test_symbol_search_metadata_read_only() {

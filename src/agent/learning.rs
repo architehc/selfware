@@ -16,7 +16,14 @@ impl Agent {
         } else if task_lower.contains("document") || task_lower.contains("readme") {
             "documentation"
         } else if [
-            "implement", "create", "add ", "edit", "modify", "update", "make ", "write ",
+            "implement",
+            "create",
+            "add ",
+            "edit",
+            "modify",
+            "update",
+            "make ",
+            "write ",
         ]
         .iter()
         .any(|k| task_lower.contains(k))

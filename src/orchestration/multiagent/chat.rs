@@ -358,7 +358,9 @@ impl MultiAgentChat {
                 // Append the assistant response (or error text) so the
                 // agent accumulates conversation history across turns.
                 if agent_result.success {
-                    agent.messages.push(Message::assistant(&agent_result.content));
+                    agent
+                        .messages
+                        .push(Message::assistant(&agent_result.content));
                 }
             }
         }

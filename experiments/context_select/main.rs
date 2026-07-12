@@ -153,7 +153,10 @@ fn query_terms(query: &str) -> Vec<String> {
 /// A simple, non-degenerate relevance signal at the block level.
 fn block_score(text: &str, terms: &[String]) -> usize {
     let lower = text.to_lowercase();
-    terms.iter().map(|t| lower.matches(t.as_str()).count()).sum()
+    terms
+        .iter()
+        .map(|t| lower.matches(t.as_str()).count())
+        .sum()
 }
 
 /// Carve `doc` into item-level blocks, rank them against `query` by term-frequency,
@@ -368,7 +371,12 @@ fn build_context(
     let mut picks = Vec::new();
     let mut used = 0usize;
 
-    let push = |picks: &mut Vec<Picked>, used: &mut usize, doc: &Doc, level: Level, tokens: usize, excerpt: Option<String>| {
+    let push = |picks: &mut Vec<Picked>,
+                used: &mut usize,
+                doc: &Doc,
+                level: Level,
+                tokens: usize,
+                excerpt: Option<String>| {
         *used += tokens;
         picks.push(Picked {
             path: doc.path.clone(),
@@ -382,23 +390,51 @@ fn build_context(
         Strategy::FullFileBm25 => {
             for doc in &order {
                 if used + doc.full_tokens <= budget {
-                    push(&mut picks, &mut used, doc, Level::Full, doc.full_tokens, None);
+                    push(
+                        &mut picks,
+                        &mut used,
+                        doc,
+                        Level::Full,
+                        doc.full_tokens,
+                        None,
+                    );
                 }
             }
         }
         Strategy::SkeletonOnly => {
             for doc in &order {
                 if used + doc.skel_tokens <= budget {
-                    push(&mut picks, &mut used, doc, Level::Skeleton, doc.skel_tokens, None);
+                    push(
+                        &mut picks,
+                        &mut used,
+                        doc,
+                        Level::Skeleton,
+                        doc.skel_tokens,
+                        None,
+                    );
                 }
             }
         }
         Strategy::SkeletonThenFull => {
             for doc in &order {
                 if used + doc.full_tokens <= budget {
-                    push(&mut picks, &mut used, doc, Level::Full, doc.full_tokens, None);
+                    push(
+                        &mut picks,
+                        &mut used,
+                        doc,
+                        Level::Full,
+                        doc.full_tokens,
+                        None,
+                    );
                 } else if used + doc.skel_tokens <= budget {
-                    push(&mut picks, &mut used, doc, Level::Skeleton, doc.skel_tokens, None);
+                    push(
+                        &mut picks,
+                        &mut used,
+                        doc,
+                        Level::Skeleton,
+                        doc.skel_tokens,
+                        None,
+                    );
                 }
             }
         }
@@ -407,7 +443,14 @@ fn build_context(
             // Pass 1 — depth: full files, capped at depth_budget.
             for doc in &order {
                 if used + doc.full_tokens <= depth_budget {
-                    push(&mut picks, &mut used, doc, Level::Full, doc.full_tokens, None);
+                    push(
+                        &mut picks,
+                        &mut used,
+                        doc,
+                        Level::Full,
+                        doc.full_tokens,
+                        None,
+                    );
                 }
             }
             // Pass 2 — breadth: skeletons of further files, using the whole remaining budget.
@@ -418,7 +461,14 @@ fn build_context(
                     continue;
                 }
                 if used + doc.skel_tokens <= budget {
-                    push(&mut picks, &mut used, doc, Level::Skeleton, doc.skel_tokens, None);
+                    push(
+                        &mut picks,
+                        &mut used,
+                        doc,
+                        Level::Skeleton,
+                        doc.skel_tokens,
+                        None,
+                    );
                 }
             }
         }
@@ -531,11 +581,11 @@ fn problems() -> Vec<Problem> {
 
 #[derive(Default, Clone)]
 struct Metrics {
-    recall_any: f64,   // gold file present at any level
-    recall_full: f64,  // gold file present at full fidelity
-    recall_code: f64,  // gold file present with real code (full OR excerpt)
-    precision: f64,    // fraction of selected files that are gold
-    utilization: f64,  // tokens_used / budget
+    recall_any: f64,    // gold file present at any level
+    recall_full: f64,   // gold file present at full fidelity
+    recall_code: f64,   // gold file present with real code (full OR excerpt)
+    precision: f64,     // fraction of selected files that are gold
+    utilization: f64,   // tokens_used / budget
     gold_code_pct: f64, // real-code tokens of gold included / gold full-token mass
 }
 
@@ -733,11 +783,25 @@ async fn main() -> Result<()> {
         println!("Strategy: {}", strategy.name());
         println!(
             "  {:<26} {:>8} {:>10} {:>11} {:>11} {:>9} {:>7} {:>6}",
-            "problem", "budget", "recall_any", "recall_full", "recall_code", "goldCode%", "prec", "util"
+            "problem",
+            "budget",
+            "recall_any",
+            "recall_full",
+            "recall_code",
+            "goldCode%",
+            "prec",
+            "util"
         );
         for p in &probs {
             for &budget in &args.budgets {
-                let sel = build_context(p.query, budget, strategy, args.breadth_frac, &corpus, &index);
+                let sel = build_context(
+                    p.query,
+                    budget,
+                    strategy,
+                    args.breadth_frac,
+                    &corpus,
+                    &index,
+                );
                 let m = score(p, &sel, budget, &corpus);
                 let e = agg.entry((strategy.name(), budget)).or_default();
                 e.ra += m.recall_any;
@@ -855,7 +919,14 @@ async fn run_e2e(args: &Args, corpus: &[Doc], index: &BM25Index, probs: &[Proble
         println!("{}  (gold: {})", p.id, p.gold.join(", "));
         // Ascending budgets = progressively larger requests to the model.
         for &budget in &args.e2e_budgets {
-            let sel = build_context(p.query, budget, args.e2e_strategy, args.breadth_frac, corpus, index);
+            let sel = build_context(
+                p.query,
+                budget,
+                args.e2e_strategy,
+                args.breadth_frac,
+                corpus,
+                index,
+            );
             let context = sel.render(corpus);
             let user = Message::user(format!(
                 "# Code context\n{context}\n\n# Task\n{}\n\n\
@@ -885,8 +956,10 @@ async fn run_e2e(args: &Args, corpus: &[Doc], index: &BM25Index, probs: &[Proble
                         .and_then(|par| par.file_name())
                         .and_then(|s| s.to_str())
                         .map(|dir| {
-                            let fname =
-                                Path::new(g).file_name().and_then(|s| s.to_str()).unwrap_or("");
+                            let fname = Path::new(g)
+                                .file_name()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("");
                             answer.contains(&format!("{dir}/{fname}"))
                         })
                         .unwrap_or(false)
@@ -903,7 +976,11 @@ async fn run_e2e(args: &Args, corpus: &[Doc], index: &BM25Index, probs: &[Proble
                 p.gold.len(),
                 sel.picks.len(),
                 sel.tokens_used,
-                answer.replace('\n', " | ").chars().take(60).collect::<String>()
+                answer
+                    .replace('\n', " | ")
+                    .chars()
+                    .take(60)
+                    .collect::<String>()
             );
         }
     }

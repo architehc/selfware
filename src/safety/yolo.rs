@@ -419,9 +419,7 @@ impl YoloManager {
         }
 
         // Print status update at intervals
-        if self.config.status_interval > 0
-            && op_id > 0
-            && op_id % self.config.status_interval == 0
+        if self.config.status_interval > 0 && op_id > 0 && op_id % self.config.status_interval == 0
         {
             self.print_status();
         }
@@ -598,17 +596,14 @@ fn check_volume_mount(mount: &str) -> Option<String> {
     let expanded = expand_home(host_path);
 
     // Block SSH directory mounts (including ~/.ssh and relative .ssh)
-    if expanded.contains("/.ssh")
-        || expanded == ".ssh"
-        || expanded.starts_with(".ssh/")
-    {
+    if expanded.contains("/.ssh") || expanded == ".ssh" || expanded.starts_with(".ssh/") {
         return Some(format!("Volume mount '{}' is not allowed", mount));
     }
 
     // Block dangerous system mounts
     let dangerous_mounts = [
-        "/", "/etc", "/boot", "/usr", "/var", "/root", "/sys", "/proc", "/lib", "/lib64",
-        "/opt", "/run",
+        "/", "/etc", "/boot", "/usr", "/var", "/root", "/sys", "/proc", "/lib", "/lib64", "/opt",
+        "/run",
     ];
     for dm in &dangerous_mounts {
         if expanded == *dm
@@ -680,8 +675,8 @@ fn reads_sensitive_path(cmd: &str) -> Option<&'static str> {
     ];
     // Commands that read file contents (as opposed to merely listing).
     const READERS: &[&str] = &[
-        "cat", "less", "more", "head", "tail", "bat", "nl", "tac", "xxd", "od",
-        "strings", "base64", "grep", "awk", "sed", "cp", "rsync", "scp", "curl", "dd",
+        "cat", "less", "more", "head", "tail", "bat", "nl", "tac", "xxd", "od", "strings",
+        "base64", "grep", "awk", "sed", "cp", "rsync", "scp", "curl", "dd",
     ];
     let secret = SENSITIVE.iter().copied().find(|s| lower.contains(s))?;
     if READERS.iter().any(|r| lower.contains(r)) {
@@ -745,7 +740,10 @@ fn reads_denied_path(cmd: &str, denied_paths: &[String]) -> Option<String> {
                 return Some(pattern.clone());
             }
             if filename_only {
-                if let Some(base) = std::path::Path::new(tok).file_name().and_then(|s| s.to_str()) {
+                if let Some(base) = std::path::Path::new(tok)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                {
                     if compiled.matches(base) {
                         return Some(pattern.clone());
                     }

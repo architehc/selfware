@@ -173,10 +173,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result["answer"].is_null());
-        assert!(result["note"]
-            .as_str()
-            .unwrap()
-            .contains("disabled"));
+        assert!(result["note"].as_str().unwrap().contains("disabled"));
         // Counter should not have been incremented.
         assert_eq!(tool.asked_count(), 0);
     }
@@ -191,10 +188,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result["answer"].is_null());
-        assert!(result["note"]
-            .as_str()
-            .unwrap()
-            .contains("limit reached"));
+        assert!(result["note"].as_str().unwrap().contains("limit reached"));
         assert_eq!(tool.asked_count(), 0);
     }
 
@@ -210,10 +204,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result["answer"].is_null());
-        assert!(result["note"]
-            .as_str()
-            .unwrap()
-            .contains("limit reached"));
+        assert!(result["note"].as_str().unwrap().contains("limit reached"));
         // Counter unchanged because we returned early.
         assert_eq!(tool.asked_count(), 2);
     }
@@ -234,9 +225,7 @@ mod tests {
     #[tokio::test]
     async fn non_string_question_errors() {
         let tool = ClarificationTool::new(true, 3);
-        let result = tool
-            .execute(serde_json::json!({"question": 42}))
-            .await;
+        let result = tool.execute(serde_json::json!({"question": 42})).await;
         assert!(result.is_err());
     }
 
@@ -292,10 +281,7 @@ mod tests {
         crate::output::set_tui_active(false);
 
         assert!(result["answer"].is_null());
-        assert!(result["note"]
-            .as_str()
-            .unwrap()
-            .contains("TUI mode"));
+        assert!(result["note"].as_str().unwrap().contains("TUI mode"));
         // Counter should not have been incremented.
         assert_eq!(tool.asked_count(), 0);
     }

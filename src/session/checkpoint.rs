@@ -379,8 +379,8 @@ impl TaskCheckpoint {
             (self.elapsed_wall_secs != base.elapsed_wall_secs).then_some(self.elapsed_wall_secs);
         let cumulative_cost_usd = (self.cumulative_cost_usd != base.cumulative_cost_usd)
             .then_some(self.cumulative_cost_usd);
-        let guard_counters = (self.guard_counters != base.guard_counters)
-            .then(|| self.guard_counters.clone());
+        let guard_counters =
+            (self.guard_counters != base.guard_counters).then(|| self.guard_counters.clone());
         if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
             // Delta format cannot encode "explicitly clear git checkpoint".
             // Force a full checkpoint write for this transition.
@@ -706,7 +706,9 @@ fn sanitize_task_id(task_id: &str) -> Result<String> {
 
     // Trim leading/trailing dots and whitespace to avoid hidden files or
     // degenerate names.
-    let trimmed = sanitized.trim_matches(['.', ' ', '\t', '\n', '\r']).to_string();
+    let trimmed = sanitized
+        .trim_matches(['.', ' ', '\t', '\n', '\r'])
+        .to_string();
 
     if trimmed.is_empty() {
         bail!("task_id is empty after sanitization");
@@ -787,7 +789,10 @@ impl CheckpointManager {
             return Ok(());
         }
         // Fallback: lexical check on the components.
-        let dir = self.checkpoints_dir.canonicalize().unwrap_or(self.checkpoints_dir.clone());
+        let dir = self
+            .checkpoints_dir
+            .canonicalize()
+            .unwrap_or(self.checkpoints_dir.clone());
         if !path.starts_with(&dir) {
             bail!(
                 "checkpoint path {:?} escapes checkpoints_dir {:?}",
@@ -1605,7 +1610,11 @@ mod tests {
             .find(|e| e.path().extension().map_or(false, |x| x == "json"))
             .expect("a checkpoint json file should exist");
         let fmode = fs::metadata(file.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(fmode, 0o600, "checkpoint file should be 0600, got {:o}", fmode);
+        assert_eq!(
+            fmode, 0o600,
+            "checkpoint file should be 0600, got {:o}",
+            fmode
+        );
     }
 
     #[test]
@@ -2502,10 +2511,16 @@ mod tests {
 
         // A task_id with "../" should be rejected, not produce a path outside dir.
         let result = manager.checkpoint_path("../evil");
-        assert!(result.is_err(), "checkpoint_path should reject path traversal");
+        assert!(
+            result.is_err(),
+            "checkpoint_path should reject path traversal"
+        );
 
         let result = manager.checkpoint_delta_path("../evil");
-        assert!(result.is_err(), "checkpoint_delta_path should reject path traversal");
+        assert!(
+            result.is_err(),
+            "checkpoint_delta_path should reject path traversal"
+        );
 
         // Saving with a traversal task_id should also fail.
         let checkpoint = TaskCheckpoint::new("../evil".to_string(), "evil".to_string());
@@ -2518,7 +2533,10 @@ mod tests {
 
         // Deleting with a traversal task_id should also fail.
         let result = manager.delete("../evil");
-        assert!(result.is_err(), "delete should reject path traversal task_id");
+        assert!(
+            result.is_err(),
+            "delete should reject path traversal task_id"
+        );
     }
 
     #[test]
@@ -2527,7 +2545,10 @@ mod tests {
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
 
         let path = manager.checkpoint_path("normal_task").unwrap();
-        assert!(path.starts_with(dir.path()), "path should stay within checkpoints dir");
+        assert!(
+            path.starts_with(dir.path()),
+            "path should stay within checkpoints dir"
+        );
         assert_eq!(path.file_name().unwrap(), "normal_task.json");
     }
 
@@ -2720,7 +2741,8 @@ mod tests {
         assert_eq!(back.guard_counters.prefill_400_count, 2);
 
         // Legacy checkpoints without these fields must default to 0, not fail.
-        let mut legacy_value = serde_json::to_value(&TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
+        let mut legacy_value =
+            serde_json::to_value(&TaskCheckpoint::new("t2".to_string(), "d".to_string())).unwrap();
         // Remove the new budget fields to simulate a legacy checkpoint.
         if let serde_json::Value::Object(ref mut map) = legacy_value {
             map.remove("cumulative_tokens");
@@ -2757,7 +2779,14 @@ mod tests {
         assert_eq!(delta.cumulative_tokens, Some(500));
         assert_eq!(delta.elapsed_wall_secs, Some(90));
         assert_eq!(delta.cumulative_cost_usd, Some(0.75));
-        assert_eq!(delta.guard_counters.as_ref().unwrap().mutation_gate_rejections, 4);
+        assert_eq!(
+            delta
+                .guard_counters
+                .as_ref()
+                .unwrap()
+                .mutation_gate_rejections,
+            4
+        );
         // Applying the delta to the base must update the budget (not keep it stale).
         let mut reconstructed = base.clone();
         reconstructed.apply_delta(&delta).unwrap();
@@ -2767,7 +2796,10 @@ mod tests {
         // Guard counters carry across the delta apply so resume can't reset them.
         assert_eq!(reconstructed.guard_counters.mutation_gate_rejections, 4);
         assert_eq!(reconstructed.guard_counters.prefill_400_count, 1);
-        assert_eq!(reconstructed.guard_counters.consecutive_no_action_prompts, 2);
+        assert_eq!(
+            reconstructed.guard_counters.consecutive_no_action_prompts,
+            2
+        );
     }
 
     #[test]

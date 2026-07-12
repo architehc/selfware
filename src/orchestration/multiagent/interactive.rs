@@ -351,8 +351,7 @@ impl MultiAgentChat {
                     if let Ok(n) = value.parse::<usize>() {
                         let n = n.clamp(1, MAX_CONCURRENT_AGENTS);
                         self.config.max_concurrency = n;
-                        self.semaphore =
-                            std::sync::Arc::new(tokio::sync::Semaphore::new(n));
+                        self.semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(n));
                         println!("Max concurrency set to {}", n);
                     }
                 }
@@ -379,7 +378,10 @@ impl MultiAgentChat {
 
             // --- Swarm-coordinated task execution ---
 
-            println!("{}", "Running task via swarm coordinator...".bright_yellow());
+            println!(
+                "{}",
+                "Running task via swarm coordinator...".bright_yellow()
+            );
 
             let start = Instant::now();
 
@@ -443,8 +445,7 @@ impl MultiAgentChat {
                             results,
                             total_duration,
                         } => {
-                            let success_count =
-                                results.iter().filter(|r| r.success).count();
+                            let success_count = results.iter().filter(|r| r.success).count();
                             println!(
                                 "\n  {} {}/{} agents completed in {:.2}s",
                                 "Swarm Summary:".bright_cyan(),
@@ -517,14 +518,15 @@ impl MultiAgentChat {
                 let outcome = swarm.resolve_decision(&decision_id)?;
 
                 // Check if it resulted in a conflict.
-                let decision_status =
-                    swarm.get_decision(&decision_id).map(|d| d.status);
+                let decision_status = swarm.get_decision(&decision_id).map(|d| d.status);
 
                 if decision_status == Some(DecisionStatus::Conflict) {
                     let conflict_outcome = swarm.resolve_conflict(&decision_id)?;
                     println!(
                         "  ⚡ Conflict detected — resolved via ConfidenceWins strategy: {}",
-                        conflict_outcome.as_deref().unwrap_or("(human intervention needed)")
+                        conflict_outcome
+                            .as_deref()
+                            .unwrap_or("(human intervention needed)")
                     );
                 } else {
                     println!(

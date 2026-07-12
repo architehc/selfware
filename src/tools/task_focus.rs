@@ -232,7 +232,8 @@ pub fn classify_task(task: &str) -> TaskType {
     // Ship/deploy — check first because "commit" could appear in edit tasks
     // Word-boundary matches so "ship"/"release" don't fire inside "relationship",
     // "membership", "township", etc. (CLS-SHIP-SUBSTRING).
-    if t.contains("commit") && (t.contains("push") || contains_word(&t, "ship") || t.contains("deploy"))
+    if t.contains("commit")
+        && (t.contains("push") || contains_word(&t, "ship") || t.contains("deploy"))
         || t.contains("deploy")
         || contains_word(&t, "release")
         || t.contains("merge to main")
@@ -422,8 +423,14 @@ mod tests {
         );
         // Genuine whole-word matches still classify as before.
         assert_eq!(classify_task("Ship the v2 release"), TaskType::Ship);
-        assert_eq!(classify_task("The login page is broken, fix it"), TaskType::Visual);
-        assert_eq!(classify_task("Read the config module and explain it"), TaskType::Read);
+        assert_eq!(
+            classify_task("The login page is broken, fix it"),
+            TaskType::Visual
+        );
+        assert_eq!(
+            classify_task("Read the config module and explain it"),
+            TaskType::Read
+        );
     }
 
     #[test]

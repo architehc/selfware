@@ -413,10 +413,7 @@ pub fn parse_plan_from_llm(content: &str) -> Option<Plan> {
 
     // Extract JSON from a markdown fence if present.
     let json_str = if trimmed.starts_with("```") {
-        let after_open = trimmed
-            .find('\n')
-            .map(|i| &trimmed[i + 1..])
-            .unwrap_or("");
+        let after_open = trimmed.find('\n').map(|i| &trimmed[i + 1..]).unwrap_or("");
         let end = after_open.rfind("```").unwrap_or(after_open.len());
         after_open[..end].trim()
     } else {

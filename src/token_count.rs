@@ -28,11 +28,9 @@ static TOKENIZER: Lazy<TokenizerState> = Lazy::new(|| {
     // Determine the configured model name (if any) so we can pick a matching
     // tokenizer instead of hardcoding one.  We deliberately swallow config
     // load errors — token counting is best-effort and must never panic.
-    let configured_model = std::env::var("SELFWARE_MODEL").ok().or_else(|| {
-        crate::config::Config::load(None)
-            .ok()
-            .map(|c| c.model)
-    });
+    let configured_model = std::env::var("SELFWARE_MODEL")
+        .ok()
+        .or_else(|| crate::config::Config::load(None).ok().map(|c| c.model));
 
     TokenizerState::for_model(configured_model.as_deref())
 });
@@ -67,10 +65,7 @@ impl TokenizerState {
             if let Some(repo) = hf_tokenizer_repo(model) {
                 match Tokenizer::from_pretrained(repo, None) {
                     Ok(tokenizer) => {
-                        debug!(
-                            "Loaded HF tokenizer '{}' for model '{}'",
-                            repo, model
-                        );
+                        debug!("Loaded HF tokenizer '{}' for model '{}'", repo, model);
                         return TokenizerState::Hf(Box::new(tokenizer));
                     }
                     Err(e) => {
@@ -269,7 +264,10 @@ mod tests {
         // a working TokenizerState (cl100k or heuristic) — never panic.
         let state = TokenizerState::for_model(Some("unknown-model-xyz"));
         let count = state.count("fn main() { println!(\"hello\"); }");
-        assert!(count > 0, "fallback tokenizer must produce a positive count");
+        assert!(
+            count > 0,
+            "fallback tokenizer must produce a positive count"
+        );
     }
 
     #[test]

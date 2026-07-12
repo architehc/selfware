@@ -734,7 +734,11 @@ mod tests {
         .collect();
 
         let unique: std::collections::HashSet<&str> = strs.iter().copied().collect();
-        assert_eq!(strs.len(), unique.len(), "EpisodeType strings must be unique");
+        assert_eq!(
+            strs.len(),
+            unique.len(),
+            "EpisodeType strings must be unique"
+        );
     }
 
     #[test]
@@ -769,24 +773,23 @@ mod tests {
 
     #[test]
     fn test_episode_with_importance() {
-        let ep = Episode::new("ep-2", EpisodeType::Error, "oops")
-            .with_importance(Importance::Critical);
+        let ep =
+            Episode::new("ep-2", EpisodeType::Error, "oops").with_importance(Importance::Critical);
         assert_eq!(ep.importance, Importance::Critical);
     }
 
     #[test]
     fn test_episode_with_importance_chained() {
         // Verify builder chaining returns Self
-        let ep = Episode::new("ep-3", EpisodeType::Thought, "hmm")
-            .with_importance(Importance::Low);
+        let ep = Episode::new("ep-3", EpisodeType::Thought, "hmm").with_importance(Importance::Low);
         assert_eq!(ep.id, "ep-3");
         assert_eq!(ep.importance, Importance::Low);
     }
 
     #[test]
     fn test_episode_serde_roundtrip() {
-        let mut ep = Episode::new("ep-serde", EpisodeType::Success, "yay")
-            .with_importance(Importance::High);
+        let mut ep =
+            Episode::new("ep-serde", EpisodeType::Success, "yay").with_importance(Importance::High);
         ep.token_count = 42;
         ep.related_episodes.push("ep-1".to_string());
         ep.insights.push("learned a lot".to_string());
@@ -806,10 +809,7 @@ mod tests {
         assert_eq!(back.insights, vec!["learned a lot".to_string()]);
         assert!(back.is_summarized);
         assert_eq!(back.original_id, Some("ep-orig".to_string()));
-        assert_eq!(
-            back.metadata.get("key"),
-            Some(&serde_json::json!("value"))
-        );
+        assert_eq!(back.metadata.get("key"), Some(&serde_json::json!("value")));
     }
 
     // ========================================================================
@@ -985,9 +985,9 @@ mod tests {
     fn test_self_improvement_context_estimate_tokens_basic() {
         // 40 chars total base + 0 code + 0 suggestions => 40/4 = 10
         let sic = SelfImprovementContext {
-            goal: "improve speed".to_string(),        // 13
-            self_model: "model v1".to_string(),        // 8
-            architecture: "modular".to_string(),       // 7
+            goal: "improve speed".to_string(),                // 13
+            self_model: "model v1".to_string(),               // 8
+            architecture: "modular".to_string(),              // 7
             recent_modifications: "refactored x".to_string(), // 12 = 40 total
             relevant_code: CodeContext::new(),
             suggestions: vec![],
@@ -1007,8 +1007,8 @@ mod tests {
         });
         let sic = SelfImprovementContext {
             goal: "g".to_string(),         // 1
-            self_model: "m".to_string(),    // 1
-            architecture: "a".to_string(),  // 1
+            self_model: "m".to_string(),   // 1
+            architecture: "a".to_string(), // 1
             recent_modifications: String::new(),
             relevant_code: cc,
             suggestions: vec![],
@@ -1253,7 +1253,10 @@ mod tests {
         assert_eq!(back.tier, MemoryTier::Archive);
         assert_eq!(back.importance, 0.8);
         assert_eq!(back.tags, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(back.metadata.get("m"), Some(&serde_json::json!({"nested": true})));
+        assert_eq!(
+            back.metadata.get("m"),
+            Some(&serde_json::json!({"nested": true}))
+        );
     }
 
     // ========================================================================
@@ -1423,10 +1426,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_index_multiple_entries_same_tag() {
         let idx = MemoryIndex::new();
-        let e1 = MemoryEntry::new(1, "a", MemoryTier::Working)
-            .with_tags(vec!["shared".to_string()]);
-        let e2 = MemoryEntry::new(2, "b", MemoryTier::LongTerm)
-            .with_tags(vec!["shared".to_string()]);
+        let e1 =
+            MemoryEntry::new(1, "a", MemoryTier::Working).with_tags(vec!["shared".to_string()]);
+        let e2 =
+            MemoryEntry::new(2, "b", MemoryTier::LongTerm).with_tags(vec!["shared".to_string()]);
         idx.index_entry(&e1).await;
         idx.index_entry(&e2).await;
 
@@ -1458,10 +1461,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_index_remove_entry_preserves_others() {
         let idx = MemoryIndex::new();
-        let e1 = MemoryEntry::new(1, "a", MemoryTier::Working)
-            .with_tags(vec!["shared".to_string()]);
-        let e2 = MemoryEntry::new(2, "b", MemoryTier::Working)
-            .with_tags(vec!["shared".to_string()]);
+        let e1 =
+            MemoryEntry::new(1, "a", MemoryTier::Working).with_tags(vec!["shared".to_string()]);
+        let e2 =
+            MemoryEntry::new(2, "b", MemoryTier::Working).with_tags(vec!["shared".to_string()]);
         idx.index_entry(&e1).await;
         idx.index_entry(&e2).await;
 
@@ -1489,8 +1492,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_index_remove_nonexistent_entry_is_noop() {
         let idx = MemoryIndex::new();
-        let real = MemoryEntry::new(1, "a", MemoryTier::Working)
-            .with_tags(vec!["t".to_string()]);
+        let real = MemoryEntry::new(1, "a", MemoryTier::Working).with_tags(vec!["t".to_string()]);
         idx.index_entry(&real).await;
 
         // Remove a non-indexed entry — should not affect existing data
@@ -1665,7 +1667,10 @@ mod tests {
         let json = serde_json::to_string(&sm).unwrap();
         let back: SelfModel = serde_json::from_str(&json).unwrap();
         assert_eq!(back.version, "1.0.0");
-        assert_eq!(back.capabilities, vec!["code".to_string(), "test".to_string()]);
+        assert_eq!(
+            back.capabilities,
+            vec!["code".to_string(), "test".to_string()]
+        );
         assert_eq!(back.limitations, vec!["no browser".to_string()]);
         assert_eq!(back.recent_changes, vec!["refactored".to_string()]);
         assert_eq!(back.modules, vec!["agent".to_string()]);

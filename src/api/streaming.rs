@@ -345,10 +345,22 @@ impl ToolCallAccumulator {
             if !name.is_empty() {
                 entry.2 = name;
             }
-            (entry.0.clone(), entry.1.clone(), entry.2.clone(), entry.3.clone())
+            (
+                entry.0.clone(),
+                entry.1.clone(),
+                entry.2.clone(),
+                entry.3.clone(),
+            )
         } else {
-            self.pending
-                .insert(index, (id.clone(), call_type.clone(), name.clone(), args_chunk.clone()));
+            self.pending.insert(
+                index,
+                (
+                    id.clone(),
+                    call_type.clone(),
+                    name.clone(),
+                    args_chunk.clone(),
+                ),
+            );
             (id, call_type, name, args_chunk)
         };
 
@@ -444,7 +456,10 @@ pub(crate) fn parse_sse_event(
         let json = match serde_json::from_str::<serde_json::Value>(data) {
             Ok(j) => j,
             Err(e) => {
-                warn!("Failed to parse SSE data line as JSON: {} (data: {})", e, data);
+                warn!(
+                    "Failed to parse SSE data line as JSON: {} (data: {})",
+                    e, data
+                );
                 continue;
             }
         };

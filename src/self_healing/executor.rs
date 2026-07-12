@@ -79,7 +79,8 @@ impl RecoveryExecutor {
         strategy: &RecoveryStrategy,
         state_manager: &StateManager,
     ) -> RecoveryExecution {
-        self.execute_internal(strategy, Some(state_manager), None).await
+        self.execute_internal(strategy, Some(state_manager), None)
+            .await
     }
 
     /// Execute a recovery strategy with state manager and an error pattern key
@@ -90,7 +91,8 @@ impl RecoveryExecutor {
         state_manager: &StateManager,
         pattern_key: &str,
     ) -> RecoveryExecution {
-        self.execute_internal(strategy, Some(state_manager), Some(pattern_key)).await
+        self.execute_internal(strategy, Some(state_manager), Some(pattern_key))
+            .await
     }
 
     async fn execute_internal(
@@ -138,7 +140,10 @@ impl RecoveryExecutor {
 
             info!("Executing recovery action: {}", name);
 
-            if let Err(e) = self.execute_action(action, state_manager, pattern_key).await {
+            if let Err(e) = self
+                .execute_action(action, state_manager, pattern_key)
+                .await
+            {
                 success = false;
                 error = Some(format!("Action '{}' failed: {}", name, e));
                 warn!("Recovery action '{}' failed: {}", name, e);
@@ -194,7 +199,10 @@ impl RecoveryExecutor {
             RecoveryAction::Retry {
                 delay_ms,
                 max_attempts,
-            } => self.execute_retry(*delay_ms, *max_attempts, pattern_key).await,
+            } => {
+                self.execute_retry(*delay_ms, *max_attempts, pattern_key)
+                    .await
+            }
 
             RecoveryAction::Restart { component } => {
                 if component.trim().is_empty() {

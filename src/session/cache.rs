@@ -65,8 +65,10 @@ impl ToolCache {
         if let Some(entry) = entries.get(&key) {
             if !entry.is_expired() {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    let current_mtime =
-                        tokio::fs::metadata(path).await.ok().and_then(|m| m.modified().ok());
+                    let current_mtime = tokio::fs::metadata(path)
+                        .await
+                        .ok()
+                        .and_then(|m| m.modified().ok());
 
                     if entry.is_file_stale(current_mtime) {
                         return None;
@@ -80,21 +82,19 @@ impl ToolCache {
 
     /// Store a result in the cache
     pub async fn set(&self, tool_name: &str, args: &Value, value: Value) {
-        self.set_with_ttl(tool_name, args, value, self.default_ttl).await;
+        self.set_with_ttl(tool_name, args, value, self.default_ttl)
+            .await;
     }
 
     /// Store a result with a custom TTL
-    pub async fn set_with_ttl(
-        &self,
-        tool_name: &str,
-        args: &Value,
-        value: Value,
-        ttl: Duration,
-    ) {
+    pub async fn set_with_ttl(&self, tool_name: &str, args: &Value, value: Value, ttl: Duration) {
         let key = Self::cache_key(tool_name, args);
 
         let file_mtime = if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-            tokio::fs::metadata(path).await.ok().and_then(|m| m.modified().ok())
+            tokio::fs::metadata(path)
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
         } else {
             None
         };
@@ -321,8 +321,7 @@ impl LlmCache {
                     // across different causal contexts or different models.
                     if entry.context_hash == context_hash
                         && entry.model == model
-                        && (best_match.is_none()
-                            || similarity > best_match.as_ref().unwrap().1)
+                        && (best_match.is_none() || similarity > best_match.as_ref().unwrap().1)
                     {
                         best_match = Some((id.clone(), similarity));
                     }
@@ -579,7 +578,9 @@ mod tests {
         cache.store(entry).await;
 
         // Should find with exact match
-        let result = cache.lookup("test prompt", &[1.0, 0.0, 0.0], 0, "test").await;
+        let result = cache
+            .lookup("test prompt", &[1.0, 0.0, 0.0], 0, "test")
+            .await;
         assert!(result.is_some());
         assert_eq!(result.unwrap().response, "test response");
     }
@@ -631,14 +632,18 @@ mod tests {
         cache.store(entry).await;
 
         // Same embedding + context_hash but DIFFERENT model -> no hit
-        let result = cache.lookup("same prompt", &[1.0, 0.0, 0.0], 42, "beta").await;
+        let result = cache
+            .lookup("same prompt", &[1.0, 0.0, 0.0], 42, "beta")
+            .await;
         assert!(
             result.is_none(),
             "cache should NOT hit for a different model"
         );
 
         // Same model -> hit
-        let result = cache.lookup("same prompt", &[1.0, 0.0, 0.0], 42, "alpha").await;
+        let result = cache
+            .lookup("same prompt", &[1.0, 0.0, 0.0], 42, "alpha")
+            .await;
         assert!(result.is_some());
     }
 

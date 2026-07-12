@@ -100,7 +100,10 @@ impl Agent {
         // Generate cache key from model, messages, tools, and thinking mode.
         // Including the model name prevents cross-model semantic matches.
         let prompt = Self::messages_to_prompt(messages);
-        let key = format!("{}:{}:{:?}:{:?}", self.config.model, prompt, tools, thinking);
+        let key = format!(
+            "{}:{}:{:?}:{:?}",
+            self.config.model, prompt, tools, thinking
+        );
 
         // Compute a real context hash from the full key so that entries with
         // different model / prompt / tools / thinking never collide.
@@ -163,7 +166,10 @@ impl Agent {
         }
 
         let prompt = Self::messages_to_prompt(messages);
-        let key = format!("{}:{}:{:?}:{:?}", self.config.model, prompt, tools, thinking);
+        let key = format!(
+            "{}:{}:{:?}:{:?}",
+            self.config.model, prompt, tools, thinking
+        );
 
         // Compute a real context hash from the full key (includes model).
         let context_hash = {
@@ -256,8 +262,7 @@ impl Agent {
         // In JSON or quiet mode, streamed prose must NOT be printed to stdout —
         // it would pollute the machine-readable output stream. The text is still
         // accumulated into `content` and returned via the normal result path.
-        let suppress_stream_stdout =
-            crate::output::is_json_mode() || crate::output::is_quiet();
+        let suppress_stream_stdout = crate::output::is_json_mode() || crate::output::is_quiet();
         // Track whether the TUI spinner is logically active (to avoid
         // sending SpinnerUpdate/SpinnerStop after it has already stopped).
         let mut tui_spinner_active = false;

@@ -265,11 +265,10 @@ impl Swarm {
             .status;
 
         if status != DecisionStatus::Conflict {
-            return Ok(
-                self.decisions
-                    .get(decision_id)
-                    .and_then(|d| d.outcome.clone()),
-            );
+            return Ok(self
+                .decisions
+                .get(decision_id)
+                .and_then(|d| d.outcome.clone()));
         }
 
         // Compute the resolution based on conflict strategy.
@@ -313,9 +312,7 @@ impl Swarm {
                     // Return all unique choices joined
                     let choices: std::collections::HashSet<_> =
                         decision.votes.iter().map(|v| &v.choice).collect();
-                    Some(
-                        choices.into_iter().cloned().collect::<Vec<_>>().join(", "),
-                    )
+                    Some(choices.into_iter().cloned().collect::<Vec<_>>().join(", "))
                 }
             }
         };
@@ -449,10 +446,7 @@ impl Swarm {
 
         // Don't complete a task with no assigned agents
         if task.assigned_agents.is_empty() {
-            tracing::warn!(
-                "Task {} has no assigned agents, cannot complete",
-                task_id
-            );
+            tracing::warn!("Task {} has no assigned agents, cannot complete", task_id);
             // Still update the agent status
             if let Some(agent) = self.agents.get_mut(agent_id) {
                 agent.complete_task(true);

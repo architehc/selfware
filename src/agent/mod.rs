@@ -999,7 +999,8 @@ To call a tool, use this EXACT XML structure:
 
         // Initialize verification gate with project root
         let project_root = current_project_root();
-        let mut verification_gate = VerificationGate::new(&project_root, VerificationConfig::fast());
+        let mut verification_gate =
+            VerificationGate::new(&project_root, VerificationConfig::fast());
         if let Some(ref cmd) = config.agent.post_edit_test_command {
             verification_gate.set_post_edit_test_command(Some(cmd.clone()));
         }
@@ -1401,7 +1402,8 @@ To call a tool, use this EXACT XML structure:
                     self.client = crate::api::ApiClient::new(&self.config)?;
                     // Re-propagate the progress emitter so HTTP round-trip events
                     // continue to land on the same channel after the rebuild.
-                    self.client.with_progress_emitter(Arc::clone(&self.progress_emitter));
+                    self.client
+                        .with_progress_emitter(Arc::clone(&self.progress_emitter));
                     warn!(
                         "Recovery tree switched endpoint from '{}' to '{}'",
                         old_endpoint, target
@@ -1446,11 +1448,11 @@ To call a tool, use this EXACT XML structure:
                 };
                 // Set the key on the top-level Config (where api_key lives as
                 // Option<RedactedString>) so ApiClient::new picks it up.
-                self.config.api_key =
-                    Some(crate::config::RedactedString::new(key));
+                self.config.api_key = Some(crate::config::RedactedString::new(key));
                 // Rebuild the client with the new credentials.
                 self.client = crate::api::ApiClient::new(&self.config)?;
-                self.client.with_progress_emitter(Arc::clone(&self.progress_emitter));
+                self.client
+                    .with_progress_emitter(Arc::clone(&self.progress_emitter));
                 info!("Credentials reloaded and API client rebuilt — caller should retry");
                 Ok(true)
             }
@@ -1581,7 +1583,11 @@ To call a tool, use this EXACT XML structure:
                     if !matches!(ext, "rs" | "toml" | "md") {
                         continue;
                     }
-                    let Some(relative) = path.strip_prefix(&root_for_walk).ok().and_then(|p| p.to_str()) else {
+                    let Some(relative) = path
+                        .strip_prefix(&root_for_walk)
+                        .ok()
+                        .and_then(|p| p.to_str())
+                    else {
                         continue;
                     };
                     out.push(relative.replace('\\', "/"));
@@ -1792,8 +1798,10 @@ To call a tool, use this EXACT XML structure:
         // inside `handle_command`), the YoloManager would otherwise stay
         // disabled and `should_auto_approve` would return
         // `RequireConfirmation` — denying all tools in headless mode.
-        if matches!(mode, crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon)
-        {
+        if matches!(
+            mode,
+            crate::config::ExecutionMode::Yolo | crate::config::ExecutionMode::Daemon
+        ) {
             self.yolo_manager.enable();
         }
     }

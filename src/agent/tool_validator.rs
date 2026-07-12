@@ -111,9 +111,7 @@ fn value_matches_schema_type(value: &Value, schema_type: &Value) -> bool {
     }
 
     if let Some(types) = schema_type.as_array() {
-        return types
-            .iter()
-            .any(|t| value_matches_schema_type(value, t));
+        return types.iter().any(|t| value_matches_schema_type(value, t));
     }
 
     // Unknown `type` shapes pass through.
@@ -320,7 +318,9 @@ mod tests {
                 arguments: r#"{"mode": "turbo"}"#.to_string(),
             },
         };
-        let err = validate_tool_call(&bad_call, &defs).unwrap_err().to_string();
+        let err = validate_tool_call(&bad_call, &defs)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("must be one of"));
     }
 

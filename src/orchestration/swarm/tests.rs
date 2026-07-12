@@ -1153,7 +1153,9 @@ fn test_coordinator_full_flow_queue_assign_complete_consensus() {
     assert_eq!(swarm.list_tasks().len(), 1);
 
     // 2. Pop the next task.
-    let task_id = swarm.next_task().expect("next_task should return a task id");
+    let task_id = swarm
+        .next_task()
+        .expect("next_task should return a task id");
     assert!(swarm.get_task(&task_id).is_some());
 
     // 3. Assign the task to role-matched idle agents.
@@ -1200,7 +1202,13 @@ fn test_coordinator_full_flow_queue_assign_complete_consensus() {
         let choice = &agent_names[i];
         let confidence = 0.5 + (i as f32 * 0.1); // 0.5, 0.6, 0.7, 0.8
         swarm
-            .vote(&decision_id, agent_id, choice.clone(), confidence, "reasoning")
+            .vote(
+                &decision_id,
+                agent_id,
+                choice.clone(),
+                confidence,
+                "reasoning",
+            )
             .expect("vote should succeed");
     }
 
@@ -1230,8 +1238,7 @@ fn test_coordinator_full_flow_queue_assign_complete_consensus() {
 
     let decision = swarm.get_decision(&decision_id).expect("decision exists");
     assert!(
-        decision.status == DecisionStatus::Resolved
-            || decision.status == DecisionStatus::Conflict,
+        decision.status == DecisionStatus::Resolved || decision.status == DecisionStatus::Conflict,
         "decision should be Resolved or Conflict after resolution attempt"
     );
 }
@@ -1259,7 +1266,11 @@ fn test_coordinator_flag_selects_swarm_path() {
     let swarm = super::factory::create_dev_swarm();
 
     // Verify the swarm has the expected agents for coordinator mode.
-    assert_eq!(swarm.list_agents().len(), 4, "dev swarm should have 4 agents");
+    assert_eq!(
+        swarm.list_agents().len(),
+        4,
+        "dev swarm should have 4 agents"
+    );
     assert!(!swarm.agents_by_role(AgentRole::Architect).is_empty());
     assert!(!swarm.agents_by_role(AgentRole::Coder).is_empty());
     assert!(!swarm.agents_by_role(AgentRole::Tester).is_empty());

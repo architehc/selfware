@@ -707,7 +707,9 @@ impl Agent {
         let events = {
             let recent = logger.recent_events(10);
             if recent.is_empty() {
-                SessionLogger::read_recent(logger.path(), 10).await.unwrap_or_default()
+                SessionLogger::read_recent(logger.path(), 10)
+                    .await
+                    .unwrap_or_default()
             } else {
                 recent
             }
@@ -791,7 +793,10 @@ impl Agent {
 }
 
 #[cfg(test)]
-pub(super) async fn new_test_session_logger(session_id: &str, dir: PathBuf) -> Option<SessionLogger> {
+pub(super) async fn new_test_session_logger(
+    session_id: &str,
+    dir: PathBuf,
+) -> Option<SessionLogger> {
     SessionLogger::new_in(session_id, dir).await
 }
 
@@ -919,7 +924,10 @@ mod tests {
             let details = event.details.as_ref().unwrap().to_string();
 
             assert!(!input.contains("sk-live-abcdefghijklmnop"), "{input}");
-            assert!(!arguments.contains("sk-live-abcdefghijklmnop"), "{arguments}");
+            assert!(
+                !arguments.contains("sk-live-abcdefghijklmnop"),
+                "{arguments}"
+            );
             assert!(!result.contains("hunter2"), "{result}");
             assert!(!details.contains("token-abcdefghijklmnop"), "{details}");
 

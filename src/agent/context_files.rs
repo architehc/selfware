@@ -188,33 +188,33 @@ impl Agent {
         for path in paths {
             let path_str = path.display().to_string();
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                    let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
-                    let full_content = format!("{}{}", file_header, content);
-                    let file_tokens =
-                        crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
-                    total_tokens += file_tokens;
+                let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
+                let full_content = format!("{}{}", file_header, content);
+                let file_tokens =
+                    crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
+                total_tokens += file_tokens;
 
-                    // Add to context files tracking (bounded to prevent memory exhaustion)
-                    const MAX_CONTEXT_FILES: usize = 10_000;
-                    if !self.file_tracker.context_files.contains(&path_str)
-                        && self.file_tracker.context_files.len() < MAX_CONTEXT_FILES
-                    {
-                        self.file_tracker.context_files.push(path_str.clone());
-                    }
-
-                    // Add as user message with file content
-                    self.messages.push(Message::user(full_content));
-
-                    let k_tokens = file_tokens as f64 / 1000.0;
-                    println!(
-                        "  {} {} ({:.1}k tokens)",
-                        "✓".bright_green(),
-                        path_str.bright_white(),
-                        k_tokens
-                    );
-                    loaded += 1;
+                // Add to context files tracking (bounded to prevent memory exhaustion)
+                const MAX_CONTEXT_FILES: usize = 10_000;
+                if !self.file_tracker.context_files.contains(&path_str)
+                    && self.file_tracker.context_files.len() < MAX_CONTEXT_FILES
+                {
+                    self.file_tracker.context_files.push(path_str.clone());
                 }
+
+                // Add as user message with file content
+                self.messages.push(Message::user(full_content));
+
+                let k_tokens = file_tokens as f64 / 1000.0;
+                println!(
+                    "  {} {} ({:.1}k tokens)",
+                    "✓".bright_green(),
+                    path_str.bright_white(),
+                    k_tokens
+                );
+                loaded += 1;
             }
+        }
 
         let window = self.memory.context_window();
         let pct = if window > 0 {

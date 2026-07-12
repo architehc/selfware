@@ -7,16 +7,16 @@ use super::{ExecutionContext, ExecutionEvent, ExecutionResult, ExecutionStatus, 
 use crate::api::{ApiClient, Message, ThinkingMode};
 use crate::errors::{SafetyError, SelfwareError};
 use crate::observability::telemetry::{
-    add_tokens_processed, increment_api_requests, record_state_transition, record_success,
-    record_failure,
+    add_tokens_processed, increment_api_requests, record_failure, record_state_transition,
+    record_success,
 };
+use crate::orchestration::workflows::VarValue;
 use crate::swl::guardrails::{
     GuardrailContext, GuardrailEnforcer, GuardrailSummary, GuardrailType,
 };
 use crate::swl::parser::ast::{AgentDefinition, SwlDocument, WorkflowDefinition, WorkflowType};
-use crate::orchestration::workflows::VarValue;
-use crate::tools::ToolRegistry;
 use crate::tool_parser::parse_tool_calls;
+use crate::tools::ToolRegistry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -74,7 +74,10 @@ impl GuardedSwlRuntime {
     pub async fn register_guardrails(&self, doc: &SwlDocument) {
         let mut enforcer = self.enforcer.lock().await;
         enforcer.register_guardrails(&doc.guardrails);
-        info!("Registered {} guardrails from document", doc.guardrails.len());
+        info!(
+            "Registered {} guardrails from document",
+            doc.guardrails.len()
+        );
     }
 
     /// Execute a workflow with guardrail enforcement
@@ -102,7 +105,9 @@ impl GuardedSwlRuntime {
         record_state_transition("idle", "executing_workflow");
 
         // Build guardrail context for pre-workflow check
-        let pre_context = self.build_guardrail_context(None, None, Some(&inputs)).await;
+        let pre_context = self
+            .build_guardrail_context(None, None, Some(&inputs))
+            .await;
 
         // Pre-workflow guardrail check
         if let Some(blocking) = self
@@ -116,25 +121,18 @@ impl GuardedSwlRuntime {
         }
 
         // Find the workflow
-        let workflow = doc
-            .workflows
-            .get(workflow_name)
-            .ok_or_else(|| crate::errors::SelfwareError::Internal(format!(
+        let workflow = doc.workflows.get(workflow_name).ok_or_else(|| {
+            crate::errors::SelfwareError::Internal(format!(
                 "Workflow '{}' not found in document",
                 workflow_name
-            )))?;
+            ))
+        })?;
 
         // Execute based on workflow type
         let result = match workflow.workflow_type {
-            WorkflowType::Sequential => {
-                self.execute_sequential(doc, workflow, workflow_name).await
-            }
-            WorkflowType::Parallel => {
-                self.execute_parallel(doc, workflow, workflow_name).await
-            }
-            WorkflowType::MapReduce => {
-                self.execute_map_reduce(doc, workflow, workflow_name).await
-            }
+            WorkflowType::Sequential => self.execute_sequential(doc, workflow, workflow_name).await,
+            WorkflowType::Parallel => self.execute_parallel(doc, workflow, workflow_name).await,
+            WorkflowType::MapReduce => self.execute_map_reduce(doc, workflow, workflow_name).await,
             WorkflowType::Conditional => {
                 self.execute_conditional(doc, workflow, workflow_name).await
             }
@@ -148,7 +146,7 @@ impl GuardedSwlRuntime {
 
         // Record telemetry
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
-        
+
         match &result {
             Ok(_) => {
                 record_state_transition("executing_workflow", "completed");
@@ -173,7 +171,9 @@ impl GuardedSwlRuntime {
         let summary = enforcer.check(guardrail_type, context).await?;
 
         if summary.should_block() {
-            Ok(Some(summary.blocking_violations().into_iter().cloned().collect()))
+            Ok(Some(
+                summary.blocking_violations().into_iter().cloned().collect(),
+            ))
         } else {
             Ok(None)
         }
@@ -237,7 +237,9 @@ impl GuardedSwlRuntime {
         for (agent_name, agent) in &doc.agents {
             // Agent execution with guardrails is handled inside
             // execute_agent_with_guardrails (pre/post agent checks).
-            let output = self.execute_agent_with_guardrails(agent_name, agent).await?;
+            let output = self
+                .execute_agent_with_guardrails(agent_name, agent)
+                .await?;
             outputs.insert(agent_name.clone(), output);
         }
 
@@ -262,7 +264,9 @@ impl GuardedSwlRuntime {
 
         // Pre-workflow guardrail check for all agents
         for (agent_name, _) in &doc.agents {
-            let pre_context = self.build_guardrail_context(Some(agent_name), None, None).await;
+            let pre_context = self
+                .build_guardrail_context(Some(agent_name), None, None)
+                .await;
             if let Some(blocking) = self
                 .check_guardrails(GuardrailType::PreAgent, &pre_context)
                 .await?
@@ -337,9 +341,11 @@ impl GuardedSwlRuntime {
         let map_result = self.execute_parallel(doc, workflow, workflow_name).await?;
 
         // Reduce phase
-        if let Some(reduce_agent_name) = workflow.reduce.as_ref().and_then(|_reduce| {
-            doc.agents.keys().last().map(|s| s.to_string())
-        }) {
+        if let Some(reduce_agent_name) = workflow
+            .reduce
+            .as_ref()
+            .and_then(|_reduce| doc.agents.keys().last().map(|s| s.to_string()))
+        {
             if let Some(agent) = doc.agents.get(&reduce_agent_name) {
                 let _reduce_output = self
                     .execute_agent_with_guardrails(&reduce_agent_name, agent)
@@ -432,7 +438,10 @@ impl GuardedSwlRuntime {
             .await?
         {
             return Err(SelfwareError::Safety(SafetyError::BlockedCommand {
-                command: format!("Agent '{}' output blocked by post-execution guardrails", name),
+                command: format!(
+                    "Agent '{}' output blocked by post-execution guardrails",
+                    name
+                ),
                 reason: format!("{} violations found", blocking.len()),
             }));
         }
@@ -464,7 +473,9 @@ impl GuardedSwlRuntime {
     }
 
     /// Get guardrail telemetry events
-    pub async fn get_guardrail_telemetry(&self) -> Vec<crate::swl::guardrails::GuardrailTelemetryEvent> {
+    pub async fn get_guardrail_telemetry(
+        &self,
+    ) -> Vec<crate::swl::guardrails::GuardrailTelemetryEvent> {
         let enforcer = self.enforcer.lock().await;
         enforcer.get_telemetry_events().await
     }

@@ -527,7 +527,8 @@ impl ApiClient {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
-                            let stream_chunk_timeout_secs = self.config.agent.step_timeout_secs.max(30);
+                            let stream_chunk_timeout_secs =
+                                self.config.agent.step_timeout_secs.max(30);
                             return Ok(StreamingResponse::new(
                                 response,
                                 Duration::from_secs(stream_chunk_timeout_secs),
@@ -596,11 +597,12 @@ impl ApiClient {
     /// gateway (thundering herd).
     fn retry_sleep_ms(&self, delay_ms: u64, retry_after_secs: Option<u64>) -> u64 {
         if let Some(secs) = retry_after_secs {
-            return secs.saturating_mul(1000).min(self.retry_config.max_delay_ms);
+            return secs
+                .saturating_mul(1000)
+                .min(self.retry_config.max_delay_ms);
         }
         let jitter = rand::random::<f64>() * 0.5 - 0.25; // [-0.25, +0.25]
-        (((delay_ms as f64) * (1.0 + jitter)).max(0.0) as u64)
-            .min(self.retry_config.max_delay_ms)
+        (((delay_ms as f64) * (1.0 + jitter)).max(0.0) as u64).min(self.retry_config.max_delay_ms)
     }
 
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
@@ -695,7 +697,8 @@ impl ApiClient {
                             // error/response bodies -- redact before
                             // printing, same as maybe_log_request_body does
                             // for the request side.
-                            let redacted = crate::observability::telemetry::redact_secrets(&body_text);
+                            let redacted =
+                                crate::observability::telemetry::redact_secrets(&body_text);
                             eprintln!("=== RAW API RESPONSE ===\n{}\n=== END RAW ===", redacted);
                         }
 

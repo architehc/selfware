@@ -1620,27 +1620,28 @@ async fn test_tool_step_with_registry_backed_handler() {
     use std::sync::Arc;
 
     let registry = Arc::new(ToolRegistry::new());
-    let handler: crate::workflows::ToolHandler = Box::new(move |name: &str, args: &HashMap<String, String>| {
-        let registry = Arc::clone(&registry);
-        let mut json_map = serde_json::Map::new();
-        for (k, v) in args {
-            let parsed = serde_json::from_str::<serde_json::Value>(v)
-                .unwrap_or(serde_json::Value::String(v.clone()));
-            json_map.insert(k.clone(), parsed);
-        }
-        let input = serde_json::Value::Object(json_map);
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { registry.execute_any(name, input).await })
-        })
-        .map(|v| v.to_string())
-    });
+    let handler: crate::workflows::ToolHandler =
+        Box::new(move |name: &str, args: &HashMap<String, String>| {
+            let registry = Arc::clone(&registry);
+            let mut json_map = serde_json::Map::new();
+            for (k, v) in args {
+                let parsed = serde_json::from_str::<serde_json::Value>(v)
+                    .unwrap_or(serde_json::Value::String(v.clone()));
+                json_map.insert(k.clone(), parsed);
+            }
+            let input = serde_json::Value::Object(json_map);
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(async move { registry.execute_any(name, input).await })
+            })
+            .map(|v| v.to_string())
+        });
 
     let mut ctx = WorkflowContext::new("/tmp");
     // file_read requires a "path" argument; point at this test file for a
     // deterministic, small read.
-    let test_file = env!("CARGO_MANIFEST_DIR").to_string()
-        + "/src/orchestration/workflows/test_execution.rs";
+    let test_file =
+        env!("CARGO_MANIFEST_DIR").to_string() + "/src/orchestration/workflows/test_execution.rs";
     let step_type = StepType::Tool {
         name: "file_read".into(),
         args: HashMap::from([("path".into(), test_file)]),
@@ -1654,8 +1655,8 @@ async fn test_tool_step_with_registry_backed_handler() {
         // file_read returns a JSON object with "content" or "success" — just
         // verify we got a non-empty, JSON-shaped string back from the registry.
         assert!(!s.is_empty(), "tool result should not be empty");
-        let parsed: serde_json::Value = serde_json::from_str(&s)
-            .expect("tool result should be valid JSON from the registry");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&s).expect("tool result should be valid JSON from the registry");
         assert!(parsed.is_object(), "file_read should return a JSON object");
     } else {
         panic!("Expected String result from tool handler");

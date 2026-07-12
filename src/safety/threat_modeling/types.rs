@@ -691,7 +691,11 @@ mod tests {
         let mut sorted = descriptions.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), descriptions.len(), "descriptions must be unique");
+        assert_eq!(
+            sorted.len(),
+            descriptions.len(),
+            "descriptions must be unique"
+        );
     }
 
     #[test]
@@ -747,7 +751,12 @@ mod tests {
 
     #[test]
     fn severity_from_score_round_trip() {
-        for sev in [Severity::Low, Severity::Medium, Severity::High, Severity::Critical] {
+        for sev in [
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
             assert_eq!(Severity::from_score(sev.score()), sev);
         }
     }
@@ -1075,7 +1084,10 @@ mod tests {
         assert_eq!(t.severity, Severity::High);
         assert_eq!(t.likelihood, Likelihood::Likely);
         assert_eq!(t.affected_assets, c.affected_assets);
-        assert_eq!(t.source_file.as_deref(), Some(std::path::Path::new("/src/db.rs")));
+        assert_eq!(
+            t.source_file.as_deref(),
+            Some(std::path::Path::new("/src/db.rs"))
+        );
         assert_eq!(t.source_line, Some(42));
         assert_eq!(t.status, ThreatStatus::Open);
     }
@@ -1202,7 +1214,12 @@ mod tests {
     fn risk_matrix_new_is_empty() {
         let m = RiskMatrix::new();
         // No threats in any cell
-        for sev in [Severity::Low, Severity::Medium, Severity::High, Severity::Critical] {
+        for sev in [
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
             for lik in [
                 Likelihood::Unlikely,
                 Likelihood::Possible,
@@ -1219,8 +1236,12 @@ mod tests {
         let d = RiskMatrix::default();
         let n = RiskMatrix::new();
         // Both should be empty
-        assert!(d.threats_at(Severity::Critical, Likelihood::AlmostCertain).is_empty());
-        assert!(n.threats_at(Severity::Critical, Likelihood::AlmostCertain).is_empty());
+        assert!(d
+            .threats_at(Severity::Critical, Likelihood::AlmostCertain)
+            .is_empty());
+        assert!(n
+            .threats_at(Severity::Critical, Likelihood::AlmostCertain)
+            .is_empty());
     }
 
     #[test]
@@ -1250,7 +1271,10 @@ mod tests {
         m.add_threat("T-high", Severity::High, Likelihood::Possible);
         m.add_threat("T-crit", Severity::Critical, Likelihood::AlmostCertain);
 
-        assert_eq!(m.threats_at(Severity::Low, Likelihood::Unlikely), &["T-low"]);
+        assert_eq!(
+            m.threats_at(Severity::Low, Likelihood::Unlikely),
+            &["T-low"]
+        );
         assert_eq!(
             m.threats_at(Severity::High, Likelihood::Possible),
             &["T-high"]
@@ -1260,14 +1284,18 @@ mod tests {
             &["T-crit"]
         );
         // Other cells still empty
-        assert!(m.threats_at(Severity::Medium, Likelihood::Likely).is_empty());
+        assert!(m
+            .threats_at(Severity::Medium, Likelihood::Likely)
+            .is_empty());
     }
 
     #[test]
     fn risk_matrix_threats_at_empty_cell_returns_empty_slice() {
         let m = RiskMatrix::new();
         assert!(m.threats_at(Severity::Low, Likelihood::Unlikely).is_empty());
-        assert!(m.threats_at(Severity::Critical, Likelihood::AlmostCertain).is_empty());
+        assert!(m
+            .threats_at(Severity::Critical, Likelihood::AlmostCertain)
+            .is_empty());
     }
 
     #[test]
@@ -1291,19 +1319,49 @@ mod tests {
         m.add_threat("T-3", Severity::Critical, Likelihood::AlmostCertain);
 
         let text = m.to_text();
-        assert!(text.contains("LIKELIHOOD"), "text should contain LIKELIHOOD header");
-        assert!(text.contains("Unlikely"), "text should contain Unlikely column header");
-        assert!(text.contains("Possible"), "text should contain Possible column header");
-        assert!(text.contains("Likely"), "text should contain Likely column header");
-        assert!(text.contains("Certain"), "text should contain Certain column header");
-        assert!(text.contains("Critical"), "text should contain Critical severity row");
-        assert!(text.contains("High"), "text should contain High severity row");
-        assert!(text.contains("Medium"), "text should contain Medium severity row");
+        assert!(
+            text.contains("LIKELIHOOD"),
+            "text should contain LIKELIHOOD header"
+        );
+        assert!(
+            text.contains("Unlikely"),
+            "text should contain Unlikely column header"
+        );
+        assert!(
+            text.contains("Possible"),
+            "text should contain Possible column header"
+        );
+        assert!(
+            text.contains("Likely"),
+            "text should contain Likely column header"
+        );
+        assert!(
+            text.contains("Certain"),
+            "text should contain Certain column header"
+        );
+        assert!(
+            text.contains("Critical"),
+            "text should contain Critical severity row"
+        );
+        assert!(
+            text.contains("High"),
+            "text should contain High severity row"
+        );
+        assert!(
+            text.contains("Medium"),
+            "text should contain Medium severity row"
+        );
         assert!(text.contains("Low"), "text should contain Low severity row");
         // The count 2 should appear for the High/Likely cell
-        assert!(text.contains("  2 "), "text should contain count 2 for High/Likely");
+        assert!(
+            text.contains("  2 "),
+            "text should contain count 2 for High/Likely"
+        );
         // The count 1 should appear for the Critical/AlmostCertain cell
-        assert!(text.contains("  1 "), "text should contain count 1 for Critical/Certain");
+        assert!(
+            text.contains("  1 "),
+            "text should contain count 1 for Critical/Certain"
+        );
     }
 
     #[test]
@@ -1316,8 +1374,14 @@ mod tests {
             "empty matrix text should contain dashes for empty cells"
         );
         // No numeric counts should appear
-        assert!(!text.contains("  1 "), "empty matrix should not show count 1");
-        assert!(!text.contains("  2 "), "empty matrix should not show count 2");
+        assert!(
+            !text.contains("  1 "),
+            "empty matrix should not show count 1"
+        );
+        assert!(
+            !text.contains("  2 "),
+            "empty matrix should not show count 2"
+        );
     }
 
     #[test]
@@ -1333,18 +1397,19 @@ mod tests {
     fn risk_matrix_to_text_nonempty_for_all_cells_filled() {
         let mut m = RiskMatrix::new();
         // Fill every cell with one threat
-        for sev in [Severity::Low, Severity::Medium, Severity::High, Severity::Critical] {
+        for sev in [
+            Severity::Low,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
             for lik in [
                 Likelihood::Unlikely,
                 Likelihood::Possible,
                 Likelihood::Likely,
                 Likelihood::AlmostCertain,
             ] {
-                m.add_threat(
-                    &format!("T-{:?}-{:?}", sev, lik),
-                    sev,
-                    lik,
-                );
+                m.add_threat(&format!("T-{:?}-{:?}", sev, lik), sev, lik);
             }
         }
         let text = m.to_text();
@@ -1374,7 +1439,11 @@ mod tests {
         // Retrieving with the same severity/likelihood should find it
         assert_eq!(m.threats_at(Severity::High, Likelihood::Possible), &["X"]);
         // Retrieving with a different severity or likelihood should not
-        assert!(m.threats_at(Severity::Medium, Likelihood::Possible).is_empty());
-        assert!(m.threats_at(Severity::High, Likelihood::Unlikely).is_empty());
+        assert!(m
+            .threats_at(Severity::Medium, Likelihood::Possible)
+            .is_empty());
+        assert!(m
+            .threats_at(Severity::High, Likelihood::Unlikely)
+            .is_empty());
     }
 }

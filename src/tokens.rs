@@ -2833,8 +2833,14 @@ mod extended_context_pruner_tests {
         ];
         let result = pruner.prune(&messages);
         let system_count = result.iter().filter(|m| m.role == "system").count();
-        assert_eq!(system_count, 1, "KeepRecent: expected exactly 1 system message");
-        assert_eq!(result[0].role, "system", "KeepRecent: system message must be first");
+        assert_eq!(
+            system_count, 1,
+            "KeepRecent: expected exactly 1 system message"
+        );
+        assert_eq!(
+            result[0].role, "system",
+            "KeepRecent: system message must be first"
+        );
     }
 
     #[test]
@@ -2858,8 +2864,14 @@ mod extended_context_pruner_tests {
         ];
         let result = pruner.prune(&messages);
         let system_count = result.iter().filter(|m| m.role == "system").count();
-        assert_eq!(system_count, 1, "KeepEnds: expected exactly 1 system message");
-        assert_eq!(result[0].role, "system", "KeepEnds: system message must be first");
+        assert_eq!(
+            system_count, 1,
+            "KeepEnds: expected exactly 1 system message"
+        );
+        assert_eq!(
+            result[0].role, "system",
+            "KeepEnds: system message must be first"
+        );
     }
 }
 

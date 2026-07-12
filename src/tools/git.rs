@@ -579,7 +579,11 @@ impl Tool for GitPush {
         };
 
         if let Some(ref safety_config) = self.safety_config {
-            if safety_config.protected_branches.iter().any(|b| b == &branch) {
+            if safety_config
+                .protected_branches
+                .iter()
+                .any(|b| b == &branch)
+            {
                 anyhow::bail!(
                     "Push to protected branch '{}' is blocked by the safety checker \
                      (protected_branches: {:?}).",
@@ -782,7 +786,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let guard = crate::test_support::CwdGuard::enter(dir.path());
         fn git(args: &[&str]) {
-            std::process::Command::new("git").args(args).status().unwrap();
+            std::process::Command::new("git")
+                .args(args)
+                .status()
+                .unwrap();
         }
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@t"]);

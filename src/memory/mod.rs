@@ -21,7 +21,6 @@ pub mod swebench_store;
 /// Maximum number of memory entries before eviction kicks in.
 const MAX_MEMORY_ENTRIES: usize = 10_000;
 
-
 pub struct AgentMemory {
     context_window: usize,
     max_memory_tokens: usize,
@@ -105,9 +104,7 @@ impl AgentMemory {
         // Token budget eviction -- evict oldest entries while over budget.
         // Uses the running `total_tokens` counter for O(1) eviction instead of
         // re-summing the entire VecDeque on every pop.
-        while self.total_tokens + new_tokens > self.max_memory_tokens
-            && !self.entries.is_empty()
-        {
+        while self.total_tokens + new_tokens > self.max_memory_tokens && !self.entries.is_empty() {
             if let Some(removed) = self.entries.pop_front() {
                 self.total_tokens = self.total_tokens.saturating_sub(removed.token_estimate);
             }

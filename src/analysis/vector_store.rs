@@ -1714,8 +1714,7 @@ impl VectorStore {
 
             // Detect corruption on the initial (smallest) search: if every
             // score is NaN the index is corrupt and expansion won't help.
-            let all_nan =
-                !raw.is_empty() && raw.iter().all(|(_, score)| score.is_nan());
+            let all_nan = !raw.is_empty() && raw.iter().all(|(_, score)| score.is_nan());
             if all_nan {
                 return (Vec::new(), true);
             }
@@ -2646,10 +2645,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
             store.load().unwrap();
 
             let collection = store.get_collection("project").expect("collection missing");
-            assert!(
-                !collection.is_empty(),
-                "chunks should survive save+load"
-            );
+            assert!(!collection.is_empty(), "chunks should survive save+load");
             assert!(
                 collection.get_chunk(&known_chunk_id).is_some(),
                 "known chunk id '{}' should resolve after reload — RAG is broken if it doesn't",
@@ -3319,10 +3315,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         }
 
         // Verify the collection has 20 chunks
-        assert_eq!(
-            store.get_collection(collection_name).unwrap().len(),
-            20
-        );
+        assert_eq!(store.get_collection(collection_name).unwrap().len(), 20);
 
         // k = 3, so k*2 = 6.  The top 6 candidates are all decoys (Structs).
         // The 5 targets (Functions) are ranked below the top 6, so a plain

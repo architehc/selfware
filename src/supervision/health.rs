@@ -114,12 +114,9 @@ impl HealthMonitor {
             // Update the global health flag used by the HTTP health
             // endpoint so that Docker/Kubernetes probes reflect the real
             // status.  If any check is Unhealthy, the endpoint returns 503.
-            let any_unhealthy = results.iter().any(|r| {
-                matches!(
-                    r.status,
-                    HealthStatus::Unhealthy { .. }
-                )
-            });
+            let any_unhealthy = results
+                .iter()
+                .any(|r| matches!(r.status, HealthStatus::Unhealthy { .. }));
             set_global_healthy(!any_unhealthy);
 
             // Log any issues
@@ -392,8 +389,7 @@ impl HealthCheck for DiskHealthCheck {
 /// Global health flag that can be updated by the supervision system.
 /// Defaults to `true` (healthy) so that bare-bones deployments without
 /// supervision still report liveness.
-static GLOBAL_HEALTHY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
+static GLOBAL_HEALTHY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 /// Update the global health flag used by the HTTP health endpoint.
 pub fn set_global_healthy(healthy: bool) {
@@ -403,8 +399,7 @@ pub fn set_global_healthy(healthy: bool) {
 /// Epoch-milliseconds of the last agent-loop heartbeat. 0 means "no heartbeat
 /// has ever been recorded" (bare-bones deployments), which is treated as
 /// healthy so liveness isn't failed for callers that don't ping.
-static LAST_HEARTBEAT_MS: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static LAST_HEARTBEAT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -462,8 +457,8 @@ pub async fn start_health_endpoint(port: u16) -> anyhow::Result<()> {
 
     loop {
         if let Ok((mut stream, _)) = listener.accept().await {
-            let healthy = GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed)
-                && heartbeat_healthy();
+            let healthy =
+                GLOBAL_HEALTHY.load(std::sync::atomic::Ordering::Relaxed) && heartbeat_healthy();
             let response = if healthy {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 9\r\n\r\nhealthy\n"
             } else {
@@ -496,7 +491,10 @@ mod heartbeat_tests {
     #[test]
     fn never_pinged_is_healthy() {
         set_last_heartbeat_ms_for_test(0);
-        assert!(heartbeat_healthy(), "no heartbeat wired -> healthy (bare-bones)");
+        assert!(
+            heartbeat_healthy(),
+            "no heartbeat wired -> healthy (bare-bones)"
+        );
     }
 
     #[test]

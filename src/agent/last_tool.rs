@@ -37,9 +37,13 @@ impl super::Agent {
     /// grow without limit when a tool returns a huge response.
     pub fn store_last_tool_output(&mut self, mut output: LastToolOutput) {
         fn truncate_on_char_boundary(s: &mut String, max: usize) {
-            if s.len() <= max { return; }
+            if s.len() <= max {
+                return;
+            }
             let mut b = max;
-            while b > 0 && !s.is_char_boundary(b) { b -= 1; }
+            while b > 0 && !s.is_char_boundary(b) {
+                b -= 1;
+            }
             s.truncate(b);
         }
         truncate_on_char_boundary(&mut output.full_output, MAX_FULL_OUTPUT_LEN);
@@ -84,7 +88,9 @@ mod tests {
             execution_mode: crate::config::ExecutionMode::Yolo,
             ..Default::default()
         };
-        let mut agent = crate::agent::Agent::new(config).await.expect("agent creation");
+        let mut agent = crate::agent::Agent::new(config)
+            .await
+            .expect("agent creation");
         let output = LastToolOutput {
             tool_name: "shell_exec".to_string(),
             summary: "x".repeat(MAX_SUMMARY_LEN + 100),
@@ -113,7 +119,9 @@ mod tests {
             execution_mode: crate::config::ExecutionMode::Yolo,
             ..Default::default()
         };
-        let mut agent = crate::agent::Agent::new(config).await.expect("agent creation");
+        let mut agent = crate::agent::Agent::new(config)
+            .await
+            .expect("agent creation");
         let output = LastToolOutput {
             tool_name: "shell_exec".to_string(),
             summary: "é".repeat(MAX_SUMMARY_LEN),

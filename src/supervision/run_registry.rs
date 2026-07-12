@@ -133,8 +133,7 @@ impl RunRegistry {
         let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(record).context("serialize run record")?;
         std::fs::write(&tmp, json).with_context(|| format!("write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("rename into {}", path.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
         Ok(())
     }
 
@@ -146,8 +145,8 @@ impl RunRegistry {
         }
         let data =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let rec = serde_json::from_str(&data)
-            .with_context(|| format!("parse {}", path.display()))?;
+        let rec =
+            serde_json::from_str(&data).with_context(|| format!("parse {}", path.display()))?;
         Ok(Some(rec))
     }
 
@@ -199,8 +198,7 @@ impl RunRegistry {
     pub fn remove(&self, id: &str) -> Result<()> {
         let path = self.record_path(id);
         if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("remove {}", path.display()))?;
+            std::fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
         }
         Ok(())
     }

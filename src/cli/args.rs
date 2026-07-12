@@ -506,7 +506,6 @@ pub(crate) enum Commands {
         aggregate: bool,
     },
 
-
     /// Workflow commands (SWL and YAML)
     #[command(alias = "w")]
     Workflow {

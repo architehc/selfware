@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
-use crate::analysis::vector_store::{EmbeddingProvider, TfIdfEmbeddingProvider, VectorIndex};
 use super::temporal::TemporalRecord;
+use crate::analysis::vector_store::{EmbeddingProvider, TfIdfEmbeddingProvider, VectorIndex};
 
 /// Build a single text blob from a [`TemporalRecord`]'s compacted content
 /// for embedding purposes.  Concatenates the summary with key facts,
@@ -131,16 +131,10 @@ impl LongTermStore {
             let text = record_text(record);
             match self.embedder.embed(&text).await {
                 Ok(embedding) => {
-                    let mut emb_map = self
-                        .embeddings
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let mut emb_map = self.embeddings.write().unwrap_or_else(|e| e.into_inner());
                     emb_map.insert(record.id.clone(), embedding);
 
-                    let mut rec_map = self
-                        .records
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let mut rec_map = self.records.write().unwrap_or_else(|e| e.into_inner());
                     rec_map.insert(record.id.clone(), record.clone());
                 }
                 Err(e) => {
@@ -227,16 +221,10 @@ impl LongTermStore {
             let text = record_text(record);
             match self.embedder.embed(&text).await {
                 Ok(embedding) => {
-                    let mut emb_map = self
-                        .embeddings
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let mut emb_map = self.embeddings.write().unwrap_or_else(|e| e.into_inner());
                     emb_map.insert(record.id.clone(), embedding);
 
-                    let mut rec_map = self
-                        .records
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
+                    let mut rec_map = self.records.write().unwrap_or_else(|e| e.into_inner());
                     rec_map.insert(record.id.clone(), record.clone());
                 }
                 Err(e) => {
@@ -307,8 +295,7 @@ impl LongTermStore {
         drop(emb_map);
 
         // Collect semantic hit IDs (ordered by similarity).
-        let mut result_ids: Vec<String> =
-            semantic_hits.iter().map(|(id, _)| id.clone()).collect();
+        let mut result_ids: Vec<String> = semantic_hits.iter().map(|(id, _)| id.clone()).collect();
         let mut seen: HashSet<String> = result_ids.iter().cloned().collect();
 
         // Graph expansion: for each semantic hit, add 1-hop causal neighbors.
@@ -482,7 +469,10 @@ mod tests {
         store.store(&[r1, r2, r3]).await.unwrap();
 
         // Query that semantically matches r1 best.
-        let results = store.retrieve("tokio async runtime scheduling", 2).await.unwrap();
+        let results = store
+            .retrieve("tokio async runtime scheduling", 2)
+            .await
+            .unwrap();
 
         // Should return at least 2 results (r1 semantic + r2 causal neighbor).
         assert!(
@@ -548,11 +538,7 @@ mod tests {
         let ids: Vec<&str> = results.iter().map(|r| r.id.as_str()).collect();
 
         // r2 should be the semantic hit.
-        assert!(
-            ids.contains(&"r2"),
-            "r2 should be in results: {:?}",
-            ids
-        );
+        assert!(ids.contains(&"r2"), "r2 should be in results: {:?}", ids);
 
         // r1 (causal parent of r2) should be included via graph expansion.
         assert!(

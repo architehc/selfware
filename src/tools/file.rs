@@ -844,12 +844,7 @@ struct TreeNode {
 }
 
 /// Insert a walked entry into the nested tree based on its relative path.
-fn insert_tree_entry(
-    root: &mut TreeNode,
-    relative: &Path,
-    type_: &str,
-    size: u64,
-) {
+fn insert_tree_entry(root: &mut TreeNode, relative: &Path, type_: &str, size: u64) {
     let mut components: Vec<String> = relative
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -919,11 +914,7 @@ fn sort_tree_node(node: &mut TreeNode) {
 
 /// Count all nodes in the tree (including the root).
 fn count_tree_nodes(node: &TreeNode) -> usize {
-    1 + node
-        .children
-        .iter()
-        .map(count_tree_nodes)
-        .sum::<usize>()
+    1 + node.children.iter().map(count_tree_nodes).sum::<usize>()
 }
 
 #[async_trait]
@@ -1015,7 +1006,11 @@ impl Tool for DirectoryTree {
 
                 entries.push(EntryInfo {
                     path: path.to_path_buf(),
-                    type_: if metadata.is_dir() { "directory" } else { "file" },
+                    type_: if metadata.is_dir() {
+                        "directory"
+                    } else {
+                        "file"
+                    },
                     size: metadata.len(),
                 });
             }
@@ -1206,8 +1201,7 @@ mod tests {
         let mut out = Vec::new();
         if let Some(children) = node["children"].as_array() {
             for child in children {
-                if let (Some(name), Some(type_)) =
-                    (child["name"].as_str(), child["type"].as_str())
+                if let (Some(name), Some(type_)) = (child["name"].as_str(), child["type"].as_str())
                 {
                     out.push((name.to_string(), type_.to_string()));
                     out.extend(flatten_tree(child));
@@ -1472,7 +1466,10 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("file_edit rejected"), "unexpected error: {err}");
+        assert!(
+            err.contains("file_edit rejected"),
+            "unexpected error: {err}"
+        );
 
         // The file should be unchanged.
         let content = fs::read_to_string(&file_path).unwrap();

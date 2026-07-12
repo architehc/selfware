@@ -102,9 +102,11 @@ fn resolve_missing_path(path: &Path) -> Result<PathBuf> {
             Err(e) if e.raw_os_error() == Some(ELOOP) => {
                 // Symlink in the existing portion — let the caller resolve it
                 // with the dedicated symlink safety check.
-                return Err(SelfwareError::Safety(SafetyError::PathCanonicalizationFailed {
-                    path: path.display().to_string(),
-                }));
+                return Err(SelfwareError::Safety(
+                    SafetyError::PathCanonicalizationFailed {
+                        path: path.display().to_string(),
+                    },
+                ));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Keep walking up until we find an existing ancestor.
@@ -119,9 +121,11 @@ fn resolve_missing_path(path: &Path) -> Result<PathBuf> {
             }
         }
     }
-    Err(SelfwareError::Safety(SafetyError::PathCanonicalizationFailed {
-        path: path.display().to_string(),
-    }))
+    Err(SelfwareError::Safety(
+        SafetyError::PathCanonicalizationFailed {
+            path: path.display().to_string(),
+        },
+    ))
 }
 
 #[derive(Clone)]

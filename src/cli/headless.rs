@@ -138,7 +138,11 @@ impl HeadlessEvent {
             tool: None,
             args: None,
             ok: None,
-            outcome: if detail.is_empty() { None } else { Some(detail) },
+            outcome: if detail.is_empty() {
+                None
+            } else {
+                Some(detail)
+            },
             reason: Some(decision),
         }
     }
@@ -453,10 +457,9 @@ mod tests {
     #[test]
     fn jsonl_emits_llm_events_with_tokens_and_finish_reason() {
         // stream-json previously dropped the LLM events entirely.
-        let req = JsonlProgressEmitter::event_json_line(ProgressEvent::LlmRequestSent {
-            tokens: 1234,
-        })
-        .expect("llm_request_sent must be emitted");
+        let req =
+            JsonlProgressEmitter::event_json_line(ProgressEvent::LlmRequestSent { tokens: 1234 })
+                .expect("llm_request_sent must be emitted");
         let req: Value = serde_json::from_str(&req).unwrap();
         assert_eq!(req["event"], "llm_request_sent");
         assert_eq!(req["prompt_tokens"], 1234);

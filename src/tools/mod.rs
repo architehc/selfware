@@ -23,10 +23,10 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub mod clarify;
 pub mod analyzer;
 pub mod browser;
 pub mod cargo;
+pub mod clarify;
 pub mod code_metrics;
 pub mod codemap;
 pub mod computer;
@@ -378,8 +378,6 @@ impl ToolRegistry {
         registry.register_critical(GlobFind);
         // SymbolSearch is deferred - less commonly used
 
-
-
         // Deferred: Git operations (can be discovered via tool_search)
         if let Some(cfg) = safety_config {
             registry.register_deferred(GitStatus::with_safety_config(cfg.clone()));
@@ -568,15 +566,22 @@ impl ToolRegistry {
     /// of registered tools. Call this after registering any tools that should
     /// be discoverable.
     pub fn rebuild_search_index(&mut self) {
-        let mut index = self.tool_search_index.write().expect("tool_search index poisoned");
+        let mut index = self
+            .tool_search_index
+            .write()
+            .expect("tool_search index poisoned");
         index.clear();
-        index.extend(self.all_tools.values().map(|info| tool_search::ToolSearchResult {
-            name: info.tool.name().to_string(),
-            description: info.tool.description().to_string(),
-            schema: info.tool.schema(),
-            is_critical: info.is_critical,
-            category: info.category.clone(),
-        }));
+        index.extend(
+            self.all_tools
+                .values()
+                .map(|info| tool_search::ToolSearchResult {
+                    name: info.tool.name().to_string(),
+                    description: info.tool.description().to_string(),
+                    schema: info.tool.schema(),
+                    is_critical: info.is_critical,
+                    category: info.category.clone(),
+                }),
+        );
     }
 
     /// Look up a tool by name, returning `None` if not found.
@@ -1354,9 +1359,7 @@ mod tests {
             .list()
             .iter()
             .map(|t| t.name().to_string())
-            .filter(|name| {
-                crate::safety::tool_metadata::classify_tool_metadata(name).is_none()
-            })
+            .filter(|name| crate::safety::tool_metadata::classify_tool_metadata(name).is_none())
             .collect();
         assert!(
             missing.is_empty(),

@@ -89,7 +89,8 @@ impl Agent {
         agent.cumulative_cost_usd = checkpoint.cumulative_cost_usd;
         // Restore anti-thrash guard counters so a crash-looping task can't reset
         // its way out of the guards on every resume.
-        agent.consecutive_no_action_prompts = checkpoint.guard_counters.consecutive_no_action_prompts;
+        agent.consecutive_no_action_prompts =
+            checkpoint.guard_counters.consecutive_no_action_prompts;
         agent.mutation_gate_rejections = checkpoint.guard_counters.mutation_gate_rejections;
         agent.prefill_400_count = checkpoint.guard_counters.prefill_400_count;
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
@@ -144,23 +145,17 @@ impl Agent {
         if !checkpoint.errors.is_empty() {
             for error in &checkpoint.errors {
                 if error.recovered {
-                    agent
-                        .cognitive_state
-                        .episodic_memory
-                        .what_worked(
-                            "error_recovery",
-                            &format!(
-                                "Recovered from error at step {}: {}",
-                                error.step, error.error
-                            ),
-                        );
+                    agent.cognitive_state.episodic_memory.what_worked(
+                        "error_recovery",
+                        &format!(
+                            "Recovered from error at step {}: {}",
+                            error.step, error.error
+                        ),
+                    );
                 } else {
                     agent.cognitive_state.episodic_memory.what_failed(
                         "task_execution",
-                        &format!(
-                            "Unrecovered error at step {}: {}",
-                            error.step, error.error
-                        ),
+                        &format!("Unrecovered error at step {}: {}", error.step, error.error),
                     );
                 }
             }
@@ -650,11 +645,7 @@ impl Agent {
     }
 
     #[cfg(feature = "resilience")]
-    pub(super) async fn try_self_healing_recovery(
-        &mut self,
-        error: &str,
-        context: &str,
-    ) -> bool {
+    pub(super) async fn try_self_healing_recovery(&mut self, error: &str, context: &str) -> bool {
         if !self.config.continuous_work.auto_recovery {
             return false;
         }

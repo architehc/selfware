@@ -1881,21 +1881,27 @@ I'll check the output next."#;
         // JSON string values ending in tag-like names (e.g. "tool>", "name>")
         // must be preserved, even when the closing tag starts on the next line.
         assert_eq!(
-            normalize_malformed_xml(r#"<arguments>{"x": "tool>"}
-</arguments>"#),
+            normalize_malformed_xml(
+                r#"<arguments>{"x": "tool>"}
+</arguments>"#
+            ),
             r#"<arguments>{"x": "tool>"}
 </arguments>"#
         );
         assert_eq!(
-            normalize_malformed_xml(r#"<arguments>{"x": "my name>"}
-</arguments>"#),
+            normalize_malformed_xml(
+                r#"<arguments>{"x": "my name>"}
+</arguments>"#
+            ),
             r#"<arguments>{"x": "my name>"}
 </arguments>"#
         );
         // Malformed closing tags outside JSON strings are still normalized.
         assert_eq!(
-            normalize_malformed_xml(r#"<arguments>{"x": "ok"} arguments>
-</arguments>"#),
+            normalize_malformed_xml(
+                r#"<arguments>{"x": "ok"} arguments>
+</arguments>"#
+            ),
             r#"<arguments>{"x": "ok"} </arguments>
 </arguments>"#
         );

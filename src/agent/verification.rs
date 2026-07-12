@@ -517,7 +517,9 @@ impl Agent {
     pub(super) async fn should_skip_cargo_verification(&self) -> bool {
         // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
         let cargo_toml_path = super::current_project_root().join("Cargo.toml");
-        let has_cargo_toml = tokio::fs::try_exists(&cargo_toml_path).await.unwrap_or(false);
+        let has_cargo_toml = tokio::fs::try_exists(&cargo_toml_path)
+            .await
+            .unwrap_or(false);
         if !has_cargo_toml {
             debug!(
                 "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
@@ -776,8 +778,8 @@ impl Agent {
                     if matches!(call.tool_name.as_str(), "shell_exec" | "pty_shell") {
                         if let Some(cmd) = args.get("command").and_then(Value::as_str) {
                             const READERS: &[&str] = &[
-                                "cat ", "grep ", "head ", "tail ", "less ", "more ",
-                                "nl ", "tac ", "rg ", "diff ", "sed -n", "awk ",
+                                "cat ", "grep ", "head ", "tail ", "less ", "more ", "nl ", "tac ",
+                                "rg ", "diff ", "sed -n", "awk ",
                             ];
                             let is_reader = READERS.iter().any(|r| cmd.contains(r));
                             let mentions_file = (!write_basename.is_empty()
@@ -910,7 +912,9 @@ impl Agent {
         // read-only task correctly never does — so it can never complete (found
         // running a 10k-step read-only code review that churned to the step cap).
         let is_read_only = !self.current_task_context.is_empty()
-            && !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification());
+            && !super::tool_dispatch::task_requires_mutation(
+                self.task_context_for_classification(),
+            );
         let skip_min_steps_for_read_only = is_read_only;
 
         if step_count < min_steps && !skip_min_steps_for_read_only {
@@ -968,7 +972,8 @@ impl Agent {
         // Reject completion if the last assistant response contains code that
         // should have been written to a file. This catches the common pattern
         // where models output code as text instead of using file_write/file_edit.
-        if !is_read_only && super::execution::contains_unwritten_code(&self.last_assistant_response) {
+        if !is_read_only && super::execution::contains_unwritten_code(&self.last_assistant_response)
+        {
             return Some(
                 "Your response contains code that was NOT written to any file. \
                  Use file_write to save it to a file, then verify with a relevant test/build command. \
@@ -1714,7 +1719,10 @@ mod tests {
             let readback = agent
                 .non_code_artifact_readback()
                 .expect("the task-owned markdown artifact should be recognized");
-            assert!(readback.artifact_only, "markdown-only edit should be artifact_only");
+            assert!(
+                readback.artifact_only,
+                "markdown-only edit should be artifact_only"
+            );
             assert!(
                 readback.missing_paths.is_empty(),
                 "a `cat <file>` shell read should count as read-back"

@@ -440,10 +440,27 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     });
 
     let streaming_ok = caps.streaming.unwrap_or(false);
-    let streaming_status = if streaming_ok { DoctorCheckStatus::Ok } else { DoctorCheckStatus::Warning };
-    let streaming_detail = if streaming_ok { "SSE streaming responded with chunks" } else { "streaming not available or returned no chunks" };
-    let streaming_fix = if streaming_ok { None } else { Some("Ensure the backend supports SSE streaming (default for vLLM/SGLang/Ollama). Disable any reverse proxy buffering.") };
-    had_fail |= print_unified_check("streaming", streaming_status, streaming_detail, streaming_fix);
+    let streaming_status = if streaming_ok {
+        DoctorCheckStatus::Ok
+    } else {
+        DoctorCheckStatus::Warning
+    };
+    let streaming_detail = if streaming_ok {
+        "SSE streaming responded with chunks"
+    } else {
+        "streaming not available or returned no chunks"
+    };
+    let streaming_fix = if streaming_ok {
+        None
+    } else {
+        Some("Ensure the backend supports SSE streaming (default for vLLM/SGLang/Ollama). Disable any reverse proxy buffering.")
+    };
+    had_fail |= print_unified_check(
+        "streaming",
+        streaming_status,
+        streaming_detail,
+        streaming_fix,
+    );
     report.capabilities.push(DoctorCheckResult {
         name: "streaming".to_string(),
         status: streaming_status.into(),
@@ -452,10 +469,27 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     });
 
     let thinking_ok = caps.thinking.unwrap_or(false);
-    let thinking_status = if thinking_ok { DoctorCheckStatus::Ok } else { DoctorCheckStatus::Warning };
-    let thinking_detail = if thinking_ok { "backend accepts chat_template_kwargs (Qwen-style thinking)" } else { "chat_template_kwargs not supported (or backend ignored it)" };
-    let thinking_fix = if thinking_ok { None } else { Some("Required for Qwen3.5 thinking control. Use vLLM/SGLang with a Qwen template, or set `[extra_body] chat_template_kwargs = { enable_thinking = false }` to opt out.") };
-    had_fail |= print_unified_check("chat_template_kwargs (thinking)", thinking_status, thinking_detail, thinking_fix);
+    let thinking_status = if thinking_ok {
+        DoctorCheckStatus::Ok
+    } else {
+        DoctorCheckStatus::Warning
+    };
+    let thinking_detail = if thinking_ok {
+        "backend accepts chat_template_kwargs (Qwen-style thinking)"
+    } else {
+        "chat_template_kwargs not supported (or backend ignored it)"
+    };
+    let thinking_fix = if thinking_ok {
+        None
+    } else {
+        Some("Required for Qwen3.5 thinking control. Use vLLM/SGLang with a Qwen template, or set `[extra_body] chat_template_kwargs = { enable_thinking = false }` to opt out.")
+    };
+    had_fail |= print_unified_check(
+        "chat_template_kwargs (thinking)",
+        thinking_status,
+        thinking_detail,
+        thinking_fix,
+    );
     report.capabilities.push(DoctorCheckResult {
         name: "chat_template_kwargs (thinking)".to_string(),
         status: thinking_status.into(),
@@ -464,9 +498,21 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
     });
 
     let mm_ok = caps.multimodal;
-    let mm_status = if mm_ok { DoctorCheckStatus::Ok } else { DoctorCheckStatus::Warning };
-    let mm_detail = if mm_ok { "model name suggests vision-language support" } else { "no vision modality detected for this model" };
-    let mm_fix = if mm_ok { None } else { Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.") };
+    let mm_status = if mm_ok {
+        DoctorCheckStatus::Ok
+    } else {
+        DoctorCheckStatus::Warning
+    };
+    let mm_detail = if mm_ok {
+        "model name suggests vision-language support"
+    } else {
+        "no vision modality detected for this model"
+    };
+    let mm_fix = if mm_ok {
+        None
+    } else {
+        Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.")
+    };
     had_fail |= print_unified_check("multimodal (vision)", mm_status, mm_detail, mm_fix);
     report.capabilities.push(DoctorCheckResult {
         name: "multimodal (vision)".to_string(),

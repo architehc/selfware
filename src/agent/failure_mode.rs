@@ -237,8 +237,7 @@ impl FailureMode {
                             "token budget exhausted with {} mutating tool calls completed",
                             mutating
                         ),
-                        advice: "increase --max-budget-tokens or shrink the task scope"
-                            .to_string(),
+                        advice: "increase --max-budget-tokens or shrink the task scope".to_string(),
                     };
                 }
                 if reason.to_lowercase().contains("timeout") || reason.contains("wall-clock") {
@@ -630,9 +629,8 @@ mod tests {
         let mut agent = make_agent().await;
         agent.test_set_mutating_count(0);
         agent.test_set_total_tool_calls(2);
-        agent.test_set_last_assistant_response(
-            "Here is the explanation you asked for.".to_string(),
-        );
+        agent
+            .test_set_last_assistant_response("Here is the explanation you asked for.".to_string());
         let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
         assert_eq!(mode.kind, FailureKind::NoChange);
         let banner = mode.cli_banner();
@@ -652,7 +650,11 @@ mod tests {
             },
         );
         assert_eq!(mode.kind, FailureKind::BudgetExhausted);
-        assert!(mode.advice.contains("max-budget-tokens"), "advice: {}", mode.advice);
+        assert!(
+            mode.advice.contains("max-budget-tokens"),
+            "advice: {}",
+            mode.advice
+        );
     }
 
     #[test]
@@ -678,9 +680,21 @@ mod tests {
         assert_eq!(retry_loop.kind, FailureKind::RetryLoop);
         for m in [&read_loop, &retry_loop] {
             let a = m.advice.to_lowercase();
-            assert!(!a.contains("selfware"), "advice leaks selfware internals: {}", m.advice);
-            assert!(!a.contains("completion gate"), "advice leaks selfware internals: {}", m.advice);
-            assert!(!a.contains("block threshold"), "advice leaks selfware internals: {}", m.advice);
+            assert!(
+                !a.contains("selfware"),
+                "advice leaks selfware internals: {}",
+                m.advice
+            );
+            assert!(
+                !a.contains("completion gate"),
+                "advice leaks selfware internals: {}",
+                m.advice
+            );
+            assert!(
+                !a.contains("block threshold"),
+                "advice leaks selfware internals: {}",
+                m.advice
+            );
         }
     }
 

@@ -243,7 +243,9 @@ impl McpServer {
         // `initialize` handshake to have been completed first (MCP spec).
         // Without this, a client could call `tools/call` before initializing.
         const PRE_INIT_METHODS: &[&str] = &["initialize", "ping", "shutdown"];
-        if !self.initialized.load(Ordering::SeqCst) && !PRE_INIT_METHODS.contains(&request.method.as_str()) {
+        if !self.initialized.load(Ordering::SeqCst)
+            && !PRE_INIT_METHODS.contains(&request.method.as_str())
+        {
             return Some(JsonRpcResponse {
                 jsonrpc: "2.0",
                 id,
@@ -312,10 +314,7 @@ impl McpServer {
     // -- Method handlers -----------------------------------------------------
 
     /// Handle `initialize` request.
-    fn handle_initialize(
-        &self,
-        params: &Option<Value>,
-    ) -> (Option<Value>, Option<JsonRpcError>) {
+    fn handle_initialize(&self, params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
         // Check the client's requested protocolVersion.  The MCP spec says
         // the server SHOULD negotiate a version.  We support
         // "2024-11-05"; if the client requests a different version we
@@ -355,7 +354,10 @@ impl McpServer {
     }
 
     /// Handle `tools/list` request.
-    async fn handle_tools_list(&self, _params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
+    async fn handle_tools_list(
+        &self,
+        _params: &Option<Value>,
+    ) -> (Option<Value>, Option<JsonRpcError>) {
         let registry = self.registry.read().await;
         let tools: Vec<Value> = registry
             .list()
@@ -491,11 +493,13 @@ impl McpServer {
         {
             let needs_activate = {
                 let registry = self.registry.read().await;
-                registry.get(tool_name).is_some()
-                    && registry.get_activated(tool_name).is_none()
+                registry.get(tool_name).is_some() && registry.get_activated(tool_name).is_none()
             };
             if needs_activate {
-                debug!("tools/call: activating deferred tool '{}' on demand", tool_name);
+                debug!(
+                    "tools/call: activating deferred tool '{}' on demand",
+                    tool_name
+                );
                 let mut registry = self.registry.write().await;
                 registry.activate(tool_name);
             }
@@ -916,8 +920,7 @@ pub async fn run_mcp_server(
         );
 
         // Check if this is a shutdown request or exit notification.
-        let is_shutdown = request.method == "shutdown"
-            || request.method == "notifications/exit";
+        let is_shutdown = request.method == "shutdown" || request.method == "notifications/exit";
 
         // Spawn a task to handle each request concurrently.  The task
         // clones the Arc<McpServer> handle and the channel sender, runs
@@ -1631,7 +1634,10 @@ mod tests {
 
         for handle in handles {
             let response = handle.await.unwrap();
-            assert!(response.error.is_none(), "concurrent tools/list should succeed");
+            assert!(
+                response.error.is_none(),
+                "concurrent tools/list should succeed"
+            );
             assert!(response.result.is_some());
         }
     }

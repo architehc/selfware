@@ -72,9 +72,7 @@ impl Drop for LspClientHandle {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 // We're inside a tokio runtime — use block_in_place to
                 // avoid a nested-runtime panic.
-                let _ = tokio::task::block_in_place(|| {
-                    handle.block_on(client.shutdown())
-                });
+                let _ = tokio::task::block_in_place(|| handle.block_on(client.shutdown()));
             } else {
                 // No runtime available — create a temporary one to do
                 // the cleanup.  This is safe because we're not inside

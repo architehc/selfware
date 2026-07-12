@@ -107,9 +107,7 @@ fn record_to_collected_item(record: &TemporalRecord) -> CollectedItem {
             .multimodal_refs
             .iter()
             .filter_map(|r| match r {
-                MultimodalRef::Screenshot { path, .. } => {
-                    path.to_str().map(|s| s.to_string())
-                }
+                MultimodalRef::Screenshot { path, .. } => path.to_str().map(|s| s.to_string()),
                 _ => None,
             })
             .collect(),
@@ -269,15 +267,11 @@ impl ConsolidationEngine {
                                     report.errors.len(),
                                 );
                                 if let Err(e) = engine.store.store(&new_records).await {
-                                    tracing::error!(
-                                        "Periodic consolidation store error: {e}"
-                                    );
+                                    tracing::error!("Periodic consolidation store error: {e}");
                                 }
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    "Periodic consolidation compaction error: {e}"
-                                );
+                                tracing::error!("Periodic consolidation compaction error: {e}");
                             }
                         }
                     }

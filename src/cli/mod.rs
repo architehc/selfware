@@ -2476,8 +2476,7 @@ async fn handle_command(
         },
 
         Commands::McpServer => {
-            crate::mcp::server::run_mcp_server(&config, config_path.as_deref())
-                .await?;
+            crate::mcp::server::run_mcp_server(&config, config_path.as_deref()).await?;
         }
 
         Commands::Lsp => {
@@ -3187,9 +3186,7 @@ max_recovery_attempts = 3
                             if let Some(st) = supervisor.status(&id).await {
                                 if matches!(
                                     st,
-                                    RunStatus::Completed
-                                        | RunStatus::Failed
-                                        | RunStatus::Aborted
+                                    RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted
                                 ) {
                                     break;
                                 }
@@ -3242,8 +3239,7 @@ max_recovery_attempts = 3
                             .collect();
                         println!(
                             "{}",
-                            serde_json::to_string(&arr)
-                                .unwrap_or_else(|_| "[]".to_string())
+                            serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
                         );
                     } else if runs.is_empty() {
                         println!(
@@ -3254,12 +3250,7 @@ max_recovery_attempts = 3
                         println!("{:<22} {:<10} {}", "ID", "STATUS", "TASK");
                         for r in runs {
                             let task_short: String = r.task.chars().take(50).collect();
-                            println!(
-                                "{:<22} {:<10} {}",
-                                r.id,
-                                r.effective_status(),
-                                task_short
-                            );
+                            println!("{:<22} {:<10} {}", r.id, r.effective_status(), task_short);
                         }
                     }
                 }

@@ -448,8 +448,7 @@ impl Agent {
         }
 
         if has_novel_target {
-            self.consecutive_read_only_steps =
-                self.consecutive_read_only_steps.saturating_sub(1);
+            self.consecutive_read_only_steps = self.consecutive_read_only_steps.saturating_sub(1);
         } else {
             self.consecutive_read_only_steps += 1;
         }
@@ -570,7 +569,8 @@ impl Agent {
             initial_decision,
             &content,
             response.reasoning_content.as_deref(),
-        ).await;
+        )
+        .await;
 
         // Check if the response contains code alongside tool calls.
         // Models often output file_read tool calls AND code text in the same
@@ -648,7 +648,9 @@ impl Agent {
         // trips, so the loop spins empty steps to MAX_ITERATIONS even though the
         // code compiles and tests pass (observed on multi-file tasks).
         if tool_calls.is_empty() {
-            let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+            let clean = super::recovery::strip_think_blocks(&content)
+                .trim()
+                .to_string();
             if clean.len() >= 40
                 && !super::verification::is_confused_response(&content)
                 && !super::verification::is_incomplete_action_response(&content)
@@ -671,7 +673,9 @@ impl Agent {
         // through to the existing flow, so normal short/empty completions and all
         // mutation tasks are unaffected (the FAKE_COMPLETE edit gate stays intact).
         if tool_calls.is_empty() && !self.current_task_requires_mutation() {
-            let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+            let clean = super::recovery::strip_think_blocks(&content)
+                .trim()
+                .to_string();
             let looks_final = clean.len() >= 40
                 && !super::verification::is_incomplete_action_response(&content)
                 && !super::verification::is_confused_response(&content);
@@ -949,7 +953,8 @@ impl Agent {
                     },
                     &content,
                     response.reasoning_content.as_deref(),
-                ).await;
+                )
+                .await;
                 self.messages
                     .push(crate::api::types::Message::user(gate_msg));
                 return Ok(false);
@@ -1014,7 +1019,8 @@ impl Agent {
                 },
                 &content,
                 response.reasoning_content.as_deref(),
-            ).await;
+            )
+            .await;
             self.last_assistant_response = clean_content;
             return Ok(true);
         }
@@ -1106,7 +1112,9 @@ impl Agent {
             && !self.files_checklist_seen
             && self.writes_target_only_read_files(&tool_calls)
         {
-            info!("Allowing edit to already-read file(s) — FILES: checklist satisfied by prior read");
+            info!(
+                "Allowing edit to already-read file(s) — FILES: checklist satisfied by prior read"
+            );
             self.files_checklist_seen = true;
         }
 
@@ -1224,7 +1232,9 @@ impl Agent {
                 // Second time hitting terminal guard without any writes.
                 // Check if src/lib.rs already has substantial content (template project).
                 // If so, do NOT overwrite with scaffold — nudge targeted edits instead.
-                let existing_content = tokio::fs::read_to_string("src/lib.rs").await.unwrap_or_default();
+                let existing_content = tokio::fs::read_to_string("src/lib.rs")
+                    .await
+                    .unwrap_or_default();
                 let meaningful_lines = existing_content
                     .lines()
                     .filter(|l| {
@@ -1592,7 +1602,9 @@ mod tests {
         assert!(Agent::is_files_checklist_line("#### FILES: a.rs"));
         assert!(Agent::is_files_checklist_line("> files: a.rs"));
         // Non-headers must not match.
-        assert!(!Agent::is_files_checklist_line("The files are listed below"));
+        assert!(!Agent::is_files_checklist_line(
+            "The files are listed below"
+        ));
         assert!(!Agent::is_files_checklist_line("profiles: none"));
     }
 
@@ -3333,13 +3345,7 @@ mod tests {
         let initial_len = agent.messages.len();
 
         agent
-            .push_tool_result_message(
-                false,
-                "call_1",
-                "test_tool",
-                true,
-                r#"{"output":"hello"}"#,
-            )
+            .push_tool_result_message(false, "call_1", "test_tool", true, r#"{"output":"hello"}"#)
             .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
@@ -3360,13 +3366,7 @@ mod tests {
         let initial_len = agent.messages.len();
 
         agent
-            .push_tool_result_message(
-                false,
-                "call_1",
-                "test_tool",
-                false,
-                "Something went wrong",
-            )
+            .push_tool_result_message(false, "call_1", "test_tool", false, "Something went wrong")
             .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
@@ -3386,13 +3386,7 @@ mod tests {
         let initial_len = agent.messages.len();
 
         agent
-            .push_tool_result_message(
-                true,
-                "call_native_1",
-                "test_tool",
-                true,
-                r#"{"data":"ok"}"#,
-            )
+            .push_tool_result_message(true, "call_native_1", "test_tool", true, r#"{"data":"ok"}"#)
             .await;
 
         assert_eq!(agent.messages.len(), initial_len + 1);
@@ -3882,13 +3876,7 @@ mod tests {
 
         let second_start = std::time::Instant::now();
         let suppressed = agent
-            .suppress_repeated_failed_tool_retry(
-                "shell_exec",
-                "{}",
-                "call_2",
-                false,
-                second_start,
-            )
+            .suppress_repeated_failed_tool_retry("shell_exec", "{}", "call_2", false, second_start)
             .await;
         assert!(suppressed);
 

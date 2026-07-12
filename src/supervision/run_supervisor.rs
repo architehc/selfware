@@ -221,8 +221,7 @@ impl RunSupervisor {
         // BroadcastEmitter for the agent.
         let (event_tx, _event_rx) =
             tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
-        let emitter: Arc<dyn EventEmitter> =
-            Arc::new(BroadcastEmitter::new(event_tx.clone()));
+        let emitter: Arc<dyn EventEmitter> = Arc::new(BroadcastEmitter::new(event_tx.clone()));
 
         let task_for_spawn = task.clone();
         // Call spawn but override its internal channel with our pre-built one
@@ -291,10 +290,7 @@ impl RunSupervisor {
     /// through this channel in real time. For runs created via
     /// [`spawn`](Self::spawn) (pure futures), the channel exists but may
     /// never receive events unless something writes to it directly.
-    pub async fn attach(
-        &self,
-        id: &RunId,
-    ) -> Option<tokio::sync::broadcast::Receiver<AgentEvent>> {
+    pub async fn attach(&self, id: &RunId) -> Option<tokio::sync::broadcast::Receiver<AgentEvent>> {
         let runs = self.runs.read().await;
         runs.get(id).map(|h| h.events.subscribe())
     }
@@ -379,16 +375,16 @@ mod tests {
 
         // list() must include it.
         let listed = sup.list().await;
-        assert!(listed.iter().any(|(rid, st)| rid == &id && *st == RunStatus::Completed));
+        assert!(listed
+            .iter()
+            .any(|(rid, st)| rid == &id && *st == RunStatus::Completed));
     }
 
     #[tokio::test]
     async fn spawn_err_fails() {
         let sup = RunSupervisor::new();
         let id = sup
-            .spawn("trivial-err".into(), async {
-                Err(anyhow::anyhow!("boom"))
-            })
+            .spawn("trivial-err".into(), async { Err(anyhow::anyhow!("boom")) })
             .await;
 
         assert!(
@@ -485,7 +481,10 @@ mod tests {
         let id = sup.spawn("trivial".into(), async { Ok(()) }).await;
 
         let sub = sup.attach(&id).await;
-        assert!(sub.is_some(), "attach should return Some for an existing run");
+        assert!(
+            sub.is_some(),
+            "attach should return Some for an existing run"
+        );
 
         // The subscriber should be a broadcast::Receiver.
         let mut rx = sub.unwrap();
@@ -501,9 +500,12 @@ mod tests {
             .expect("recv should not time out")
             .expect("recv should succeed");
 
-        assert_eq!(received, AgentEvent::Status {
-            message: "hello".into()
-        });
+        assert_eq!(
+            received,
+            AgentEvent::Status {
+                message: "hello".into()
+            }
+        );
     }
 
     #[tokio::test]
