@@ -91,11 +91,19 @@ struct ShellOutput {
 
 /// Run a command via `sh -c` and capture output.
 async fn run_shell_command(command: &str) -> Result<ShellOutput> {
-    let output = tokio::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .await?;
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(command);
+    // Hooks execute arbitrary repo-defined commands — do NOT hand them the
+    // agent's full environment, which can carry API keys and other secrets.
+    // Start from an empty environment and re-add only a minimal safe allowlist
+    // (matches shell_exec / ProcessManager sanitization).
+    cmd.env_clear();
+    for key in ["PATH", "HOME", "LANG"] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    let output = cmd.output().await?;
 
     let stdout =
         String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(MAX_OUTPUT_BYTES)])
@@ -187,5 +195,31 @@ mod tests {
         let output = run_shell_command("false").await.unwrap();
         assert!(!output.success);
         assert_ne!(output.exit_code, 0);
+    }
+
+    #[tokio::test]
+    async fn run_shell_command_does_not_leak_secret_env() {
+        // A secret in the agent's environment must NOT reach a hook command.
+        std::env::set_var("SELFWARE_HOOK_SECRET_TEST", "topsecret");
+        let output = run_shell_command("printf %s \"${SELFWARE_HOOK_SECRET_TEST:-CLEARED}\"")
+            .await
+            .unwrap();
+        std::env::remove_var("SELFWARE_HOOK_SECRET_TEST");
+        assert_eq!(
+            output.stdout.trim(),
+            "CLEARED",
+            "hook must not inherit secret env vars, got: {:?}",
+            output.stdout
+        );
+
+        // PATH stays allowlisted so hook commands still resolve binaries.
+        let path_out = run_shell_command("printf %s \"${PATH:+HASPATH}\"")
+            .await
+            .unwrap();
+        assert_eq!(
+            path_out.stdout.trim(),
+            "HASPATH",
+            "PATH must remain available to hooks"
+        );
     }
 }
