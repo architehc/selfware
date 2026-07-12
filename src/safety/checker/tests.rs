@@ -906,3 +906,51 @@ fn test_whitespace_padded_file_write_still_validated() {
     let result = checker.check_tool_call(&call);
     assert!(result.is_err(), "whitespace-padded file_write to /etc should be blocked");
 }
+
+/// Contract test: every tool the registry actually registers must be handled by
+/// the safety checker's dispatch — i.e. NEVER hard-blocked as "unregistered".
+/// This is the guard the review called for: it fails closed on drift (a new
+/// registered tool that the checker doesn't know about) instead of silently
+/// breaking an advertised tool (file_multi_edit, pty_shell, LSP, worktree, MCP…).
+#[test]
+fn every_registered_tool_passes_the_safety_dispatch() {
+    use crate::errors::{SafetyError, SelfwareError};
+    use crate::tools::ToolRegistry;
+
+    // Permissive paths so benign path/command checks don't reject empty-arg calls;
+    // we only assert that no registered tool is blocked as UNREGISTERED.
+    let config = SafetyConfig {
+        allowed_paths: vec!["**".to_string()],
+        ..SafetyConfig::default()
+    };
+    let checker = SafetyChecker::new(&config);
+
+    let registry = ToolRegistry::new();
+    let mut names: Vec<String> = registry
+        .list()
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    names.extend(
+        registry
+            .list_deferred()
+            .iter()
+            .map(|t| t.name().to_string()),
+    );
+    assert!(!names.is_empty(), "registry should expose tools");
+
+    let mut blocked: Vec<String> = Vec::new();
+    for name in names {
+        let call = create_test_call(&name, "{}");
+        if let Err(SelfwareError::Safety(SafetyError::UnregisteredTool { tool })) =
+            checker.check_tool_call(&call)
+        {
+            blocked.push(tool);
+        }
+    }
+    assert!(
+        blocked.is_empty(),
+        "these registered tools are hard-blocked by the safety checker as \
+         unregistered — add them to the dispatch in validation.rs: {blocked:?}"
+    );
+}

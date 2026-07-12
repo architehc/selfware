@@ -256,7 +256,98 @@ impl SafetyChecker {
                     self.check_browser_eval(expr)?;
                 }
             }
+            // pty_shell is a shell tool — apply the same command checks as shell_exec.
+            "pty_shell" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                    self.check_shell_command(cmd)?;
+                }
+            }
+            // file_multi_edit mutates several files — validate EVERY edit path and
+            // secret-scan each replacement, not just a top-level "path".
+            "file_multi_edit" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+                    for edit in edits {
+                        if let Some(path) = edit.get("path").and_then(|v| v.as_str()) {
+                            self.check_path(path)?;
+                        }
+                        if let Some(new_str) = edit.get("new_str").and_then(|v| v.as_str()) {
+                            if !new_str.is_empty() {
+                                self.check_content_for_secrets(new_str)?;
+                            }
+                        }
+                    }
+                }
+            }
+            // patch_apply targets paths embedded in the unified diff — validate the
+            // `+++ b/<path>` targets and secret-scan the diff body.
+            "patch_apply" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(diff) = args.get("diff").and_then(|v| v.as_str()) {
+                    for line in diff.lines() {
+                        if let Some(rest) = line.strip_prefix("+++ ") {
+                            let p = rest.trim().trim_start_matches("b/");
+                            if !p.is_empty() && p != "/dev/null" {
+                                self.check_path(p)?;
+                            }
+                        }
+                    }
+                    self.check_content_for_secrets(diff)?;
+                }
+            }
+            // Worktree tools operate on a worktree path — validate it.
+            "enter_worktree" | "exit_worktree" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    self.check_path(path)?;
+                }
+            }
+            // Read-only / introspection tools: no filesystem or shell mutation.
+            "list_worktrees"
+            | "lsp_goto_definition"
+            | "lsp_goto_implementation"
+            | "lsp_find_references"
+            | "lsp_hover"
+            | "lsp_document_symbols"
+            | "lsp_workspace_symbols"
+            | "lsp_diagnostics"
+            | "radarcam_status"
+            | "radarcam_frame"
+            | "radarcam_logs"
+            | "radarcam_introspect"
+            | "radarcam_control"
+            | "radarcam_test"
+            // Analysis / context / interaction tools: no filesystem or shell
+            // mutation (metadata-classified read-only).
+            | "code_metrics"
+            | "code_map"
+            | "code_diff_plan"
+            | "context_budget"
+            | "context_action"
+            | "localize_issue"
+            | "ask_user"
+            | "knowledge_auto_extract" => {
+                // Metadata-classified as read-only / network probes; nothing to
+                // path- or command-check.
+            }
             unknown => {
+                // MCP tools are dynamically named `mcp_<server>_<tool>`; they are
+                // registered (user-configured servers), so don't hard-block them.
+                // Apply generic argument checks (path + command) and allow.
+                if unknown.starts_with("mcp_") {
+                    if let Ok(args) =
+                        serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                    {
+                        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                            self.check_path(path)?;
+                        }
+                        if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                            self.check_shell_command(cmd)?;
+                        }
+                    }
+                    return Ok(());
+                }
                 tracing::error!(
                     "Safety checker: unregistered tool '{}' blocked — add to checker.rs dispatch if legitimate.",
                     unknown
