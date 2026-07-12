@@ -3747,6 +3747,12 @@ impl Agent {
             }
         };
 
+        // Redact any secrets (API keys, tokens, credentials) the tool output may
+        // contain BEFORE it enters the model's conversation context — otherwise a
+        // command that echoes a secret (or a mis-run `cat .env`) would leak
+        // credentials into context and every downstream log/exfil path.
+        let result_to_store = crate::safety::redact::redact_secrets(&result_to_store).into_owned();
+
         if use_native_fc {
             let result_json = if success {
                 result_to_store
