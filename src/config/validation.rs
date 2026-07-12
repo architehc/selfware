@@ -99,6 +99,23 @@ impl Config {
                 self.agent.token_budget
             );
         }
+        // A run-level USD cost cap, when set, must be a positive finite amount —
+        // a NaN/infinite/zero/negative cap would silently disable enforcement or
+        // abort immediately.
+        if let Some(max_cost) = self.agent.max_cost_usd {
+            if !max_cost.is_finite() {
+                bail!(
+                    "Config error: agent.max_cost_usd must be a finite number, got: {}",
+                    max_cost
+                );
+            }
+            if max_cost <= 0.0 {
+                bail!(
+                    "Config error: agent.max_cost_usd must be greater than 0 when set, got: {}",
+                    max_cost
+                );
+            }
+        }
 
         // --- Retry settings: base_delay_ms should not exceed max_delay_ms ---
         if self.retry.base_delay_ms > self.retry.max_delay_ms {
@@ -227,6 +244,30 @@ mod tests {
             cfg.validate().is_ok(),
             "a well-formed config should validate"
         );
+    }
+
+    #[test]
+    fn max_cost_usd_rejects_nonpositive_and_nonfinite() {
+        for bad in [0.0_f64, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut cfg = valid_config();
+            cfg.agent.max_cost_usd = Some(bad);
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("max_cost_usd"),
+                "max_cost_usd={bad} must be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_cost_usd_accepts_positive_finite_and_none() {
+        let mut cfg = valid_config();
+        cfg.agent.max_cost_usd = Some(0.25);
+        assert!(cfg.validate().is_ok(), "a positive cap should validate");
+
+        let mut cfg = valid_config();
+        cfg.agent.max_cost_usd = None; // unset is fine (cap disabled)
+        assert!(cfg.validate().is_ok(), "no cap should validate");
     }
 
     #[test]
