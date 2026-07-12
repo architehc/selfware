@@ -624,6 +624,15 @@ impl Agent {
                 self.emit_terminal_event_once(AgentEvent::Completed { message });
             }
             Err(e) => {
+                // A cancellation can be raised from deep in the loop (e.g. a
+                // provider call aborted by shutdown), not only at the top-of-loop
+                // check. Persist resumable state here so EVERY cancellation exit
+                // saves exactly one checkpoint before the terminal event.
+                if self.is_cancelled() {
+                    if let Err(ce) = self.save_checkpoint(task_description) {
+                        warn!("Failed to save cancelled checkpoint: {}", ce);
+                    }
+                }
                 self.emit_terminal_event_once(AgentEvent::Error {
                     message: e.to_string(),
                 });
@@ -745,13 +754,11 @@ impl Agent {
                     Outcome::Abandoned,
                     Some("Task interrupted by user"),
                 );
-                // Preserve resumable state, then return a typed cancellation.
-                // `run_execution_loop` maps errors to the single authoritative
-                // terminal Error event; returning Ok here would emit a
-                // misleading Completed event and make headless callers exit 0.
-                if let Err(e) = self.save_checkpoint(task_description) {
-                    warn!("Failed to save cancelled checkpoint: {}", e);
-                }
+                // Return a typed cancellation. `run_execution_loop` maps errors
+                // to the single authoritative terminal Error event AND saves the
+                // resumable checkpoint (one save for every cancellation exit);
+                // returning Ok here would emit a misleading Completed event and
+                // make headless callers exit 0.
                 return Err(crate::errors::AgentError::Cancelled.into());
             }
 

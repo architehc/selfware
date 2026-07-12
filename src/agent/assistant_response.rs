@@ -283,6 +283,13 @@ impl Agent {
                     (content, reasoning)
                 }
                 Err(stream_err) => {
+                    // A shutdown request aborts the in-flight provider call and
+                    // surfaces here as an error. Treat it as cancellation — don't
+                    // fall back or retry — so the loop saves one checkpoint and
+                    // exits cleanly without claiming completion.
+                    if self.is_cancelled() {
+                        return Err(crate::errors::AgentError::Cancelled.into());
+                    }
                     warn!(
                         "Streaming request failed ({}); retrying this step with non-streaming API",
                         stream_err
@@ -311,6 +318,9 @@ impl Agent {
                     let (response, fallback_meta) = match response {
                         Ok((response, meta)) => (response, meta),
                         Err(e) => {
+                            if self.is_cancelled() {
+                                return Err(crate::errors::AgentError::Cancelled.into());
+                            }
                             self.log_turn_end_event(
                                 "assistant_step",
                                 false,
@@ -369,6 +379,9 @@ impl Agent {
             let (response, sync_meta) = match response {
                 Ok((response, meta)) => (response, meta),
                 Err(e) => {
+                    if self.is_cancelled() {
+                        return Err(crate::errors::AgentError::Cancelled.into());
+                    }
                     if e.to_string()
                         .to_lowercase()
                         .contains("prefill incompatible")
