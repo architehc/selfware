@@ -226,11 +226,12 @@ impl ApiClient {
                     let status = response.status();
                     let text = response.text().await.unwrap_or_default();
                     if Self::is_retryable_status(status) && attempt < max_attempts {
+                        let sleep_ms = self.retry_sleep_ms(delay_ms, None);
                         warn!(
-                            "completion retryable error {} (attempt {}/{}); retrying after {}ms",
-                            status, attempt, max_attempts, delay_ms
+                            "completion retryable error {} (attempt {}/{}); retrying after {}ms (jittered)",
+                            status, attempt, max_attempts, sleep_ms
                         );
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
@@ -242,11 +243,12 @@ impl ApiClient {
                 }
                 Err(e) => {
                     if attempt < max_attempts {
+                        let sleep_ms = self.retry_sleep_ms(delay_ms, None);
                         warn!(
-                            "completion network error {} (attempt {}/{}); retrying after {}ms",
-                            e, attempt, max_attempts, delay_ms
+                            "completion network error {} (attempt {}/{}); retrying after {}ms (jittered)",
+                            e, attempt, max_attempts, sleep_ms
                         );
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
