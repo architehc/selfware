@@ -140,10 +140,6 @@ pub use testing::visual_verification;
 
 // ============================================================================
 // New feature modules
-// ============================================================================
-// Browser automation module (stub implementation - requires 'browser' feature)
-#[cfg(feature = "browser")]
-pub mod browser;
 pub mod profiles;
 
 

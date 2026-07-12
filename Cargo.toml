@@ -171,11 +171,8 @@ system-tests = []
 # Redis backend for workflow state (optional, requires redis server)
 redis = ["dep:redis"]
 
-# Browser automation module (currently stub implementation)
-browser = []
-
 # Convenience feature that enables all optional modules
-extras = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation", "browser"]
+extras = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation"]
 
 [dev-dependencies]
 tokio-test = "0.4"
