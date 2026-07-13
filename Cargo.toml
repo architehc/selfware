@@ -46,6 +46,18 @@ exclude = [
     "deny.toml",
     ".pre-commit-config.yaml",
     ".github/",
+    # Non-source residue that shouldn't ship in the crate (verified none is
+    # include_str!'d or used by build.rs): review artifacts, dev scripts,
+    # editor/IDE sources, benchmark output, and review/plan markdown.
+    "artifacts/",
+    "benchmark_results/",
+    "scripts/",
+    "editors/",
+    "vscode-selfware/",
+    "IMPROVE_*.md",
+    "REVIEW_*.md",
+    "SELFWARE_REVIEW_*.md",
+    "selfware-27b-concurrency16.toml",
 ]
 
 [dependencies]
