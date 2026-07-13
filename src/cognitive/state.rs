@@ -376,7 +376,7 @@ impl WorkingMemory {
 
     /// Push an approach attempt for backtracking.
     ///
-    /// The stack is capped at [`MAX_APPROACH_DEPTH`]; when the cap is reached,
+    /// The stack is capped at `MAX_APPROACH_DEPTH`; when the cap is reached,
     /// the oldest attempt is discarded so the structure cannot grow without
     /// bound during long retry loops.
     pub fn push_approach(&mut self, description: &str, files_modified: Vec<String>) {

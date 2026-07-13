@@ -77,8 +77,8 @@ impl LongTermStore {
 
     /// Create a new long-term store with a custom embedding provider.
     ///
-    /// Use this in tests with [`MockEmbeddingProvider`] or in production
-    /// with [`HttpEmbeddingProvider`] for higher-quality embeddings.
+    /// Use this in tests with `MockEmbeddingProvider` or in production
+    /// with `HttpEmbeddingProvider` for higher-quality embeddings.
     pub fn with_embedder(
         storage_dir: std::path::PathBuf,
         embedder: Arc<dyn EmbeddingProvider>,

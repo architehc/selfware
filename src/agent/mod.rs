@@ -2372,7 +2372,7 @@ To call a tool, use this EXACT XML structure:
     // ============================================================
 
     /// Pure decision function: should rigor mode be entered given a
-    /// [`ResolutionOutcome`]? Returns `true` for `Escalate` and
+    /// `ResolutionOutcome`? Returns `true` for `Escalate` and
     /// `Unresolvable` (auto-recovery could NOT fix the failure), `false`
     /// for `Resolved` (auto-recovery succeeded).
     pub fn should_enter_rigor(outcome: &crate::self_healing::ResolutionOutcome) -> bool {

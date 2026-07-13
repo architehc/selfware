@@ -14,7 +14,7 @@ use std::path::PathBuf;
 /// A persisted record of a single supervised run.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RunRecord {
-    /// Process-unique id: "<pid>-<local_run_id>".
+    /// Process-unique id: `<pid>-<local_run_id>`.
     pub id: String,
     /// OS process id that started (owns) the run.
     pub pid: u32,
