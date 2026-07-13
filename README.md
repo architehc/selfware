@@ -345,15 +345,13 @@ Recent improvements landing in 0.3.0-beta:
   [docs/configuration.md](docs/configuration.md).
 - **Model profiles.** Define a `coder`, `vision`, or `quick` profile in
   `[models.<name>]` and switch with `--model coder`. Vision-capable
-  profiles unlock screenshot tools automatically. See
-  [docs/model_profiles.md](docs/model_profiles.md).
+  profiles unlock screenshot tools automatically.
 - **Per-turn artifacts.** Every agent turn is dumped to
   `~/.selfware/artifacts/turns/<session>/<turn>.json` with secrets
   redacted, so you can replay or diff a session after the fact.
 - **`--debug` flag.** One flag turns on every diagnostic channel
   (events, turns, prompts, raw I/O, failure-mode classifier). Pick
-  individual channels with `SELFWARE_DEBUG_CHANNELS=...`. See
-  [docs/debugging.md](docs/debugging.md).
+  individual channels with `SELFWARE_DEBUG_CHANNELS=...`.
 - **Failure-mode classifier.** Failed turns are tagged
   (`endpoint_unreachable`, `model_timeout`, `tool_error`,
   `parse_error`, `policy_denial`) and streamed to
@@ -366,14 +364,11 @@ Recent improvements landing in 0.3.0-beta:
   source of agent loops.
 - **Benchmark suite, ported to Rust.** `selfware bench` is now native
   Rust (no Python wrapper), supports `--trials N` for stability sweeps,
-  and writes a single `aggregate.json` covering all trials. See
-  [docs/benchmarks.md](docs/benchmarks.md).
+  and writes a single `aggregate.json` covering all trials.
 - **Event channel.** A typed broadcast channel exposes lifecycle events
   to in-process subscribers (TUI, MCP server, custom harnesses) without
   scraping logs.
 
-For the full test contract pinning these features, see
-[docs/test_plan.md](docs/test_plan.md).
 
 ---
 
@@ -1153,14 +1148,14 @@ Full guides are available in the [`docs/`](docs/) directory:
 
 | Guide | Description |
 |-------|-------------|
-| [Getting Started](docs/GETTING_STARTED.md) | Installation, first run, basic usage |
-| [Configuration](docs/CONFIGURATION.md) | All config options, TOML reference |
-| [Tools Reference](docs/TOOLS_REFERENCE.md) | Complete tool catalog with examples |
-| [Interactive Commands](docs/INTERACTIVE_COMMANDS.md) | Slash commands and shortcuts |
-| [Hooks](docs/HOOKS.md) | Event-driven automation setup |
-| [MCP](docs/MCP.md) | MCP client and server configuration |
-| [Doctor](docs/DOCTOR.md) | System and LLM diagnostics |
-| [ZED Extension](docs/ZED_EXTENSION.md) | IDE integration via ZED |
+| [Getting Started](docs/getting-started.md) | Installation, first run, basic usage |
+| [Configuration](docs/configuration.md) | All config options, TOML reference |
+| [Tools Reference](docs/tools.md) | Complete tool catalog with examples |
+| [Interactive Commands](docs/interactive-commands.md) | Slash commands and shortcuts |
+| [Hooks](docs/hooks.md) | Event-driven automation setup |
+| [MCP](docs/mcp.md) | MCP client and server configuration |
+| [Doctor](docs/doctor.md) | System and LLM diagnostics |
+| [ZED Extension](docs/zed-extension.md) | IDE integration via ZED |
 
 ---
 

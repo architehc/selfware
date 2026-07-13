@@ -1,6 +1,6 @@
 # Hermes Setup Implementation Checklist
 
-Related requirements: [HERMES_SETUP_INTEGRATION_REQUIREMENTS.md](/home/ivo/selfware/docs/HERMES_SETUP_INTEGRATION_REQUIREMENTS.md)
+Related requirements: [HERMES_SETUP_INTEGRATION_REQUIREMENTS.md](HERMES_SETUP_INTEGRATION_REQUIREMENTS.md)
 
 ## Goal
 

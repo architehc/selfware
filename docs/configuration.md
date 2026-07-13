@@ -47,8 +47,7 @@ SELFWARE_TEMPERATURE=0.5 selfware --model coder --temperature 0.1 run "..."
 
 The (planned) `Config::provenance(field)` API exposes the source of every
 value at runtime, so `--show-config` can print "endpoint: gpu-rig (from
-profile.coder)". See [test_plan.md](test_plan.md) for the precise contract
-the test suite pins.
+profile.coder)".
 
 ## Top-Level Settings
 

@@ -300,4 +300,4 @@ echo $TERM
 - [Qwen Code CLI Documentation](https://qwenlm.github.io/qwen-code-docs/)
 - [Selfware README](../README.md)
 - [ratatui Documentation](https://docs.rs/ratatui/)
-- [Agent Swarm Implementation](../src/orchestration/swarm.rs)
+- [Agent Swarm Implementation](../src/orchestration/swarm/mod.rs)
