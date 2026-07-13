@@ -727,14 +727,26 @@ impl ApiClient {
                         // Bound the body read too: with stream_client there is no
                         // total reqwest timeout, so a backend that sends headers
                         // then stalls mid-body would otherwise hang forever. Reuse
-                        // the generous response timeout and treat an elapse as a
-                        // retryable network error.
-                        let body_text = match tokio::time::timeout(
-                            Duration::from_secs(response_timeout_secs),
-                            response.text(),
-                        )
-                        .await
-                        {
+                        // the generous response timeout, and — like the header wait
+                        // above — race it against a shutdown request so Ctrl-C /
+                        // SIGTERM interrupts a stalled body read promptly instead
+                        // of blocking for up to response_timeout_secs. An elapse
+                        // is treated as a retryable network error.
+                        let read_result = tokio::select! {
+                            biased;
+                            _ = crate::shutdown_requested() => {
+                                return Err(ApiError::Network(
+                                    "Shutdown requested while reading provider response body"
+                                        .to_string(),
+                                )
+                                .into());
+                            }
+                            r = tokio::time::timeout(
+                                Duration::from_secs(response_timeout_secs),
+                                response.text(),
+                            ) => r,
+                        };
+                        let body_text = match read_result {
                             Ok(r) => r.context("Failed to read response body")?,
                             Err(_elapsed) => {
                                 warn!(
