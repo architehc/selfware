@@ -6,11 +6,9 @@
 //! context-building strategies do at different context lengths?
 //!
 //! It reuses selfware's own primitives:
-//!   * `analysis::bm25::BM25Index`        — lexical relevance ranking (across files
-//!                                          and, for excerpts, across blocks within a file)
+//!   * `analysis::bm25::BM25Index` — lexical relevance ranking (across files and, for excerpts, across blocks within a file)
 //!   * `token_count::estimate_content_tokens` — the same token accounting the agent uses
-//!   * `agent::context_map::extract_rust_skeleton` — L2 (signature-only) file view and
-//!                                          item line boundaries used to carve excerpts
+//!   * `agent::context_map::extract_rust_skeleton` — L2 (signature-only) file view and item line boundaries used to carve excerpts
 //!
 //! The corpus is selfware/src/**/*.rs. The "gold" context for each coding problem
 //! is the set of files that the corresponding fix actually touches (mined from the

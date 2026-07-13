@@ -558,6 +558,7 @@ impl Config {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // test config builders: default-then-tweak is clearer
 mod tests {
     use super::*;
     use crate::config::test_helpers::clear_env;
