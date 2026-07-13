@@ -506,6 +506,11 @@ impl PageControlTool {
             controller: PageController::new(),
         }
     }
+
+    /// Shut down the underlying browser and bridge process.
+    pub async fn shutdown(&self) -> Result<()> {
+        self.controller.shutdown().await
+    }
 }
 
 impl Default for PageControlTool {

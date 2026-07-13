@@ -5,6 +5,7 @@
 //! screenshots, and action outcomes for downstream memory consolidation.
 
 pub mod bench_runner;
+pub mod browser_executor;
 pub mod evaluator;
 pub mod executor;
 pub mod recorder;
