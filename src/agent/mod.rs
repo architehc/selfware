@@ -1722,6 +1722,17 @@ To call a tool, use this EXACT XML structure:
             .chat(messages, None, crate::api::ThinkingMode::Disabled)
             .await?;
 
+        // Account the synthesis LLM call against the budget — this billable
+        // call previously went uncounted, so a stuck-model synthesis could
+        // spend tokens/cost that max_budget_tokens/max_cost_usd never saw.
+        self.cumulative_token_usage.input += response.usage.prompt_tokens;
+        self.cumulative_token_usage.output += response.usage.completion_tokens;
+        self.cumulative_token_usage.total =
+            self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        if let Some(cost) = response.usage.cost {
+            self.cumulative_cost_usd += cost;
+        }
+
         let answer = response
             .choices
             .first()
