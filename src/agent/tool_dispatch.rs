@@ -89,6 +89,11 @@ async fn summarize_and_spill(
     // Save the redacted result to disk
     let spill_dir = std::path::Path::new(TOOL_RESULTS_DIR);
     let _ = tokio::fs::create_dir_all(spill_dir).await;
+    // Keep the agent's scratch out of the user's repo: drop a .gitignore into
+    // the project-local .selfware/ (the spill dir's parent).
+    if let Some(selfware_dir) = spill_dir.parent() {
+        super::turn_artifacts::ensure_selfware_gitignore(selfware_dir);
+    }
     let spill_file = spill_dir.join(format!(
         "{}_{}.json",
         tool_name,

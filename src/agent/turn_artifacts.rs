@@ -150,6 +150,21 @@ pub fn artifact_dir(workdir: &Path) -> PathBuf {
     workdir.join(".selfware").join("turns")
 }
 
+/// Ensure a project-local `.selfware/` directory carries a `.gitignore` that
+/// ignores everything inside it, so the agent's scratch (turn artifacts,
+/// spilled tool results, …) can't be accidentally committed into the user's
+/// repo. No-op if the dir doesn't exist or the file is already present.
+/// Best-effort — a failure to write it must never break the caller.
+pub(crate) fn ensure_selfware_gitignore(selfware_dir: &Path) {
+    if !selfware_dir.is_dir() {
+        return;
+    }
+    let gitignore = selfware_dir.join(".gitignore");
+    if !gitignore.exists() {
+        let _ = std::fs::write(&gitignore, "# Selfware scratch — do not commit.\n*\n");
+    }
+}
+
 /// Maximum number of turn-artifact files to retain per workdir. Older files
 /// are pruned so long-running or repeated sessions don't grow unbounded
 /// (mirrors the checkpoint retention cap).
@@ -203,6 +218,9 @@ pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
         tracing::warn!("Failed to create turn artifact dir {:?}: {}", dir, e);
         return;
     }
+    // Drop a .gitignore into the project-local .selfware/ so scratch isn't
+    // accidentally committed into the user's repo.
+    ensure_selfware_gitignore(&workdir.join(".selfware"));
     let path = dir.join(format!("turn_{:04}.json", artifact.step));
     let json = match serde_json::to_string_pretty(artifact) {
         Ok(s) => s,
@@ -222,6 +240,31 @@ pub async fn write_artifact(workdir: &Path, artifact: &TurnArtifact) {
 mod tests {
     use super::*;
     use crate::api::types::{ToolCall, ToolFunction};
+
+    #[test]
+    fn ensure_selfware_gitignore_writes_wildcard_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let selfware = tmp.path().join(".selfware");
+        std::fs::create_dir_all(&selfware).unwrap();
+
+        ensure_selfware_gitignore(&selfware);
+        let gi = selfware.join(".gitignore");
+        assert!(gi.is_file(), "gitignore should be created");
+        assert!(std::fs::read_to_string(&gi).unwrap().contains('*'));
+
+        // Idempotent + non-clobbering: an existing file is left untouched.
+        std::fs::write(&gi, "custom\n").unwrap();
+        ensure_selfware_gitignore(&selfware);
+        assert_eq!(std::fs::read_to_string(&gi).unwrap(), "custom\n");
+    }
+
+    #[test]
+    fn ensure_selfware_gitignore_noop_when_dir_absent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join(".selfware");
+        ensure_selfware_gitignore(&missing); // must not create the dir
+        assert!(!missing.exists());
+    }
 
     fn sample_artifact() -> TurnArtifact {
         TurnArtifact {
