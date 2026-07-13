@@ -8,6 +8,19 @@ use tracing::{debug, info, warn};
 /// Per-message overhead tokens (role header, formatting, separators).
 const MESSAGE_OVERHEAD_TOKENS: usize = 4;
 
+/// Advance a tail start index past any leading `role == "tool"` messages so
+/// the kept tail never begins on an orphan tool result (whose matching
+/// assistant tool_call was compacted away). Those leading tool results move
+/// into the summarized/dropped region instead, keeping tool-call pairs
+/// intact and avoiding unpaired-tool_calls 400s.
+fn safe_tail_start(messages: &[Message], desired: usize) -> usize {
+    let mut start = desired.min(messages.len());
+    while start < messages.len() && messages[start].role == "tool" {
+        start += 1;
+    }
+    start
+}
+
 /// Estimate the token cost of a single message, including text, images,
 /// per-message overhead, and tool calls. This is the single source of truth
 /// for message-level token estimation — both `ContextCompressor` and
@@ -99,7 +112,10 @@ impl ContextCompressor {
         info!("Compressing context: {} messages", messages.len());
 
         let system_msg = messages.first().cloned();
-        let recent_start = messages.len().saturating_sub(self.min_messages_to_keep);
+        let recent_start = safe_tail_start(
+            messages,
+            messages.len().saturating_sub(self.min_messages_to_keep),
+        );
         let recent_msgs: Vec<Message> = messages[recent_start..].to_vec();
         let to_summarize = &messages[1..recent_start];
 
@@ -208,7 +224,7 @@ impl ContextCompressor {
         ));
 
         // Keep only last few messages (must end with user for next assistant response)
-        let start = messages.len().saturating_sub(3);
+        let start = safe_tail_start(messages, messages.len().saturating_sub(3));
         for msg in &messages[start..] {
             // Skip if this would create consecutive assistants
             if let Some(last) = result.last() {
@@ -551,6 +567,75 @@ mod tests {
         assert_eq!(compressed[0].role, "system");
         // Should end with user
         assert_eq!(compressed.last().unwrap().role, "user");
+    }
+
+    #[test]
+    fn safe_tail_start_skips_leading_tool_results() {
+        // [system, user, assistant, tool, tool, user, assistant] — 7 messages.
+        let messages = vec![
+            Message::system("system"),
+            Message::user("question"),
+            Message::assistant("let me call a tool"),
+            Message::tool("tool result 1", "call_1"),
+            Message::tool("tool result 2", "call_2"),
+            Message::user("follow-up"),
+            Message::assistant("done"),
+        ];
+
+        // desired = 3 lands on a tool message at index 3; should skip both
+        // tool messages (indices 3 and 4) and land on the user at index 5.
+        assert_eq!(safe_tail_start(&messages, 3), 5);
+
+        // desired = 1 lands on a user message — no skip needed.
+        assert_eq!(safe_tail_start(&messages, 1), 1);
+    }
+
+    #[test]
+    fn hard_compress_does_not_start_tail_on_tool_result() {
+        // [system, user, assistant(tool_calls), tool, assistant, user]
+        // len = 6, len-3 = 3 → index 3 is the orphan tool result whose
+        // matching assistant (index 2) would be compacted away.
+        let messages = vec![
+            Message::system("system"),
+            Message::user("please run a tool"),
+            Message::assistant("calling tool now"),
+            Message::tool("tool result", "call_1"),
+            Message::assistant("the result was good"),
+            Message::user("thanks"),
+        ];
+
+        let compressed = ContextCompressor::new(100000).hard_compress(&messages);
+
+        // Find the "[Earlier context was compressed" note and verify the very
+        // next message is not an orphan tool result.
+        let note_idx = compressed
+            .iter()
+            .position(|m| m.content.text().contains("[Earlier context was compressed"));
+        assert!(
+            note_idx.is_some(),
+            "compression note not found in: {:?}",
+            compressed
+                .iter()
+                .map(|m| m.role.clone())
+                .collect::<Vec<_>>()
+        );
+        let note_idx = note_idx.unwrap();
+
+        // There must be at least one message after the note (the tail), and
+        // the first one must NOT be a bare tool result.
+        assert!(
+            note_idx + 1 < compressed.len(),
+            "no messages after compression note"
+        );
+        assert_ne!(
+            compressed[note_idx + 1].role,
+            "tool",
+            "hard_compress kept an orphan tool result as the first tail message: {:?}",
+            compressed
+                .iter()
+                .map(|m| m.role.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
