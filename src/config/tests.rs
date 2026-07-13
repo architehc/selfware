@@ -2415,11 +2415,14 @@ fn test_default_min_completion_steps_fn() {
 #[test]
 fn test_default_denied_paths_fn() {
     let paths = default_denied_paths();
-    assert_eq!(paths.len(), 4);
+    assert_eq!(paths.len(), 6);
     assert!(paths.contains(&"**/.env".to_string()));
     assert!(paths.contains(&"**/.env.local".to_string()));
     assert!(paths.contains(&"**/.ssh/**".to_string()));
     assert!(paths.contains(&"**/secrets/**".to_string()));
+    // .git executable-config vectors (hooks + config) are denied by default.
+    assert!(paths.contains(&"**/.git/hooks/**".to_string()));
+    assert!(paths.contains(&"**/.git/config".to_string()));
 }
 
 // ---- Config::Debug output completeness ----

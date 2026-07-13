@@ -804,12 +804,23 @@ impl CheckpointManager {
             }
             return Ok(());
         }
-        // Fallback: lexical check on the components.
+        // Fallback: `path` may not exist yet (about to be created), so it can't
+        // be canonicalized directly. Canonicalize its PARENT (which does exist)
+        // and re-append the file name, so BOTH sides resolve symlinks — e.g. on
+        // macOS a temp dir under /var canonicalizes to /private/var, and
+        // comparing a canonicalized dir against a raw /var path spuriously fails.
         let dir = self
             .checkpoints_dir
             .canonicalize()
-            .unwrap_or(self.checkpoints_dir.clone());
-        if !path.starts_with(&dir) {
+            .unwrap_or_else(|_| self.checkpoints_dir.clone());
+        let resolved_path = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => match parent.canonicalize() {
+                Ok(canon_parent) => canon_parent.join(name),
+                Err(_) => path.to_path_buf(),
+            },
+            _ => path.to_path_buf(),
+        };
+        if !resolved_path.starts_with(&dir) {
             bail!(
                 "checkpoint path {:?} escapes checkpoints_dir {:?}",
                 path,

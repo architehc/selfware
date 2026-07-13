@@ -41,11 +41,20 @@ impl RunRecord {
 }
 
 /// Returns true if a process with `pid` currently exists.
+#[cfg(unix)]
 pub fn pid_alive(pid: u32) -> bool {
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
     // Signal `None` (0) performs error checking without sending a signal.
     kill(Pid::from_raw(pid as i32), None).is_ok()
+}
+
+/// Non-Unix fallback: no portable liveness probe without `nix` (which is a
+/// Unix-only dependency), so assume alive — the conservative choice (a stale
+/// PID at worst delays reclamation; it never signals the wrong process).
+#[cfg(not(unix))]
+pub fn pid_alive(_pid: u32) -> bool {
+    true
 }
 
 /// Whether a status string is a terminal (final) run state. Terminal
@@ -218,9 +227,12 @@ impl RunRegistry {
         // process — never SIGTERM a reused PID belonging to an unrelated
         // program.
         let outcome = if pid_alive(rec.pid) && pid_is_selfware(rec.pid) {
-            use nix::sys::signal::{kill, Signal};
-            use nix::unistd::Pid;
-            let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM);
+            #[cfg(unix)]
+            {
+                use nix::sys::signal::{kill, Signal};
+                use nix::unistd::Pid;
+                let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM);
+            }
             AbortOutcome::Signalled(rec.pid)
         } else {
             // Owner gone, or its PID was reused by an unrelated process — do
