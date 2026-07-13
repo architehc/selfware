@@ -13,10 +13,10 @@ context_length = 1010000
 
 # MAXED OUT Concurrency Settings
 [concurrency]
-# Push to the limit
-max_parallel_requests = 24
-max_retries = 3
-timeout_secs = 300
+# Push to the limit (valid keys: max_streams, max_tools, max_global)
+max_streams = 24
+max_tools = 24
+max_global = 48
 
 [extra_body]
 # Disable thinking for tool-heavy workflows
@@ -26,7 +26,7 @@ top_k = 20
 min_p = 0.0
 
 [safety]
-allowed_paths = ["./**", "/tmp/**", "/home/ivo/selfware/**"]
+allowed_paths = ["./**", "/tmp/**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 protected_branches = ["main"]
 
