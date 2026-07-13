@@ -883,6 +883,13 @@ impl Agent {
                     }
                     self.transition_from_planning_to_executing()?;
 
+                    // A planning turn is billable (plan() records tokens + cost).
+                    // If it pushed us over a hard cap, stop BEFORE executing the
+                    // planned tool calls — those can mutate files. Without this,
+                    // the only budget check is at the top of the *next* iteration,
+                    // a full tool batch too late.
+                    self.enforce_hard_budgets(task_description).await?;
+
                     match self
                         .execute_planned_tool_calls_if_any(task_description, has_tool_calls, 1)
                         .await
@@ -1007,6 +1014,12 @@ impl Agent {
                         info!("Running phase-2 synthesis for stuck model");
                         match self.synthesize_answer(synthesis_task).await {
                             Ok(Some(answer)) => {
+                                // synthesize_answer is billable. Enforce hard
+                                // budgets BEFORE the auto-write branch below —
+                                // otherwise an over-budget synthesis writes
+                                // generated code to disk (execute_tool_batch)
+                                // before ever being stopped.
+                                self.enforce_hard_budgets(task_description).await?;
                                 // Check if synthesis produced code that should be
                                 // written to a file instead of accepted as text.
                                 if super::execution::contains_unwritten_code(&answer) {
