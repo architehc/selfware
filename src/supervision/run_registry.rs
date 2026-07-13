@@ -100,6 +100,10 @@ pub enum AbortOutcome {
     WasStale,
     /// SIGTERM was sent to the owning pid; record marked Aborted.
     Signalled(u32),
+    /// The owning process is alive but this platform has no supported way to
+    /// signal it (non-Unix; `nix` is Unix-only). The run is NOT marked Aborted
+    /// — it is still running — and the caller must report that honestly.
+    SignalUnsupported(u32),
 }
 
 /// A filesystem-backed registry of run records under a directory.
@@ -232,8 +236,15 @@ impl RunRegistry {
                 use nix::sys::signal::{kill, Signal};
                 use nix::unistd::Pid;
                 let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM);
+                AbortOutcome::Signalled(rec.pid)
             }
-            AbortOutcome::Signalled(rec.pid)
+            #[cfg(not(unix))]
+            {
+                // No portable way to signal without nix (Unix-only). The process
+                // is still alive — return early WITHOUT marking the run Aborted,
+                // so we don't falsely report a successful termination.
+                return Ok(AbortOutcome::SignalUnsupported(rec.pid));
+            }
         } else {
             // Owner gone, or its PID was reused by an unrelated process — do
             // not signal; the run is effectively dead, so record it Aborted.

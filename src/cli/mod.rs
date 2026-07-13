@@ -3277,6 +3277,12 @@ max_recovery_attempts = 3
                              host other runs).",
                             pid, id
                         ),
+                        AbortOutcome::SignalUnsupported(pid) => println!(
+                            "Cannot abort run '{}' on this platform: signalling the \
+                             owning process (pid {}) requires Unix. The run is still \
+                             running and was left unchanged.",
+                            id, pid
+                        ),
                     }
                 }
             }

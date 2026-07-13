@@ -1063,6 +1063,12 @@ impl Agent {
                                     )));
                                     continue;
                                 }
+                                // Synthesis made a billable LLM call; a crossed
+                                // cap must stop the run rather than let an
+                                // over-budget synthesized answer report success
+                                // (the post-step check on the normal path does
+                                // not cover this synthesis-completion branch).
+                                self.enforce_hard_budgets(task_description).await?;
                                 output::final_answer(&answer);
                                 self.last_assistant_response = answer;
                                 record_state_transition("Executing", "Completed");
