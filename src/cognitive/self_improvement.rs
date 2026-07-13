@@ -1599,12 +1599,8 @@ impl SelfImprovementEngine {
             learning_enabled: self.learning_enabled,
         };
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
         let content = serde_json::to_string_pretty(&snapshot)?;
-        std::fs::write(path, content)?;
+        write_private_atomic(path, content.as_bytes())?;
         Ok(())
     }
 
@@ -1629,6 +1625,47 @@ impl Default for SelfImprovementEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Write `bytes` to `path` atomically and with owner-only (0600) permissions.
+///
+/// The learning store holds raw task prompts, so it must not be readable by
+/// other local users. We write to a temp file in the same directory, chmod
+/// it to 0600 (Unix) before it is visible under the real name, then rename
+/// over the target. The parent directory is created 0700 on Unix.
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Best-effort: tighten the dir to owner-only. Ignore errors on
+            // pre-existing dirs we may not own.
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    // Temp file in the same directory as the target, keyed by pid to avoid
+    // collisions between concurrent processes.
+    let tmp_path = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => path.with_extension(format!("{ext}.tmp.{}", std::process::id())),
+        None => path.with_extension(format!("tmp.{}", std::process::id())),
+    };
+
+    std::fs::write(&tmp_path, bytes)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    // Atomic replace. On failure, clean up the temp file.
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 /// Comprehensive stats for self-improvement
@@ -2351,5 +2388,24 @@ mod tests {
         let best = optimizer.best_patterns_for("code");
         assert_eq!(best.len(), 1);
         assert_eq!(best[0].id, "p1");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_writes_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("selfware_priv_test_{}", std::process::id()));
+        let path = dir.join("improvement_engine.json");
+        let engine = SelfImprovementEngine::new();
+        engine.save(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "learning file must be owner-only, got {:o}",
+            mode
+        );
+        // Round-trips.
+        let _loaded = SelfImprovementEngine::load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
