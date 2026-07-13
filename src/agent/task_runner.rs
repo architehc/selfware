@@ -639,6 +639,63 @@ impl Agent {
         result
     }
 
+    /// Enforce the hard budget caps (token count, USD cost, wall-clock).
+    ///
+    /// Returns `Ok(())` when no cap is exceeded. When a cap is crossed the
+    /// run is recorded as `Outcome::Partial`, the failure mode is finalized,
+    /// and the method bails with the same reason string the inline checks
+    /// used previously — so callers see an `Err` containing the canonical
+    /// message (e.g. "Token budget exhausted: ...").
+    ///
+    /// Called both at the top of each loop iteration (before a billable step
+    /// runs) **and** after a billable step completes, so a final LLM call that
+    /// pushes cumulative usage past a cap stops the run instead of letting the
+    /// over-budget response report success.
+    async fn enforce_hard_budgets(&mut self, task_description: &str) -> Result<()> {
+        if let Some(max_budget) = self.config.agent.max_budget_tokens {
+            let total = self.cumulative_token_usage.total;
+            if total >= max_budget {
+                let reason = format!("Token budget exhausted: {} >= {} tokens", total, max_budget);
+                warn!("{}", reason);
+                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.finalize_failure_mode(RunOutcome::Failed {
+                    reason: reason.clone(),
+                })
+                .await;
+                anyhow::bail!("{}", reason);
+            }
+        }
+        if let Some(max_cost) = self.config.agent.max_cost_usd {
+            if self.cumulative_cost_usd >= max_cost {
+                let reason = format!(
+                    "Cost budget exhausted: ${:.4} >= ${:.4}",
+                    self.cumulative_cost_usd, max_cost
+                );
+                warn!("{}", reason);
+                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.finalize_failure_mode(RunOutcome::Failed {
+                    reason: reason.clone(),
+                })
+                .await;
+                anyhow::bail!("{}", reason);
+            }
+        }
+        if let Some(max_secs) = self.config.agent.max_wall_secs {
+            let elapsed = self.budget_elapsed_secs();
+            if elapsed >= max_secs {
+                let reason = format!("Wall-clock timeout: {}s >= {}s", elapsed, max_secs);
+                warn!("{}", reason);
+                self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
+                self.finalize_failure_mode(RunOutcome::Failed {
+                    reason: reason.clone(),
+                })
+                .await;
+                anyhow::bail!("{}", reason);
+            }
+        }
+        Ok(())
+    }
+
     async fn run_execution_loop_inner(
         &mut self,
         task_description: &str,
@@ -708,48 +765,7 @@ impl Agent {
                 ),
             });
             // Hard limits: token budget, USD cost, and wall-clock timeout
-            if let Some(max_budget) = self.config.agent.max_budget_tokens {
-                let total = self.cumulative_token_usage.total;
-                if total >= max_budget {
-                    let reason =
-                        format!("Token budget exhausted: {} >= {} tokens", total, max_budget);
-                    warn!("{}", reason);
-                    self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
-                    self.finalize_failure_mode(RunOutcome::Failed {
-                        reason: reason.clone(),
-                    })
-                    .await;
-                    anyhow::bail!("{}", reason);
-                }
-            }
-            if let Some(max_cost) = self.config.agent.max_cost_usd {
-                if self.cumulative_cost_usd >= max_cost {
-                    let reason = format!(
-                        "Cost budget exhausted: ${:.4} >= ${:.4}",
-                        self.cumulative_cost_usd, max_cost
-                    );
-                    warn!("{}", reason);
-                    self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
-                    self.finalize_failure_mode(RunOutcome::Failed {
-                        reason: reason.clone(),
-                    })
-                    .await;
-                    anyhow::bail!("{}", reason);
-                }
-            }
-            if let Some(max_secs) = self.config.agent.max_wall_secs {
-                let elapsed = self.budget_elapsed_secs();
-                if elapsed >= max_secs {
-                    let reason = format!("Wall-clock timeout: {}s >= {}s", elapsed, max_secs);
-                    warn!("{}", reason);
-                    self.record_task_outcome(task_description, Outcome::Partial, Some(&reason));
-                    self.finalize_failure_mode(RunOutcome::Failed {
-                        reason: reason.clone(),
-                    })
-                    .await;
-                    anyhow::bail!("{}", reason);
-                }
-            }
+            self.enforce_hard_budgets(task_description).await?;
 
             if self.is_cancelled() {
                 cli_println!("{}", "\n⚡ Interrupted".bright_yellow());
@@ -1081,6 +1097,9 @@ impl Agent {
                             consecutive_error_recoveries = 0;
                             self.rigor_mode = false;
                             self.rigor_directive_injected = false;
+                            // A billable step just ran; a crossed cap must stop the run rather than
+                            // let a final response that overshot the budget still report success.
+                            self.enforce_hard_budgets(task_description).await?;
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 if mode == LoopMode::NewTask {
@@ -2231,6 +2250,43 @@ mod tests {
         assert!(
             result.is_err(),
             "run_task should fail on budget exhaustion, got Ok"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Token budget exhausted"),
+            "expected a token-budget error, got: {err}"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_budget_enforced_after_completing_step() {
+        // Each mock response reports 15 total tokens (see mock_api.rs). The
+        // planning LLM call brings cumulative usage to 15, which is still
+        // under the 20-token cap at the next loop entry. The executing step
+        // then makes a second billable LLM call (cumulative → 30) and the
+        // model signals completion. The post-step budget check must catch the
+        // overshoot and fail the run instead of letting it return Ok.
+        let server = MockLlmServer::builder()
+            .with_response("Planning the approach for this analysis task.")
+            .with_response(
+                "The analysis is complete: all components reviewed and verified successfully.",
+            )
+            .build()
+            .await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+        config.agent.max_budget_tokens = Some(20);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Describe the authentication module").await;
+
+        assert!(
+            result.is_err(),
+            "run_task should fail when the budget is exceeded after a completing step, got Ok"
         );
         let err = result.unwrap_err().to_string();
         assert!(
