@@ -5,6 +5,12 @@ use tracing::warn;
 
 /// Known top-level TOML keys that map to Config fields.
 /// Any key not in this list triggers a warning during config load.
+/// The full set of recognized config keys across every level (top-level fields,
+/// section names, and section sub-keys). Now only referenced by the config-key
+/// sanity tests; the production top-level typo check uses
+/// [`TOP_LEVEL_CONFIG_KEYS`]. Kept as a reference for a future per-section
+/// nested-key validation.
+#[cfg(test)]
 const KNOWN_CONFIG_KEYS: &[&str] = &[
     // Top-level config keys
     "endpoint",
@@ -71,6 +77,35 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "disk_limit_gb",
 ];
 
+/// Keys valid at the TOP LEVEL of a config file: scalar top-level fields
+/// plus section names. Section SUB-keys (e.g. max_iterations under [agent])
+/// are intentionally absent so a misplaced sub-key at the top level warns.
+const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
+    "endpoint",
+    "model",
+    "max_tokens",
+    "context_length",
+    "temperature",
+    "api_key",
+    "execution_mode",
+    "safety",
+    "agent",
+    "yolo",
+    "ui",
+    "continuous_work",
+    "retry",
+    "resources",
+    "concurrency",
+    "evolution",
+    "cache",
+    "debug",
+    "models",
+    "extra_body",
+    "qa",
+    "mcp",
+    "hooks",
+];
+
 use std::path::PathBuf;
 
 use super::api_key::{load_api_key_from_keyring, ApiKeySource};
@@ -122,7 +157,7 @@ impl Config {
     fn warn_unknown_keys(content: &str) {
         if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(content) {
             for key in table.keys() {
-                if !KNOWN_CONFIG_KEYS.contains(&key.as_str()) {
+                if !TOP_LEVEL_CONFIG_KEYS.contains(&key.as_str()) {
                     warn!(
                         key = %key,
                         "Unknown config key [{}] — this section is ignored. \
@@ -1923,6 +1958,19 @@ mod tests {
         assert!(!KNOWN_CONFIG_KEYS.contains(&"endpont"));
         assert!(!KNOWN_CONFIG_KEYS.contains(&"max_token"));
         assert!(!KNOWN_CONFIG_KEYS.contains(&"temprature"));
+    }
+
+    #[test]
+    fn top_level_keys_exclude_section_subkeys() {
+        // Section names + scalar top-level fields are top-level valid.
+        assert!(TOP_LEVEL_CONFIG_KEYS.contains(&"endpoint"));
+        assert!(TOP_LEVEL_CONFIG_KEYS.contains(&"agent"));
+        assert!(TOP_LEVEL_CONFIG_KEYS.contains(&"safety"));
+        // Sub-keys must NOT be valid at the top level (misplacing them warns).
+        assert!(!TOP_LEVEL_CONFIG_KEYS.contains(&"max_iterations"));
+        assert!(!TOP_LEVEL_CONFIG_KEYS.contains(&"step_timeout_secs"));
+        assert!(!TOP_LEVEL_CONFIG_KEYS.contains(&"streaming"));
+        assert!(!TOP_LEVEL_CONFIG_KEYS.contains(&"allowed_paths"));
     }
 
     // =========================================================================
