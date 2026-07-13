@@ -51,7 +51,8 @@ exclude = [
     # editor/IDE sources, benchmark output, and review/plan markdown.
     "artifacts/",
     "benchmark_results/",
-    "scripts/",
+    # NB: do NOT exclude scripts/ wholesale — scripts/playwright-bridge.js is a
+    # runtime dependency of the page_control tool (src/tools/page_controller.rs).
     "editors/",
     "vscode-selfware/",
     "IMPROVE_*.md",
@@ -120,7 +121,7 @@ parking_lot = "0.12.5"
 lru = "0.16.3"
 libloading = "0.9.0"
 sysinfo = "0.38.3"
-llmfit-core = { git = "https://github.com/AlexsJones/llmfit", rev = "f216779" }
+llmfit-core = { version = "0.9.7", git = "https://github.com/AlexsJones/llmfit", rev = "f216779" }
 xcap = "0.3"
 nvml-wrapper = "0.12.1"
 zstd = "0.13.3"
