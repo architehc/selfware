@@ -93,6 +93,28 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
     };
     wizard_print!();
 
+    // Step 2.5: API key (optional) — stored in the OS keyring, never the config.
+    wizard_print!("Step: API Key (optional)");
+    wizard_print!("  If your endpoint needs an API key (e.g. OpenRouter), paste it now.");
+    wizard_print!("  It is stored in your OS keyring — NOT written to the config file.");
+    wizard_print!("  Leave blank to skip (you can set SELFWARE_API_KEY later).");
+    print!("  > ");
+    io::stdout().flush()?;
+    let mut api_key = String::new();
+    io::stdin().lock().read_line(&mut api_key)?;
+    let api_key = api_key.trim();
+    if !api_key.is_empty() {
+        match crate::config::save_api_key_to_keyring(api_key) {
+            Ok(()) => wizard_print!("  {} API key saved to your OS keyring.", Glyphs::bloom()),
+            Err(e) => wizard_print!(
+                "  {} Could not save to keyring ({}). Set SELFWARE_API_KEY=<key> in your environment instead.",
+                Glyphs::frost(),
+                e
+            ),
+        }
+    }
+    wizard_print!();
+
     // Step 3: Allowed paths
     wizard_print!("Step 3/4: Allowed Paths");
     wizard_print!("  Which directories can Selfware access?");
@@ -321,5 +343,16 @@ mod tests {
         assert!(content.contains("http://localhost:8000/v1"));
         assert!(content.contains("model = \"mock\""));
         assert!(content.contains("selfware -y"));
+    }
+
+    #[test]
+    fn generated_config_has_no_api_key() {
+        // The API key is stored in the OS keyring, never written to the config
+        // TOML — verify the generated body has no api_key field.
+        let content = build_config_content("https://openrouter.ai/api/v1", "gpt-4", "[\".\"]");
+        assert!(
+            !content.contains("api_key"),
+            "config must never contain the api key: {content}"
+        );
     }
 }
