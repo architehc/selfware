@@ -212,17 +212,41 @@ impl ProfileManager {
             .get(profile_name)
             .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found", profile_name))?;
 
-        // Apply overrides
-        if let Some(max_tokens) = profile.config_overrides.max_tokens {
+        // Apply every override that has a concrete Config target. (Previously
+        // only max_tokens/temperature were applied, so --profile silently
+        // dropped max_iterations, step_timeout, streaming, etc.)
+        let o = &profile.config_overrides;
+
+        if let Some(max_tokens) = o.max_tokens {
             config.max_tokens = max_tokens;
         }
-
-        if let Some(temperature) = profile.config_overrides.temperature {
+        if let Some(temperature) = o.temperature {
             config.temperature = temperature;
         }
-
-        // Note: In real implementation, would apply all overrides
-        // This is simplified for demonstration
+        if let Some(max_iterations) = o.max_iterations {
+            config.agent.max_iterations = max_iterations;
+        }
+        if let Some(step_timeout_secs) = o.step_timeout_secs {
+            config.agent.step_timeout_secs = step_timeout_secs;
+        }
+        if let Some(agent) = &o.agent {
+            if let Some(streaming) = agent.streaming {
+                config.agent.streaming = streaming;
+            }
+            if let Some(native_fc) = agent.native_function_calling {
+                config.agent.native_function_calling = native_fc;
+            }
+            // `enable_thinking` has no direct Config field — it's expressed as
+            // chat_template_kwargs in extra_body — so it's intentionally not
+            // mapped here rather than silently faked. (Follow-up: wire it into
+            // extra_body if profile-level thinking control is wanted.)
+        }
+        if let Some(concurrency) = &o.concurrency {
+            if let Some(max_parallel) = concurrency.max_parallel_requests {
+                config.concurrency.max_streams = max_parallel;
+            }
+            // `timeout_secs` has no ConcurrencyConfig field; not mapped (see above).
+        }
 
         Ok(())
     }
@@ -249,6 +273,32 @@ mod tests {
         let manager = ProfileManager::new();
         assert!(manager.get("architect").is_some());
         assert!(manager.get("batch-16").is_some());
+    }
+
+    #[test]
+    fn apply_profile_applies_all_mappable_overrides() {
+        let manager = ProfileManager::new();
+        let mut config = crate::config::Config::default();
+        manager.apply_profile(&mut config, "architect").unwrap();
+
+        // Previously only these two were applied.
+        assert_eq!(config.max_tokens, 8192);
+        assert!((config.temperature - 0.7).abs() < f32::EPSILON);
+        // These were silently dropped before the fix.
+        assert_eq!(config.agent.max_iterations, 100);
+        assert_eq!(config.agent.step_timeout_secs, 900);
+        assert!(!config.agent.streaming);
+        assert!(config.agent.native_function_calling);
+        assert_eq!(config.concurrency.max_streams, 4);
+    }
+
+    #[test]
+    fn apply_profile_unknown_name_errors() {
+        let manager = ProfileManager::new();
+        let mut config = crate::config::Config::default();
+        assert!(manager
+            .apply_profile(&mut config, "no-such-profile")
+            .is_err());
     }
 
     #[test]
