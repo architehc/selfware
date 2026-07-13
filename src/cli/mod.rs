@@ -512,7 +512,10 @@ pub async fn run() -> Result<()> {
                 );
             }
             Err(e) => {
-                tracing::warn!("Could not apply profile '{}': {}", profile_name, e);
+                anyhow::bail!(
+                    "Unknown --profile '{}': {}. Available profiles: architect, swarm-8, batch-16, batch-32, visual, quick.",
+                    profile_name, e
+                );
             }
         }
     }

@@ -493,7 +493,10 @@ impl ApiClient {
             // agent step timeout if larger) so slow-but-healthy models are
             // unaffected.  The body is then streamed as before (per-chunk
             // timeout only — NO total timeout on the body).
-            let hdr_timeout_secs = self.config.agent.step_timeout_secs.max(120);
+            let mut hdr_timeout_secs = self.config.agent.step_timeout_secs.max(120);
+            if let Some(wall) = self.config.agent.max_wall_secs {
+                hdr_timeout_secs = hdr_timeout_secs.min(wall.max(1));
+            }
             // Race the header wait against a shutdown request so a single Ctrl-C
             // interrupts a stalled provider connection instead of blocking for
             // up to hdr_timeout_secs waiting for response headers.
@@ -533,8 +536,12 @@ impl ApiClient {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
-                            let stream_chunk_timeout_secs =
+                            let mut stream_chunk_timeout_secs =
                                 self.config.agent.step_timeout_secs.max(30);
+                            if let Some(wall) = self.config.agent.max_wall_secs {
+                                stream_chunk_timeout_secs =
+                                    stream_chunk_timeout_secs.min(wall.max(1));
+                            }
                             return Ok(StreamingResponse::new(
                                 response,
                                 Duration::from_secs(stream_chunk_timeout_secs),
@@ -684,7 +691,10 @@ impl ApiClient {
             // floor (or the step timeout if larger) lets slow-but-healthy models
             // finish while still bounding a truly-dead connection. Raced against
             // shutdown so Ctrl-C / SIGTERM interrupts promptly.
-            let response_timeout_secs = self.config.agent.step_timeout_secs.max(600);
+            let mut response_timeout_secs = self.config.agent.step_timeout_secs.max(600);
+            if let Some(wall) = self.config.agent.max_wall_secs {
+                response_timeout_secs = response_timeout_secs.min(wall.max(1));
+            }
             let send_result = tokio::select! {
                 biased;
                 _ = crate::shutdown_requested() => {

@@ -263,6 +263,12 @@ impl Agent {
                 self.cumulative_token_usage.input + self.cumulative_token_usage.output;
         }
 
+        // Accumulate cost from this planning call so USD caps account for
+        // planning spend, not just execution spend.
+        if let Some(cost) = plan_meta.cost {
+            self.cumulative_cost_usd += cost;
+        }
+
         // Return whether there are tool calls to execute
         Ok(has_tool_calls)
     }
