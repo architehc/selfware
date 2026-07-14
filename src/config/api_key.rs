@@ -20,20 +20,31 @@ pub enum ApiKeySource {
 pub(crate) const KEYRING_SERVICE: &str = "selfware-api-key";
 
 /// Derive the keyring account name that scopes a stored API key to a
-/// specific endpoint HOST. Keys are stored per-endpoint so that a checkout
-/// which selects a different (e.g. attacker-controlled) endpoint cannot
-/// retrieve a credential saved for another endpoint. Scheme, case, port-less
-/// path, and trailing slashes are normalized so trivially different
-/// spellings of the same endpoint share one entry; the port IS part of the
-/// scope.
+/// specific endpoint by (scheme, host, effective port).  Keys are stored
+/// per-endpoint so that a checkout which selects a different (e.g.
+/// attacker-controlled) endpoint cannot retrieve a credential saved for
+/// another endpoint.  The scheme is kept so that an `http://` URL cannot
+/// retrieve a key stored for the same host over `https://`.
 pub(crate) fn keyring_account_for_endpoint(endpoint: &str) -> String {
-    let no_scheme = endpoint
-        .strip_prefix("https://")
-        .or_else(|| endpoint.strip_prefix("http://"))
-        .unwrap_or(endpoint);
-    // host[:port] only — drop any path so `/api/v1` vs `/` share one entry.
-    let host_port = no_scheme.split('/').next().unwrap_or(no_scheme);
-    host_port.trim().to_ascii_lowercase()
+    if let Ok(url) = url::Url::parse(endpoint) {
+        let scheme = url.scheme().to_ascii_lowercase();
+        let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+        // Effective port: explicit port, else the scheme's default (443/80).
+        let port = url.port_or_known_default().unwrap_or(0);
+        format!("{scheme}://{host}:{port}")
+    } else {
+        // Unparseable endpoint: fall back to the raw string, normalized.
+        endpoint.trim().to_ascii_lowercase()
+    }
+}
+
+/// Whether sending a credential to this endpoint would cross plaintext HTTP to
+/// a REMOTE host — a downgrade / exfiltration risk, since a checkout-local
+/// config can choose the endpoint. Local HTTP (localhost / loopback) is allowed
+/// because traffic stays on the machine. Note: `https://...` does NOT start with
+/// `http://`, so only real http endpoints match.
+pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
+    endpoint.starts_with("http://") && !is_local_endpoint(endpoint)
 }
 
 /// Load the API key from the OS system keyring.
@@ -104,27 +115,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keyring_account_is_endpoint_scoped() {
-        let real = keyring_account_for_endpoint("https://openrouter.ai/api/v1");
-        let attacker = keyring_account_for_endpoint("https://attacker.example.com/v1");
-        assert_ne!(
-            real, attacker,
-            "different hosts must not share a keyring account"
+    fn keyring_account_is_scheme_host_port_scoped() {
+        // scheme + host + effective port form the account
+        assert_eq!(
+            keyring_account_for_endpoint("https://openrouter.ai/api/v1"),
+            "https://openrouter.ai:443"
         );
-        assert_eq!(real, "openrouter.ai");
-        // case / scheme / path / trailing slash normalize to the same account
+        // http and https to the SAME host must be DIFFERENT accounts (no downgrade)
+        assert_ne!(
+            keyring_account_for_endpoint("https://openrouter.ai/api/v1"),
+            keyring_account_for_endpoint("http://openrouter.ai/api/v1")
+        );
+        // different hosts differ
+        assert_ne!(
+            keyring_account_for_endpoint("https://openrouter.ai/api/v1"),
+            keyring_account_for_endpoint("https://attacker.example.com/v1")
+        );
+        // case / path normalize; explicit default port == implicit default port
         assert_eq!(
             keyring_account_for_endpoint("https://OpenRouter.ai/api/v1"),
-            keyring_account_for_endpoint("http://openrouter.ai/")
+            keyring_account_for_endpoint("https://openrouter.ai:443/")
         );
-        // port is part of the scope
+        // explicit non-default port is part of the scope
         assert_eq!(
             keyring_account_for_endpoint("http://127.0.0.1:1234/v1"),
-            "127.0.0.1:1234"
+            "http://127.0.0.1:1234"
         );
         assert_ne!(
             keyring_account_for_endpoint("http://127.0.0.1:1234/v1"),
             keyring_account_for_endpoint("http://127.0.0.1:9999/v1")
         );
+    }
+
+    #[test]
+    fn insecure_remote_endpoint_detection() {
+        assert!(is_insecure_remote_endpoint("http://openrouter.ai/api/v1")); // remote http -> insecure
+        assert!(!is_insecure_remote_endpoint("https://openrouter.ai/api/v1")); // https ok
+        assert!(!is_insecure_remote_endpoint("http://localhost:1234/v1")); // local ok
+        assert!(!is_insecure_remote_endpoint("http://127.0.0.1:8000/v1")); // loopback ok
+        assert!(!is_insecure_remote_endpoint("http://[::1]:8000/v1")); // ipv6 loopback ok
     }
 }

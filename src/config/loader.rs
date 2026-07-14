@@ -108,7 +108,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 
 use std::path::PathBuf;
 
-use super::api_key::{load_api_key_from_keyring, ApiKeySource};
+use super::api_key::{is_insecure_remote_endpoint, load_api_key_from_keyring, ApiKeySource};
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
 use super::provenance::{ConfigSource, ConfigSources};
@@ -362,6 +362,18 @@ impl Config {
         // Suppress unused-variable warning; the value is consumed by the
         // match arms above and kept around only for clarity / future use.
         let _ = api_key_source;
+
+        // Never send a credential over plaintext HTTP to a REMOTE host: a
+        // checkout-local config can choose the endpoint, so an http:// remote
+        // URL with a key present is a downgrade / exfiltration risk. Local HTTP
+        // is fine (traffic stays on the machine).
+        if config.api_key.is_some() && is_insecure_remote_endpoint(&config.endpoint) {
+            bail!(
+                "Refusing to send the API key over plaintext HTTP to a remote endpoint '{}'. \
+                 Use https:// or a local endpoint (localhost / 127.0.0.1).",
+                config.endpoint
+            );
+        }
 
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
             if let Ok(n) = max_tokens.parse::<usize>() {
