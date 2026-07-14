@@ -11,7 +11,9 @@ pub mod executor;
 pub mod recorder;
 pub mod tasks;
 
-pub use bench_runner::{BrowserBenchConfig, BrowserBenchReport, BrowserBenchRunner};
+pub use bench_runner::{
+    BrowserBenchConfig, BrowserBenchReport, BrowserBenchRunner, ExecutionBackend,
+};
 pub use evaluator::WebTaskEvaluator;
 pub use executor::WebTaskExecutor;
 pub use recorder::{InteractionRecorder, InteractionTrace, RecordedAction, ScreenshotRef};

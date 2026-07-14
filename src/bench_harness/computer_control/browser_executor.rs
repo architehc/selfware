@@ -281,6 +281,18 @@ impl BrowserTaskExecutor {
 
         recorder.finish(final_outcome)
     }
+
+    /// Execute several tasks sequentially, each in its own fresh browser
+    /// session. Sequential by design: each task drives a full Playwright
+    /// browser, so running many at once would spawn many heavyweight browser
+    /// processes for little benchmarking value.
+    pub async fn execute_all(&self, tasks: &[WebTask]) -> Vec<InteractionTrace> {
+        let mut traces = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            traces.push(self.execute(task).await);
+        }
+        traces
+    }
 }
 
 /// Evaluate a success criterion by querying the live browser.
@@ -489,5 +501,14 @@ mod tests {
         let cmd = web_action_to_command(&action, Path::new("/tmp/ss"));
         assert_eq!(cmd["action"], "hover");
         assert_eq!(cmd["selector"], ".menu-item");
+    }
+
+    #[tokio::test]
+    async fn execute_all_empty_is_empty() {
+        let dir = std::env::temp_dir().join(format!("bx_empty_{}", std::process::id()));
+        let ex = BrowserTaskExecutor::new(dir.clone()).unwrap();
+        let traces = ex.execute_all(&[]).await;
+        assert!(traces.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

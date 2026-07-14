@@ -8,6 +8,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+use super::browser_executor::BrowserTaskExecutor;
 use super::executor::WebTaskExecutor;
 use super::recorder::{InteractionTrace, TaskOutcome};
 use super::tasks::{self, WebTask};
@@ -17,6 +18,32 @@ use crate::bench_harness::config::HarnessConfig;
 use crate::bench_harness::report::HarnessReport;
 use crate::bench_harness::runner::HarnessRunner;
 use crate::bench_harness::task::{BenchTask, KeywordEvaluator};
+
+/// Which executor drives the web tasks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ExecutionBackend {
+    /// Real Playwright browser via the page_control tool (honest outcomes).
+    #[default]
+    Browser,
+    /// Legacy HTTP-fetch executor (no real interaction). Kept as a fallback
+    /// for environments without Node/Playwright.
+    Http,
+}
+
+/// Internal dispatch over the selected executor.
+enum BackendExecutor {
+    Http(WebTaskExecutor),
+    Browser(BrowserTaskExecutor),
+}
+
+impl BackendExecutor {
+    async fn execute_all(&self, tasks: &[WebTask]) -> Vec<InteractionTrace> {
+        match self {
+            Self::Http(e) => e.execute_all(tasks).await,
+            Self::Browser(e) => e.execute_all(tasks).await,
+        }
+    }
+}
 
 /// Configuration for the browser benchmark.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +58,8 @@ pub struct BrowserBenchConfig {
     pub llm_analysis: bool,
     /// Whether to store traces for consolidation.
     pub store_traces: bool,
+    /// Which executor to run web tasks through (default: real Browser).
+    pub backend: ExecutionBackend,
 }
 
 impl Default for BrowserBenchConfig {
@@ -53,6 +82,7 @@ impl Default for BrowserBenchConfig {
             output_dir: "bench_results/browser".into(),
             llm_analysis: true,
             store_traces: true,
+            backend: ExecutionBackend::Browser,
         }
     }
 }
@@ -140,16 +170,21 @@ impl BrowserBenchReport {
 /// Runs browser benchmarks: executes web tasks, optionally analyzes with LLM.
 pub struct BrowserBenchRunner {
     config: BrowserBenchConfig,
-    executor: WebTaskExecutor,
+    executor: BackendExecutor,
 }
 
 impl BrowserBenchRunner {
     pub fn new(config: BrowserBenchConfig) -> Result<Self> {
-        let executor = WebTaskExecutor::new(
-            config.max_browser_concurrent,
-            config.output_dir.join("screenshots"),
-        )?;
-
+        let screenshots = config.output_dir.join("screenshots");
+        let executor = match config.backend {
+            ExecutionBackend::Http => BackendExecutor::Http(WebTaskExecutor::new(
+                config.max_browser_concurrent,
+                screenshots,
+            )?),
+            ExecutionBackend::Browser => {
+                BackendExecutor::Browser(BrowserTaskExecutor::new(screenshots)?)
+            }
+        };
         Ok(Self { config, executor })
     }
 
@@ -404,5 +439,13 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("Browser Benchmark Report"));
         assert!(md.contains("10.5s"));
+    }
+
+    #[test]
+    fn default_backend_is_browser() {
+        assert_eq!(
+            BrowserBenchConfig::default().backend,
+            ExecutionBackend::Browser
+        );
     }
 }
