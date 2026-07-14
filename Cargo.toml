@@ -121,7 +121,12 @@ parking_lot = "0.12.5"
 lru = "0.16.3"
 libloading = "0.9.0"
 sysinfo = "0.38.3"
-llmfit-core = { version = "0.9.7", git = "https://github.com/AlexsJones/llmfit", rev = "f216779" }
+# Git-only dependency (not on crates.io). selfware is distributed via GitHub
+# releases and `cargo install --git`, so it is intentionally NOT crates.io-
+# publishable. Do NOT add a `version = ` here: with the git source stripped at
+# package time, cargo would resolve a DIFFERENT crates.io llmfit-core whose API
+# has diverged from rev f216779 (E0596 in src/config/unpack.rs).
+llmfit-core = { git = "https://github.com/AlexsJones/llmfit", rev = "f216779" }
 xcap = "0.3"
 nvml-wrapper = "0.12.1"
 zstd = "0.13.3"
