@@ -67,8 +67,15 @@ impl HarnessReport {
             0.0
         };
 
-        // Latency stats
-        let mut latencies: Vec<u64> = results.iter().map(|r| r.latency_ms).collect();
+        // Latency stats — over SUCCESSFUL requests only. A failed request's
+        // latency (an immediate connection error or a timeout) is not a
+        // meaningful sample of server response time and would skew the
+        // percentiles and min/max.
+        let mut latencies: Vec<u64> = results
+            .iter()
+            .filter(|r| r.success)
+            .map(|r| r.latency_ms)
+            .collect();
         latencies.sort_unstable();
 
         let latency_p50_ms = percentile(&latencies, 50);
@@ -277,6 +284,30 @@ mod tests {
         assert!(md.contains("Benchmark Report"));
         assert!(md.contains("t1"));
         assert!(md.contains("PASS"));
+    }
+
+    #[test]
+    fn percentiles_exclude_failed_requests() {
+        let config = HarnessConfig::default();
+        // Two fast successes and one FAILED request with a huge latency.
+        let results = vec![
+            make_result("ok1", true, 100, 10),
+            make_result("ok2", true, 120, 10),
+            make_result("boom", false, 100_000, 0),
+        ];
+        let report = HarnessReport::from_results(&config, results, 1.0);
+        // The 100_000ms failure must NOT pollute the latency stats.
+        assert_eq!(report.latency_min_ms, 100);
+        assert!(
+            report.latency_max_ms <= 120,
+            "max must be a success latency, got {}",
+            report.latency_max_ms
+        );
+        assert!(
+            report.latency_p99_ms <= 120,
+            "p99 must exclude the failed request, got {}",
+            report.latency_p99_ms
+        );
     }
 
     #[test]

@@ -226,8 +226,23 @@ async fn execute_task(
         .unwrap_or("")
         .to_string();
 
-    let prompt_tokens = parsed["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
-    let completion_tokens = parsed["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+    // Token accounting. If a successful response carries no usage block, do not
+    // silently count it as zero — warn, because it makes throughput (tok/s)
+    // undercount this request.
+    let usage = &parsed["usage"];
+    if usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .is_none()
+    {
+        warn!(
+            task_id = %task.id,
+            stream_id,
+            "response has no usage.completion_tokens; throughput will undercount this request"
+        );
+    }
+    let prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+    let completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
