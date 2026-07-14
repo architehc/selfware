@@ -25,6 +25,7 @@ pub mod prompt_profiles;
 pub mod provenance;
 pub mod resources;
 pub mod safety;
+pub mod trust;
 pub mod types;
 pub mod unpack;
 mod validation;

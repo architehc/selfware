@@ -109,7 +109,8 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 use std::path::PathBuf;
 
 use super::api_key::{
-    endpoint_has_userinfo, is_insecure_remote_endpoint, load_api_key_from_keyring, ApiKeySource,
+    endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint,
+    load_api_key_from_keyring, ApiKeySource,
 };
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
@@ -383,6 +384,32 @@ impl Config {
                      Use https:// or a local endpoint (localhost / 127.0.0.1).",
                     config.endpoint
                 );
+            }
+        }
+
+        // Credential-origin gate: refuse to send a GLOBALLY-exported credential
+        // (SELFWARE_API_KEY) to a REMOTE endpoint that an untrusted, checkout-
+        // local `selfware.toml` selected. Local endpoints are exempt (no login
+        // for local models). Explicit --config / home-config endpoints are not
+        // "selfware.toml" and so are unaffected. Trust a repo by adding its
+        // config's canonical path to ~/.selfware/trusted_repos.
+        if config.api_key.is_some()
+            && matches!(api_key_source, ApiKeySource::EnvVar)
+            && !is_local_endpoint(&config.endpoint)
+        {
+            if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
+                if p.as_path() == std::path::Path::new("selfware.toml")
+                    && !super::trust::is_config_trusted(p)
+                {
+                    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                    bail!(
+                        "Refusing to send the global SELFWARE_API_KEY to endpoint '{}' selected by \
+                         the project's selfware.toml: this repository is not trusted. If you trust \
+                         it, add this path to ~/.selfware/trusted_repos:\n  {}",
+                        config.endpoint,
+                        canon.display()
+                    );
+                }
             }
         }
 
