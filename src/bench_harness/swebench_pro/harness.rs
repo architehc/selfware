@@ -246,53 +246,6 @@ fn probe_endpoint(port: u16) -> bool {
         .unwrap_or(false)
 }
 
-/// Detect the backend engine by querying `/v1/models` and inspecting headers
-/// plus body content.  Returns a lower-case label like `"llama.cpp"`,
-/// `"sglang"`, `"vllm"`, or `"unknown"`.
-pub fn detect_backend(port: u16) -> Result<String> {
-    let url = format!("http://127.0.0.1:{}/v1/models", port);
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .context("building backend detection client")?;
-    let response = client
-        .get(&url)
-        .send()
-        .with_context(|| format!("backend detection request failed for {}", url))?;
-
-    let server_header = response
-        .headers()
-        .get("server")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
-
-    // Header hints
-    if server_header.contains("llama.cpp") || server_header.contains("llamacpp") {
-        return Ok("llama.cpp".into());
-    }
-    if server_header.contains("sglang") {
-        return Ok("sglang".into());
-    }
-    if server_header.contains("vllm") {
-        return Ok("vllm".into());
-    }
-
-    // Body hints
-    let body = response.text().unwrap_or_default().to_lowercase();
-    if body.contains("llama.cpp") || body.contains("llamacpp") {
-        return Ok("llama.cpp".into());
-    }
-    if body.contains("sglang") {
-        return Ok("sglang".into());
-    }
-    if body.contains("vllm") {
-        return Ok("vllm".into());
-    }
-
-    Ok("unknown".into())
-}
-
 /// Parse the final JSON object from stdout text.
 ///
 /// The agent may emit intermediate progress lines (in stream-json mode) or
@@ -763,13 +716,6 @@ mod tests {
         let p = resolve_llama_binary();
         std::env::remove_var("LLAMA_SERVER_BIN");
         assert_eq!(p, PathBuf::from("/sentinel/llama-server-test"));
-    }
-
-    #[test]
-    fn detect_backend_returns_unknown_for_unresponsive_port() {
-        // Use a port that is almost certainly closed.
-        let result = detect_backend(59999);
-        assert!(result.is_err() || result.unwrap() == "unknown");
     }
 
     #[test]
