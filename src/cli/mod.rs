@@ -2609,6 +2609,7 @@ async fn handle_command(
                         timeout_secs: 120,
                         output_dir: "bench_results/cli_bench".into(),
                         extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                        api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
                         ..Default::default()
                     };
 
@@ -2677,6 +2678,7 @@ async fn handle_command(
                         timeout_secs: 120,
                         output_dir: "bench_results/cli_bench".into(),
                         extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                        api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
                         ..Default::default()
                     };
 

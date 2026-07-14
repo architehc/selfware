@@ -155,7 +155,11 @@ async fn execute_task(
             };
         }
         attempt += 1;
-        match client.post(&url).json(&body).send().await {
+        let mut request = client.post(&url).json(&body);
+        if let Some(key) = config.api_key.as_deref() {
+            request = request.bearer_auth(key);
+        }
+        match request.send().await {
             Ok(resp) => {
                 let status = resp.status();
                 let body_text = resp.text().await.unwrap_or_default();

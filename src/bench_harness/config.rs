@@ -29,6 +29,10 @@ pub struct HarnessConfig {
     /// Extra body parameters for the API request (e.g., chat_template_kwargs).
     #[serde(default)]
     pub extra_body: serde_json::Value,
+    /// Optional API key. When set, requests send `Authorization: Bearer <key>`.
+    /// Resolved from the main Config (keyring / SELFWARE_API_KEY / config file).
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Default for HarnessConfig {
@@ -46,6 +50,7 @@ impl Default for HarnessConfig {
             extra_body: serde_json::json!({
                 "chat_template_kwargs": {"enable_thinking": false}
             }),
+            api_key: None,
         }
     }
 }
@@ -146,6 +151,18 @@ mod tests {
             ..Default::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn api_key_defaults_none_and_round_trips() {
+        assert!(HarnessConfig::default().api_key.is_none());
+        let cfg = HarnessConfig {
+            api_key: Some("secret".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: HarnessConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.api_key.as_deref(), Some("secret"));
     }
 
     #[test]
