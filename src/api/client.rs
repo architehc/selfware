@@ -132,6 +132,23 @@ impl ApiClient {
             .build()
             .context("Failed to build streaming HTTP client")?;
 
+        // Request-boundary credential enforcement: never build a client that
+        // would send the API key to an endpoint that leaks it — plaintext HTTP
+        // to a remote host, or a URL embedding userinfo (user:pass@host). This
+        // covers programmatic clients, recovery endpoint switches, and profile
+        // endpoints that never went through Config::load's checks.
+        if config.api_key.is_some()
+            && (crate::config::api_key::endpoint_has_userinfo(&config.endpoint)
+                || crate::config::api_key::is_insecure_remote_endpoint(&config.endpoint))
+        {
+            anyhow::bail!(
+                "Refusing to build an API client: endpoint '{}' would receive the API key over \
+                 plaintext HTTP to a remote host or via an embedded-credential URL. Use https:// \
+                 or a local endpoint (localhost / 127.0.0.1).",
+                config.endpoint
+            );
+        }
+
         if config.endpoint.starts_with("http://")
             && !crate::config::is_local_endpoint(&config.endpoint)
         {

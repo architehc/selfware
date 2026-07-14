@@ -2586,6 +2586,37 @@ fn test_api_client_http_127_no_warning() {
     assert!(client.is_ok());
 }
 
+#[test]
+fn client_refuses_key_over_plaintext_remote() {
+    // A remote http endpoint WITH a key must be refused at the request boundary.
+    let config = crate::config::Config {
+        endpoint: "http://api.example.com/v1".to_string(),
+        api_key: Some(crate::config::model::RedactedString::new("secret")),
+        ..Default::default()
+    };
+    assert!(ApiClient::new(&config).is_err());
+}
+
+#[test]
+fn client_allows_key_over_https_and_local_http() {
+    // https remote WITH key -> Ok
+    let https_config = crate::config::Config {
+        endpoint: "https://api.example.com/v1".to_string(),
+        api_key: Some(crate::config::model::RedactedString::new("secret")),
+        ..Default::default()
+    };
+    assert!(ApiClient::new(&https_config).is_ok());
+
+    // local http WITH key -> Ok (no login for local models is fine; local
+    // stays on machine)
+    let local_config = crate::config::Config {
+        endpoint: "http://127.0.0.1:8000/v1".to_string(),
+        api_key: Some(crate::config::model::RedactedString::new("secret")),
+        ..Default::default()
+    };
+    assert!(ApiClient::new(&local_config).is_ok());
+}
+
 // --- canonicalize_message_order tests ---
 
 #[test]
