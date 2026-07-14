@@ -481,7 +481,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         };
         let concurrency = effective_concurrency.max(1) as usize;
 
-        LlamaServer::stop_existing();
+        LlamaServer::stop_existing(opts.llama_opts.port);
         let server = match LlamaServer::boot(&spec, &quant_llama_opts) {
             Ok(s) => s,
             Err(e) => {
@@ -565,7 +565,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         drop(server);
     }
 
-    LlamaServer::stop_existing();
+    LlamaServer::stop_existing(opts.llama_opts.port);
 
     // Always collate patches even if some quants failed.
     write_patches_json(&opts, &all_runs)?;

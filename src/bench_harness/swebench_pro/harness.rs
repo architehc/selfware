@@ -131,24 +131,29 @@ pub struct LlamaServer {
 }
 
 impl LlamaServer {
-    /// Best-effort kill of any existing `llama-server` owned by the current
-    /// user and a short pause to let the kernel reclaim the GPU.  Mirrors
-    /// `stop_llama_server()` in run.py but avoids killing other users' servers.
-    pub fn stop_existing() {
-        let uid = Command::new("id")
-            .args(["-u"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-
-        if !uid.is_empty() {
-            let _ = Command::new("pkill")
-                .args(["-u", &uid, "-f", "llama-server"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+    /// Best-effort kill of a stale `llama-server` bound to `port`.
+    ///
+    /// Scoped to the harness's own port: it inspects each running process and
+    /// kills only `llama-server` instances whose command line targets
+    /// `--port <port>` as adjacent tokens. The previous implementation ran
+    /// `pkill -f llama-server`, which killed every llama-server the user was
+    /// running — including unrelated local servers on other ports.
+    pub fn stop_existing(port: u16) {
+        use sysinfo::{ProcessesToUpdate, System};
+        let mut sys = System::new();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
+        for proc_ in sys.processes().values() {
+            if !proc_.name().to_string_lossy().contains("llama-server") {
+                continue;
+            }
+            let cmd: Vec<String> = proc_
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into_owned())
+                .collect();
+            if cmd_targets_port(&cmd, port) {
+                proc_.kill();
+            }
         }
         std::thread::sleep(Duration::from_secs(2));
     }
@@ -217,6 +222,14 @@ impl Drop for LlamaServer {
             let _ = child.wait();
         }
     }
+}
+
+/// Whether a process command line targets `--port <port>` as ADJACENT tokens.
+/// Matching the exact token pair avoids the substring hazard where port 80
+/// would otherwise match `--port 8000`.
+fn cmd_targets_port(cmd: &[String], port: u16) -> bool {
+    let p = port.to_string();
+    cmd.windows(2).any(|w| w[0] == "--port" && w[1] == p)
 }
 
 fn probe_endpoint(port: u16) -> bool {
@@ -716,6 +729,25 @@ mod tests {
             "SWE-bench Pro prompts expect XML tool calls, so native FC must be disabled"
         );
         assert!(content.contains("read_loop_policy = \"force_mutation\""));
+    }
+
+    #[test]
+    fn cmd_targets_port_matches_exact_token() {
+        let cmd: Vec<String> = ["llama-server", "--port", "8000", "--ctx", "4096"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(cmd_targets_port(&cmd, 8000));
+        // a prefix/substring of the real port must NOT match
+        assert!(!cmd_targets_port(&cmd, 80));
+        assert!(!cmd_targets_port(&cmd, 800));
+        assert!(!cmd_targets_port(&cmd, 9000));
+        // no --port token at all
+        let cmd2: Vec<String> = ["llama-server", "--ctx", "4096"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(!cmd_targets_port(&cmd2, 8000));
     }
 
     #[test]
