@@ -156,14 +156,12 @@ checkpoint_interval_tools = 5
 auto_recovery = true
 max_recovery_attempts = 3
 
-[extra_body]
-{extra_body}
-
 [retry]
 max_retries = 3
 base_delay_ms = 2000
 max_delay_ms = 30000
-"#,
+
+{extra_body}"#,
             endpoint = self.endpoint,
             model = self.model,
             max_tokens = self.max_tokens,
@@ -172,8 +170,30 @@ max_delay_ms = 30000
             max_iterations = self.max_iterations,
             step_timeout = self.timeout_per_project_secs,
             require_verification = self.require_verification,
-            extra_body = serde_json::to_string_pretty(&self.extra_body).unwrap_or_default(),
+            extra_body = self.extra_body_toml_section(),
         )
+    }
+
+    /// Serialize `extra_body` as a valid TOML `[extra_body]` section.
+    ///
+    /// The previous implementation dumped serde_json's pretty-printed JSON
+    /// under a hand-written `[extra_body]` header, which is NOT valid TOML — so
+    /// every spawned child died at config parse and long-test was broken out of
+    /// the box. Serialize through the `toml` crate instead (emitted last so its
+    /// nested sub-tables cannot bleed into a following section). Returns an
+    /// empty string when there is nothing to emit.
+    fn extra_body_toml_section(&self) -> String {
+        let is_empty = self
+            .extra_body
+            .as_object()
+            .map(|o| o.is_empty())
+            .unwrap_or(true);
+        if is_empty {
+            return String::new();
+        }
+        let mut wrapper = serde_json::Map::new();
+        wrapper.insert("extra_body".to_string(), self.extra_body.clone());
+        toml::to_string(&serde_json::Value::Object(wrapper)).unwrap_or_default()
     }
 }
 
@@ -195,6 +215,50 @@ mod tests {
         let cfg = LongRunningConfig::new("http://example.com/v1", "test-model");
         assert_eq!(cfg.endpoint, "http://example.com/v1");
         assert_eq!(cfg.model, "test-model");
+    }
+
+    #[test]
+    fn to_selfware_toml_is_valid_and_round_trips_extra_body() {
+        // Regression: the default extra_body was emitted as pretty JSON under a
+        // [extra_body] header — invalid TOML, so every spawned child died at
+        // config parse and long-test was broken out of the box.
+        let cfg = LongRunningConfig::default();
+        let toml_str = cfg.to_selfware_toml();
+
+        // Must now parse as valid TOML.
+        let parsed: toml::Value = toml::from_str(&toml_str)
+            .unwrap_or_else(|e| panic!("generated config is not valid TOML: {e}\n---\n{toml_str}"));
+
+        // extra_body round-trips as a nested table.
+        let enable_thinking = parsed
+            .get("extra_body")
+            .and_then(|v| v.get("chat_template_kwargs"))
+            .and_then(|v| v.get("enable_thinking"))
+            .and_then(|v| v.as_bool());
+        assert_eq!(
+            enable_thinking,
+            Some(false),
+            "extra_body nesting lost:\n{toml_str}"
+        );
+
+        // And selfware's own config loader accepts the generated config.
+        let loaded: std::result::Result<crate::config::Config, _> = toml::from_str(&toml_str);
+        assert!(
+            loaded.is_ok(),
+            "selfware rejected the generated config: {:?}\n---\n{toml_str}",
+            loaded.err()
+        );
+    }
+
+    #[test]
+    fn to_selfware_toml_handles_empty_extra_body() {
+        let cfg = LongRunningConfig {
+            extra_body: serde_json::json!({}),
+            ..Default::default()
+        };
+        let toml_str = cfg.to_selfware_toml();
+        let parsed: std::result::Result<toml::Value, _> = toml::from_str(&toml_str);
+        assert!(parsed.is_ok(), "empty extra_body must still be valid TOML");
     }
 
     #[test]
