@@ -651,7 +651,7 @@ impl Agent {
     /// runs) **and** after a billable step completes, so a final LLM call that
     /// pushes cumulative usage past a cap stops the run instead of letting the
     /// over-budget response report success.
-    async fn enforce_hard_budgets(&mut self, task_description: &str) -> Result<()> {
+    pub(super) async fn enforce_hard_budgets(&mut self, task_description: &str) -> Result<()> {
         if let Some(max_budget) = self.config.agent.max_budget_tokens {
             let total = self.cumulative_token_usage.total;
             if total >= max_budget {

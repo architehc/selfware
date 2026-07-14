@@ -1954,6 +1954,19 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
+        // Central hard-budget enforcement: the assistant response, planning, or
+        // synthesis call that produced these tool calls was billable. Enforce
+        // the token/cost/wall caps HERE — before ANY tool (model-requested,
+        // auto-write, fallback, or scaffold) runs — so an over-budget turn
+        // cannot mutate the project between the outer per-iteration checks.
+        // (Under the default config there is no cap, so this is a no-op.)
+        let task_desc = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.clone())
+            .unwrap_or_default();
+        self.enforce_hard_budgets(&task_desc).await?;
+
         let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls).await? else {
             return Ok(());
         };
@@ -5860,5 +5873,48 @@ mod tests {
             "shell_exec",
             &json!({"command": "git status"})
         ));
+    }
+
+    #[tokio::test]
+    async fn over_budget_batch_does_not_execute_tools() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.max_budget_tokens = Some(1);
+        let mut agent = Agent::new(config).await.unwrap();
+        // Drive cumulative usage over the 1-token cap.
+        agent.cumulative_token_usage.total = 100;
+
+        // A file_write whose target must NOT be created once we are over budget.
+        let marker =
+            std::env::temp_dir().join(format!("sw_budget_guard_{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+
+        let result = agent
+            .execute_tool_batch(vec![(
+                "file_write".to_string(),
+                serde_json::json!({"path": marker.to_string_lossy(), "content": "x"}).to_string(),
+                None,
+            )])
+            .await;
+
+        assert!(
+            result.is_err(),
+            "over-budget batch must bail before executing tools"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .to_lowercase()
+                .contains("budget"),
+            "error should mention the budget"
+        );
+        assert!(
+            !marker.exists(),
+            "over-budget batch must NOT run the file_write"
+        );
+        let _ = std::fs::remove_file(&marker);
+
+        server.stop().await;
     }
 }
