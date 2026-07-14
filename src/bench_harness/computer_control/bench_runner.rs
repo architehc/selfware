@@ -303,8 +303,13 @@ impl BrowserBenchRunner {
                 }
             }
 
-            // Read any saved HTML content from screenshots
+            // Read any saved TEXT content from screenshots. Real screenshots are
+            // now PNG images (browser backend); they are not text and must not be
+            // fed to the text-based analyzer.
             for ss in &trace.screenshots {
+                if is_image_path(&ss.path) {
+                    continue;
+                }
                 if ss.path.exists() {
                     if let Ok(content) = std::fs::read_to_string(&ss.path) {
                         // Strip HTML tags and truncate to keep prompts small
@@ -413,6 +418,18 @@ fn strip_html_tags(html: &str) -> String {
     result.trim().to_string()
 }
 
+/// Whether a path looks like a binary image (screenshot) that must not be read
+/// as text for the text-based LLM analysis.
+fn is_image_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +464,16 @@ mod tests {
             BrowserBenchConfig::default().backend,
             ExecutionBackend::Browser
         );
+    }
+
+    #[test]
+    fn is_image_path_detects_screenshots() {
+        use std::path::Path;
+        assert!(is_image_path(Path::new("/x/shot.png")));
+        assert!(is_image_path(Path::new("/x/shot.PNG")));
+        assert!(is_image_path(Path::new("a.jpeg")));
+        assert!(!is_image_path(Path::new("/x/page.html")));
+        assert!(!is_image_path(Path::new("/x/data.json")));
+        assert!(!is_image_path(Path::new("/x/noext")));
     }
 }

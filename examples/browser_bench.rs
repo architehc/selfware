@@ -74,5 +74,16 @@ async fn main() -> anyhow::Result<()> {
     // Print markdown
     eprintln!("\n{}", report.to_markdown());
 
+    // Exit non-zero when any web task failed, so CI and scripts can detect a
+    // broken run instead of a false success.
+    if report.tasks_passed < report.tasks_total {
+        eprintln!(
+            "\n{} of {} task(s) failed.",
+            report.tasks_total - report.tasks_passed,
+            report.tasks_total
+        );
+        std::process::exit(1);
+    }
+
     Ok(())
 }
