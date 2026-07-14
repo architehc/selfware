@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::errors::ApiError;
@@ -476,7 +476,28 @@ impl ApiClient {
         let mut delay_ms = self.retry_config.initial_delay_ms;
         let max_attempts = self.retry_config.max_retries + 1;
 
+        // One absolute deadline for the WHOLE send (all retries + body
+        // streaming), so retries can't each receive a fresh full-length timeout
+        // and the streamed body can't run forever. Bounded by the wall-clock
+        // budget when configured.
+        let deadline = self
+            .config
+            .agent
+            .max_wall_secs
+            .map(|w| Instant::now() + Duration::from_secs(w.max(1)));
+
         for attempt in 1..=max_attempts {
+            // Stop rather than begin another full-length attempt once the
+            // wall-clock deadline has passed.
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    return Err(ApiError::Network(format!(
+                        "Streaming request exceeded max_wall_secs deadline after {} attempt(s)",
+                        attempt - 1
+                    ))
+                    .into());
+                }
+            }
             let mut request = self
                 .stream_client
                 .post(&url)
@@ -494,8 +515,11 @@ impl ApiClient {
             // unaffected.  The body is then streamed as before (per-chunk
             // timeout only — NO total timeout on the body).
             let mut hdr_timeout_secs = self.config.agent.step_timeout_secs.max(120);
-            if let Some(wall) = self.config.agent.max_wall_secs {
-                hdr_timeout_secs = hdr_timeout_secs.min(wall.max(1));
+            if let Some(d) = deadline {
+                // Cap by the REMAINING wall budget (<= the full limit), so the
+                // sum across retries stays within max_wall_secs.
+                let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
+                hdr_timeout_secs = hdr_timeout_secs.min(remaining);
             }
             // Race the header wait against a shutdown request so a single Ctrl-C
             // interrupts a stalled provider connection instead of blocking for
@@ -545,6 +569,7 @@ impl ApiClient {
                             return Ok(StreamingResponse::new(
                                 response,
                                 Duration::from_secs(stream_chunk_timeout_secs),
+                                deadline,
                             ));
                         }
 
@@ -647,7 +672,29 @@ impl ApiClient {
         let mut delay_ms = self.retry_config.initial_delay_ms;
         let mut honored_retry_after = false;
 
+        // Absolute deadline for the whole retry sequence, bounded by the
+        // wall-clock budget when configured — retries must not each receive a
+        // fresh full-length response timeout.
+        let deadline = self
+            .config
+            .agent
+            .max_wall_secs
+            .map(|w| Instant::now() + Duration::from_secs(w.max(1)));
+
         for attempt in 0..=self.retry_config.max_retries {
+            // Stop rather than begin another full-length attempt once the
+            // wall-clock deadline has passed.
+            if let Some(d) = deadline {
+                if Instant::now() >= d {
+                    return Err(last_error.unwrap_or_else(|| {
+                        ApiError::Network(format!(
+                            "Non-streaming request exceeded max_wall_secs deadline after {} attempt(s)",
+                            attempt
+                        ))
+                        .into()
+                    }));
+                }
+            }
             if attempt > 0 {
                 warn!(
                     "Retry attempt {}/{} after {}ms delay",
@@ -692,8 +739,10 @@ impl ApiClient {
             // finish while still bounding a truly-dead connection. Raced against
             // shutdown so Ctrl-C / SIGTERM interrupts promptly.
             let mut response_timeout_secs = self.config.agent.step_timeout_secs.max(600);
-            if let Some(wall) = self.config.agent.max_wall_secs {
-                response_timeout_secs = response_timeout_secs.min(wall.max(1));
+            if let Some(d) = deadline {
+                // Cap by the REMAINING wall budget (<= the full limit).
+                let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
+                response_timeout_secs = response_timeout_secs.min(remaining);
             }
             let send_result = tokio::select! {
                 biased;

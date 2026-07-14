@@ -839,7 +839,7 @@ async fn test_stream_timeout_flushes_buffered_tool_calls() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_millis(50));
+    let stream = StreamingResponse::new(response, Duration::from_millis(50), None);
     let mut rx = stream.into_channel().await;
 
     let first = rx.recv().await.unwrap().unwrap();
@@ -854,6 +854,59 @@ async fn test_stream_timeout_flushes_buffered_tool_calls() {
         .unwrap_err()
         .to_string()
         .contains("API Request timed out"));
+
+    let _ = server.await;
+}
+
+// ============================================
+// ============================================
+
+/// The absolute deadline must bound the WHOLE body stream, independent of the
+/// per-chunk timeout. Here the chunk timeout is long (10s) but the deadline is
+/// short (150ms) and the server sends headers then stalls forever. Without the
+/// deadline the stream would block for 10s on the first chunk; with it, the
+/// stream must yield a Timeout promptly.
+#[tokio::test]
+async fn test_stream_deadline_bounds_stalled_body() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_http_request(&mut socket).await;
+        // Send only the response headers, then stall with the connection open —
+        // no SSE body ever arrives.
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        socket.write_all(response.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    });
+
+    let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+    // Long per-chunk timeout, short absolute deadline: the deadline must win.
+    let deadline = Some(std::time::Instant::now() + Duration::from_millis(150));
+    let stream = StreamingResponse::new(response, Duration::from_secs(10), deadline);
+    let mut rx = stream.into_channel().await;
+
+    let started = std::time::Instant::now();
+    let msg = rx.recv().await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert!(
+        msg.is_err(),
+        "stream should end with an error at the deadline"
+    );
+    assert!(msg
+        .unwrap_err()
+        .to_string()
+        .contains("API Request timed out"));
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "deadline (150ms) must bound the stall, not the 10s chunk timeout — took {elapsed:?}"
+    );
 
     let _ = server.await;
 }
@@ -1782,7 +1835,7 @@ async fn test_streaming_response_collect() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_secs(5));
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
     let result = stream.collect().await;
     assert!(result.is_ok());
     let chat_resp = result.unwrap();
@@ -1826,7 +1879,7 @@ async fn test_streaming_response_collect_with_reasoning() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_secs(5));
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
     let result = stream.collect().await;
     assert!(result.is_ok());
     let chat_resp = result.unwrap();
@@ -1871,7 +1924,7 @@ async fn test_streaming_response_collect_with_tool_calls() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_secs(5));
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
     let result = stream.collect().await;
     assert!(result.is_ok());
     let chat_resp = result.unwrap();
@@ -1906,7 +1959,7 @@ async fn test_streaming_response_collect_empty_stream() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_secs(5));
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
     let result = stream.collect().await;
     assert!(result.is_ok());
     let chat_resp = result.unwrap();
@@ -1933,7 +1986,7 @@ async fn test_streaming_response_debug_format() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_secs(30));
+    let stream = StreamingResponse::new(response, Duration::from_secs(30), None);
     let debug = format!("{:?}", stream);
     assert!(debug.contains("StreamingResponse"));
     assert!(debug.contains("status"));
@@ -1965,7 +2018,7 @@ async fn test_streaming_trailing_buffer_processing() {
     });
 
     let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
-    let stream = StreamingResponse::new(response, Duration::from_secs(5));
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
     let mut rx = stream.into_channel().await;
 
     let mut content = String::new();

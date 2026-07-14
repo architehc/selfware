@@ -3,7 +3,7 @@
 use anyhow::Result;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Semaphore};
 use tracing::warn;
 
@@ -17,6 +17,11 @@ static STREAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
 pub struct StreamingResponse {
     response: reqwest::Response,
     chunk_timeout: Duration,
+    /// Absolute deadline for the ENTIRE body stream. Once it passes, the stream
+    /// flushes buffered tool calls, yields a `Timeout` error, and ends — so a
+    /// server that keeps emitting chunks just under `chunk_timeout` cannot
+    /// stream forever. `None` means no wall-clock bound (per-chunk only).
+    deadline: Option<Instant>,
 }
 
 impl std::fmt::Debug for StreamingResponse {
@@ -24,15 +29,21 @@ impl std::fmt::Debug for StreamingResponse {
         f.debug_struct("StreamingResponse")
             .field("status", &self.response.status())
             .field("chunk_timeout_secs", &self.chunk_timeout.as_secs())
+            .field("has_deadline", &self.deadline.is_some())
             .finish()
     }
 }
 
 impl StreamingResponse {
-    pub(crate) fn new(response: reqwest::Response, chunk_timeout: Duration) -> Self {
+    pub(crate) fn new(
+        response: reqwest::Response,
+        chunk_timeout: Duration,
+        deadline: Option<Instant>,
+    ) -> Self {
         Self {
             response,
             chunk_timeout,
+            deadline,
         }
     }
 
@@ -67,9 +78,38 @@ impl StreamingResponse {
             let mut pending_utf8 = Vec::new();
             let mut accumulator = ToolCallAccumulator::new();
             let chunk_timeout = self.chunk_timeout;
+            let deadline = self.deadline;
 
             loop {
-                let chunk_opt = match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                // Bound each chunk wait by BOTH the per-chunk timeout and the
+                // absolute deadline. Once the deadline passes, stop — otherwise
+                // a stream that keeps emitting chunks just under chunk_timeout
+                // runs unbounded past the wall-clock budget.
+                let effective_timeout = match deadline {
+                    Some(d) => match d.checked_duration_since(Instant::now()) {
+                        Some(remaining) if !remaining.is_zero() => remaining.min(chunk_timeout),
+                        _ => {
+                            // Deadline reached: flush buffered tool calls, then
+                            // end the stream with a timeout error.
+                            for call in accumulator.flush() {
+                                if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                                    warn!(
+                                        "Streaming receiver dropped while flushing tool call at deadline"
+                                    );
+                                    return;
+                                }
+                            }
+                            if tx.send(Err(ApiError::Timeout.into())).await.is_err() {
+                                warn!(
+                                    "Streaming receiver dropped while sending deadline timeout error"
+                                );
+                            }
+                            return;
+                        }
+                    },
+                    None => chunk_timeout,
+                };
+                let chunk_opt = match tokio::time::timeout(effective_timeout, stream.next()).await {
                     Ok(Some(result)) => Some(result),
                     Ok(None) => None, // Stream ended
                     Err(_elapsed) => {
