@@ -3286,6 +3286,12 @@ max_recovery_attempts = 3
                              running and was left unchanged.",
                             id, pid
                         ),
+                        AbortOutcome::SignalFailed(pid, err) => println!(
+                            "Could not abort run '{}': signalling the owning process \
+                             (pid {}) failed ({}). The run is still running and was \
+                             left unchanged.",
+                            id, pid, err
+                        ),
                     }
                 }
             }

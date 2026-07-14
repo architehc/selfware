@@ -41,20 +41,17 @@ impl RunRecord {
 }
 
 /// Returns true if a process with `pid` currently exists.
-#[cfg(unix)]
+///
+/// Cross-platform via `sysinfo` (already a dependency). The previous version
+/// probed liveness with `nix` on Unix and unconditionally returned `true` on
+/// every other platform — so on Windows a finished run was reported alive
+/// forever and never reclaimed (its status stuck at "Running").
 pub fn pid_alive(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    // Signal `None` (0) performs error checking without sending a signal.
-    kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
-/// Non-Unix fallback: no portable liveness probe without `nix` (which is a
-/// Unix-only dependency), so assume alive — the conservative choice (a stale
-/// PID at worst delays reclamation; it never signals the wrong process).
-#[cfg(not(unix))]
-pub fn pid_alive(_pid: u32) -> bool {
-    true
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let target = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+    sys.process(target).is_some()
 }
 
 /// Whether a status string is a terminal (final) run state. Terminal
@@ -66,26 +63,25 @@ pub fn is_terminal_status(status: &str) -> bool {
 /// Best-effort check that `pid` still belongs to a *selfware* process, to
 /// guard against PID reuse: after the original owner exits, the OS may
 /// reassign its PID to an unrelated process, and we must never signal that.
-/// On Linux we read `/proc/<pid>/comm` (and fall back to the full cmdline).
-/// On other platforms we cannot verify and assume it is still ours.
+///
+/// Cross-platform via `sysinfo`. The previous version only inspected `/proc`
+/// on Linux and returned `true` unconditionally on macOS/Windows — so on those
+/// platforms a REUSED pid was assumed to still be selfware and could be
+/// SIGTERM'd even though it now belonged to an unrelated program.
 pub fn pid_is_selfware(pid: u32) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // comm is the (<=15 char) executable name; "selfware" fits.
-        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) {
-            if comm.trim().contains("selfware") {
-                return true;
-            }
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let target = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[target]), true);
+    match sys.process(target) {
+        Some(proc_) => {
+            proc_.name().to_string_lossy().contains("selfware")
+                || proc_
+                    .exe()
+                    .map(|e| e.to_string_lossy().contains("selfware"))
+                    .unwrap_or(false)
         }
-        if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-            return String::from_utf8_lossy(&cmdline).contains("selfware");
-        }
-        false
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = pid;
-        true
+        None => false,
     }
 }
 
@@ -104,6 +100,10 @@ pub enum AbortOutcome {
     /// signal it (non-Unix; `nix` is Unix-only). The run is NOT marked Aborted
     /// — it is still running — and the caller must report that honestly.
     SignalUnsupported(u32),
+    /// The owning process is alive and ours, but the abort signal itself failed
+    /// (e.g. EPERM — we lack permission to signal it). The run is NOT marked
+    /// Aborted; it is still running and the caller must report that honestly.
+    SignalFailed(u32, String),
 }
 
 /// A filesystem-backed registry of run records under a directory.
@@ -233,10 +233,19 @@ impl RunRegistry {
         let outcome = if pid_alive(rec.pid) && pid_is_selfware(rec.pid) {
             #[cfg(unix)]
             {
+                use nix::errno::Errno;
                 use nix::sys::signal::{kill, Signal};
                 use nix::unistd::Pid;
-                let _ = kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM);
-                AbortOutcome::Signalled(rec.pid)
+                match kill(Pid::from_raw(rec.pid as i32), Signal::SIGTERM) {
+                    Ok(()) => AbortOutcome::Signalled(rec.pid),
+                    // Raced: the process vanished between the liveness check and
+                    // the signal. Effectively dead → record it stale/aborted.
+                    Err(Errno::ESRCH) => AbortOutcome::WasStale,
+                    // e.g. EPERM: alive but we may not signal it. Do NOT mark
+                    // the run Aborted; report the failure honestly so the caller
+                    // knows it is still running.
+                    Err(e) => return Ok(AbortOutcome::SignalFailed(rec.pid, e.to_string())),
+                }
             }
             #[cfg(not(unix))]
             {
@@ -328,6 +337,19 @@ mod tests {
         let reg = RunRegistry::with_dir(dir.path().to_path_buf()).unwrap();
         reg.write(&rec("1-1", 1, "Completed", 100)).unwrap();
         assert_eq!(reg.abort("1-1", 200).unwrap(), AbortOutcome::AlreadyDone);
+    }
+
+    #[test]
+    fn pid_alive_detects_running_and_dead() {
+        // The cross-platform liveness probe (sysinfo) that replaced the old
+        // "always true on non-Unix" stub: the test process itself is alive,
+        // and a pid past pid_max is not. On the old non-Unix path both would
+        // have (wrongly) reported alive.
+        assert!(
+            pid_alive(std::process::id()),
+            "current process must be alive"
+        );
+        assert!(!pid_alive(DEAD_PID), "a pid past pid_max must be dead");
     }
 
     #[test]
