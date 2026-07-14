@@ -179,6 +179,7 @@ async fn execute_task(
                     completion_tokens: 0,
                     latency_ms: start.elapsed().as_millis() as u64,
                     eval: None,
+                    transport_succeeded: false,
                     error: Some(format!("Request error: {e}")),
                 };
             }
@@ -195,6 +196,7 @@ async fn execute_task(
             completion_tokens: 0,
             latency_ms: start.elapsed().as_millis() as u64,
             eval: None,
+            transport_succeeded: false,
             error: Some(format!("HTTP {status}: {body_text}")),
         };
     }
@@ -212,6 +214,7 @@ async fn execute_task(
                 completion_tokens: 0,
                 latency_ms: start.elapsed().as_millis() as u64,
                 eval: None,
+                transport_succeeded: false,
                 error: Some(format!("JSON parse error: {e}")),
             };
         }
@@ -262,6 +265,7 @@ async fn execute_task(
         task_id: task.id.clone(),
         stream_id,
         success,
+        transport_succeeded: true,
         response: content,
         prompt_tokens,
         completion_tokens,

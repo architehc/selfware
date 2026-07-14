@@ -67,13 +67,15 @@ impl HarnessReport {
             0.0
         };
 
-        // Latency stats — over SUCCESSFUL requests only. A failed request's
-        // latency (an immediate connection error or a timeout) is not a
-        // meaningful sample of server response time and would skew the
-        // percentiles and min/max.
+        // Latency stats — over TRANSPORT-successful requests only (the request
+        // completed and returned a well-formed response). This is independent
+        // of evaluation: a timely but wrong answer is still a valid latency
+        // sample, whereas a connection error / HTTP error / parse failure is
+        // not. Filtering on eval-success instead would report 0 latency when
+        // every answer happens to be wrong.
         let mut latencies: Vec<u64> = results
             .iter()
-            .filter(|r| r.success)
+            .filter(|r| r.transport_succeeded)
             .map(|r| r.latency_ms)
             .collect();
         latencies.sort_unstable();
@@ -244,6 +246,7 @@ mod tests {
             task_id: task_id.into(),
             stream_id: 0,
             success,
+            transport_succeeded: success,
             response: "test".into(),
             prompt_tokens: tokens,
             completion_tokens: tokens * 2,
@@ -308,6 +311,33 @@ mod tests {
             "p99 must exclude the failed request, got {}",
             report.latency_p99_ms
         );
+    }
+
+    #[test]
+    fn latency_counts_transport_success_even_when_eval_fails() {
+        let config = HarnessConfig::default();
+        // A timely response that transported fine but whose ANSWER was wrong.
+        let results = vec![StreamResult {
+            task_id: "t1".into(),
+            stream_id: 0,
+            success: false,            // eval failed (wrong answer)
+            transport_succeeded: true, // but the request/response was fine
+            response: "wrong".into(),
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            latency_ms: 150,
+            eval: Some(EvalResult {
+                score: 0.0,
+                passed: false,
+                details: vec![],
+            }),
+            error: None,
+        }];
+        let report = HarnessReport::from_results(&config, results, 1.0);
+        // The latency MUST be counted despite the failed evaluation.
+        assert_eq!(report.latency_p50_ms, 150);
+        assert_eq!(report.latency_max_ms, 150);
+        assert_eq!(report.latency_min_ms, 150);
     }
 
     #[test]

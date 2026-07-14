@@ -63,6 +63,10 @@ pub struct StreamResult {
     pub stream_id: usize,
     /// Whether the task completed successfully (no errors).
     pub success: bool,
+    /// Whether the HTTP request completed AND returned a well-formed, parseable
+    /// success response. Distinct from `success` (which is eval.passed): a
+    /// response can transport fine yet fail evaluation. Latency stats use this.
+    pub transport_succeeded: bool,
     /// Raw model response text.
     pub response: String,
     /// Tokens used (from usage field in API response).
