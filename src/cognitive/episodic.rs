@@ -862,9 +862,24 @@ impl EpisodicMemory {
 
         std::fs::create_dir_all(path)?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Owner-only: episodic memory holds task data.
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        }
+
         fn atomic_write(path: &std::path::Path, json: &str) -> Result<()> {
-            let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+            // Unique per write so concurrent saves in one process never collide.
+            static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_path = path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
             std::fs::write(&tmp_path, json)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+            }
             std::fs::rename(&tmp_path, path)?;
             Ok(())
         }

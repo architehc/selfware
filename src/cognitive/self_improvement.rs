@@ -1607,6 +1607,19 @@ impl SelfImprovementEngine {
     /// Load engine state from a JSON file
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
+
+        // Migrate legacy files written before at-rest hardening: tighten to
+        // owner-only on load so an existing world-readable learning file
+        // (mode 664) becomes 0600. Best-effort; ignore errors (e.g. not owner).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
         let snapshot: EngineSnapshot = serde_json::from_str(&content)?;
 
         Ok(Self {
@@ -1645,11 +1658,13 @@ fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         }
     }
 
-    // Temp file in the same directory as the target, keyed by pid to avoid
-    // collisions between concurrent processes.
+    // Unique per write: pid alone collides when two agents in the same
+    // process save concurrently.
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp_path = match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => path.with_extension(format!("{ext}.tmp.{}", std::process::id())),
-        None => path.with_extension(format!("tmp.{}", std::process::id())),
+        Some(ext) => path.with_extension(format!("{ext}.tmp.{}.{}", std::process::id(), seq)),
+        None => path.with_extension(format!("tmp.{}.{}", std::process::id(), seq)),
     };
 
     std::fs::write(&tmp_path, bytes)?;
@@ -2406,6 +2421,30 @@ mod tests {
         );
         // Round-trips.
         let _loaded = SelfImprovementEngine::load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn load_migrates_legacy_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("selfware_migrate_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("improvement_engine.json");
+        SelfImprovementEngine::new().save(&path).unwrap();
+        // Simulate a legacy world-readable file.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        // Loading must migrate it to owner-only.
+        let _ = SelfImprovementEngine::load(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "load must tighten a legacy 0644 learning file to 0600"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
