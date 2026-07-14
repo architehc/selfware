@@ -6,6 +6,7 @@
 //! project configs are listed one canonical path per line in
 //! `~/.selfware/trusted_repos`.
 
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 
 /// Path to the trusted-repos file (`~/.selfware/trusted_repos`).
@@ -39,6 +40,43 @@ fn is_config_trusted_in(trust_file: &Path, config_path: &Path) -> bool {
     })
 }
 
+/// Add `config_path` (canonicalized) to the default trusted-repos file.
+pub fn add_trusted_config(config_path: &Path) -> Result<()> {
+    let file =
+        trusted_repos_file().ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?;
+    add_trusted_config_to(&file, config_path)
+}
+
+/// Testable core: append the canonical `config_path` to `trust_file` (creating
+/// it 0600 / its parent 0700 on Unix). Idempotent — a path already trusted is a
+/// no-op.
+fn add_trusted_config_to(trust_file: &Path, config_path: &Path) -> Result<()> {
+    if is_config_trusted_in(trust_file, config_path) {
+        return Ok(());
+    }
+    if let Some(parent) = trust_file.parent() {
+        std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+    let mut existing = std::fs::read_to_string(trust_file).unwrap_or_default();
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        existing.push('\n');
+    }
+    existing.push_str(&canonical(config_path).to_string_lossy());
+    existing.push('\n');
+    std::fs::write(trust_file, existing)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(trust_file, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +98,29 @@ mod tests {
         let canon = std::fs::canonicalize(&cfg).unwrap();
         std::fs::write(&trust, format!("{}\n", canon.display())).unwrap();
         assert!(is_config_trusted_in(&trust, &cfg));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_makes_trusted_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("sw_trust_add_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = dir.join("selfware.toml");
+        std::fs::write(&cfg, "x").unwrap();
+        let trust = dir.join("trusted_repos");
+
+        assert!(!is_config_trusted_in(&trust, &cfg));
+        add_trusted_config_to(&trust, &cfg).unwrap();
+        assert!(is_config_trusted_in(&trust, &cfg));
+        // idempotent: a second add does not duplicate the line
+        add_trusted_config_to(&trust, &cfg).unwrap();
+        let n = std::fs::read_to_string(&trust)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count();
+        assert_eq!(n, 1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

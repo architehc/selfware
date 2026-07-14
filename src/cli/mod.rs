@@ -494,6 +494,25 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // `selfware trust` records repo trust and must run BEFORE Config::load so it
+    // is not blocked by the very credential-origin gate it manages.
+    if let Some(Commands::Trust { path }) = &cli.command {
+        let cfg_path = std::path::Path::new(path);
+        if !cfg_path.exists() {
+            anyhow::bail!(
+                "No config to trust at '{}'. Pass a path (`selfware trust <path>`) \
+                 or create ./selfware.toml first.",
+                path
+            );
+        }
+        let canon = std::fs::canonicalize(cfg_path).unwrap_or_else(|_| cfg_path.to_path_buf());
+        crate::config::trust::add_trusted_config(cfg_path)?;
+        if !cli.quiet {
+            println!("Trusted {}", canon.display());
+        }
+        return Ok(());
+    }
+
     let mut config = Config::load(config_path.as_deref())?;
 
     // ── Apply named configuration profile (if requested) ──
@@ -2900,6 +2919,8 @@ async fn handle_command(
                 );
             }
         }
+
+        Commands::Trust { .. } => unreachable!("Trust is handled before Config::load"),
 
         Commands::Doctor => {
             if !quiet {

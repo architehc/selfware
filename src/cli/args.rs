@@ -200,6 +200,15 @@ pub(crate) enum Commands {
     /// Diagnose the configured LLM backend and model setup
     LlmDoctor,
 
+    /// Trust the current repo's ./selfware.toml so its remote endpoint may
+    /// receive a globally-exported SELFWARE_API_KEY. Records the config's
+    /// canonical path in ~/.selfware/trusted_repos.
+    Trust {
+        /// Path to the config to trust (default: ./selfware.toml).
+        #[arg(default_value = "selfware.toml")]
+        path: String,
+    },
+
     /// Test local development workflow
     #[command(alias = "t")]
     Test {
