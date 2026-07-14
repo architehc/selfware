@@ -314,8 +314,8 @@ impl BrowserBenchRunner {
                     if let Ok(content) = std::fs::read_to_string(&ss.path) {
                         // Strip HTML tags and truncate to keep prompts small
                         let text = strip_html_tags(&content);
-                        let truncated = if text.len() > 3000 {
-                            format!("{}...[truncated]", &text[..3000])
+                        let truncated = if text.chars().count() > 3000 {
+                            format!("{}...[truncated]", truncate_chars(&text, 3000))
                         } else {
                             text
                         };
@@ -341,7 +341,7 @@ impl BrowserBenchRunner {
                  \nRespond with only valid JSON.",
                 trace.task_name,
                 trace.task_id,
-                &content_summary[..content_summary.len().min(6000)],
+                truncate_chars(&content_summary, 6000),
             );
 
             bench_tasks.push(BenchTask {
@@ -368,6 +368,16 @@ impl BrowserBenchRunner {
         }
 
         runner.run(bench_tasks).await
+    }
+}
+
+/// Truncate `s` to at most `max` CHARACTERS, returning a slice that ends on a
+/// char boundary. A byte-index slice like `&s[..3000]` panics when the boundary
+/// falls inside a multibyte UTF-8 character.
+fn truncate_chars(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
     }
 }
 
@@ -464,6 +474,21 @@ mod tests {
             BrowserBenchConfig::default().backend,
             ExecutionBackend::Browser
         );
+    }
+
+    #[test]
+    fn truncate_chars_is_utf8_safe() {
+        // Each 'é' is 2 bytes; truncating at 3000 chars must not panic.
+        let s = "é".repeat(5000);
+        let t = truncate_chars(&s, 3000);
+        assert_eq!(t.chars().count(), 3000);
+        // shorter-than-max returns the whole string
+        assert_eq!(truncate_chars("abc", 10), "abc");
+        // mixed widths: a=1, é=2, 漢=3, 🎉=4 bytes — a byte slice here would panic
+        let mixed = "aé漢🎉";
+        assert_eq!(truncate_chars(mixed, 2), "aé");
+        assert_eq!(truncate_chars(mixed, 3), "aé漢");
+        assert_eq!(truncate_chars(mixed, 99), mixed);
     }
 
     #[test]
