@@ -90,6 +90,16 @@ fn result_to_string(v: &Value) -> String {
     }
 }
 
+/// Interpret the `result` payload of a `visible` bridge action. The bridge
+/// returns either a bare boolean or an object like `{ "visible": true }`, so
+/// accept both rather than only a bare bool (which silently reads as false).
+fn result_is_visible(result: &Value) -> bool {
+    result
+        .as_bool()
+        .or_else(|| result.get("visible").and_then(|b| b.as_bool()))
+        .unwrap_or(false)
+}
+
 /// Truncate a string to approximately `max_len` characters, appending "...".
 fn truncate(s: &str, max_len: usize) -> String {
     if s.chars().count() > max_len {
@@ -155,16 +165,17 @@ impl BrowserTaskExecutor {
                 .and_then(|p| p.as_str())
                 .map(PathBuf::from);
 
+            // Bound this action by the time remaining in the task budget, so a
+            // single slow action cannot overrun the task timeout that is only
+            // checked between actions.
+            let remaining = timeout.saturating_sub(task_start.elapsed());
             let action_start = Instant::now();
-            let result = tool.execute(command).await;
-            let duration_ms = action_start.elapsed().as_millis() as u64;
-
-            // Interpret result honestly
-            let outcome = match result {
-                Err(e) => ActionOutcome::Failed {
+            let outcome = match tokio::time::timeout(remaining, tool.execute(command)).await {
+                Err(_elapsed) => ActionOutcome::Timeout,
+                Ok(Err(e)) => ActionOutcome::Failed {
                     error: e.to_string(),
                 },
-                Ok(v) => {
+                Ok(Ok(v)) => {
                     let success = v.get("success").and_then(|s| s.as_bool());
                     match success {
                         Some(true) => {
@@ -212,10 +223,9 @@ impl BrowserTaskExecutor {
                 None
             };
 
-            // Handle outcome side effects.
-            // Navigate failure aborts the task (the rest is meaningless if
-            // the page never loaded). Other failures are logged and the task
-            // continues, mirroring the HTTP executor.
+            // Handle outcome side effects. A timeout or ANY failed action fails
+            // the task and stops it (subsequent actions typically depend on the
+            // one that just failed).
             let should_break = match &outcome {
                 ActionOutcome::Timeout => {
                     task_failed = true;
@@ -223,23 +233,24 @@ impl BrowserTaskExecutor {
                     true
                 }
                 ActionOutcome::Failed { error } => {
-                    if matches!(action, WebAction::Navigate { .. }) {
-                        task_failed = true;
-                        failure_reasons.push(format!("Navigate failed: {error}"));
-                        true
-                    } else {
-                        debug!(
-                            task_id = %task.id,
-                            action = ?action,
-                            error,
-                            "Browser action failed"
-                        );
-                        false
-                    }
+                    // Any failed browser action fails the task: for a benchmark,
+                    // an action the browser could not perform means the
+                    // automation did not work, and later actions usually depend
+                    // on it. Stop here.
+                    debug!(
+                        task_id = %task.id,
+                        action = ?action,
+                        error,
+                        "Browser action failed"
+                    );
+                    task_failed = true;
+                    failure_reasons.push(format!("{action:?} failed: {error}"));
+                    true
                 }
                 ActionOutcome::Success { .. } => false,
             };
 
+            let duration_ms = action_start.elapsed().as_millis() as u64;
             recorder.record_action(action.clone(), outcome, duration_ms, None, screenshot_after);
 
             if should_break {
@@ -324,8 +335,7 @@ async fn evaluate_criterion_browser(criterion: &SuccessCriterion, tool: &PageCon
             {
                 Ok(v) => {
                     let success = v.get("success").and_then(|s| s.as_bool()).unwrap_or(false);
-                    let result = v.get("result").and_then(|r| r.as_bool()).unwrap_or(false);
-                    success && result
+                    success && result_is_visible(&v["result"])
                 }
                 Err(_) => false,
             }
@@ -501,6 +511,18 @@ mod tests {
         let cmd = web_action_to_command(&action, Path::new("/tmp/ss"));
         assert_eq!(cmd["action"], "hover");
         assert_eq!(cmd["selector"], ".menu-item");
+    }
+
+    #[test]
+    fn result_is_visible_accepts_bool_and_object() {
+        assert!(result_is_visible(&json!(true)));
+        assert!(!result_is_visible(&json!(false)));
+        // the bridge returns an object
+        assert!(result_is_visible(&json!({"visible": true})));
+        assert!(!result_is_visible(&json!({"visible": false})));
+        // missing / wrong shape -> not visible
+        assert!(!result_is_visible(&json!({})));
+        assert!(!result_is_visible(&json!("nope")));
     }
 
     #[tokio::test]
