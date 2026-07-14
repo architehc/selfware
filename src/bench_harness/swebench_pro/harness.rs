@@ -36,7 +36,10 @@ impl Default for LlamaServerOpts {
             // this to `None` (auto) when explicitly requested.
             tensor_split: Some("24,24".into()),
             boot_timeout: Duration::from_secs(180),
-            host: "0.0.0.0".into(),
+            // Loopback by default: the harness client (selfware) runs on the
+            // same machine, and 0.0.0.0 needlessly exposed the model server on
+            // every network interface.
+            host: "127.0.0.1".into(),
         }
     }
 }
@@ -767,6 +770,11 @@ mod tests {
         // Use a port that is almost certainly closed.
         let result = detect_backend(59999);
         assert!(result.is_err() || result.unwrap() == "unknown");
+    }
+
+    #[test]
+    fn default_llama_opts_bind_loopback() {
+        assert_eq!(LlamaServerOpts::default().host, "127.0.0.1");
     }
 
     #[test]

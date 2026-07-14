@@ -477,11 +477,40 @@ impl Agent {
                     tracing::warn!("Failed to create episodic memory dir: {}", e);
                     return;
                 }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+                }
             }
-            if let Err(e) = tokio::fs::write(&memory_path, content).await {
-                tracing::warn!("Failed to write episodic memory: {}", e);
+            // Atomic + owner-only: episodic memory holds raw task data. Write to
+            // a process-unique temp, chmod 0600 BEFORE it is visible under the
+            // real name, then rename over the target.
+            static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tmp_path =
+                memory_path.with_extension(format!("tmp.{}.{}", std::process::id(), seq));
+            if let Err(e) = tokio::fs::write(&tmp_path, &content).await {
+                tracing::warn!("Failed to write episodic memory temp: {}", e);
+                return;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) =
+                    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!("Failed to chmod episodic memory temp: {}", e);
+                    let _ = tokio::fs::remove_file(&tmp_path).await;
+                    return;
+                }
+            }
+            if let Err(e) = tokio::fs::rename(&tmp_path, &memory_path).await {
+                tracing::warn!("Failed to rename episodic memory into place: {}", e);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
             } else {
-                tracing::info!("Saved global episodic memory (background)");
+                tracing::info!("Saved global episodic memory (background, atomic 0600)");
             }
         });
 
