@@ -132,8 +132,28 @@ async fn execute_task(
     let max_attempts = (config.max_retries + 1).max(1);
     let mut attempt = 0u32;
     let mut delay_ms = config.retry_delay_ms.max(1);
+    // Overall per-task deadline: the total time budget for this task INCLUDING
+    // all retries and backoffs. Without it, retries each get a fresh
+    // per-request timeout and a single task could hold its concurrency slot for
+    // retries × timeout_secs (~20 min). timeout_secs is the whole-task budget.
+    let deadline = start + std::time::Duration::from_secs(config.timeout_secs);
 
     let (status, body_text) = loop {
+        // Stop before starting another attempt once the task budget is spent.
+        if std::time::Instant::now() >= deadline {
+            return StreamResult {
+                task_id: task.id.clone(),
+                stream_id,
+                success: false,
+                transport_succeeded: false,
+                response: String::new(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                latency_ms: start.elapsed().as_millis() as u64,
+                eval: None,
+                error: Some(format!("Task deadline exceeded ({}s)", config.timeout_secs)),
+            };
+        }
         attempt += 1;
         match client.post(&url).json(&body).send().await {
             Ok(resp) => {
@@ -150,7 +170,9 @@ async fn execute_task(
                         max_attempts,
                         "Retryable HTTP {status}; retrying after {delay_ms}ms"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    let backoff = std::time::Duration::from_millis(delay_ms)
+                        .min(deadline.saturating_duration_since(std::time::Instant::now()));
+                    tokio::time::sleep(backoff).await;
                     delay_ms = (delay_ms * 2).min(10_000);
                     continue;
                 }
@@ -165,7 +187,9 @@ async fn execute_task(
                         max_attempts,
                         "Request failed: {e}; retrying after {delay_ms}ms"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    let backoff = std::time::Duration::from_millis(delay_ms)
+                        .min(deadline.saturating_duration_since(std::time::Instant::now()));
+                    tokio::time::sleep(backoff).await;
                     delay_ms = (delay_ms * 2).min(10_000);
                     continue;
                 }
