@@ -108,7 +108,9 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 
 use std::path::PathBuf;
 
-use super::api_key::{is_insecure_remote_endpoint, load_api_key_from_keyring, ApiKeySource};
+use super::api_key::{
+    endpoint_has_userinfo, is_insecure_remote_endpoint, load_api_key_from_keyring, ApiKeySource,
+};
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
 use super::provenance::{ConfigSource, ConfigSources};
@@ -367,12 +369,21 @@ impl Config {
         // checkout-local config can choose the endpoint, so an http:// remote
         // URL with a key present is a downgrade / exfiltration risk. Local HTTP
         // is fine (traffic stays on the machine).
-        if config.api_key.is_some() && is_insecure_remote_endpoint(&config.endpoint) {
-            bail!(
-                "Refusing to send the API key over plaintext HTTP to a remote endpoint '{}'. \
-                 Use https:// or a local endpoint (localhost / 127.0.0.1).",
-                config.endpoint
-            );
+        if config.api_key.is_some() {
+            if endpoint_has_userinfo(&config.endpoint) {
+                bail!(
+                    "Refusing to send the API key: endpoint '{}' embeds URL credentials \
+                     (user:pass@host), a host-spoofing vector. Remove the '@' userinfo.",
+                    config.endpoint
+                );
+            }
+            if is_insecure_remote_endpoint(&config.endpoint) {
+                bail!(
+                    "Refusing to send the API key over plaintext HTTP to a remote endpoint '{}'. \
+                     Use https:// or a local endpoint (localhost / 127.0.0.1).",
+                    config.endpoint
+                );
+            }
         }
 
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {

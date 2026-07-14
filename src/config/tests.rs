@@ -1,4 +1,4 @@
-use super::api_key::{is_local_endpoint, ApiKeySource, KEYRING_SERVICE};
+use super::api_key::{endpoint_has_userinfo, is_local_endpoint, ApiKeySource, KEYRING_SERVICE};
 use super::types::{
     default_animation_speed, default_checkpoint_interval_secs, default_checkpoint_interval_tools,
     default_max_recovery_attempts, default_retry_base_delay_ms, default_retry_max_delay_ms,
@@ -1006,6 +1006,29 @@ fn test_is_local_endpoint_remote() {
 fn test_is_local_endpoint_no_scheme() {
     assert!(!is_local_endpoint("localhost:8000/v1"));
     assert!(!is_local_endpoint("ftp://localhost:8000/v1"));
+}
+
+#[test]
+fn test_is_local_endpoint_rejects_userinfo_hostspoof() {
+    // The bypass: real host is attacker.example, not localhost.
+    assert!(!is_local_endpoint(
+        "http://localhost:80@attacker.example/v1"
+    ));
+    assert!(!is_local_endpoint("http://127.0.0.1@attacker.example/v1"));
+    assert!(!is_local_endpoint("https://localhost@attacker.example/v1"));
+    // genuine local endpoints are still local
+    assert!(is_local_endpoint("http://localhost:1234/v1"));
+    assert!(is_local_endpoint("http://127.0.0.1:8000/v1"));
+}
+
+#[test]
+fn test_endpoint_has_userinfo() {
+    assert!(endpoint_has_userinfo(
+        "http://localhost@attacker.example/v1"
+    ));
+    assert!(endpoint_has_userinfo("https://user:pass@openrouter.ai/v1"));
+    assert!(!endpoint_has_userinfo("https://openrouter.ai/api/v1"));
+    assert!(!endpoint_has_userinfo("http://127.0.0.1:8000/v1"));
 }
 
 #[test]

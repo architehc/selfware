@@ -75,39 +75,38 @@ pub fn save_api_key_to_keyring(endpoint: &str, api_key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Check whether an endpoint URL points to a local address.
-/// Local addresses include localhost, 127.0.0.1, `[::1]`, and 0.0.0.0.
-/// These are safe to use over plain HTTP since traffic stays on the machine.
+/// Check whether an endpoint URL points to a local address (safe for plain
+/// HTTP because traffic stays on the machine). Parses with url::Url and derives
+/// locality from the PARSED host, so a host-spoofing userinfo URL such as
+/// `http://localhost@attacker.example/` (real host `attacker.example`) is NOT
+/// treated as local. Only http/https endpoints are considered.
 pub fn is_local_endpoint(endpoint: &str) -> bool {
-    // Extract host portion from the URL (after scheme, before port/path)
-    let after_scheme = if let Some(rest) = endpoint.strip_prefix("https://") {
-        rest
-    } else if let Some(rest) = endpoint.strip_prefix("http://") {
-        rest
-    } else {
+    let Ok(url) = url::Url::parse(endpoint) else {
         return false;
     };
-
-    // Handle bracketed IPv6 addresses like [::1]:8000/v1
-    if after_scheme.starts_with('[') {
-        // Extract the bracketed host (e.g., "[::1]")
-        if let Some(bracket_end) = after_scheme.find(']') {
-            let bracketed_host = &after_scheme[..=bracket_end];
-            return bracketed_host == "[::1]";
-        }
+    if !matches!(url.scheme(), "http" | "https") {
         return false;
     }
+    // Userinfo (user[:pass]@host) is a host-spoof vector — never local.
+    if !url.username().is_empty() || url.password().is_some() {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(h)) => h.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
 
-    // Get host (before port or path) for non-IPv6
-    let host = after_scheme
-        .split(':')
-        .next()
-        .unwrap_or(after_scheme)
-        .split('/')
-        .next()
-        .unwrap_or(after_scheme);
-
-    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0")
+/// Whether the endpoint URL embeds userinfo (`user[:pass]@host`). Such URLs are
+/// a host-spoofing vector — `http://localhost@attacker/` parses to host
+/// `attacker` while a naive string check sees `localhost`. Callers refuse to
+/// send a credential to such an endpoint.
+pub fn endpoint_has_userinfo(endpoint: &str) -> bool {
+    url::Url::parse(endpoint)
+        .map(|u| !u.username().is_empty() || u.password().is_some())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
