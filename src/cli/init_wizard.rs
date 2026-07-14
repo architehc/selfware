@@ -104,7 +104,7 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
     io::stdin().lock().read_line(&mut api_key)?;
     let api_key = api_key.trim();
     if !api_key.is_empty() {
-        match crate::config::save_api_key_to_keyring(api_key) {
+        match crate::config::save_api_key_to_keyring(&endpoint, api_key) {
             Ok(()) => wizard_print!("  {} API key saved to your OS keyring.", Glyphs::bloom()),
             Err(e) => wizard_print!(
                 "  {} Could not save to keyring ({}). Set SELFWARE_API_KEY=<key> in your environment instead.",

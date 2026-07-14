@@ -433,13 +433,13 @@ impl CredentialReload {
     /// Returns `Some(key)` if a key can be obtained, or `None` if no source
     /// is available.  This is a pure helper that can be unit-tested directly
     /// without constructing a full [`RecoveryContext`].
-    pub fn find_available_key() -> Option<String> {
+    pub fn find_available_key(endpoint: &str) -> Option<String> {
         if let Ok(key) = std::env::var("SELFWARE_API_KEY") {
             if !key.is_empty() {
                 return Some(key);
             }
         }
-        match crate::config::load_api_key_from_keyring() {
+        match crate::config::load_api_key_from_keyring(endpoint) {
             Ok(Some(key)) if !key.is_empty() => Some(key),
             _ => None,
         }
@@ -459,7 +459,7 @@ impl Resolution for CredentialReload {
         if classify(ctx.message) != FailureKind::AuthError {
             return ResolutionOutcome::Escalate;
         }
-        if Self::find_available_key().is_some() {
+        if Self::find_available_key(&ctx.config.endpoint).is_some() {
             ResolutionOutcome::Resolved(RecoveryDirective::ReloadCredentials)
         } else {
             ResolutionOutcome::Escalate
@@ -1209,7 +1209,7 @@ mod tests {
         let saved = std::env::var("SELFWARE_API_KEY").ok();
         // Set a unique value that won't collide with keyring entries.
         std::env::set_var("SELFWARE_API_KEY", "test-credential-reload-finder-key-xyz");
-        let key = CredentialReload::find_available_key();
+        let key = CredentialReload::find_available_key("https://example.test/v1");
         assert!(
             key.is_some(),
             "find_available_key should return Some when SELFWARE_API_KEY is set"
@@ -1230,7 +1230,7 @@ mod tests {
         let saved = std::env::var("SELFWARE_API_KEY").ok();
         std::env::remove_var("SELFWARE_API_KEY");
         // This call may hit the OS keyring — that's fine, it must not panic.
-        let _ = CredentialReload::find_available_key();
+        let _ = CredentialReload::find_available_key("https://example.test/v1");
         if let Some(v) = saved {
             std::env::set_var("SELFWARE_API_KEY", v)
         }

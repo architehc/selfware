@@ -1437,7 +1437,7 @@ To call a tool, use this EXACT XML structure:
                     .ok()
                     .filter(|k| !k.is_empty())
                     .or_else(|| {
-                        crate::config::load_api_key_from_keyring()
+                        crate::config::load_api_key_from_keyring(&self.config.endpoint)
                             .ok()
                             .flatten()
                             .filter(|k| !k.is_empty())

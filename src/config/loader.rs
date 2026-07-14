@@ -324,7 +324,7 @@ impl Config {
 
         // Try the system keyring if no env var was set.
         if matches!(api_key_source, ApiKeySource::None) {
-            match load_api_key_from_keyring() {
+            match load_api_key_from_keyring(&config.endpoint) {
                 Ok(Some(key)) => {
                     config.api_key = Some(RedactedString::new(key));
                     api_key_source = ApiKeySource::Keyring;
