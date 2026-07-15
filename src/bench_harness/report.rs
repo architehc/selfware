@@ -37,7 +37,8 @@ pub struct HarnessReport {
     /// Min/max latency.
     pub latency_min_ms: u64,
     pub latency_max_ms: u64,
-    /// Average evaluation score across passed tasks.
+    /// Average evaluation score across all tasks that produced an eval result
+    /// (not only passed ones — failed evals contribute their score too).
     pub avg_score: f64,
     /// Total wall-clock duration in seconds.
     pub total_duration_secs: f64,

@@ -59,7 +59,9 @@ impl fmt::Debug for BenchTask {
 pub struct StreamResult {
     /// Task that was executed.
     pub task_id: String,
-    /// Which stream (0..max_concurrent) executed this task.
+    /// Monotonic per-task sequence number, assigned from an atomic counter as
+    /// tasks are dispatched. It grows unbounded with the number of tasks and is
+    /// NOT bounded by max_concurrent.
     pub stream_id: usize,
     /// Whether the task completed successfully (no errors).
     pub success: bool,
