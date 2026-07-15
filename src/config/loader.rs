@@ -146,6 +146,15 @@ fn record_toml_sources(
     }
 }
 
+/// Whether `config_path` is an auto-discovered project-local `selfware.toml`.
+/// Matches by FILE NAME so it covers both the relative `selfware.toml`
+/// (auto-discovery) and an absolute `<dir>/selfware.toml` (the `-C` case),
+/// while the home `~/.config/selfware/config.toml` and explicit `--config`
+/// paths to other names are NOT treated as checkout-local.
+fn config_is_checkout_local(config_path: &std::path::Path) -> bool {
+    config_path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
+}
+
 impl Config {
     fn content_sets_agent_token_budget(content: &str) -> bool {
         toml::from_str::<toml::Value>(content)
@@ -398,9 +407,7 @@ impl Config {
             && !is_local_endpoint(&config.endpoint)
         {
             if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
-                if p.as_path() == std::path::Path::new("selfware.toml")
-                    && !super::trust::is_config_trusted(p)
-                {
+                if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
                     let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
                     bail!(
                         "Refusing to send the global SELFWARE_API_KEY to endpoint '{}' selected by \
@@ -2125,5 +2132,20 @@ mod tests {
             config.max_tokens, 32768,
             "env max_tokens should override profile default"
         );
+    }
+
+    #[test]
+    fn config_is_checkout_local_matches_relative_and_absolute() {
+        use std::path::Path;
+        // auto-discovered relative, and the -C absolute case -> checkout-local
+        assert!(config_is_checkout_local(Path::new("selfware.toml")));
+        assert!(config_is_checkout_local(Path::new(
+            "/home/u/repo/selfware.toml"
+        )));
+        // home config and explicit other-named configs -> NOT checkout-local
+        assert!(!config_is_checkout_local(Path::new(
+            "/home/u/.config/selfware/config.toml"
+        )));
+        assert!(!config_is_checkout_local(Path::new("/x/myconfig.toml")));
     }
 }
