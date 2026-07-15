@@ -558,10 +558,13 @@ impl VisualVerifier {
             .build()
             .context("Failed to build HTTP client")?;
 
-        let mut request = client.post(&url).header("Content-Type", "application/json");
-        if let Some(ref key) = self.api_key {
-            request = request.bearer_auth(key.expose());
-        }
+        // Shared authenticated-request factory: refuses plaintext-HTTP/userinfo
+        // credential exposure, then attaches the bearer token.
+        let request = crate::config::api_key::authorize_request(
+            client.post(&url).header("Content-Type", "application/json"),
+            &self.endpoint,
+            self.api_key.as_ref().map(|k| k.expose()),
+        )?;
 
         let response = request
             .json(body)

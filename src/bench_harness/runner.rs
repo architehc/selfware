@@ -111,6 +111,27 @@ async fn execute_task(
     let start = Instant::now();
     let url = format!("{}/chat/completions", config.endpoint.trim_end_matches('/'));
 
+    // Credential-transport guard: refuse to send the API key over plaintext HTTP
+    // to a remote host (or a userinfo URL) — e.g. via `bench --endpoint`. Checked
+    // once up front so no retry can smuggle it out.
+    if let Err(e) = crate::config::api_key::assert_credential_endpoint_safe(
+        &config.endpoint,
+        config.api_key.is_some(),
+    ) {
+        return StreamResult {
+            task_id: task.id.clone(),
+            stream_id,
+            success: false,
+            transport_succeeded: false,
+            response: String::new(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            latency_ms: start.elapsed().as_millis() as u64,
+            eval: None,
+            error: Some(e.to_string()),
+        };
+    }
+
     let mut body = json!({
         "model": config.model,
         "messages": task.messages,

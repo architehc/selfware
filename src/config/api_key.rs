@@ -64,6 +64,23 @@ pub fn assert_credential_endpoint_safe(endpoint: &str, has_credential: bool) -> 
     Ok(())
 }
 
+/// The single authenticated-request choke point: verify `endpoint` is safe to
+/// receive the credential (plaintext-HTTP-to-remote / embedded-userinfo refusal
+/// via [`assert_credential_endpoint_safe`]) and then attach `Authorization:
+/// Bearer` when a key is present. Every bearer path should build its request
+/// through this so the transport/origin check cannot be silently skipped.
+pub fn authorize_request(
+    req: reqwest::RequestBuilder,
+    endpoint: &str,
+    api_key: Option<&str>,
+) -> Result<reqwest::RequestBuilder> {
+    assert_credential_endpoint_safe(endpoint, api_key.is_some())?;
+    Ok(match api_key {
+        Some(key) => req.bearer_auth(key),
+        None => req,
+    })
+}
+
 /// Load the API key from the OS system keyring.
 ///
 /// Returns `Ok(Some(key))` when a key is stored, `Ok(None)` when
@@ -175,6 +192,19 @@ mod tests {
         assert!(assert_credential_endpoint_safe("http://127.0.0.1:8000/v1", true).is_ok());
         // no credential -> always Ok (even remote http)
         assert!(assert_credential_endpoint_safe("http://api.example.com/v1", false).is_ok());
+    }
+
+    #[test]
+    fn authorize_request_enforces_transport_before_attaching_key() {
+        let client = reqwest::Client::new();
+        let url = "http://api.example.com/v1/chat/completions";
+        // key + remote http -> refused (never builds a request that leaks it)
+        assert!(authorize_request(client.post(url), "http://api.example.com/v1", Some("sk-x")).is_err());
+        // key + safe endpoint -> allowed
+        assert!(authorize_request(client.post(url), "https://api.example.com/v1", Some("sk-x")).is_ok());
+        assert!(authorize_request(client.post(url), "http://127.0.0.1:8000/v1", Some("sk-x")).is_ok());
+        // no key -> allowed regardless of transport
+        assert!(authorize_request(client.post(url), "http://api.example.com/v1", None).is_ok());
     }
 
     #[test]

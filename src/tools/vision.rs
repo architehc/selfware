@@ -443,10 +443,14 @@ pub(crate) async fn call_vision_endpoint(
         .build()
         .context("Failed to build HTTP client")?;
 
-    let mut request = client.post(&url).header("Content-Type", "application/json");
-    if let Some(key) = api_key {
-        request = request.bearer_auth(key);
-    }
+    // Route through the shared authenticated-request factory: it refuses to
+    // send the key over plaintext HTTP to a remote host (or via a userinfo URL)
+    // and attaches the bearer token.
+    let request = crate::config::api_key::authorize_request(
+        client.post(&url).header("Content-Type", "application/json"),
+        endpoint,
+        api_key,
+    )?;
 
     let response = request
         .json(body)
