@@ -445,7 +445,6 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
 
     // Create widgets for status display
     let mut spinner = GardenSpinner::new("Processing...");
-    let status_indicator = StatusIndicator::new(StatusType::Info, "Connected");
 
     // Create markdown renderer for rich message display
     let md_renderer = MarkdownRenderer::new();
@@ -480,9 +479,6 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
 
                 // Layout engine manages pane positions
                 let _panes = layout_engine.calculate_layout(frame.area());
-
-                // Status indicator would show connection state
-                let _ = &status_indicator;
 
                 // Markdown renderer would format assistant messages
                 let _ = &md_renderer;
@@ -716,7 +712,9 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);
     dashboard_state.log(LogLevel::Info, "Dashboard initialized");
-    dashboard_state.log(LogLevel::Success, "Connected to model");
+    // Honest status: state the configured model rather than asserting a live
+    // connection — no request has been sent yet, so "Connected" would be a lie.
+    dashboard_state.log(LogLevel::Info, &format!("Model: {model}"));
 
     // Throttle redraws to ~30fps to avoid wasting CPU
     let min_draw_interval = Duration::from_millis(33);
@@ -1032,7 +1030,9 @@ pub fn run_tui_dashboard_with_events(
     layout_engine.apply_preset(LayoutPreset::Dashboard);
     with_dashboard_state(&shared_state, |state| {
         state.log(LogLevel::Info, "Dashboard initialized");
-        state.log(LogLevel::Success, "Connected to model");
+        // Honest status: state the configured model rather than asserting a live
+        // connection — no request has been sent yet, so "Connected" would be a lie.
+        state.log(LogLevel::Info, &format!("Model: {model}"));
     });
 
     // Throttle redraws to ~30fps to avoid wasting CPU
