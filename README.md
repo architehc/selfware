@@ -2,8 +2,6 @@
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-pink?logo=github)](https://github.com/sponsors/architehc)
 [![CI](https://github.com/architehc/selfware/actions/workflows/ci.yml/badge.svg)](https://github.com/architehc/selfware/actions/workflows/ci.yml)
-[![Crates.io](https://img.shields.io/crates/v/selfware)](https://crates.io/crates/selfware)
-[![Docs.rs](https://docs.rs/selfware/badge.svg)](https://docs.rs/selfware)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![codecov](https://codecov.io/gh/architehc/selfware/branch/main/graph/badge.svg)](https://codecov.io/gh/architehc/selfware)
 
@@ -200,10 +198,13 @@ unzip -o /tmp/selfware.zip -d /tmp/selfware && sudo mv /tmp/selfware/selfware /u
 | **macOS** | Intel | [selfware-macos-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 | **Windows** | x86_64 | [selfware-windows-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 
-**Option B: Install via Cargo**
+**Option B: Install via Cargo (from Git)**
+
+> selfware depends on a Git-only crate (`llmfit-core`), so it is distributed via Git and
+> release binaries rather than crates.io.
 
 ```bash
-cargo install selfware
+cargo install --git https://github.com/architehc/selfware
 ```
 
 **Option C: Build from source**
