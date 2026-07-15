@@ -118,3 +118,8 @@ system_tests/**/reports/
 system_tests/**/*.prompt.txt
 system_tests/**/*.response.md
 system_tests/**/*.recovery.toml
+
+# Playwright bridge runtime (installed locally, not committed)
+scripts/node_modules/
+scripts/package-lock.json
+scripts/package.json
