@@ -238,15 +238,12 @@ pub(crate) enum Commands {
         /// Endpoint URL to benchmark (legacy mode, defaults to config)
         #[arg(short, long)]
         endpoint: Option<String>,
-        /// Benchmark suites to run (legacy mode: throughput,e2e,swebench,multilang)
+        /// Benchmark suites to run (legacy mode: throughput,e2e,multilang,all)
         #[arg(short, long, default_value = "throughput,e2e")]
         suite: String,
         /// Number of concurrent tasks (legacy mode)
         #[arg(short, long, default_value_t = 4)]
         concurrent: usize,
-        /// Output format (legacy mode: text, json)
-        #[arg(long, default_value = "text")]
-        format: String,
     },
 
     /// Run long-running system test (8+ hours)

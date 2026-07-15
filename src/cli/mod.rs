@@ -2536,7 +2536,6 @@ async fn handle_command(
             endpoint,
             suite,
             concurrent,
-            format: _format,
         } => {
             if let Some(sub) = command {
                 return dispatch_bench_subcommand(sub, &config).await;
