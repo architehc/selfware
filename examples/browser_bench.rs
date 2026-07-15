@@ -3,9 +3,7 @@
 //!
 //! Run with: cargo run --features bench-harness --example browser_bench
 
-use selfware::bench_harness::computer_control::{
-    BrowserBenchConfig, BrowserBenchRunner, ExecutionBackend,
-};
+use selfware::bench_harness::computer_control::{BrowserBenchConfig, BrowserBenchRunner};
 use selfware::bench_harness::HarnessConfig;
 
 #[tokio::main]
@@ -28,12 +26,12 @@ async fn main() -> anyhow::Result<()> {
             extra_body: serde_json::json!({
                 "chat_template_kwargs": {"enable_thinking": false}
             }),
+            ..Default::default()
         },
         max_browser_concurrent: 4,
         output_dir: "bench_results/browser".into(),
         llm_analysis: true,
         store_traces: true,
-        backend: ExecutionBackend::Browser,
     };
 
     let runner = BrowserBenchRunner::new(config.clone())?;
