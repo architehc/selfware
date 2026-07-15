@@ -111,7 +111,9 @@ impl Default for DashboardState {
             garden_health: 1.0,
             active_tools: Vec::new(),
             logs: Vec::new(),
-            connected: true,
+            // Not connected until the model actually responds — set true on the
+            // first response bytes/completion, false on an agent error.
+            connected: false,
             status_message: "Ready".to_string(),
             coordinator_status: CoordinatorUiStatus::default(),
         }
@@ -183,10 +185,12 @@ impl DashboardState {
                 self.log(LogLevel::Info, "Agent started processing");
             }
             TuiEvent::AgentCompleted { message } => {
+                self.connected = true;
                 self.status_message = "Ready".to_string();
                 self.log(LogLevel::Success, &format!("Completed: {}", message));
             }
             TuiEvent::AgentError { message } => {
+                self.connected = false;
                 self.status_message = format!("Error: {}", truncate_for_display(&message, 30));
                 self.log(LogLevel::Error, &message);
             }
@@ -216,6 +220,8 @@ impl DashboardState {
                 prompt_tokens,
                 completion_tokens,
             } => {
+                // Token usage came back from the model — we're demonstrably connected.
+                self.connected = true;
                 self.tokens_used += completion_tokens;
                 self.log(
                     LogLevel::Debug,
@@ -233,9 +239,11 @@ impl DashboardState {
                 self.log(level, &message);
             }
             TuiEvent::AssistantDelta { text } => {
+                self.connected = true;
                 tracing::debug!("Assistant delta: {} chars", text.len());
             }
             TuiEvent::ThinkingDelta { text } => {
+                self.connected = true;
                 tracing::debug!("Thinking delta: {} chars", text.len());
             }
             TuiEvent::ThinkingEnd => {
@@ -823,9 +831,26 @@ mod tests {
         let state = DashboardState::default();
         assert_eq!(state.model, "Unknown");
         assert_eq!(state.tokens_used, 0);
-        assert!(state.connected);
+        // Honest default: not connected until a response arrives.
+        assert!(!state.connected);
         assert!(state.active_tools.is_empty());
         assert!(state.logs.is_empty());
+    }
+
+    #[test]
+    fn test_dashboard_connected_toggles_on_response_and_error() {
+        let mut state = DashboardState::default();
+        assert!(!state.connected);
+        state.process_event(TuiEvent::AssistantDelta { text: "hi".into() });
+        assert!(state.connected, "a response delta means connected");
+        state.process_event(TuiEvent::AgentError {
+            message: "boom".into(),
+        });
+        assert!(!state.connected, "an agent error clears connected");
+        state.process_event(TuiEvent::AgentCompleted {
+            message: "ok".into(),
+        });
+        assert!(state.connected, "a completion re-marks connected");
     }
 
     #[test]

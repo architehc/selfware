@@ -121,7 +121,9 @@ impl App {
             task_progress: None,
             status: "Ready".into(),
             model: model.into(),
-            connected: true,
+            // Not connected until the model actually responds (see
+            // append_streaming / add_assistant_message).
+            connected: false,
             scroll: 0,
             selected: 0,
             animation_speed: ANIMATION_SPEED_DEFAULT,
@@ -159,6 +161,8 @@ impl App {
 
     /// Append a streamed chunk to the in-progress assistant response.
     pub fn append_streaming(&mut self, text: &str) {
+        // Streamed bytes from the model prove the connection is live.
+        self.connected = true;
         self.streaming_assistant
             .get_or_insert_with(String::new)
             .push_str(text);
@@ -186,6 +190,8 @@ impl App {
 
     /// Add an assistant message
     pub fn add_assistant_message(&mut self, content: &str) {
+        // Receiving an assistant message means we reached the model.
+        self.connected = true;
         self.messages.push(ChatMessage {
             role: MessageRole::Assistant,
             content: content.into(),
@@ -685,7 +691,20 @@ mod tests {
         let app = App::new("test-model");
         assert_eq!(app.model, "test-model");
         assert_eq!(app.state, AppState::Chatting);
-        assert!(app.connected);
+        // Honest default: not connected until the model responds.
+        assert!(!app.connected);
+    }
+
+    #[test]
+    fn test_app_connected_after_model_output() {
+        let mut app = App::new("test-model");
+        assert!(!app.connected);
+        app.append_streaming("hello");
+        assert!(app.connected, "streamed bytes must mark the app connected");
+
+        let mut app2 = App::new("test-model");
+        app2.add_assistant_message("done");
+        assert!(app2.connected, "an assistant message must mark connected");
     }
 
     #[test]

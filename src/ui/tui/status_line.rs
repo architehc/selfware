@@ -90,7 +90,9 @@ impl Default for StatusLine {
             context_percent: 0.0,
             mode: StatusMode::Normal,
             session_id: "-".into(),
-            connected: true,
+            // Reflects App.connected (copied in refresh_status_line); starts
+            // false until the model responds rather than asserting a live link.
+            connected: false,
             status_message: None,
         }
     }
@@ -245,7 +247,7 @@ mod tests {
         assert_eq!(sl.tokens_used, (0, 0));
         assert_eq!(sl.context_percent, 0.0);
         assert_eq!(sl.mode, StatusMode::Normal);
-        assert!(sl.connected);
+        assert!(!sl.connected);
     }
 
     #[test]
