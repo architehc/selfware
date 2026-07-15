@@ -1,10 +1,14 @@
 //! Configuration for the concurrent benchmark harness.
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 
 /// Configuration for a benchmark harness run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is implemented by hand (not derived) so the `api_key` never prints,
+/// and `api_key` is `skip_serializing` so it never lands in an on-disk report.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HarnessConfig {
     /// OpenAI-compatible API endpoint.
     pub endpoint: String,
@@ -31,8 +35,29 @@ pub struct HarnessConfig {
     pub extra_body: serde_json::Value,
     /// Optional API key. When set, requests send `Authorization: Bearer <key>`.
     /// Resolved from the main Config (keyring / SELFWARE_API_KEY / config file).
-    #[serde(default)]
+    /// `skip_serializing`: an in-memory secret that must never be written to a
+    /// report/plan artifact. Still deserializes (default `None` when absent).
+    #[serde(default, skip_serializing)]
     pub api_key: Option<String>,
+}
+
+impl fmt::Debug for HarnessConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HarnessConfig")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("max_concurrent", &self.max_concurrent)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("max_retries", &self.max_retries)
+            .field("retry_delay_ms", &self.retry_delay_ms)
+            .field("output_dir", &self.output_dir)
+            .field("extra_body", &self.extra_body)
+            // Never print the secret — only whether one is set.
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 impl Default for HarnessConfig {
@@ -154,15 +179,29 @@ mod tests {
     }
 
     #[test]
-    fn api_key_defaults_none_and_round_trips() {
+    fn api_key_is_never_serialized_or_debug_printed() {
         assert!(HarnessConfig::default().api_key.is_none());
         let cfg = HarnessConfig {
-            api_key: Some("secret".into()),
+            api_key: Some("sk-super-secret".into()),
             ..Default::default()
         };
+        // Security: the key must NOT appear in the serialized report artifact.
         let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !json.contains("sk-super-secret"),
+            "api_key leaked into serialized HarnessConfig: {json}"
+        );
+        assert!(!json.contains("api_key"), "api_key field must be skipped");
+        // Security: the key must NOT appear in Debug output either.
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("sk-super-secret"),
+            "api_key leaked into Debug: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"), "Debug should mark a set key");
+        // Deserializing a report (no api_key field) yields None, not an error.
         let back: HarnessConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.api_key.as_deref(), Some("secret"));
+        assert!(back.api_key.is_none());
     }
 
     #[test]
