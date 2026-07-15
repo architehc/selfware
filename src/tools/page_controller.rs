@@ -26,6 +26,11 @@ use tracing::{debug, info, warn};
 use super::net_policy;
 use super::Tool;
 
+/// The Playwright bridge script, embedded in the binary at compile time so
+/// PageControl works even when scripts/ is not shipped (cargo install --git /
+/// release archives). Extracted to ~/.selfware/bridge/ on demand.
+const EMBEDDED_BRIDGE_JS: &str = include_str!("../../scripts/playwright-bridge.js");
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -332,10 +337,44 @@ impl PlaywrightBridge {
             }
         }
 
-        bail!(
-            "Cannot find scripts/playwright-bridge.js. \
-             Set SELFWARE_ROOT or run from the project root."
-        )
+        // Not found on disk (an installed binary without scripts/): extract the
+        // embedded bridge to a versioned data dir and use that.
+        Self::extract_embedded_bridge()
+    }
+
+    /// Extract the embedded bridge to `~/.selfware/bridge/` and return its path.
+    fn extract_embedded_bridge() -> Result<PathBuf> {
+        let dir = dirs::home_dir()
+            .context("cannot resolve home directory for the Playwright bridge")?
+            .join(".selfware")
+            .join("bridge");
+        Self::extract_embedded_bridge_to(&dir)
+    }
+
+    /// Testable core: write the embedded bridge (and a package.json declaring the
+    /// playwright dependency) into `dir`, returning the script path. Rewrites the
+    /// script only when missing or stale so upgrades re-extract.
+    fn extract_embedded_bridge_to(dir: &std::path::Path) -> Result<PathBuf> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("creating bridge dir {}", dir.display()))?;
+        let script = dir.join("playwright-bridge.js");
+        let needs_write = match std::fs::read_to_string(&script) {
+            Ok(existing) => existing != EMBEDDED_BRIDGE_JS,
+            Err(_) => true,
+        };
+        if needs_write {
+            std::fs::write(&script, EMBEDDED_BRIDGE_JS)
+                .with_context(|| format!("writing bridge to {}", script.display()))?;
+        }
+        // Drop a package.json so `npm install` in this dir pulls Playwright.
+        let pkg = dir.join("package.json");
+        if !pkg.exists() {
+            let _ = std::fs::write(
+                &pkg,
+                "{\n  \"name\": \"selfware-playwright-bridge\",\n  \"private\": true,\n  \"dependencies\": { \"playwright\": \"*\" }\n}\n",
+            );
+        }
+        Ok(script)
     }
 }
 
@@ -1009,5 +1048,27 @@ mod tests {
         assert_eq!(resp.id, Some(2));
         assert!(!resp.success);
         assert_eq!(resp.error, Some("something broke".to_string()));
+    }
+
+    #[test]
+    fn embedded_bridge_is_present() {
+        assert!(!EMBEDDED_BRIDGE_JS.is_empty());
+        assert!(EMBEDDED_BRIDGE_JS.contains("playwright"));
+    }
+
+    #[test]
+    fn extract_embedded_bridge_writes_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("sw_bridge_test_{}", std::process::id()));
+        let script = PlaywrightBridge::extract_embedded_bridge_to(&dir).unwrap();
+        assert!(script.exists());
+        assert_eq!(
+            std::fs::read_to_string(&script).unwrap(),
+            EMBEDDED_BRIDGE_JS
+        );
+        assert!(dir.join("package.json").exists());
+        // second call is a no-op (content already matches)
+        let script2 = PlaywrightBridge::extract_embedded_bridge_to(&dir).unwrap();
+        assert_eq!(script, script2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
