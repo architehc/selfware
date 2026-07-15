@@ -47,6 +47,23 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
     endpoint.starts_with("http://") && !is_local_endpoint(endpoint)
 }
 
+/// Assert it is safe to send a credential to `endpoint`. Fails when a credential
+/// is present AND the endpoint would leak it — plaintext HTTP to a remote host,
+/// or a URL embedding userinfo (user:pass@host). The single choke point every
+/// authenticated request path should call before sending.
+pub fn assert_credential_endpoint_safe(endpoint: &str, has_credential: bool) -> Result<()> {
+    if has_credential && (endpoint_has_userinfo(endpoint) || is_insecure_remote_endpoint(endpoint))
+    {
+        anyhow::bail!(
+            "Refusing to send the API key to endpoint '{}': it would go over plaintext HTTP to a \
+             remote host or via an embedded-credential URL. Use https:// or a local endpoint \
+             (localhost / 127.0.0.1).",
+            endpoint
+        );
+    }
+    Ok(())
+}
+
 /// Load the API key from the OS system keyring.
 ///
 /// Returns `Ok(Some(key))` when a key is stored, `Ok(None)` when
@@ -144,6 +161,20 @@ mod tests {
             keyring_account_for_endpoint("http://127.0.0.1:1234/v1"),
             keyring_account_for_endpoint("http://127.0.0.1:9999/v1")
         );
+    }
+
+    #[test]
+    fn assert_credential_endpoint_safe_rules() {
+        // remote http OR userinfo + key -> Err
+        assert!(assert_credential_endpoint_safe("http://api.example.com/v1", true).is_err());
+        assert!(
+            assert_credential_endpoint_safe("https://user:pass@api.example.com/v1", true).is_err()
+        );
+        // safe endpoints with key -> Ok
+        assert!(assert_credential_endpoint_safe("https://api.example.com/v1", true).is_ok());
+        assert!(assert_credential_endpoint_safe("http://127.0.0.1:8000/v1", true).is_ok());
+        // no credential -> always Ok (even remote http)
+        assert!(assert_credential_endpoint_safe("http://api.example.com/v1", false).is_ok());
     }
 
     #[test]

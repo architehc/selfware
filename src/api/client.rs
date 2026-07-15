@@ -137,17 +137,10 @@ impl ApiClient {
         // to a remote host, or a URL embedding userinfo (user:pass@host). This
         // covers programmatic clients, recovery endpoint switches, and profile
         // endpoints that never went through Config::load's checks.
-        if config.api_key.is_some()
-            && (crate::config::api_key::endpoint_has_userinfo(&config.endpoint)
-                || crate::config::api_key::is_insecure_remote_endpoint(&config.endpoint))
-        {
-            anyhow::bail!(
-                "Refusing to build an API client: endpoint '{}' would receive the API key over \
-                 plaintext HTTP to a remote host or via an embedded-credential URL. Use https:// \
-                 or a local endpoint (localhost / 127.0.0.1).",
-                config.endpoint
-            );
-        }
+        crate::config::api_key::assert_credential_endpoint_safe(
+            &config.endpoint,
+            config.api_key.is_some(),
+        )?;
 
         if config.endpoint.starts_with("http://")
             && !crate::config::is_local_endpoint(&config.endpoint)
@@ -684,6 +677,8 @@ impl ApiClient {
         endpoint: &str,
         api_key: Option<&crate::config::RedactedString>,
     ) -> Result<ChatResponse> {
+        crate::config::api_key::assert_credential_endpoint_safe(endpoint, api_key.is_some())?;
+
         let url = format!("{}/chat/completions", endpoint);
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay_ms = self.retry_config.initial_delay_ms;
