@@ -267,11 +267,6 @@ path = "examples/swebench_eval.rs"
 required-features = ["bench-harness"]
 
 [[example]]
-name = "swebench_two_phase"
-path = "examples/swebench_two_phase.rs"
-required-features = ["bench-harness"]
-
-[[example]]
 name = "quant_benchmark"
 path = "examples/quant_benchmark.rs"
 
