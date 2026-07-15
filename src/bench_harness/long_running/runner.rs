@@ -5,7 +5,7 @@ use super::project::{ProjectResult, ProjectStatus, ProjectType};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use tokio::time::timeout;
+use crate::bench_harness::subprocess::{apply_env_allowlist, run_with_group_timeout};
 
 /// A test task definition.
 #[derive(Debug, Clone)]
@@ -104,34 +104,41 @@ impl LongRunningRunner {
             .arg("--no-color")
             .arg("-p")
             .arg(&task.prompt)
-            .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Scrub the agent's environment to the shared allowlist (drop the
+        // operator's unrelated secrets); the model endpoint comes from the
+        // written selfware.toml, not the environment.
+        apply_env_allowlist(&mut cmd);
 
-        let output = match timeout(
-            Duration::from_secs(self.config.timeout_per_project_secs),
-            tokio::task::spawn_blocking(move || cmd.output()),
-        )
+        // Run under a wall-clock timeout in its own process group, so a hung
+        // agent — and every git/cargo/tool process it spawned — is killed
+        // rather than orphaned. The blocking spawn+wait runs on a blocking
+        // thread so the async scheduler isn't stalled.
+        let timeout_secs = self.config.timeout_per_project_secs;
+        let outcome = match tokio::task::spawn_blocking(move || {
+            run_with_group_timeout(cmd, Duration::from_secs(timeout_secs))
+        })
         .await
         {
-            Ok(Ok(Ok(output))) => output,
-            Ok(Ok(Err(e))) => {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(e)) => {
                 return self.create_error_result(&task.name, &format!("spawn error: {}", e));
             }
-            Ok(Err(_)) => {
+            Err(_) => {
                 return self.create_error_result(&task.name, "task panicked");
             }
-            Err(_) => {
-                return self.create_error_result(&task.name, "timeout");
-            }
         };
+        if outcome.timed_out {
+            return self.create_error_result(&task.name, "timeout");
+        }
 
         // Save log
-        let _ = std::fs::write(&log_path, &output.stdout);
+        let _ = std::fs::write(&log_path, outcome.stdout.as_bytes());
 
         // Evaluate results
         let duration = task_start.elapsed().as_secs();
-        let steps = count_steps(&output.stdout);
-        let outcome_label = extract_outcome(&output.stdout);
+        let steps = count_steps(outcome.stdout.as_bytes());
+        let outcome_label = extract_outcome(outcome.stdout.as_bytes());
 
         let (compiles, tests_passed, tests_failed, src_lines) =
             self.evaluate_project(&task.project_type, work_dir);

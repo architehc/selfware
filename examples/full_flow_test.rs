@@ -273,6 +273,7 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
         max_retries: 3,
         retry_delay_ms: 500,
         output_dir: "bench_results/flow_test".into(),
+        api_key: None,
         extra_body: json!({"chat_template_kwargs": {"enable_thinking": false}}),
     };
 

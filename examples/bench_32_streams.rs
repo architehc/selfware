@@ -22,6 +22,7 @@ async fn main() -> anyhow::Result<()> {
         max_retries: 3,
         retry_delay_ms: 500,
         output_dir: "bench_results".into(),
+        api_key: None,
         extra_body: serde_json::json!({
             "chat_template_kwargs": {"enable_thinking": false}
         }),

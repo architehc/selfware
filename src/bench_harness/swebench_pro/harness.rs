@@ -5,9 +5,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
-use wait_timeout::ChildExt;
 
 use super::catalog::QuantSpec;
+use crate::bench_harness::subprocess::{apply_env_allowlist, run_with_group_timeout};
 
 #[derive(Clone, Debug)]
 pub struct LlamaServerOpts {
@@ -44,39 +44,6 @@ impl Default for LlamaServerOpts {
     }
 }
 
-/// Whether an environment variable may be passed to a spawned agent subprocess.
-/// Allowlist: the vars the agent needs to run (shell / toolchain) and to reach
-/// its configured model endpoint — NOT the operator's other secrets (cloud
-/// keys, tokens, unrelated credentials).
-fn env_allowed(key: &str) -> bool {
-    if key.starts_with("SELFWARE_") || key.starts_with("LC_") {
-        return true;
-    }
-    matches!(
-        key,
-        "PATH"
-            | "HOME"
-            | "USER"
-            | "LOGNAME"
-            | "SHELL"
-            | "LANG"
-            | "TERM"
-            | "TMPDIR"
-            | "TZ"
-            | "CARGO_HOME"
-            | "RUSTUP_HOME"
-            | "RUST_BACKTRACE"
-            | "GOPATH"
-            | "GOROOT"
-            | "PYENV_ROOT"
-            | "NODE_PATH"
-            | "JAVA_HOME"
-            | "OPENROUTER_API_KEY"
-            | "LLM_API_KEY"
-            | "LLAMA_SERVER_BIN"
-            | "SWEBENCH_MODELS_DIR"
-    )
-}
 
 /// Resolve the `llama-server` binary path with this priority:
 ///   1. `LLAMA_SERVER_BIN` environment variable.
@@ -328,18 +295,11 @@ pub fn run_selfware(
     write_bench_selfware_config(&bench_config_path, endpoint, alias)
         .with_context(|| format!("writing {}", bench_config_path.display()))?;
 
-    let started = Instant::now();
     let mut cmd = Command::new(selfware_bin);
     // Environment allowlist: pass only the vars the agent needs to run and to
-    // reach its model endpoint; drop the operator's other secrets. env_clear()
-    // then re-add the allowlisted subset. The explicit SELFWARE_* .env() calls
-    // in the chain below still set the bench-specific vars.
-    cmd.env_clear();
-    for (k, v) in std::env::vars() {
-        if env_allowed(&k) {
-            cmd.env(k, v);
-        }
-    }
+    // reach its model endpoint; drop the operator's other secrets. The explicit
+    // SELFWARE_* .env() calls below still set the bench-specific vars.
+    apply_env_allowlist(&mut cmd);
     cmd.arg("-p")
         .arg(prompt)
         .arg("-C")
@@ -354,85 +314,39 @@ pub fn run_selfware(
         .env("SELFWARE_MODEL", alias)
         .env("SELFWARE_RESULT_DIR", &result_dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
         .stderr(Stdio::from(log));
 
-    // New process group so a timeout can kill the agent AND everything it
-    // spawned (git / cargo / tools), not just the direct child. The child
-    // becomes the group leader, so its pgid == its pid.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+    // Spawn in its own process group under a wall-clock timeout; on timeout the
+    // whole group (agent + any git/cargo/tool processes it spawned) is killed.
+    // stdout is captured by the shared helper.
+    let outcome = run_with_group_timeout(cmd, timeout)?;
+
+    if outcome.timed_out {
+        return Ok(RunOutcome {
+            exit_code: -1,
+            timed_out: true,
+            wall_secs: outcome.wall_secs,
+            parsed_result: None,
+        });
     }
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawning {}", selfware_bin.display()))?;
-
-    let stdout = child.stdout.take().unwrap();
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        let _ = std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf);
-        buf
-    });
-
-    // Wait-with-timeout. `Child::wait_timeout` blocks until the child exits or
-    // the poll interval elapses, avoiding the busy 500 ms polling of the old loop.
-    let deadline = started + timeout;
-    let poll_interval = Duration::from_millis(500);
-    loop {
-        match child.wait_timeout(poll_interval)? {
-            Some(status) => {
-                let stdout_text = stdout_handle.join().unwrap_or_default();
-                let exit_code = status.code().unwrap_or(-1);
-
-                // Try to parse structured output from stdout.
-                if let Some(result) = parse_session_result_from_stdout(&stdout_text) {
-                    return Ok(RunOutcome {
-                        exit_code: result.exit_status,
-                        timed_out: false,
-                        wall_secs: result.duration_ms as f64 / 1000.0,
-                        parsed_result: Some(result),
-                    });
-                }
-
-                // Fall back to current behavior if JSON parse fails.
-                return Ok(RunOutcome {
-                    exit_code,
-                    timed_out: false,
-                    wall_secs: started.elapsed().as_secs_f64(),
-                    parsed_result: None,
-                });
-            }
-            None => {
-                if Instant::now() >= deadline {
-                    // Kill the whole process group — the agent plus any git /
-                    // cargo / tool / server processes it spawned — not just the
-                    // direct child. The child is the group leader (pgid == pid).
-                    #[cfg(unix)]
-                    {
-                        use nix::sys::signal::{killpg, Signal};
-                        use nix::unistd::Pid;
-                        let pgid = Pid::from_raw(child.id() as i32);
-                        let _ = killpg(pgid, Signal::SIGTERM);
-                        std::thread::sleep(Duration::from_millis(500));
-                        let _ = killpg(pgid, Signal::SIGKILL);
-                    }
-                    #[cfg(not(unix))]
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stdout_handle.join();
-                    return Ok(RunOutcome {
-                        exit_code: -1,
-                        timed_out: true,
-                        wall_secs: started.elapsed().as_secs_f64(),
-                        parsed_result: None,
-                    });
-                }
-            }
-        }
+    // Try to parse structured output from stdout.
+    if let Some(result) = parse_session_result_from_stdout(&outcome.stdout) {
+        return Ok(RunOutcome {
+            exit_code: result.exit_status,
+            timed_out: false,
+            wall_secs: result.duration_ms as f64 / 1000.0,
+            parsed_result: Some(result),
+        });
     }
+
+    // Fall back to the raw exit code if JSON parsing fails.
+    Ok(RunOutcome {
+        exit_code: outcome.exit_code,
+        timed_out: false,
+        wall_secs: outcome.wall_secs,
+        parsed_result: None,
+    })
 }
 
 fn toml_string(value: &str) -> String {
@@ -782,23 +696,6 @@ mod tests {
         let p = resolve_llama_binary();
         std::env::remove_var("LLAMA_SERVER_BIN");
         assert_eq!(p, PathBuf::from("/sentinel/llama-server-test"));
-    }
-
-    #[test]
-    fn env_allowlist_keeps_tooling_drops_secrets() {
-        // needed to run + reach the endpoint
-        assert!(env_allowed("PATH"));
-        assert!(env_allowed("HOME"));
-        assert!(env_allowed("SELFWARE_API_KEY"));
-        assert!(env_allowed("SELFWARE_CONFIG"));
-        assert!(env_allowed("OPENROUTER_API_KEY"));
-        assert!(env_allowed("CARGO_HOME"));
-        assert!(env_allowed("LC_ALL"));
-        // unrelated operator secrets must NOT propagate to the agent
-        assert!(!env_allowed("AWS_SECRET_ACCESS_KEY"));
-        assert!(!env_allowed("GITHUB_TOKEN"));
-        assert!(!env_allowed("DATABASE_URL"));
-        assert!(!env_allowed("ANTHROPIC_API_KEY"));
     }
 
     #[test]
