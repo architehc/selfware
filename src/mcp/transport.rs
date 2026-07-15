@@ -355,6 +355,23 @@ impl Transport for StdioTransport {
     }
 }
 
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        // Owned teardown: if the transport is dropped without an explicit
+        // async shutdown() (e.g. on a connection failure), still reap the child
+        // process and its reader task so they cannot leak. Best-effort and
+        // synchronous — no await, so use try_lock + Child::start_kill (SIGKILL).
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+        if let Ok(mut handle) = self.reader_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,5 +532,35 @@ mod tests {
         let mut reader = BufReader::new(bytes);
         let result = read_message(&mut reader).await;
         assert!(result.is_err(), "missing Content-Length must error");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn drop_reaps_the_child_process() {
+        use std::collections::HashMap;
+        // A stand-in "server" that just sleeps; StdioTransport::spawn doesn't do
+        // an MCP handshake, so any long-lived process works.
+        let transport = StdioTransport::spawn("sleep", &["300".to_string()], &HashMap::new())
+            .await
+            .expect("spawn sleep");
+        let pid = transport.child.lock().await.id().expect("child has a pid");
+
+        drop(transport);
+
+        // start_kill sends SIGKILL; give the kernel a moment to reap it.
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // `kill -0 <pid>` fails once the process is gone.
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        assert!(
+            !alive,
+            "MCP child (pid {pid}) must be dead after transport drop"
+        );
     }
 }
