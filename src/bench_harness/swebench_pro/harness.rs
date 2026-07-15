@@ -357,6 +357,15 @@ pub fn run_selfware(
         .stdout(Stdio::piped())
         .stderr(Stdio::from(log));
 
+    // New process group so a timeout can kill the agent AND everything it
+    // spawned (git / cargo / tools), not just the direct child. The child
+    // becomes the group leader, so its pgid == its pid.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+
     let mut child = cmd
         .spawn()
         .with_context(|| format!("spawning {}", selfware_bin.display()))?;
@@ -398,6 +407,19 @@ pub fn run_selfware(
             }
             None => {
                 if Instant::now() >= deadline {
+                    // Kill the whole process group — the agent plus any git /
+                    // cargo / tool / server processes it spawned — not just the
+                    // direct child. The child is the group leader (pgid == pid).
+                    #[cfg(unix)]
+                    {
+                        use nix::sys::signal::{killpg, Signal};
+                        use nix::unistd::Pid;
+                        let pgid = Pid::from_raw(child.id() as i32);
+                        let _ = killpg(pgid, Signal::SIGTERM);
+                        std::thread::sleep(Duration::from_millis(500));
+                        let _ = killpg(pgid, Signal::SIGKILL);
+                    }
+                    #[cfg(not(unix))]
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stdout_handle.join();
