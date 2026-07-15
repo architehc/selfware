@@ -61,6 +61,19 @@ pub fn load_instances(instance_ids: &[String], limit: usize) -> Result<Vec<Insta
         .collect::<Result<Vec<_>, _>>()
         .context("parsing SWE-bench Pro JSONL rows")?;
 
+    // Path-traversal guard: `instance_id` is used to build on-disk trial
+    // directories and `<id>.pred` filenames. A row whose id contains a path
+    // separator or `..` (e.g. from a tampered dataset) could write outside the
+    // output directory. Reject any id that is not a single, normal path
+    // component before it reaches any path-building code.
+    if let Some(bad) = all.iter().find(|i| !is_safe_instance_id(&i.instance_id)) {
+        bail!(
+            "unsafe SWE-bench Pro instance_id {:?}: it must be a single path \
+             component (no '/', '\\', '..', or '.')",
+            bad.instance_id
+        );
+    }
+
     if !instance_ids.is_empty() {
         let wanted: std::collections::HashSet<&str> =
             instance_ids.iter().map(String::as_str).collect();
@@ -71,6 +84,19 @@ pub fn load_instances(instance_ids: &[String], limit: usize) -> Result<Vec<Insta
     all.sort_by_key(|i| i.problem_statement.len());
     all.truncate(limit);
     Ok(all)
+}
+
+/// Whether `id` is safe to use as a single on-disk path component — i.e. it
+/// resolves to exactly one `Normal` path component (no separators, no `..`/`.`,
+/// not absolute, not empty). This is the anti-traversal invariant every
+/// `instance_id` path use relies on.
+fn is_safe_instance_id(id: &str) -> bool {
+    use std::path::{Component, Path};
+    let mut comps = Path::new(id).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(Component::Normal(_)), None)
+    )
 }
 
 fn run_loader_script() -> Result<String> {
@@ -121,6 +147,22 @@ pub fn coerce_string_list(value: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn instance_id_traversal_is_rejected() {
+        // Legit SWE-bench Pro ids pass.
+        assert!(is_safe_instance_id("astropy__astropy-12345"));
+        assert!(is_safe_instance_id("django__django-9.2rc1"));
+        assert!(is_safe_instance_id("a..b")); // embedded dots, still one component
+        // Traversal / separators / specials are rejected.
+        assert!(!is_safe_instance_id(".."));
+        assert!(!is_safe_instance_id("."));
+        assert!(!is_safe_instance_id(""));
+        assert!(!is_safe_instance_id("../../etc/passwd"));
+        assert!(!is_safe_instance_id("foo/bar"));
+        assert!(!is_safe_instance_id("/abs/path"));
+        assert!(!is_safe_instance_id("a/../../b"));
+    }
 
     #[test]
     fn coerce_handles_raw_array() {
