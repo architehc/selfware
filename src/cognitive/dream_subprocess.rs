@@ -410,6 +410,8 @@ async fn consolidate_phase(memories: &[MemoryEntry], config: &AutoDreamConfig) -
         .or_else(|| std::env::var("LLM_API_KEY").ok())
         .unwrap_or_default();
 
+    crate::config::api_key::assert_credential_endpoint_safe(&config.endpoint, !api_key.is_empty())?;
+
     let client = reqwest::Client::new();
     let body = serde_json::json!({
         "model": config.model,

@@ -84,8 +84,16 @@ impl AutoConfigurator {
             .map(|key| ("Authorization", format!("Bearer {key}")))
     }
 
+    fn assert_credential_safe(&self) -> Result<()> {
+        crate::config::api_key::assert_credential_endpoint_safe(
+            &self.endpoint,
+            self.api_key.is_some(),
+        )
+    }
+
     /// Fetch available models from the /models endpoint.
     pub async fn fetch_models(&self) -> Result<Vec<ModelInfo>> {
+        self.assert_credential_safe()?;
         let url = format!("{}/models", self.endpoint);
         debug!("Fetching models from {url}");
 
@@ -313,6 +321,7 @@ impl AutoConfigurator {
     }
 
     async fn test_chat(&self, model: &str, extra_body: Option<Value>) -> Result<Value> {
+        self.assert_credential_safe()?;
         let url = format!("{}/chat/completions", self.endpoint);
         let mut body = json!({
             "model": model,

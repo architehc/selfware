@@ -1126,6 +1126,8 @@ async fn call_llm(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String, String> {
+    crate::config::api_key::assert_credential_endpoint_safe(&llm.endpoint, llm.api_key.is_some())
+        .map_err(|e| e.to_string())?;
     let url = format!("{}/chat/completions", llm.endpoint.trim_end_matches('/'));
 
     let mut headers = reqwest::header::HeaderMap::new();
