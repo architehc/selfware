@@ -378,6 +378,24 @@ impl PlaywrightBridge {
     }
 }
 
+impl Drop for PlaywrightBridge {
+    fn drop(&mut self) {
+        // Owned teardown: if the bridge is dropped without an explicit async
+        // shutdown() (e.g. an error path), still reap the browser child process
+        // and its reader task so they cannot leak. Best-effort, synchronous —
+        // no await, so use try_lock + Child::start_kill (SIGKILL). Mirrors the
+        // MCP StdioTransport Drop guard.
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+        if let Ok(mut handle) = self.reader_handle.try_lock() {
+            if let Some(h) = handle.take() {
+                h.abort();
+            }
+        }
+    }
+}
+
 // ============================================================================
 // URL Safety Validation (Rust-side pre-check)
 // ============================================================================
