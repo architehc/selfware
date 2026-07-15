@@ -159,10 +159,48 @@ async fn execute_task(
         if let Some(key) = config.api_key.as_deref() {
             request = request.bearer_auth(key);
         }
-        match request.send().await {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let send_result = match tokio::time::timeout(remaining, request.send()).await {
+            Ok(r) => r,
+            Err(_elapsed) => {
+                return StreamResult {
+                    task_id: task.id.clone(),
+                    stream_id,
+                    success: false,
+                    transport_succeeded: false,
+                    response: String::new(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    latency_ms: start.elapsed().as_millis() as u64,
+                    eval: None,
+                    error: Some(format!("Task deadline exceeded ({}s)", config.timeout_secs)),
+                };
+            }
+        };
+        match send_result {
             Ok(resp) => {
                 let status = resp.status();
-                let body_text = resp.text().await.unwrap_or_default();
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let body_text = match tokio::time::timeout(remaining, resp.text()).await {
+                    Ok(r) => r.unwrap_or_default(),
+                    Err(_elapsed) => {
+                        return StreamResult {
+                            task_id: task.id.clone(),
+                            stream_id,
+                            success: false,
+                            transport_succeeded: false,
+                            response: String::new(),
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            latency_ms: start.elapsed().as_millis() as u64,
+                            eval: None,
+                            error: Some(format!(
+                                "Task deadline exceeded ({}s)",
+                                config.timeout_secs
+                            )),
+                        };
+                    }
+                };
                 if status.is_success() {
                     break (status, body_text);
                 }
