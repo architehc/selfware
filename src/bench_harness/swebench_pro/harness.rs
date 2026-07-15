@@ -44,6 +44,40 @@ impl Default for LlamaServerOpts {
     }
 }
 
+/// Whether an environment variable may be passed to a spawned agent subprocess.
+/// Allowlist: the vars the agent needs to run (shell / toolchain) and to reach
+/// its configured model endpoint — NOT the operator's other secrets (cloud
+/// keys, tokens, unrelated credentials).
+fn env_allowed(key: &str) -> bool {
+    if key.starts_with("SELFWARE_") || key.starts_with("LC_") {
+        return true;
+    }
+    matches!(
+        key,
+        "PATH"
+            | "HOME"
+            | "USER"
+            | "LOGNAME"
+            | "SHELL"
+            | "LANG"
+            | "TERM"
+            | "TMPDIR"
+            | "TZ"
+            | "CARGO_HOME"
+            | "RUSTUP_HOME"
+            | "RUST_BACKTRACE"
+            | "GOPATH"
+            | "GOROOT"
+            | "PYENV_ROOT"
+            | "NODE_PATH"
+            | "JAVA_HOME"
+            | "OPENROUTER_API_KEY"
+            | "LLM_API_KEY"
+            | "LLAMA_SERVER_BIN"
+            | "SWEBENCH_MODELS_DIR"
+    )
+}
+
 /// Resolve the `llama-server` binary path with this priority:
 ///   1. `LLAMA_SERVER_BIN` environment variable.
 ///   2. `which llama-server` on `$PATH`.
@@ -296,6 +330,16 @@ pub fn run_selfware(
 
     let started = Instant::now();
     let mut cmd = Command::new(selfware_bin);
+    // Environment allowlist: pass only the vars the agent needs to run and to
+    // reach its model endpoint; drop the operator's other secrets. env_clear()
+    // then re-add the allowlisted subset. The explicit SELFWARE_* .env() calls
+    // in the chain below still set the bench-specific vars.
+    cmd.env_clear();
+    for (k, v) in std::env::vars() {
+        if env_allowed(&k) {
+            cmd.env(k, v);
+        }
+    }
     cmd.arg("-p")
         .arg(prompt)
         .arg("-C")
@@ -716,6 +760,23 @@ mod tests {
         let p = resolve_llama_binary();
         std::env::remove_var("LLAMA_SERVER_BIN");
         assert_eq!(p, PathBuf::from("/sentinel/llama-server-test"));
+    }
+
+    #[test]
+    fn env_allowlist_keeps_tooling_drops_secrets() {
+        // needed to run + reach the endpoint
+        assert!(env_allowed("PATH"));
+        assert!(env_allowed("HOME"));
+        assert!(env_allowed("SELFWARE_API_KEY"));
+        assert!(env_allowed("SELFWARE_CONFIG"));
+        assert!(env_allowed("OPENROUTER_API_KEY"));
+        assert!(env_allowed("CARGO_HOME"));
+        assert!(env_allowed("LC_ALL"));
+        // unrelated operator secrets must NOT propagate to the agent
+        assert!(!env_allowed("AWS_SECRET_ACCESS_KEY"));
+        assert!(!env_allowed("GITHUB_TOKEN"));
+        assert!(!env_allowed("DATABASE_URL"));
+        assert!(!env_allowed("ANTHROPIC_API_KEY"));
     }
 
     #[test]
