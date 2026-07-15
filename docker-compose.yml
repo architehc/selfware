@@ -21,4 +21,5 @@ services:
       - .:/workspace:rw
     stdin_open: true
     tty: true
-    command: ["sleep", "infinity"]
+    entrypoint: ["sleep"]
+    command: ["infinity"]

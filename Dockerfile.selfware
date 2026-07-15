@@ -19,9 +19,15 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Playwright for visual validation
-RUN pip3 install --break-system-packages playwright && \
-    playwright install chromium
+# Node runtime + Playwright for PageControl. The bridge is a NODE script
+# (its embedded copy is extracted to ~/.selfware/bridge at runtime) and
+# requires the Node `playwright` package, not the Python one.
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm && \
+    npm install -g playwright && \
+    npx playwright install --with-deps chromium && \
+    rm -rf /var/lib/apt/lists/*
+# Let the extracted bridge resolve the globally-installed playwright package.
+ENV SELFWARE_PLAYWRIGHT_NODE_PATH=/usr/local/lib/node_modules
 
 # Copy pre-built binary from host
 COPY target/release/selfware /usr/local/bin/selfware
