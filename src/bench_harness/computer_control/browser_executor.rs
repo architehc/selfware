@@ -216,7 +216,10 @@ impl BrowserTaskExecutor {
             // The browser already wrote the PNG; we just record the path.
             let screenshot_after = if let WebAction::Screenshot { label } = action {
                 if let Some(ref p) = screenshot_path {
-                    recorder.record_screenshot(label, p.clone(), (0, 0));
+                    // Read the real PNG size from the header instead of hardcoding
+                    // (0, 0); fall back to (0, 0) only if the file can't be read.
+                    let dims = image::image_dimensions(p).unwrap_or((0, 0));
+                    recorder.record_screenshot(label, p.clone(), dims);
                 }
                 screenshot_path.clone()
             } else {
