@@ -668,19 +668,19 @@ pub(crate) struct SwebenchProArgs {
     /// Path to the SWE-bench Pro evaluator script.
     #[arg(
         long,
-        default_value = "/home/ivo/SWE-bench_Pro-os/swe_bench_pro_eval.py"
+        default_value = "SWE-bench_Pro-os/swe_bench_pro_eval.py"
     )]
     pub official_eval_script: String,
 
     /// Path to the SWE-bench Pro raw sample CSV/JSONL.
     #[arg(
         long,
-        default_value = "/home/ivo/SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl"
+        default_value = "SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl"
     )]
     pub official_eval_raw_sample_path: String,
 
     /// Directory containing per-instance run_script.sh/parser.py files.
-    #[arg(long, default_value = "/home/ivo/SWE-bench_Pro-os/run_scripts")]
+    #[arg(long, default_value = "SWE-bench_Pro-os/run_scripts")]
     pub official_eval_scripts_dir: String,
 
     /// Docker Hub user/org that hosts sweap-images.
