@@ -267,7 +267,28 @@ impl BrowserTaskExecutor {
                         .push("VisualSimilarity not supported in browser executor".into());
                     continue;
                 }
-                let met = evaluate_criterion_browser(criterion, &tool).await;
+                // Bound each criterion check by the REMAINING task budget so a
+                // short-timeout task can't overrun by 30s per failing criterion.
+                let remaining = timeout.saturating_sub(task_start.elapsed());
+                if remaining.is_zero() {
+                    task_failed = true;
+                    failure_reasons
+                        .push("Task timeout exceeded during criteria evaluation".into());
+                    break;
+                }
+                let met = match tokio::time::timeout(
+                    remaining,
+                    evaluate_criterion_browser(criterion, &tool),
+                )
+                .await
+                {
+                    Ok(met) => met,
+                    Err(_) => {
+                        task_failed = true;
+                        failure_reasons.push("Criterion evaluation timeout".into());
+                        false
+                    }
+                };
                 if !met {
                     task_failed = true;
                     failure_reasons.push(format!("Criterion not met: {criterion:?}"));
