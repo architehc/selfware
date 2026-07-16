@@ -3793,6 +3793,7 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         official_eval_redo: args.official_eval_redo,
         official_eval_block_network: args.official_eval_block_network,
         llama_opts,
+        endpoint: args.endpoint,
     };
 
     // The harness is blocking (subprocess + file I/O) and intentionally serial;

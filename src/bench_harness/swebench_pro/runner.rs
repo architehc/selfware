@@ -41,6 +41,9 @@ pub struct SwebenchProOpts {
     pub selfware_bin: PathBuf,
     pub skip_existing: bool,
     pub llama_opts: LlamaServerOpts,
+    /// When set, use this already-running OpenAI-compatible endpoint instead of
+    /// booting a llama-server per quant (skips spawn/teardown).
+    pub endpoint: Option<String>,
     pub prompt_mode: String,    // "diagnostic" or "official"
     pub prompt_profile: String, // "default" or "swebench_pro"
     pub official_eval: bool,    // run Docker eval after patches
@@ -514,9 +517,14 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         };
         let concurrency = effective_concurrency.max(1) as usize;
 
-        LlamaServer::stop_existing(opts.llama_opts.port);
-        let server = match LlamaServer::boot(&spec, &quant_llama_opts) {
-            Ok(s) => s,
+        // With a user-supplied --endpoint we don't manage a llama-server at all;
+        // otherwise boot one for this quant (holding the RAII handle in `server`).
+        let server = if opts.endpoint.is_some() {
+            None
+        } else {
+            LlamaServer::stop_existing(opts.llama_opts.port);
+            match LlamaServer::boot(&spec, &quant_llama_opts) {
+            Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("  ❌ boot failed: {} — recording failures and skipping", e);
                 // Each (instance × trial) is "attempted" from the harness's
@@ -558,10 +566,14 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
                 }
                 continue;
             }
+            }
         };
 
         // Detect backend after successful boot and annotate plan.json.
-        let endpoint = format!("http://127.0.0.1:{}/v1", opts.llama_opts.port);
+        let endpoint = opts
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}/v1", opts.llama_opts.port));
         match crate::api::client::detect_backend(&endpoint) {
             Ok(backend) => {
                 if let Ok(bytes) = std::fs::read(&plan_path) {
@@ -595,10 +607,13 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         }
 
         // Drop server explicitly so subsequent quant boot has a clean GPU.
+        // (None when using an external --endpoint — nothing to drop.)
         drop(server);
     }
 
-    LlamaServer::stop_existing(opts.llama_opts.port);
+    if opts.endpoint.is_none() {
+        LlamaServer::stop_existing(opts.llama_opts.port);
+    }
 
     // Always collate patches even if some quants failed.
     write_patches_json(&opts, &all_runs)?;
@@ -1048,7 +1063,10 @@ fn run_one_candidate(
     )?;
 
     let log_path = candidate_dir.join("agent.log");
-    let endpoint = format!("http://127.0.0.1:{}/v1", opts.llama_opts.port);
+    let endpoint = opts
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}/v1", opts.llama_opts.port));
     let outcome = run_selfware(
         &opts.selfware_bin,
         &workdir,
@@ -2457,6 +2475,7 @@ mod tests {
             selfware_bin: PathBuf::from("selfware"),
             skip_existing: false,
             llama_opts: LlamaServerOpts::default(),
+            endpoint: None,
             prompt_mode: "official".into(),
             prompt_profile: "swebench_pro".into(),
             official_eval: false,

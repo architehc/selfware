@@ -609,6 +609,11 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long)]
     pub host: Option<String>,
 
+    /// Use an already-running OpenAI-compatible endpoint (e.g.
+    /// http://127.0.0.1:8000/v1) instead of booting a llama-server per quant.
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
     /// Future-use: bench-side concurrency (currently surfaced in plan.json)
     #[arg(long, default_value_t = 1)]
     pub concurrency: u32,
