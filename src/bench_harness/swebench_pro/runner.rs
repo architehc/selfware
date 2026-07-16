@@ -14,7 +14,9 @@ use serde_json::json;
 use super::catalog::{quant_catalog, QuantSpec};
 use super::dataset::{load_instances, Instance};
 use super::harness::{capture_patch, clone_instance, run_selfware, LlamaServer, LlamaServerOpts};
-use super::manifest::{SwebenchProOptsSnapshot, SweepManifest, TrialManifest, TrialState};
+use super::manifest::{
+    write_json_atomic, SwebenchProOptsSnapshot, SweepManifest, TrialManifest, TrialState,
+};
 use super::trace::{RunTrace, TraceEvent};
 use crate::config::PromptProfile;
 use crate::memory::swebench::{
@@ -827,10 +829,7 @@ fn record_boot_failure(
         syntax_check_passed: false,
         candidate_num: 0,
     };
-    std::fs::write(
-        trial_dir.join("result.json"),
-        serde_json::to_vec_pretty(&result)?,
-    )?;
+    write_json_atomic(&trial_dir.join("result.json"), &result)?;
     Ok(result)
 }
 
@@ -932,10 +931,7 @@ fn run_one_candidate(
             syntax_check_passed: false,
             candidate_num: candidate,
         };
-        std::fs::write(
-            candidate_dir.join("result.json"),
-            serde_json::to_vec_pretty(&result)?,
-        )?;
+        write_json_atomic(&candidate_dir.join("result.json"), &result)?;
         return Ok(result);
     }
 
@@ -1133,10 +1129,7 @@ fn run_one_candidate(
         syntax_check_passed,
         candidate_num: candidate,
     };
-    std::fs::write(
-        candidate_dir.join("result.json"),
-        serde_json::to_vec_pretty(&result)?,
-    )?;
+    write_json_atomic(&candidate_dir.join("result.json"), &result)?;
     eprintln!(
         "    patch: {} lines, {} bytes → {}",
         result.patch_lines,
@@ -1248,10 +1241,7 @@ fn run_one(
             syntax_check_passed: false,
             candidate_num: 0,
         };
-        std::fs::write(
-            trial_dir.join("result.json"),
-            serde_json::to_vec_pretty(&synthetic)?,
-        )?;
+        write_json_atomic(&trial_dir.join("result.json"), &synthetic)?;
         return Ok((synthetic, candidate_results));
     }
 
@@ -1312,10 +1302,7 @@ fn run_one(
         syntax_check_passed: best.syntax_check_passed,
         candidate_num: 0,
     };
-    std::fs::write(
-        trial_dir.join("result.json"),
-        serde_json::to_vec_pretty(&synthetic)?,
-    )?;
+    write_json_atomic(&trial_dir.join("result.json"), &synthetic)?;
     if let Some(metrics) = best_metrics {
         merge_official_metrics_into_result(&trial_dir.join("result.json"), &metrics)?;
     }
@@ -2048,10 +2035,7 @@ fn write_aggregate(
         pass_at_k_oracle_is_proxy,
         entries,
     };
-    std::fs::write(
-        output.join("aggregate.json"),
-        serde_json::to_vec_pretty(&report)?,
-    )?;
+    write_json_atomic(&output.join("aggregate.json"), &report)?;
     Ok(())
 }
 
@@ -2116,10 +2100,7 @@ fn write_patches_json(opts: &SwebenchProOpts, runs: &[PerRunResult]) -> Result<(
         });
     }
 
-    std::fs::write(
-        opts.output.join("patches.json"),
-        serde_json::to_vec_pretty(&preds)?,
-    )?;
+    write_json_atomic(&opts.output.join("patches.json"), &preds)?;
     Ok(())
 }
 

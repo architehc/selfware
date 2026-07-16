@@ -63,13 +63,7 @@ impl SweepManifest {
     }
 
     pub fn write_atomic(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_vec_pretty(self)?;
-        let temp_path = path.with_extension("json.tmp");
-        std::fs::write(&temp_path, json)
-            .with_context(|| format!("writing temp manifest {}", temp_path.display()))?;
-        std::fs::rename(&temp_path, path)
-            .with_context(|| format!("renaming manifest to {}", path.display()))?;
-        Ok(())
+        write_json_atomic(path, self)
     }
 
     pub fn find_trial(&self, quant: &str, instance_id: &str, trial: u32) -> Option<&TrialManifest> {
@@ -88,6 +82,22 @@ impl SweepManifest {
             .iter_mut()
             .find(|t| t.quant == quant && t.instance_id == instance_id && t.trial == trial)
     }
+}
+
+/// Atomically write `value` as pretty JSON to `path` via a temp sibling +
+/// rename. A crash mid-write can then never leave a truncated/partial file:
+/// `path` either has the old contents or the complete new contents. The harness
+/// relies on this for every file a later resume reads (manifest.json,
+/// result.json, aggregate.json, patches.json) — a half-written result.json was
+/// otherwise misread as corrupt and turned into a spurious "synthetic failure".
+pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let json = serde_json::to_vec_pretty(value)?;
+    let temp_path = path.with_extension("json.tmp");
+    std::fs::write(&temp_path, json)
+        .with_context(|| format!("writing temp file {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, path)
+        .with_context(|| format!("renaming {} into place", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -176,6 +186,23 @@ mod tests {
         let mut content = String::new();
         file.read_to_string(&mut content).unwrap();
         let _: SweepManifest = serde_json::from_str(&content).unwrap();
+    }
+
+    #[test]
+    fn write_json_atomic_overwrites_completely_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+
+        // A larger value first, then a smaller one: an atomic replace must yield
+        // exactly the new contents (no leftover tail from the old file, which a
+        // truncating in-place rewrite could leave) and no .tmp sibling.
+        write_json_atomic(&path, &serde_json::json!({"a": 1, "b": 2, "c": 3})).unwrap();
+        write_json_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
+
+        assert!(!dir.path().join("result.json.tmp").exists(), "temp left behind");
+        let back: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(back, serde_json::json!({"a": 1}));
     }
 
     #[test]
