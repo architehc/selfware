@@ -516,6 +516,10 @@ async fn test_e2e_browser_screenshot_round_trip() {
         eprintln!("skipping browser_screenshot E2E test: Chrome not available");
         return;
     };
+    if !playwright_runtime_ready() {
+        eprintln!("skipping browser_screenshot E2E test: Playwright runtime unavailable");
+        return;
+    }
     let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
     env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
     env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", chrome_path);
@@ -559,12 +563,18 @@ async fn test_e2e_browser_screenshot_round_trip() {
 #[tokio::test]
 async fn test_e2e_browser_pdf_round_trip() {
     let _env_lock = BROWSER_ENV_LOCK.lock().await;
+    let Some(chrome_path) = find_chrome_executable() else {
+        eprintln!("skipping browser_pdf E2E test: Chrome not available");
+        return;
+    };
+    if !playwright_runtime_ready() {
+        eprintln!("skipping browser_pdf E2E test: Playwright runtime unavailable");
+        return;
+    }
     let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
     env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
-    if let Some(chrome_path) = find_chrome_executable() {
-        env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", &chrome_path);
-        env_restore.set_var("SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", &chrome_path);
-    }
+    env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", &chrome_path);
+    env_restore.set_var("SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", &chrome_path);
 
     let body = "<html><head><title>chart pdf</title></head><body><article><h1>chart pdf</h1><p>pdf smoke</p></article></body></html>".to_string();
     let (server, base_url) = spawn_static_response_server(body, "text/html").await;
