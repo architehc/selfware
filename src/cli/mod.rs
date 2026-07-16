@@ -3734,12 +3734,28 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         }
     };
 
-    let llama_opts = crate::bench_harness::swebench_pro::harness::LlamaServerOpts {
+    let mut llama_opts = crate::bench_harness::swebench_pro::harness::LlamaServerOpts {
         port: args.port,
         ctx: args.ctx,
         parallel: args.parallel,
         ..Default::default()
     };
+    if let Some(ref d) = args.models_dir {
+        llama_opts.models_dir = std::path::PathBuf::from(d);
+    }
+    if let Some(ref b) = args.llama_server_bin {
+        llama_opts.binary = std::path::PathBuf::from(b);
+    }
+    if let Some(ref ts) = args.tensor_split {
+        // "auto"/"none"/empty disables the flag (e.g. single-GPU); else pass it through.
+        llama_opts.tensor_split = match ts.as_str() {
+            "auto" | "none" | "" => None,
+            other => Some(other.to_string()),
+        };
+    }
+    if let Some(ref h) = args.host {
+        llama_opts.host = h.clone();
+    }
     // Validate the prompt mode up front: an unknown value must fail loudly, not
     // silently fall back to diagnostic mode — which injects the oracle test
     // files (fail_to_pass) into the prompt and leaks the benchmark answer. A

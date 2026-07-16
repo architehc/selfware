@@ -593,6 +593,22 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
 
+    /// Directory containing the GGUF quant files (default: built-in models dir).
+    #[arg(long)]
+    pub models_dir: Option<String>,
+
+    /// Path to the llama-server binary (default: built-in / PATH lookup).
+    #[arg(long)]
+    pub llama_server_bin: Option<String>,
+
+    /// llama-server --tensor-split, e.g. "24,24". Use "auto" to omit the flag.
+    #[arg(long)]
+    pub tensor_split: Option<String>,
+
+    /// Host/interface llama-server binds to (default 127.0.0.1).
+    #[arg(long)]
+    pub host: Option<String>,
+
     /// Future-use: bench-side concurrency (currently surfaced in plan.json)
     #[arg(long, default_value_t = 1)]
     pub concurrency: u32,
