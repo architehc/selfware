@@ -38,7 +38,9 @@ Thumbs.db
 
 # Benchmark and test result directories
 /bench_results/
+/benchmark_results/
 /benchmark_results_*/
+/models/
 /benchmark_suite_*/
 /parallel_results/
 /parallel_dev_tests/
