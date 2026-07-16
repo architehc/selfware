@@ -84,6 +84,11 @@ pub struct ProcOutcome {
 /// this helper forces `stdout` to a pipe (it captures it) and sets
 /// `process_group(0)` on Unix. It does **not** parse stdout — callers
 /// interpret [`ProcOutcome::stdout`] however they need.
+///
+/// IMPORTANT: this helper drains **only stdout**. The caller MUST NOT set
+/// `stderr` to an unread pipe (`Stdio::piped()`) — nothing drains it, so a
+/// chatty child fills the pipe buffer and blocks, then gets killed and falsely
+/// reported as timed out. Send stderr to a file, `Stdio::null()`, or inherit.
 pub fn run_with_group_timeout(mut cmd: Command, timeout: Duration) -> Result<ProcOutcome> {
     cmd.stdout(Stdio::piped());
 

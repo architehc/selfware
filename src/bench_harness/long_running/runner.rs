@@ -104,7 +104,11 @@ impl LongRunningRunner {
             .arg("--no-color")
             .arg("-p")
             .arg(&task.prompt)
-            .stderr(Stdio::piped());
+            // Discard stderr: only stdout is consumed (count_steps / extract_
+            // outcome / the log), and `run_with_group_timeout` drains ONLY
+            // stdout — piping stderr into an undrained pipe would let a chatty
+            // child fill it and block, then be falsely reported as timed out.
+            .stderr(Stdio::null());
         // Scrub the agent's environment to the shared allowlist (drop the
         // operator's unrelated secrets); the model endpoint comes from the
         // written selfware.toml, not the environment.
