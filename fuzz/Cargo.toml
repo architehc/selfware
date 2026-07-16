@@ -14,13 +14,6 @@ libfuzzer-sys = "0.4"
 path = ".."
 
 [[bin]]
-name = "fuzz_target_1"
-path = "fuzz_targets/fuzz_target_1.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "path_validator"
 path = "fuzz_targets/path_validator.rs"
 test = false
