@@ -708,10 +708,6 @@ step_timeout_secs = {}
 mod tests {
     use super::*;
     use crate::config::{default_endpoint, default_model, Config};
-    use std::sync::Mutex;
-
-    /// Mutex to serialize tests that change the working directory.
-    static CWD_MUTEX: Mutex<()> = Mutex::new(());
 
     // =========================================================================
     // DiscoveredEndpoint struct tests
@@ -1124,7 +1120,7 @@ mod tests {
     where
         F: FnOnce() -> R,
     {
-        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::CwdGuard::hold();
         let original = std::env::current_dir().expect("failed to get cwd");
         let tmp = tempfile::tempdir().expect("failed to create temp dir");
         std::env::set_current_dir(&tmp).expect("failed to change to temp dir");

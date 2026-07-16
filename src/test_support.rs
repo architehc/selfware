@@ -88,3 +88,36 @@ impl Drop for BudgetGuard {
         crate::tools::codemap::update_budget(0, 1_000_000, 0);
     }
 }
+
+/// Guard for tests that drive the agent execute loop. Such a test BOTH reads the
+/// cwd (`current_project_root` in the completion gate) AND mutates the codemap
+/// budget atomics (as a side effect of execution), so it needs all of: hold the
+/// shared lock (serialize), reset the budget to a large known value on
+/// acquire/drop (so a prior execute-loop test that left the budget low can't
+/// make this one spuriously trip "budget exceeded"), and restore the cwd on
+/// drop. `CwdGuard` alone left the budget inherited — the cause of flaky
+/// `continue_execution`/`run_task` failures under parallel test execution.
+pub(crate) struct ExecGuard {
+    _lock: MutexGuard<'static, ()>,
+    saved: PathBuf,
+}
+
+impl ExecGuard {
+    pub(crate) fn hold() -> Self {
+        let lock = state_lock();
+        let saved = std::env::current_dir().expect("read current dir");
+        crate::tools::codemap::update_budget(0, 1_000_000, 0);
+        // Start from a non-cancelled state: a prior test may have exercised
+        // `request_shutdown`, and `is_cancelled()` observes that global latch.
+        crate::reset_shutdown_for_test();
+        Self { _lock: lock, saved }
+    }
+}
+
+impl Drop for ExecGuard {
+    fn drop(&mut self) {
+        crate::tools::codemap::update_budget(0, 1_000_000, 0);
+        crate::reset_shutdown_for_test();
+        let _ = std::env::set_current_dir(&self.saved);
+    }
+}

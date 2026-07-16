@@ -2683,7 +2683,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_no_checkpoint() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response("Resume plan.")
             .with_response("Resume done.")
@@ -2701,7 +2701,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_with_checkpoint() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response("Plan.")
             .with_response("Done.")
@@ -2725,7 +2725,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_executes_planned_tool_calls_immediately() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response(
                 r#"<tool>
@@ -2759,7 +2759,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_cancellation() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response("Plan.")
             .with_response("More.")
@@ -2791,7 +2791,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_preserves_tactical_plan() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response("Plan.")
             .with_response("Done.")
@@ -2827,7 +2827,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_sets_operational_plan() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response("Plan.")
             .with_response("Done.")
@@ -2855,7 +2855,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_preserves_operational_plan() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder()
             .with_response("Plan.")
             .with_response("Done.")
@@ -2894,7 +2894,7 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_continue_execution_no_action_error_is_recoverable() {
-        let _state = crate::test_support::CwdGuard::hold();
+        let _state = crate::test_support::ExecGuard::hold();
         // The model will repeatedly describe intent without using tools.
         // With recoverable no-action errors, the loop should eventually
         // exhaust max_iterations rather than fatally aborting early.

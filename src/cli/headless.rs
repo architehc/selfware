@@ -326,10 +326,6 @@ mod tests {
     use crate::agent::progress::ProgressEvent;
     use crate::observability::dashboard::TokenUsage;
     use serde_json::Value;
-    use std::sync::Mutex;
-
-    /// Mutex to serialize tests that change the working directory.
-    static CWD_MUTEX: Mutex<()> = Mutex::new(());
 
     // ── SessionResult serialization ──────────────────────────────────────
 
@@ -835,7 +831,7 @@ mod tests {
             }
         };
         let _cleanup = TempDirCleanup(tmp_dir.clone());
-        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::CwdGuard::hold();
         let original_dir = std::env::current_dir().unwrap();
 
         // Modify existing file
@@ -875,7 +871,7 @@ mod tests {
             }
         };
         let _cleanup = TempDirCleanup(tmp_dir.clone());
-        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::CwdGuard::hold();
         let original_dir = std::env::current_dir().unwrap();
 
         // Two commits, in order, so the file ends up tracked-BUT-ignored:
@@ -930,7 +926,7 @@ mod tests {
             }
         };
         let _cleanup = TempDirCleanup(tmp_dir.clone());
-        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::CwdGuard::hold();
         let original_dir = std::env::current_dir().unwrap();
 
         std::env::set_current_dir(&tmp_dir).unwrap();
@@ -956,7 +952,7 @@ mod tests {
             }
         };
         let _cleanup = TempDirCleanup(tmp_dir.clone());
-        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::CwdGuard::hold();
         let original_dir = std::env::current_dir().unwrap();
 
         // Modify main file (should appear)
@@ -994,7 +990,7 @@ mod tests {
             }
         };
         let _cleanup = TempDirCleanup(tmp_dir.clone());
-        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::test_support::CwdGuard::hold();
         let original_dir = std::env::current_dir().unwrap();
 
         // Make an unstaged modification to the tracked file.

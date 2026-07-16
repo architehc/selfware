@@ -175,6 +175,16 @@ pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_FLAG.load(Ordering::SeqCst)
 }
 
+/// Test-only: clear the process-global shutdown latch. In production the latch
+/// is a one-way switch owned by `main`'s signal handler, but a test that
+/// exercises `request_shutdown` must clear it — otherwise the flag stays set for
+/// the rest of the process and every later test that checks `is_cancelled()`
+/// (which observes this latch) spuriously fails with "Task cancelled by user".
+#[cfg(test)]
+pub(crate) fn reset_shutdown_for_test() {
+    SHUTDOWN_FLAG.store(false, Ordering::SeqCst);
+}
+
 /// Await until a graceful shutdown has been requested.
 ///
 /// The shutdown state is a one-way latch, so a simple poll loop is race-free
@@ -207,7 +217,11 @@ mod tests {
 
     #[test]
     fn test_request_shutdown_sets_flag() {
+        // Hold the shared test lock so no execute-loop test runs while the global
+        // shutdown latch is set, and clear it on drop so the latch never leaks.
+        let _g = crate::test_support::ExecGuard::hold();
         request_shutdown();
         assert!(is_shutdown_requested());
+        reset_shutdown_for_test();
     }
 }
