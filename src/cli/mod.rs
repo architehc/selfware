@@ -3729,6 +3729,16 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         parallel: args.parallel,
         ..Default::default()
     };
+    // Validate the prompt mode up front: an unknown value must fail loudly, not
+    // silently fall back to diagnostic mode — which injects the oracle test
+    // files (fail_to_pass) into the prompt and leaks the benchmark answer. A
+    // `--prompt-mode offical` typo previously enabled that silently.
+    if !matches!(args.prompt_mode.as_str(), "official" | "diagnostic") {
+        anyhow::bail!(
+            "invalid --prompt-mode '{}': expected 'official' or 'diagnostic'",
+            args.prompt_mode
+        );
+    }
     let opts = SwebenchProOpts {
         quants,
         instance_ids,
