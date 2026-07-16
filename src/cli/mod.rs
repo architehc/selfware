@@ -884,14 +884,25 @@ fn build_session_result(
         Err(e) => format!("error: {}", e),
     };
     let num_turns = agent.current_iteration();
-    let patch = headless::capture_patch().unwrap_or_default();
+    // A capture failure must NOT masquerade as a clean empty patch (0 bytes),
+    // which would fool automated success metrics. Surface it instead.
+    let (patch, patch_capture_error) = match headless::capture_patch() {
+        Ok(p) => (p, None),
+        Err(e) => {
+            eprintln!("warning: patch capture failed: {e}");
+            (String::new(), Some(format!("patch_capture_failed: {e}")))
+        }
+    };
     let patch_bytes = patch.len();
     let patch_lines = patch.lines().count();
     let usage = agent.cumulative_token_usage().clone();
     let model = agent.model().to_string();
+    // Prefer the agent's own failure mode; otherwise report a patch-capture
+    // failure so a git error is visible in the structured result.
     let failure_mode = agent
         .last_run_failure_mode()
-        .map(|fm| format!("{}: {}", fm.kind.tag(), fm.evidence));
+        .map(|fm| format!("{}: {}", fm.kind.tag(), fm.evidence))
+        .or(patch_capture_error);
     let artifact_dir = std::env::var("SELFWARE_RESULT_DIR")
         .ok()
         .map(std::path::PathBuf::from)

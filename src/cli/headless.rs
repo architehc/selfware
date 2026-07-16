@@ -171,6 +171,19 @@ pub fn emit_result(result: &SessionResult) {
 
 /// Capture `git diff` from the current working directory, including newly
 /// added files and excluding selfware-internal scratch directories.
+/// Whether the repository in the current directory has a resolvable `HEAD`
+/// (i.e. at least one commit). Used to tell a legitimately-empty repo (no HEAD)
+/// from a genuine seeding failure.
+fn head_exists() -> bool {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 pub fn capture_patch() -> anyhow::Result<String> {
     // Stage changes into a *temporary* git index so we never mutate the user's
     // real `.git/index`. `GIT_INDEX_FILE` redirects `git add`/`git diff` at a
@@ -193,19 +206,31 @@ pub fn capture_patch() -> anyhow::Result<String> {
     // from HEAD makes those files present in the temp index, so an unchanged
     // tracked-ignored file stays unchanged and only real working-tree edits
     // (modifications, new files, genuine deletions) appear in the patch.
-    let _ = std::process::Command::new("git")
+    let read_tree = std::process::Command::new("git")
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["read-tree", "HEAD"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    // If seeding failed while a HEAD actually exists, the index would start
+    // empty and every tracked-but-.gitignore'd file would show as a phantom
+    // deletion — refuse rather than emit a bogus patch. A repo with no commits
+    // legitimately has no HEAD; there the empty index is correct and the
+    // diff-vs-HEAD below fails cleanly on its own.
+    let seed_ok = matches!(read_tree, Ok(ref s) if s.success());
+    if !seed_ok && head_exists() {
+        anyhow::bail!("git read-tree HEAD failed while seeding the patch index");
+    }
 
-    let _ = std::process::Command::new("git")
+    let add_status = std::process::Command::new("git")
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["add", "-A"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+    if !matches!(add_status, Ok(ref s) if s.success()) {
+        anyhow::bail!("git add -A failed while staging the patch");
+    }
 
     let out = std::process::Command::new("git")
         .env("GIT_INDEX_FILE", &tmp_index)
