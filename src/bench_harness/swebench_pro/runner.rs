@@ -677,6 +677,24 @@ fn run_trial(
                 }
                 Err(e) => {
                     eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e);
+                    // Record the failure so the trial isn't left at `Planned`
+                    // (which reads as "never attempted"). It will still be
+                    // re-run on a later resume, but the manifest now reflects
+                    // reality and persists the error.
+                    let mut m = manifest.lock().unwrap_or_else(|e| e.into_inner());
+                    update_manifest_entry(
+                        &mut m,
+                        &spec.label,
+                        &inst.instance_id,
+                        trial,
+                        TrialState::AgentFailed,
+                        Some(format!("run_one error: {e}")),
+                        None,
+                        None,
+                    );
+                    if let Err(we) = m.write_atomic(manifest_path) {
+                        eprintln!("    failed to write manifest: {}", we);
+                    }
                 }
             }
         }
@@ -767,7 +785,25 @@ fn run_trial(
                         r.push(selected);
                         r.append(&mut candidates);
                     }
-                    Err(e) => eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e),
+                    Err(e) => {
+                        eprintln!("    {} trial {}: error: {}", inst.instance_id, trial, e);
+                        // Record the failure instead of leaving the trial at
+                        // `Planned` (see the sequential path). Re-run on resume.
+                        let mut m = manifest_c.lock().unwrap_or_else(|e| e.into_inner());
+                        update_manifest_entry(
+                            &mut m,
+                            &spec_c.label,
+                            &inst.instance_id,
+                            trial,
+                            TrialState::AgentFailed,
+                            Some(format!("run_one error: {e}")),
+                            None,
+                            None,
+                        );
+                        if let Err(we) = m.write_atomic(&manifest_path_c) {
+                            eprintln!("    failed to write manifest: {}", we);
+                        }
+                    }
                 }
             }));
         }
