@@ -914,6 +914,33 @@ fn get_recent_git_changes(repo_root: &Path, max_commits: usize) -> Option<String
     }
 }
 
+/// Resolve `candidate` against `base`, guaranteeing the result stays INSIDE
+/// `base`. Returns `None` for an absolute path or any `..` sequence that would
+/// escape. Used to contain both config-supplied mutation targets (read) and
+/// model-produced edit paths (write) so `selfware evolve` can never read or
+/// overwrite files outside the repository. Purely lexical (no canonicalize) so
+/// it also works for not-yet-existing write targets.
+fn contained_path(base: &Path, candidate: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if candidate.is_absolute() {
+        return None;
+    }
+    let mut result = base.to_path_buf();
+    for comp in candidate.components() {
+        match comp {
+            Component::Normal(c) => result.push(c),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !result.pop() || !result.starts_with(base) {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    result.starts_with(base).then_some(result)
+}
+
 pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
     // Collect all files with their sizes, then sort smallest-first so we
     // maximise the number of files sent in full within the context budget.
@@ -926,7 +953,16 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
 
     let mut file_entries: Vec<(&PathBuf, String, usize, Vec<String>)> = Vec::new();
     for file in &all_paths {
-        let full_path = repo_root.join(file);
+        // Contain the target inside the repo: an `[evolution]` config entry that
+        // is absolute or uses `..` must not read arbitrary host files into the
+        // model prompt.
+        let Some(full_path) = contained_path(repo_root, file) else {
+            log_warning(&format!(
+                "Refusing mutation target outside the repository: {}",
+                file.display()
+            ));
+            continue;
+        };
         match std::fs::read_to_string(&full_path) {
             Ok(contents) => {
                 let len = contents.len();
@@ -1400,7 +1436,15 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
     }
 
     for (file, edits) in &file_edits {
-        let path = dir.join(file);
+        // Contain the model-produced edit path inside the working dir: an
+        // absolute or `../` path must not read or overwrite host files.
+        let Some(path) = contained_path(dir, Path::new(file)) else {
+            log_warning(&format!(
+                "Refusing edit to path outside the working directory: {}",
+                file
+            ));
+            return false;
+        };
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(_) => return false,
@@ -1703,6 +1747,25 @@ fn log_reject(_gen: usize, rating: &GenerationRating, winner_sab: f64, baseline_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contained_path_contains_and_rejects_escapes() {
+        let base = Path::new("/repo");
+        // Normal in-repo paths resolve inside base.
+        assert_eq!(
+            contained_path(base, Path::new("src/main.rs")),
+            Some(PathBuf::from("/repo/src/main.rs"))
+        );
+        assert_eq!(
+            contained_path(base, Path::new("a/../b")),
+            Some(PathBuf::from("/repo/b"))
+        );
+        // Escapes are rejected: absolute, parent traversal, root.
+        assert_eq!(contained_path(base, Path::new("/etc/passwd")), None);
+        assert_eq!(contained_path(base, Path::new("../secret")), None);
+        assert_eq!(contained_path(base, Path::new("../../etc/passwd")), None);
+        assert_eq!(contained_path(base, Path::new("a/../../b")), None);
+    }
 
     #[test]
     fn test_format_empty_history() {
