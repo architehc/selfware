@@ -666,10 +666,7 @@ pub(crate) struct SwebenchProArgs {
     pub official_eval: bool,
 
     /// Path to the SWE-bench Pro evaluator script.
-    #[arg(
-        long,
-        default_value = "SWE-bench_Pro-os/swe_bench_pro_eval.py"
-    )]
+    #[arg(long, default_value = "SWE-bench_Pro-os/swe_bench_pro_eval.py")]
     pub official_eval_script: String,
 
     /// Path to the SWE-bench Pro raw sample CSV/JSONL.

@@ -2320,7 +2320,10 @@ mod tests {
         assert!(restricted.is_some(), "restriction must be reported");
 
         // Every privileged field is neutralized.
-        assert!(config.safety.permissions.is_empty(), "wildcard grant stripped");
+        assert!(
+            config.safety.permissions.is_empty(),
+            "wildcard grant stripped"
+        );
         assert!(config.hooks.is_empty(), "shell hooks stripped");
         assert!(config.mcp.servers.is_empty(), "MCP servers stripped");
         assert_eq!(config.agent.post_edit_test_command, None);
@@ -2358,10 +2361,7 @@ mod tests {
             ConfigSource::EnvVar("SELFWARE_X".into()),
         );
         // Hooks from an explicitly-named config (not `selfware.toml`) → preserved.
-        sources.set(
-            "hooks",
-            ConfigSource::ConfigFile("/x/myconfig.toml".into()),
-        );
+        sources.set("hooks", ConfigSource::ConfigFile("/x/myconfig.toml".into()));
 
         let restricted = config.restrict_untrusted_project_config(&sources);
         assert!(restricted.is_none(), "trusted-origin values must be kept");

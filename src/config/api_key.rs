@@ -227,10 +227,16 @@ mod tests {
         let client = reqwest::Client::new();
         let url = "http://api.example.com/v1/chat/completions";
         // key + remote http -> refused (never builds a request that leaks it)
-        assert!(authorize_request(client.post(url), "http://api.example.com/v1", Some("sk-x")).is_err());
+        assert!(
+            authorize_request(client.post(url), "http://api.example.com/v1", Some("sk-x")).is_err()
+        );
         // key + safe endpoint -> allowed
-        assert!(authorize_request(client.post(url), "https://api.example.com/v1", Some("sk-x")).is_ok());
-        assert!(authorize_request(client.post(url), "http://127.0.0.1:8000/v1", Some("sk-x")).is_ok());
+        assert!(
+            authorize_request(client.post(url), "https://api.example.com/v1", Some("sk-x")).is_ok()
+        );
+        assert!(
+            authorize_request(client.post(url), "http://127.0.0.1:8000/v1", Some("sk-x")).is_ok()
+        );
         // no key -> allowed regardless of transport
         assert!(authorize_request(client.post(url), "http://api.example.com/v1", None).is_ok());
     }

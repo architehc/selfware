@@ -275,8 +275,7 @@ impl BrowserTaskExecutor {
                 let remaining = timeout.saturating_sub(task_start.elapsed());
                 if remaining.is_zero() {
                     task_failed = true;
-                    failure_reasons
-                        .push("Task timeout exceeded during criteria evaluation".into());
+                    failure_reasons.push("Task timeout exceeded during criteria evaluation".into());
                     break;
                 }
                 let met = match tokio::time::timeout(

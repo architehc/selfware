@@ -44,7 +44,6 @@ impl Default for LlamaServerOpts {
     }
 }
 
-
 /// Resolve the `llama-server` binary path with this priority:
 ///   1. `LLAMA_SERVER_BIN` environment variable.
 ///   2. `which llama-server` on `$PATH`.

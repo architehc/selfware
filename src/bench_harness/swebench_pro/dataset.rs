@@ -164,7 +164,7 @@ mod tests {
         assert!(is_safe_instance_id("astropy__astropy-12345"));
         assert!(is_safe_instance_id("django__django-9.2rc1"));
         assert!(is_safe_instance_id("a..b")); // embedded dots, still one component
-        // Traversal / separators / specials are rejected.
+                                              // Traversal / separators / specials are rejected.
         assert!(!is_safe_instance_id(".."));
         assert!(!is_safe_instance_id("."));
         assert!(!is_safe_instance_id(""));

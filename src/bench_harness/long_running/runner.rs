@@ -2,10 +2,10 @@
 
 use super::config::LongRunningConfig;
 use super::project::{ProjectResult, ProjectStatus, ProjectType};
+use crate::bench_harness::subprocess::{apply_env_allowlist, run_with_group_timeout};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use crate::bench_harness::subprocess::{apply_env_allowlist, run_with_group_timeout};
 
 /// A test task definition.
 #[derive(Debug, Clone)]

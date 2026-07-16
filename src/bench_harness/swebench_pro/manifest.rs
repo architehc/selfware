@@ -199,7 +199,10 @@ mod tests {
         write_json_atomic(&path, &serde_json::json!({"a": 1, "b": 2, "c": 3})).unwrap();
         write_json_atomic(&path, &serde_json::json!({"a": 1})).unwrap();
 
-        assert!(!dir.path().join("result.json.tmp").exists(), "temp left behind");
+        assert!(
+            !dir.path().join("result.json.tmp").exists(),
+            "temp left behind"
+        );
         let back: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(back, serde_json::json!({"a": 1}));

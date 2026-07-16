@@ -531,56 +531,56 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         } else {
             LlamaServer::stop_existing(opts.llama_opts.port);
             match LlamaServer::boot(&spec, &quant_llama_opts) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                eprintln!("  ❌ boot failed: {} — recording failures and skipping", e);
-                // Each (instance × trial) is "attempted" from the harness's
-                // point of view, even if the server never came up.
-                let mut m = manifest_arc.lock().unwrap_or_else(|e| e.into_inner());
-                for trial in 1..=trials {
-                    for inst in &instances {
-                        match record_boot_failure(&opts, &spec, inst, trial, &e.to_string()) {
-                            Ok(res) => {
-                                all_runs.push(res.clone());
-                                update_manifest_entry(
-                                    &mut m,
-                                    &spec.label,
-                                    &inst.instance_id,
-                                    trial,
-                                    TrialState::BootFailed,
-                                    Some(res.error),
-                                    Some(res.pred_path),
-                                    Some(
-                                        trial_dir_for(
-                                            &opts.output,
-                                            &spec.label,
-                                            &inst.instance_id,
-                                            trial,
-                                        )
-                                        .join("result.json"),
-                                    ),
-                                );
+                Ok(s) => Some(s),
+                Err(e) => {
+                    eprintln!("  ❌ boot failed: {} — recording failures and skipping", e);
+                    // Each (instance × trial) is "attempted" from the harness's
+                    // point of view, even if the server never came up.
+                    let mut m = manifest_arc.lock().unwrap_or_else(|e| e.into_inner());
+                    for trial in 1..=trials {
+                        for inst in &instances {
+                            match record_boot_failure(&opts, &spec, inst, trial, &e.to_string()) {
+                                Ok(res) => {
+                                    all_runs.push(res.clone());
+                                    update_manifest_entry(
+                                        &mut m,
+                                        &spec.label,
+                                        &inst.instance_id,
+                                        trial,
+                                        TrialState::BootFailed,
+                                        Some(res.error),
+                                        Some(res.pred_path),
+                                        Some(
+                                            trial_dir_for(
+                                                &opts.output,
+                                                &spec.label,
+                                                &inst.instance_id,
+                                                trial,
+                                            )
+                                            .join("result.json"),
+                                        ),
+                                    );
+                                }
+                                Err(rec_err) => eprintln!(
+                                    "    failed to record boot failure for {} trial {}: {}",
+                                    inst.instance_id, trial, rec_err
+                                ),
                             }
-                            Err(rec_err) => eprintln!(
-                                "    failed to record boot failure for {} trial {}: {}",
-                                inst.instance_id, trial, rec_err
-                            ),
                         }
                     }
+                    if let Err(we) = m.write_atomic(&manifest_path) {
+                        eprintln!("    failed to write manifest after boot failure: {}", we);
+                    }
+                    continue;
                 }
-                if let Err(we) = m.write_atomic(&manifest_path) {
-                    eprintln!("    failed to write manifest after boot failure: {}", we);
-                }
-                continue;
-            }
             }
         };
 
         // Detect backend after successful boot and annotate plan.json.
         let endpoint = opts
-        .endpoint
-        .clone()
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}/v1", opts.llama_opts.port));
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| format!("http://127.0.0.1:{}/v1", opts.llama_opts.port));
         match crate::api::client::detect_backend(&endpoint) {
             Ok(backend) => {
                 if let Ok(bytes) = std::fs::read(&plan_path) {
@@ -2525,12 +2525,18 @@ mod tests {
 
         // Normal resume: an Evaluated trial is skipped (seeded once, not re-run).
         opts.force_rerun = false;
-        assert!(should_skip_trial(&opts, Some(&trial_in_state(TrialState::Evaluated))));
+        assert!(should_skip_trial(
+            &opts,
+            Some(&trial_in_state(TrialState::Evaluated))
+        ));
 
         // --force-rerun: the Evaluated trial is NOT skipped → it is re-run and
         // must therefore NOT be seeded (else it lands in all_runs twice).
         opts.force_rerun = true;
-        assert!(!should_skip_trial(&opts, Some(&trial_in_state(TrialState::Evaluated))));
+        assert!(!should_skip_trial(
+            &opts,
+            Some(&trial_in_state(TrialState::Evaluated))
+        ));
 
         // Failed trials are always re-run on resume → never seeded.
         for st in [
