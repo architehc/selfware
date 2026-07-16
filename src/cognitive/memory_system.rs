@@ -414,16 +414,10 @@ mod tests {
 
         // Temporarily override home_dir by using a path inside our temp tree.
         // Since `dirs::home_dir()` reads env vars, we can set HOME.
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
+        let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+        env.set("HOME", &home);
 
         let files = MemorySystem::discover(&src);
-
-        // Restore HOME
-        match original_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
 
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, project_memory);
@@ -482,15 +476,10 @@ mod tests {
         std::fs::write(&home_guidance, "home guidance").unwrap();
         std::fs::write(&outside_guidance, "outside guidance").unwrap();
 
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
+        let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+        env.set("HOME", &home);
 
         let files = MemorySystem::discover_workspace_guidance(&src);
-
-        match original_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
 
         assert_eq!(files.len(), 2);
         assert_eq!(files[0].path, project_guidance);
@@ -527,15 +516,10 @@ mod tests {
         )
         .unwrap();
 
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
+        let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+        env.set("HOME", &home);
 
         let files = MemorySystem::discover_workspace_guidance(&project);
-
-        match original_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
 
         assert_eq!(files.len(), 1);
         assert!(files[0].content.ends_with("... [truncated]"));
@@ -590,16 +574,10 @@ mod tests {
         std::fs::write(memory_base.join("projects_myapp_MEMORY.md"), memory_content).unwrap();
 
         // Set HOME to temp directory
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
+        let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+        env.set("HOME", &home);
 
         let memories = MemorySystem::discover_consolidated(&project);
-
-        // Restore HOME
-        match original_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
 
         assert_eq!(memories.len(), 1);
         assert_eq!(memories[0].project_key, "projects_myapp");
@@ -655,17 +633,11 @@ mod tests {
         std::fs::write(memory_base.join("home_myapp_MEMORY.md"), memory_content).unwrap();
 
         // Set HOME to temp directory
-        let original_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", &home);
+        let env = crate::test_support::EnvGuard::capture(&["HOME"]);
+        env.set("HOME", &home);
 
         let system = DreamIntegratedMemorySystem::new(&project);
         let memory = system.load_consolidated_memory();
-
-        // Restore HOME
-        match original_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
 
         assert!(memory.is_some());
         assert!(memory.unwrap().content.contains("Test fact"));

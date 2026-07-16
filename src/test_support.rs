@@ -121,3 +121,38 @@ impl Drop for ExecGuard {
         let _ = std::env::set_current_dir(&self.saved);
     }
 }
+
+/// RAII guard serializing tests that mutate process environment variables
+/// (`HOME`, `SELFWARE_API_KEY`, …). Takes the shared state lock — so an env
+/// mutator can never run concurrently with a cwd, budget, or exec-loop test —
+/// and restores each captured variable to its prior value on drop (including
+/// on panic).
+pub(crate) struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl EnvGuard {
+    /// Acquire the state lock and capture the current values of `keys`.
+    pub(crate) fn capture(keys: &[&'static str]) -> Self {
+        let lock = state_lock();
+        let saved = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
+        Self { _lock: lock, saved }
+    }
+
+    /// Set an environment variable while holding the guard.
+    pub(crate) fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        std::env::set_var(key, value);
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.saved.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
