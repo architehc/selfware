@@ -15,9 +15,6 @@ use anyhow::Result;
 use chrono::Utc;
 use std::collections::VecDeque;
 
-pub mod swebench;
-pub mod swebench_store;
-
 /// Maximum number of memory entries before eviction kicks in.
 const MAX_MEMORY_ENTRIES: usize = 10_000;
 
