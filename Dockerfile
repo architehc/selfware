@@ -50,6 +50,10 @@ RUN cargo build --release 2>/dev/null || true && rm -rf src benches tests
 
 # Copy the actual source code
 COPY src ./src
+# scripts/ is required at build time: src/tools/page_controller.rs embeds the
+# Playwright bridge via `include_str!("../../scripts/playwright-bridge.js")`,
+# so the file must be in the build context or `cargo build` fails.
+COPY scripts ./scripts
 COPY tests ./tests
 COPY benches ./benches
 COPY examples ./examples
@@ -79,6 +83,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     libgcc-s1 \
     curl \
+    libdbus-1-3 \
+    libxcb1 \
+    libxcb-randr0 \
+    libxcb-shm0 \
+    libxcb-composite0 \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

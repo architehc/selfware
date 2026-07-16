@@ -5,6 +5,11 @@
 
 # Build artifacts
 target/
+# ...but keep the prebuilt binary that Dockerfile.selfware copies in
+# (`COPY target/release/selfware`); without this exception that COPY fails.
+!target/release/selfware
+# Playwright runtime deps are installed in-image; never ship the host's.
+scripts/node_modules/
 **/*.rs.bk
 Cargo.lock.bak
 
