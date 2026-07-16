@@ -712,18 +712,43 @@ impl ProcessManager {
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         } else {
-            // No health check, mark as running after brief delay
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-            // Check if process already exited during the brief delay
-            let exit_code = {
-                let mut child_guard = child_handle.write().await;
-                if let Some(ref mut child) = *child_guard {
-                    child.try_wait().ok().flatten().and_then(|s| s.code())
-                } else {
-                    None
+            // No health check: give the process a brief window to settle, but
+            // POLL for an early exit throughout it instead of taking a single
+            // snapshot at the end. A single 500 ms snapshot was flaky: under a
+            // saturated CPU the child could exit slightly later, and the
+            // concurrent `monitor_process` task races us to reap it (whoever
+            // calls `try_wait` first gets the code, the other gets `None`), so
+            // an immediately-crashing process was sometimes mis-marked Running.
+            // Break as soon as either we or the monitor observe the exit.
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(800);
+            let mut exit_code = None;
+            loop {
+                {
+                    let mut child_guard = child_handle.write().await;
+                    if let Some(ref mut child) = *child_guard {
+                        if let Some(code) = child.try_wait().ok().flatten().and_then(|s| s.code()) {
+                            exit_code = Some(code);
+                        }
+                    }
                 }
-            };
+                // The monitor task may have reaped + recorded the exit first.
+                let monitor_saw_exit = {
+                    let processes = self.processes.read().await;
+                    processes.get(&id).is_some_and(|p| {
+                        matches!(
+                            p.status,
+                            ProcessStatus::Crashed { .. } | ProcessStatus::Stopped
+                        )
+                    })
+                };
+                if exit_code.is_some()
+                    || monitor_saw_exit
+                    || tokio::time::Instant::now() >= deadline
+                {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            }
 
             let mut processes = self.processes.write().await;
             if let Some(proc) = processes.get_mut(&id) {
@@ -732,9 +757,11 @@ impl ProcessManager {
                         exit_code: Some(code),
                     };
                 } else if matches!(proc.status, ProcessStatus::Starting) {
+                    // Neither we nor the monitor saw an exit within the window.
                     proc.status = ProcessStatus::Running;
                     proc.health_matched = true;
                 }
+                // else: the monitor already set Crashed/Stopped — leave it.
             }
         }
 
