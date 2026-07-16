@@ -32,6 +32,8 @@ Thumbs.db
 /system_tests/projecte2e/reports/
 /system_tests/swe_bench_pro/runs*/
 /system_tests/swe_bench_pro/swarm_*/
+# Point-in-time visual-audit / recheck screenshots — keep out of source control.
+/artifacts/
 .venv_eval/
 
 # Benchmark and test result directories
