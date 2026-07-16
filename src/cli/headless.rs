@@ -185,6 +185,21 @@ pub fn capture_patch() -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("creating temp dir for git index: {}", e))?;
     let tmp_index = tmp_index_dir.path().join("index");
 
+    // Seed the temporary index from HEAD before staging. Without this the index
+    // starts EMPTY, so `git add -A` — which skips paths matched by `.gitignore`
+    // — never re-adds tracked-but-ignored files, and `git diff --cached HEAD`
+    // then reports every one of them as a spurious deletion (the giant phantom
+    // patch: files that exist and are committed, reported as removed). Seeding
+    // from HEAD makes those files present in the temp index, so an unchanged
+    // tracked-ignored file stays unchanged and only real working-tree edits
+    // (modifications, new files, genuine deletions) appear in the patch.
+    let _ = std::process::Command::new("git")
+        .env("GIT_INDEX_FILE", &tmp_index)
+        .args(["read-tree", "HEAD"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
     let _ = std::process::Command::new("git")
         .env("GIT_INDEX_FILE", &tmp_index)
         .args(["add", "-A"])
@@ -842,6 +857,65 @@ mod tests {
         assert!(
             patch.contains("new content"),
             "patch should contain new file, got: {}",
+            patch
+        );
+    }
+
+    #[test]
+    fn test_capture_patch_no_phantom_deletion_for_tracked_ignored_files() {
+        // Regression: a file that is tracked in HEAD but matches .gitignore must
+        // NOT be reported as deleted when it is unchanged. Before seeding the
+        // temp index from HEAD, `git add -A` skipped it (ignored) and the diff
+        // showed a spurious deletion — a huge phantom patch with zero real edits.
+        let tmp_dir = match make_temp_git_repo("selfware_cp_phantom") {
+            Some(d) => d,
+            None => {
+                eprintln!("Skipping: git not available");
+                return;
+            }
+        };
+        let _cleanup = TempDirCleanup(tmp_dir.clone());
+        let _guard = CWD_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let original_dir = std::env::current_dir().unwrap();
+
+        // Two commits, in order, so the file ends up tracked-BUT-ignored:
+        //   1) commit data.gen while it is still un-ignored (so it is tracked),
+        //   2) THEN add a .gitignore that ignores it.
+        // (Writing both at once and committing would let `git add -A` skip the
+        // already-ignored file, so it would never be tracked — not the case we
+        // want to exercise.)
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&tmp_dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap();
+        };
+        std::fs::write(tmp_dir.join("data.gen"), "generated payload\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "add data.gen (tracked)"]);
+        std::fs::write(tmp_dir.join(".gitignore"), "data.gen\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "ignore data.gen (now tracked-but-ignored)"]);
+
+        // No working-tree changes at all → the patch must be empty, and in
+        // particular must not mention data.gen (as a deletion or otherwise).
+        std::env::set_current_dir(&tmp_dir).unwrap();
+        let result = capture_patch();
+        std::env::set_current_dir(&original_dir).unwrap();
+
+        assert!(result.is_ok(), "capture_patch failed: {:?}", result.err());
+        let patch = result.unwrap();
+        assert!(
+            !patch.contains("data.gen"),
+            "tracked-but-ignored file reported as a phantom change:\n{}",
+            patch
+        );
+        assert!(
+            patch.trim().is_empty(),
+            "no real edits, so the patch must be empty; got:\n{}",
             patch
         );
     }
