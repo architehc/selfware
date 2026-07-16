@@ -614,6 +614,10 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long)]
     pub endpoint: Option<String>,
 
+    /// Load the dataset from a local JSONL file instead of HuggingFace.
+    #[arg(long)]
+    pub instances_jsonl: Option<String>,
+
     /// Future-use: bench-side concurrency (currently surfaced in plan.json)
     #[arg(long, default_value_t = 1)]
     pub concurrency: u32,

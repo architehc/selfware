@@ -52,8 +52,18 @@ for row in ds:
 /// * `limit` — when `instance_ids` is empty, picks the `limit` rows with the
 ///   shortest `problem_statement` (matching the Python harness's "easiest first"
 ///   heuristic for sanity runs).
-pub fn load_instances(instance_ids: &[String], limit: usize) -> Result<Vec<Instance>> {
-    let raw = run_loader_script()?;
+pub fn load_instances(
+    instance_ids: &[String],
+    limit: usize,
+    jsonl_path: Option<&std::path::Path>,
+) -> Result<Vec<Instance>> {
+    // Offline path: read the dataset from a local JSONL file instead of pulling
+    // it from HuggingFace via the Python loader.
+    let raw = match jsonl_path {
+        Some(p) => std::fs::read_to_string(p)
+            .with_context(|| format!("reading instances JSONL {}", p.display()))?,
+        None => run_loader_script()?,
+    };
     let mut all: Vec<Instance> = raw
         .lines()
         .filter(|line| !line.trim().is_empty())

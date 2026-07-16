@@ -44,6 +44,9 @@ pub struct SwebenchProOpts {
     /// When set, use this already-running OpenAI-compatible endpoint instead of
     /// booting a llama-server per quant (skips spawn/teardown).
     pub endpoint: Option<String>,
+    /// When set, load the dataset from this local JSONL file instead of pulling
+    /// it from HuggingFace.
+    pub instances_jsonl: Option<PathBuf>,
     pub prompt_mode: String,    // "diagnostic" or "official"
     pub prompt_profile: String, // "default" or "swebench_pro"
     pub official_eval: bool,    // run Docker eval after patches
@@ -345,7 +348,11 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         .with_context(|| format!("creating {}", opts.output.display()))?;
 
     eprintln!("loading SWE-bench Pro dataset...");
-    let instances = load_instances(&opts.instance_ids, opts.instances)?;
+    let instances = load_instances(
+        &opts.instance_ids,
+        opts.instances,
+        opts.instances_jsonl.as_deref(),
+    )?;
     if instances.is_empty() {
         bail!("dataset loader returned 0 instances (filters too strict?)");
     }
@@ -2476,6 +2483,7 @@ mod tests {
             skip_existing: false,
             llama_opts: LlamaServerOpts::default(),
             endpoint: None,
+            instances_jsonl: None,
             prompt_mode: "official".into(),
             prompt_profile: "swebench_pro".into(),
             official_eval: false,
