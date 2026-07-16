@@ -281,64 +281,31 @@ impl PlaywrightBridge {
         Ok(())
     }
 
-    /// Find the playwright-bridge.js script relative to the executable
-    /// or the project root.
+    /// Resolve the Playwright bridge script to run with Node.
+    ///
+    /// SECURITY: the bridge compiled into the binary (`EMBEDDED_BRIDGE_JS`,
+    /// extracted to the user-owned `~/.selfware/bridge/`) is the ONLY production
+    /// source. Previously this scanned `./scripts/playwright-bridge.js` (the
+    /// current directory) and exe-relative dirs first, so an untrusted checkout
+    /// could drop a malicious `scripts/playwright-bridge.js` and have it executed
+    /// with Node on an ordinary — or Auto/YOLO auto-approved — browser action:
+    /// arbitrary code execution from repository contents.
+    ///
+    /// A developer may point at a local bridge ONLY via the explicit
+    /// `SELFWARE_PLAYWRIGHT_BRIDGE` environment variable (an operator decision,
+    /// never repository-controlled). No directory is auto-discovered.
     fn find_bridge_script() -> Result<PathBuf> {
-        // Try relative to current working directory
-        let cwd_path = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("scripts")
-            .join("playwright-bridge.js");
-        if cwd_path.exists() {
-            return Ok(cwd_path);
-        }
-
-        // Try relative to the executable
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                let exe_path = parent.join("scripts").join("playwright-bridge.js");
-                if exe_path.exists() {
-                    return Ok(exe_path);
-                }
-                // Try one level up (e.g., target/debug/../scripts)
-                if let Some(grandparent) = parent.parent() {
-                    let gp_path = grandparent.join("scripts").join("playwright-bridge.js");
-                    if gp_path.exists() {
-                        return Ok(gp_path);
-                    }
-                    // Try two levels up (target/debug/../../scripts)
-                    if let Some(ggp) = grandparent.parent() {
-                        let ggp_path = ggp.join("scripts").join("playwright-bridge.js");
-                        if ggp_path.exists() {
-                            return Ok(ggp_path);
-                        }
-                    }
-                }
+        if let Ok(override_path) = std::env::var("SELFWARE_PLAYWRIGHT_BRIDGE") {
+            let p = PathBuf::from(override_path);
+            if p.is_file() {
+                return Ok(p);
             }
+            bail!(
+                "SELFWARE_PLAYWRIGHT_BRIDGE is set but is not a readable file: {}",
+                p.display()
+            );
         }
-
-        // Try SELFWARE_ROOT env var
-        if let Ok(root) = std::env::var("SELFWARE_ROOT") {
-            let env_path = PathBuf::from(root)
-                .join("scripts")
-                .join("playwright-bridge.js");
-            if env_path.exists() {
-                return Ok(env_path);
-            }
-        }
-
-        // Try CARGO_MANIFEST_DIR (for development)
-        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let dev_path = PathBuf::from(manifest_dir)
-                .join("scripts")
-                .join("playwright-bridge.js");
-            if dev_path.exists() {
-                return Ok(dev_path);
-            }
-        }
-
-        // Not found on disk (an installed binary without scripts/): extract the
-        // embedded bridge to a versioned data dir and use that.
+        // Default and only production path: the embedded bridge.
         Self::extract_embedded_bridge()
     }
 
