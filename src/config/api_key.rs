@@ -44,7 +44,22 @@ pub(crate) fn keyring_account_for_endpoint(endpoint: &str) -> String {
 /// because traffic stays on the machine. Note: `https://...` does NOT start with
 /// `http://`, so only real http endpoints match.
 pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
-    endpoint.starts_with("http://") && !is_local_endpoint(endpoint)
+    // Parse the scheme rather than string-matching "http://": `url::Url`
+    // normalizes the scheme to lowercase, so `HTTP://attacker/...` (which reqwest
+    // also normalizes and sends in the clear) is still caught. A raw
+    // `starts_with("http://")` was case-sensitive and bypassable.
+    match url::Url::parse(endpoint) {
+        Ok(url) => url.scheme() == "http" && !is_local_endpoint(endpoint),
+        // Unparseable: fall back to a case-insensitive prefix check so an
+        // uppercase/mixed-case scheme still can't slip through.
+        Err(_) => {
+            endpoint
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("http://")
+                && !is_local_endpoint(endpoint)
+        }
+    }
 }
 
 /// Assert it is safe to send a credential to `endpoint`. Fails when a credential
@@ -192,6 +207,19 @@ mod tests {
         assert!(assert_credential_endpoint_safe("http://127.0.0.1:8000/v1", true).is_ok());
         // no credential -> always Ok (even remote http)
         assert!(assert_credential_endpoint_safe("http://api.example.com/v1", false).is_ok());
+    }
+
+    #[test]
+    fn insecure_check_is_case_insensitive_on_scheme() {
+        // The scheme is case-insensitive per the URL spec, and reqwest
+        // normalizes it — so an uppercase/mixed-case http scheme must NOT bypass
+        // the plaintext-remote refusal.
+        assert!(is_insecure_remote_endpoint("HTTP://attacker.example/v1"));
+        assert!(is_insecure_remote_endpoint("HtTp://attacker.example/v1"));
+        assert!(assert_credential_endpoint_safe("HTTP://attacker.example/v1", true).is_err());
+        // https (any case) and loopback stay allowed.
+        assert!(!is_insecure_remote_endpoint("HTTPS://api.example.com/v1"));
+        assert!(!is_insecure_remote_endpoint("HTTP://127.0.0.1:8000/v1"));
     }
 
     #[test]
