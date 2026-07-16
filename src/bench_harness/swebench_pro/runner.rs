@@ -413,15 +413,17 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
 
     // Seed all_runs with results from previously-completed trials so aggregate
     // and patches.json reflect the full sweep even when resuming.
+    //
+    // Seed ONLY trials that will be SKIPPED this run — the exact complement of
+    // the run/skip gate (`should_skip_trial`, checked before each execution).
+    // A trial that will be re-executed (a failed trial on resume, or ANY
+    // Evaluated trial under --force-rerun) must not be seeded here, or its
+    // result lands in `all_runs` twice — once from this seed, once from the
+    // re-run — inflating aggregate.json counts and letting patches.json keep
+    // the stale patch. Partitioning by `should_skip_trial` guarantees each
+    // trial is either seeded XOR re-run, never both.
     for t in &manifest.trials {
-        if matches!(
-            t.state,
-            TrialState::Evaluated
-                | TrialState::PatchCaptured
-                | TrialState::BootFailed
-                | TrialState::CloneFailed
-                | TrialState::AgentFailed
-        ) {
+        if should_skip_trial(&opts, Some(t)) {
             // Try to load the existing result.json; if missing, synthesise.
             if let Some(ref result_path) = t.result_path {
                 if result_path.exists() {
@@ -2485,6 +2487,49 @@ mod tests {
             official_eval_block_network: false,
             resume: false,
             force_rerun: false,
+        }
+    }
+
+    fn trial_in_state(state: TrialState) -> TrialManifest {
+        TrialManifest {
+            quant: "q1".into(),
+            instance_id: "org__repo-1".into(),
+            trial: 1,
+            state,
+            started_at: None,
+            completed_at: None,
+            error: None,
+            pred_path: None,
+            result_path: None,
+        }
+    }
+
+    #[test]
+    fn seed_and_rerun_partition_prevents_force_rerun_double_count() {
+        // The resume seed loop seeds a trial IFF `should_skip_trial` is true, and
+        // the run gate re-runs a trial IFF it is false — so a trial is seeded XOR
+        // re-run, never both. This is the invariant that stops --force-rerun from
+        // double-counting a completed trial in aggregate.json.
+        let out = std::env::temp_dir().join("sw_partition_test");
+        let mut opts = dummy_opts(out);
+
+        // Normal resume: an Evaluated trial is skipped (seeded once, not re-run).
+        opts.force_rerun = false;
+        assert!(should_skip_trial(&opts, Some(&trial_in_state(TrialState::Evaluated))));
+
+        // --force-rerun: the Evaluated trial is NOT skipped → it is re-run and
+        // must therefore NOT be seeded (else it lands in all_runs twice).
+        opts.force_rerun = true;
+        assert!(!should_skip_trial(&opts, Some(&trial_in_state(TrialState::Evaluated))));
+
+        // Failed trials are always re-run on resume → never seeded.
+        for st in [
+            TrialState::BootFailed,
+            TrialState::CloneFailed,
+            TrialState::AgentFailed,
+            TrialState::Planned,
+        ] {
+            assert!(!should_skip_trial(&opts, Some(&trial_in_state(st))));
         }
     }
 
