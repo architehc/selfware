@@ -488,7 +488,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
                 eprintln!("  ❌ boot failed: {} — recording failures and skipping", e);
                 // Each (instance × trial) is "attempted" from the harness's
                 // point of view, even if the server never came up.
-                let mut m = manifest_arc.lock().unwrap();
+                let mut m = manifest_arc.lock().unwrap_or_else(|e| e.into_inner());
                 for trial in 1..=trials {
                     for inst in &instances {
                         match record_boot_failure(&opts, &spec, inst, trial, &e.to_string()) {
@@ -577,7 +577,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
 
     // After official eval, mark PatchCaptured trials as Evaluated.
     if opts.official_eval {
-        let mut m = manifest_arc.lock().unwrap();
+        let mut m = manifest_arc.lock().unwrap_or_else(|e| e.into_inner());
         for t in &mut m.trials {
             if t.state == TrialState::PatchCaptured {
                 t.state = TrialState::Evaluated;
@@ -625,7 +625,7 @@ fn run_trial(
         for inst in instances {
             // Check manifest state before running.
             {
-                let m = manifest.lock().unwrap();
+                let m = manifest.lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(t) = m.find_trial(&spec.label, &inst.instance_id, trial) {
                     if should_skip_trial(opts, Some(t)) {
                         eprintln!(
@@ -650,7 +650,7 @@ fn run_trial(
                 Ok((selected, mut candidates)) => {
                     let (state, error) = trial_state_from_result(&selected);
                     {
-                        let mut m = manifest.lock().unwrap();
+                        let mut m = manifest.lock().unwrap_or_else(|e| e.into_inner());
                         update_manifest_entry(
                             &mut m,
                             &spec.label,
@@ -707,7 +707,7 @@ fn run_trial(
             let output_c = Arc::clone(&output_arc);
             handles.push(scope.spawn(move || loop {
                 let idx = {
-                    let mut q = queue.lock().unwrap();
+                    let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
                     q.pop()
                 };
                 let Some(idx) = idx else { return };
@@ -715,7 +715,7 @@ fn run_trial(
 
                 // Check manifest state before running.
                 {
-                    let m = manifest_c.lock().unwrap();
+                    let m = manifest_c.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(t) = m.find_trial(&spec_c.label, &inst.instance_id, trial) {
                         if should_skip_trial(&opts_c, Some(t)) {
                             eprintln!(
@@ -725,7 +725,7 @@ fn run_trial(
                             if let Ok(res) =
                                 reconstruct_result_from_disk(&opts_c, &spec_c, inst, trial)
                             {
-                                results.lock().unwrap().push(res);
+                                results.lock().unwrap_or_else(|e| e.into_inner()).push(res);
                             }
                             continue;
                         }
@@ -736,7 +736,7 @@ fn run_trial(
                     Ok((selected, mut candidates)) => {
                         let (state, error) = trial_state_from_result(&selected);
                         {
-                            let mut m = manifest_c.lock().unwrap();
+                            let mut m = manifest_c.lock().unwrap_or_else(|e| e.into_inner());
                             update_manifest_entry(
                                 &mut m,
                                 &spec_c.label,
@@ -759,7 +759,7 @@ fn run_trial(
                                 eprintln!("    failed to write manifest: {}", we);
                             }
                         }
-                        let mut r = results.lock().unwrap();
+                        let mut r = results.lock().unwrap_or_else(|e| e.into_inner());
                         r.push(selected);
                         r.append(&mut candidates);
                     }
@@ -772,7 +772,7 @@ fn run_trial(
         }
     });
 
-    let mut out = results.lock().unwrap().clone();
+    let mut out = results.lock().unwrap_or_else(|e| e.into_inner()).clone();
     // Stable order: by (instance_id, trial) so logs/aggregate are deterministic.
     out.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
     out
