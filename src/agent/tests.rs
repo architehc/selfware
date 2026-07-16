@@ -160,6 +160,7 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
     ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
 )]
 async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
+    let _g = crate::test_support::ExecGuard::hold();
     let server = MockLlmServer::builder()
         .with_response(
             r#"<tool>
@@ -1144,9 +1145,9 @@ async fn test_apply_recovery_action_reload_credentials_with_env() {
     };
     let mut agent = Agent::new(config).await.unwrap();
 
-    // Set a temporary env var so the reload finds a key.
-    let saved = std::env::var("SELFWARE_API_KEY").ok();
-    std::env::set_var("SELFWARE_API_KEY", "test-reload-credentials-directive-key");
+    // Set a temporary env var so the reload finds a key (serialized + auto-restored).
+    let env = crate::test_support::EnvGuard::capture(&["SELFWARE_API_KEY"]);
+    env.set("SELFWARE_API_KEY", "test-reload-credentials-directive-key");
 
     let directive = crate::self_healing::RecoveryDirective::ReloadCredentials;
     let result = agent.apply_recovery_action(&directive).await;
@@ -1169,11 +1170,6 @@ async fn test_apply_recovery_action_reload_credentials_with_env() {
         "test-reload-credentials-directive-key"
     );
 
-    // Restore env.
-    match saved {
-        Some(v) => std::env::set_var("SELFWARE_API_KEY", v),
-        None => std::env::remove_var("SELFWARE_API_KEY"),
-    }
     server.stop().await;
 }
 
@@ -1193,10 +1189,10 @@ async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
     };
     let mut agent = Agent::new(config).await.unwrap();
 
-    // Ensure no env var is set. The keyring may or may not have a key;
-    // if it does, the result will be Ok(true) which is also valid.
-    // We just verify the call doesn't error.
-    let saved = std::env::var("SELFWARE_API_KEY").ok();
+    // Ensure no env var is set (serialized + auto-restored). The keyring may
+    // or may not have a key; if it does, the result will be Ok(true) which is
+    // also valid. We just verify the call doesn't error.
+    let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_API_KEY"]);
     std::env::remove_var("SELFWARE_API_KEY");
 
     let directive = crate::self_healing::RecoveryDirective::ReloadCredentials;
@@ -1207,10 +1203,6 @@ async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
         result.err()
     );
 
-    // Restore env.
-    if let Some(v) = saved {
-        std::env::set_var("SELFWARE_API_KEY", v)
-    }
     server.stop().await;
 }
 

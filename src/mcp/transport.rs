@@ -547,17 +547,26 @@ mod tests {
 
         drop(transport);
 
-        // start_kill sends SIGKILL; give the kernel a moment to reap it.
-        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-
-        // `kill -0 <pid>` fails once the process is gone.
-        let alive = std::process::Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // Poll until the kernel reaps the child (5s deadline) instead of one
+        // fixed sleep, which flakes on loaded machines.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let alive = loop {
+            // `kill -0 <pid>` fails once the process is gone.
+            let alive = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                break false;
+            }
+            if std::time::Instant::now() >= deadline {
+                break true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
         assert!(
             !alive,
             "MCP child (pid {pid}) must be dead after transport drop"

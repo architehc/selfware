@@ -1250,6 +1250,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_estimate_messages_tokens_longer_content_costs_more() {
+        let _g = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent_a = make_test_agent(&server).await;
         let mut agent_b = make_test_agent(&server).await;
@@ -1275,6 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_estimate_messages_tokens_all_roles_counted() {
+        let _g = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
 

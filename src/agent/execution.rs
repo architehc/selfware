@@ -4637,6 +4637,7 @@ pub fn other() -> i32 {
         use std::fs;
         use tempfile::NamedTempFile;
 
+        let _g = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();

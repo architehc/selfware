@@ -2155,6 +2155,7 @@ mod tests {
 
     #[test]
     fn test_list_tasks_multiple() {
+        let _g = crate::test_support::CwdGuard::hold();
         let tmp = tempfile::tempdir().unwrap();
         let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
         manager

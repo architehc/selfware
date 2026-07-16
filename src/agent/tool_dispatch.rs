@@ -5578,6 +5578,7 @@ mod tests {
         // ran unchecked here just because a second parallel-safe call
         // happened to land in the same batch. Uses two file_read calls
         // (file_read is parallel-safe) to force the parallel path.
+        let _g = crate::test_support::ExecGuard::hold();
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
