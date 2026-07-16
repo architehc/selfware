@@ -189,6 +189,49 @@ fn reconstruct_result_from_disk(
     })
 }
 
+/// Reconstruct EVERY result a completed trial contributed to `all_runs`: the
+/// trial-level result (candidate_num 0) plus each `candidate_N/result.json`.
+///
+/// A multi-candidate live run appends the promoted trial result AND all N
+/// per-candidate results, so `write_aggregate`'s candidate pool (pass@k) sees
+/// N+1 samples. On resume the old skip path reconstructed only the trial-level
+/// result, collapsing the pool to a single sample and degrading pass@k. This
+/// recovers the candidate subdirs so a resumed sweep matches a fresh one.
+fn reconstruct_trial_pool_from_disk(
+    opts: &SwebenchProOpts,
+    spec: &QuantSpec,
+    inst: &Instance,
+    trial: u32,
+) -> Result<Vec<PerRunResult>> {
+    // Trial-level result first (existing single-result logic, incl. synthesis
+    // when result.json is absent).
+    let mut pool = vec![reconstruct_result_from_disk(opts, spec, inst, trial)?];
+
+    // Then every candidate_N/result.json, in deterministic candidate order.
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
+    if let Ok(entries) = std::fs::read_dir(&trial_dir) {
+        let mut candidate_dirs: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.starts_with("candidate_"))
+            })
+            .collect();
+        candidate_dirs.sort();
+        for c_dir in candidate_dirs {
+            if let Ok(bytes) = std::fs::read(c_dir.join("result.json")) {
+                if let Ok(res) = serde_json::from_slice::<PerRunResult>(&bytes) {
+                    pool.push(res);
+                }
+            }
+        }
+    }
+    Ok(pool)
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct PerRunResult {
     instance_id: String,
@@ -426,24 +469,15 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
     // trial is either seeded XOR re-run, never both.
     for t in &manifest.trials {
         if should_skip_trial(&opts, Some(t)) {
-            // Try to load the existing result.json; if missing, synthesise.
-            if let Some(ref result_path) = t.result_path {
-                if result_path.exists() {
-                    if let Ok(bytes) = std::fs::read(result_path) {
-                        if let Ok(result) = serde_json::from_slice::<PerRunResult>(&bytes) {
-                            all_runs.push(result);
-                            continue;
-                        }
-                    }
-                }
-            }
-            // Find the instance to build a synthetic result.
+            // Recover the trial's FULL result pool (trial-level + every
+            // candidate_N/result.json), so a resumed sweep's aggregate/pass@k
+            // matches a fresh run instead of collapsing multi-candidate trials.
             if let Some(inst) = instances.iter().find(|i| i.instance_id == t.instance_id) {
                 if let Some(spec) = catalog.get(&t.quant) {
-                    if let Ok(synthetic) =
-                        reconstruct_result_from_disk(&opts, &spec.clone(), inst, t.trial)
+                    if let Ok(pool) =
+                        reconstruct_trial_pool_from_disk(&opts, &spec.clone(), inst, t.trial)
                     {
-                        all_runs.push(synthetic);
+                        all_runs.extend(pool);
                     }
                 }
             }
@@ -636,8 +670,8 @@ fn run_trial(
                             "  → {} (trial {}): SKIP (manifest: {:?})",
                             inst.instance_id, trial, t.state
                         );
-                        match reconstruct_result_from_disk(opts, spec, inst, trial) {
-                            Ok(res) => out.push(res),
+                        match reconstruct_trial_pool_from_disk(opts, spec, inst, trial) {
+                            Ok(pool) => out.extend(pool),
                             Err(e) => {
                                 eprintln!(
                                     "    {} trial {}: failed to reconstruct skipped result: {}",
@@ -744,10 +778,13 @@ fn run_trial(
                                 "  → {} (trial {}): SKIP (manifest: {:?})",
                                 inst.instance_id, trial, t.state
                             );
-                            if let Ok(res) =
-                                reconstruct_result_from_disk(&opts_c, &spec_c, inst, trial)
+                            if let Ok(pool) =
+                                reconstruct_trial_pool_from_disk(&opts_c, &spec_c, inst, trial)
                             {
-                                results.lock().unwrap_or_else(|e| e.into_inner()).push(res);
+                                results
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .extend(pool);
                             }
                             continue;
                         }
@@ -3060,6 +3097,44 @@ diff --git a/tests/test_a.py b/tests/test_a.py
         assert_ne!(result.exit_code, 0);
         assert!(result.error.contains("without result.json"));
         assert_eq!(result.patch_bytes, 6);
+    }
+
+    #[test]
+    fn reconstruct_trial_pool_recovers_candidate_subdirs() {
+        // A multi-candidate trial on disk: the promoted trial-level result.json
+        // (candidate_num 0) plus candidate_1/ and candidate_2/ result.json.
+        // Resume must recover all three, not just the trial-level one, or the
+        // candidate pool (pass@k) collapses.
+        let dir = tempfile::tempdir().unwrap();
+        let opts = dummy_opts(dir.path().to_path_buf());
+        let spec = dummy_quant("q1");
+        let inst = dummy_instance();
+        let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, 1);
+        std::fs::create_dir_all(&trial_dir).unwrap();
+
+        std::fs::write(
+            trial_dir.join("result.json"),
+            serde_json::to_vec(&make_candidate_result(0, false)).unwrap(),
+        )
+        .unwrap();
+        for c in 1..=2u32 {
+            let c_dir = trial_dir.join(format!("candidate_{c}"));
+            std::fs::create_dir_all(&c_dir).unwrap();
+            std::fs::write(
+                c_dir.join("result.json"),
+                serde_json::to_vec(&make_candidate_result(c, false)).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let pool = reconstruct_trial_pool_from_disk(&opts, &spec, &inst, 1).unwrap();
+        let mut nums: Vec<u32> = pool.iter().map(|r| r.candidate_num).collect();
+        nums.sort();
+        assert_eq!(
+            nums,
+            vec![0, 1, 2],
+            "pool must recover the trial result AND both candidate subdirs"
+        );
     }
 
     fn make_candidate_result(candidate_num: u32, has_test_edit: bool) -> PerRunResult {
