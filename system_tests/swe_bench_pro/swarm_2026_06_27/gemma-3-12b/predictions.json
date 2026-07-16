@@ -1,6 +1,0 @@
-[
-  {
-    "instance_id": "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan",
-    "patch": "diff --git a/src/user/email.js b/src/user/email.js\nindex 9b51b43ddd..372f5c2e35 100644\n--- a/src/user/email.js\n+++ b/src/user/email.js\n@@ -49,7 +49,7 @@ UserEmail.isValidationPending = async (uid, email) => {\n \n \tif (email) {\n \t\tconst confirmObj = await db.getObject(`confirm:${code}`);\n-\t\treturn !!(confirmObj && email === confirmObj.email);\n+\t\treturn !!(confirmObj && email === confirmObj.email && confirmObj.expires > Date.now());\n \t}\n \n \treturn !!code;\n@@ -78,7 +78,7 @@ UserEmail.canSendValidation = async (uid, email) => {\n \tconst max = meta.config.emailConfirmExpiry * 60 * 60 * 1000;\n \tconst interval = meta.config.emailConfirmInterval * 60 * 1000;\n \n-\treturn ttl + interval < max;\n+\treturn ttl === null || ttl + interval < max;\n };\n \n UserEmail.sendValidationEmail = async function (uid, options) {\n"
-  }
-]

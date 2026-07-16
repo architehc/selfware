@@ -1,6 +1,0 @@
-[
-  {
-    "instance_id": "instance_NodeBB__NodeBB-04998908ba6721d64eba79ae3b65a351dcfbc5b5-vnan",
-    "patch": "diff --git a/src/user/email.js b/src/user/email.js\nindex 9b51b43ddd..5b16dc1696 100644\n--- a/src/user/email.js\n+++ b/src/user/email.js\n@@ -61,7 +61,7 @@ UserEmail.getValidationExpiry = async (uid) => {\n };\n \n UserEmail.expireValidation = async (uid) => {\n-\tconst code = await db.get(`confirm:byUid:${uid}`);\n+\tconst code = await db.mget(['confirm:byUid:' + uid])[0];\n \tawait db.deleteAll([\n \t\t`confirm:byUid:${uid}`,\n \t\t`confirm:${code}`,\n"
-  }
-]
