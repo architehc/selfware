@@ -146,7 +146,7 @@ def boot_llama_server(
         raise FileNotFoundError(f"missing GGUF: {gguf}")
 
     cmd = [
-        "/home/ivo/llama.cpp/build/bin/llama-server",
+        os.environ.get("LLAMA_SERVER_BIN", "llama-server"),
         "-m", str(gguf),
         "--jinja",
         "-c", str(ctx),
@@ -492,7 +492,7 @@ def main():
     log(f"DONE in {time.time() - overall_started:.0f}s. Output: {args.output}")
     log("Next steps:")
     log(f"  python helper_code/gather_patches.py --directory {args.output / 'runs' / quants[0]} --prefix {quants[0]} --output {args.output / 'patches.json'}")
-    log(f"  (then) python /home/ivo/SWE-bench_Pro-os/swe_bench_pro_eval.py ... (Docker required)")
+    log(f"  (then) python <path/to/SWE-bench_Pro-os>/swe_bench_pro_eval.py ... (Docker required)")
 
 
 if __name__ == "__main__":
