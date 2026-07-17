@@ -509,6 +509,12 @@ pub async fn run() -> Result<()> {
         crate::config::trust::add_trusted_config(cfg_path)?;
         if !cli.quiet {
             println!("Trusted {}", canon.display());
+            println!(
+                "  This repo's selfware.toml may now run its hooks, MCP servers, \
+                 and post-edit command, apply its permission/yolo/safety settings, \
+                 and use its endpoint with your API key. Untrust by removing that \
+                 line from ~/.selfware/trusted_repos."
+            );
         }
         return Ok(());
     }
@@ -3863,6 +3869,15 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         anyhow::bail!(
             "invalid --prompt-mode '{}': expected 'official' or 'diagnostic'",
             args.prompt_mode
+        );
+    }
+    // Same for the prompt profile: an unknown value silently fell back to the
+    // Default profile (see runner.rs), so a typo ran the wrong prompt without
+    // any signal. Only the two known profiles are valid.
+    if !matches!(args.prompt_profile.as_str(), "swebench_pro" | "default") {
+        anyhow::bail!(
+            "invalid --prompt-profile '{}': expected 'swebench_pro' or 'default'",
+            args.prompt_profile
         );
     }
     let opts = SwebenchProOpts {

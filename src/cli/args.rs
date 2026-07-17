@@ -228,8 +228,13 @@ pub(crate) enum Commands {
     #[command(display_order = 7)]
     LlmDoctor,
 
-    /// Trust the current repo's ./selfware.toml so its remote endpoint may
-    /// receive a globally-exported SELFWARE_API_KEY. Records the config's
+    /// Trust this repository's checkout-local selfware.toml. Trusting ACTIVATES
+    /// all of its privileged settings, which are otherwise stripped for an
+    /// untrusted repo: shell hooks, MCP subprocess servers, wildcard
+    /// tool-permission grants, the post-edit command, yolo / destructive-shell,
+    /// and safety-path/confirmation overrides — and it allows a globally-exported
+    /// SELFWARE_API_KEY to be sent to the endpoint the config selects. Only trust
+    /// repositories whose selfware.toml you have reviewed. Records the config's
     /// canonical path in ~/.selfware/trusted_repos.
     #[command(display_order = 10)]
     Trust {

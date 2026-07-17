@@ -86,6 +86,24 @@ fn result_to_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
+        // The bridge wraps extracted content in an object: {"text": "..."} for a
+        // single element, {"texts": [...]} for many, {"url": "..."} for the url
+        // action. Use the inner text rather than a JSON dump of the wrapper
+        // (which would include the field names and mis-match `contains` checks).
+        Value::Object(_) => {
+            if let Some(s) = v.get("text").and_then(|t| t.as_str()) {
+                s.to_string()
+            } else if let Some(s) = v.get("url").and_then(|t| t.as_str()) {
+                s.to_string()
+            } else if let Some(arr) = v.get("texts").and_then(|t| t.as_array()) {
+                arr.iter()
+                    .filter_map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            }
+        }
         _ => serde_json::to_string(v).unwrap_or_default(),
     }
 }
@@ -212,18 +230,20 @@ impl BrowserTaskExecutor {
                 }
             };
 
-            // Record screenshot reference for Screenshot actions.
-            // The browser already wrote the PNG; we just record the path.
-            let screenshot_after = if let WebAction::Screenshot { label } = action {
-                if let Some(ref p) = screenshot_path {
-                    // Read the real PNG size from the header instead of hardcoding
-                    // (0, 0); fall back to (0, 0) only if the file can't be read.
-                    let dims = image::image_dimensions(p).unwrap_or((0, 0));
-                    recorder.record_screenshot(label, p.clone(), dims);
+            // Record a screenshot reference only for a SUCCESSFUL Screenshot action.
+            // A failed screenshot wrote no valid PNG, so recording its path/size
+            // would be misleading.
+            let screenshot_after = match (action, &outcome) {
+                (WebAction::Screenshot { label }, ActionOutcome::Success { .. }) => {
+                    if let Some(ref p) = screenshot_path {
+                        // Real PNG size from the header; fall back to (0, 0) only
+                        // if the file can't be read.
+                        let dims = image::image_dimensions(p).unwrap_or((0, 0));
+                        recorder.record_screenshot(label, p.clone(), dims);
+                    }
+                    screenshot_path.clone()
                 }
-                screenshot_path.clone()
-            } else {
-                None
+                _ => None,
             };
 
             // Handle outcome side effects. A timeout or ANY failed action fails
@@ -546,6 +566,23 @@ mod tests {
         // missing / wrong shape -> not visible
         assert!(!result_is_visible(&json!({})));
         assert!(!result_is_visible(&json!("nope")));
+    }
+
+    #[test]
+    fn result_to_string_unwraps_bridge_text_fields() {
+        use serde_json::json;
+        assert_eq!(super::result_to_string(&json!("plain")), "plain");
+        assert_eq!(super::result_to_string(&json!({"text": "hello"})), "hello");
+        assert_eq!(
+            super::result_to_string(&json!({"url": "http://x/y"})),
+            "http://x/y"
+        );
+        assert_eq!(
+            super::result_to_string(&json!({"texts": ["a", "b"]})),
+            "a\nb"
+        );
+        // Unknown object shape still falls back to a JSON dump (not empty).
+        assert!(super::result_to_string(&json!({"other": 1})).contains("other"));
     }
 
     #[tokio::test]

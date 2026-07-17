@@ -211,8 +211,40 @@ static CATALOG: Lazy<BTreeMap<String, QuantSpec>> = Lazy::new(|| {
     .collect()
 });
 
+/// Merge an external catalog (JSON mapping label -> QuantSpec) over `base`,
+/// extending/overriding compiled entries. A parse error is logged and `base`
+/// is returned unchanged (never panics).
+fn apply_external_catalog(
+    mut base: BTreeMap<String, QuantSpec>,
+    json: &str,
+) -> BTreeMap<String, QuantSpec> {
+    match serde_json::from_str::<BTreeMap<String, QuantSpec>>(json) {
+        Ok(extra) => {
+            base.extend(extra);
+            base
+        }
+        Err(e) => {
+            eprintln!("warning: ignoring malformed SWEBENCH_QUANT_CATALOG: {e}");
+            base
+        }
+    }
+}
+
 pub fn quant_catalog() -> BTreeMap<String, QuantSpec> {
-    CATALOG.clone()
+    let base = CATALOG.clone();
+    // Optional external catalog: SWEBENCH_QUANT_CATALOG points at a JSON file
+    // mapping label -> QuantSpec, merged over the compiled defaults so
+    // arbitrary local GGUFs can be used without editing this source.
+    match std::env::var("SWEBENCH_QUANT_CATALOG") {
+        Ok(path) if !path.is_empty() => match std::fs::read_to_string(&path) {
+            Ok(text) => apply_external_catalog(base, &text),
+            Err(e) => {
+                eprintln!("warning: cannot read SWEBENCH_QUANT_CATALOG {path}: {e}");
+                base
+            }
+        },
+        _ => base,
+    }
 }
 
 /// Default quant set used when `--quants` is not provided.
@@ -245,6 +277,22 @@ mod tests {
                 spec.alias
             );
         }
+    }
+
+    #[test]
+    fn external_catalog_merges_and_overrides() {
+        let base = quant_catalog();
+        let first = base.keys().next().expect("catalog non-empty").clone();
+        // A brand-new entry is added; an existing label is overridden.
+        let json = format!(
+            r#"{{ "custom-quant": {{ "label":"custom-quant","gguf":"c.gguf","alias":"c","mmproj":"","name":"Custom","ctx":4096,"max_parallel":1,"kv_cache_type":"q8_0","tensor_split":null,"temperature":1.0,"thinking_policy":"Disable","backend":"LlamaCpp" }} }}"#
+        );
+        let merged = apply_external_catalog(base.clone(), &json);
+        assert!(merged.contains_key("custom-quant"));
+        assert!(merged.contains_key(&first)); // originals preserved
+        // Malformed JSON returns the base unchanged.
+        let unchanged = apply_external_catalog(base.clone(), "not json");
+        assert_eq!(unchanged.len(), base.len());
     }
 
     #[test]
