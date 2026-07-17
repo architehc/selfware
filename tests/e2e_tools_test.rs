@@ -411,19 +411,34 @@ fn test_e2e_safety_allows_local_page_control_targets() {
 
     let workspace_file = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
     fs::write(workspace_file.path(), "<html><body>ok</body></html>").unwrap();
-    let file_url = format!("file://{}", workspace_file.path().display());
+    // Build the file:// URL with the platform-correct serializer — naive
+    // `format!("file://{}", path.display())` produces a Windows shape
+    // (`file://D:\...`) whose round-trip is fragile.
+    let file_url = url::Url::from_file_path(workspace_file.path())
+        .expect("absolute temp path must convert to a file URL")
+        .to_string();
 
     let file_call = make_tool_call(
         "page_control",
         format!(r#"{{"action":"goto","url":"{}"}}"#, file_url),
     );
-    assert!(checker.check_tool_call(&file_call).is_ok());
+    let file_result = checker.check_tool_call(&file_call);
+    assert!(
+        file_result.is_ok(),
+        "file:// workspace URL should be allowed, got: {:?}",
+        file_result.err()
+    );
 
     let localhost_call = make_tool_call(
         "page_control",
         r#"{"action":"goto","url":"http://localhost:8888/chart.html"}"#.to_string(),
     );
-    assert!(checker.check_tool_call(&localhost_call).is_ok());
+    let localhost_result = checker.check_tool_call(&localhost_call);
+    assert!(
+        localhost_result.is_ok(),
+        "localhost page target should be allowed, got: {:?}",
+        localhost_result.err()
+    );
 }
 
 #[test]
