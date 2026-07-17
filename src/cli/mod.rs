@@ -509,6 +509,12 @@ pub async fn run() -> Result<()> {
         crate::config::trust::add_trusted_config(cfg_path)?;
         if !cli.quiet {
             println!("Trusted {}", canon.display());
+            println!(
+                "  This repo's selfware.toml may now run its hooks, MCP servers, \
+                 and post-edit command, apply its permission/yolo/safety settings, \
+                 and use its endpoint with your API key. Untrust by removing that \
+                 line from ~/.selfware/trusted_repos."
+            );
         }
         return Ok(());
     }
