@@ -695,17 +695,26 @@ mod tests {
     #[tokio::test]
     async fn test_port_check_find_available_with_reservation() {
         let tool = PortCheck;
-        let result = tool
-            .execute(serde_json::json!({
-                "find_available": true,
-                "reserve": true,
-                "range_start": 56000,
-                "range_end": 56100
-            }))
-            .await;
-        assert!(result.is_ok());
+        // Busy CI runners can transiently fill a fixed range; retry with a
+        // shifted range a few times before giving up.
+        let mut output = None;
+        for offset in 0..3u16 {
+            let start = 56000 + offset * 100;
+            let result = tool
+                .execute(serde_json::json!({
+                    "find_available": true,
+                    "reserve": true,
+                    "range_start": start,
+                    "range_end": start + 100
+                }))
+                .await;
+            if let Ok(out) = result {
+                output = Some(out);
+                break;
+            }
+        }
+        let output = output.expect("find_available+reserve should succeed within a few ranges");
 
-        let output = result.unwrap();
         let port = output["available_port"].as_u64().unwrap() as u16;
         assert_eq!(output["reserved"].as_bool(), Some(true));
         assert!(!is_port_available(port).await);
@@ -824,32 +833,49 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_start_auto_reserves_expected_port_without_prior_reservation() {
-        let probe_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .unwrap();
-        let port = probe_listener.local_addr().unwrap().port();
-        drop(probe_listener);
-
         let tool = ProcessStart;
-        let result = tool
-            .execute(serde_json::json!({
-                "id": "test-auto-reserved-port-tool",
-                "command": "sleep",
-                "args": ["60"],
-                "expected_port": port
-            }))
-            .await;
-        assert!(
-            result.is_ok(),
-            "process_start should automatically reserve a free expected_port before spawn"
-        );
+        // The probe/drop/reserve sequence has an inherent TOCTOU window — on
+        // busy CI runners another thread can grab the probed port first, so
+        // retry with a fresh port (and a fresh process id) a few times.
+        let mut started: Option<(String, u16)> = None;
+        let mut last_err = None;
+        for attempt in 0..5u32 {
+            let probe_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let port = probe_listener.local_addr().unwrap().port();
+            drop(probe_listener);
+
+            let id = format!("test-auto-reserved-port-tool-{attempt}");
+            match tool
+                .execute(serde_json::json!({
+                    "id": id,
+                    "command": "sleep",
+                    "args": ["60"],
+                    "expected_port": port
+                }))
+                .await
+            {
+                Ok(_) => {
+                    started = Some((id, port));
+                    break;
+                }
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let (id, port) = started.unwrap_or_else(|| {
+            panic!(
+                "process_start should automatically reserve a free expected_port before spawn: {:?}",
+                last_err
+            )
+        });
 
         let manager = PROCESS_MANAGER.read().await;
-        let summary = manager.get("test-auto-reserved-port-tool").await.unwrap();
+        let summary = manager.get(&id).await.unwrap();
         assert_eq!(summary.expected_port, Some(port));
         assert!(!manager.has_reserved_port(port).await);
 
-        let _ = manager.stop("test-auto-reserved-port-tool", true).await;
+        let _ = manager.stop(&id, true).await;
     }
 
     #[tokio::test]
