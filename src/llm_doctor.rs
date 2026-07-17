@@ -600,7 +600,12 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
     });
     let mut req = client.post(&url).json(&body);
     if let Some(ref k) = api_key {
-        req = req.bearer_auth(k);
+        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
+        if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
+            req = req.bearer_auth(k);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+        }
     }
     caps.streaming = match req.send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -622,7 +627,12 @@ async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Cap
     });
     let mut req = client.post(&url).json(&body);
     if let Some(ref k) = api_key {
-        req = req.bearer_auth(k);
+        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
+        if crate::config::api_key::assert_credential_endpoint_safe(&url, true).is_ok() {
+            req = req.bearer_auth(k);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {url}");
+        }
     }
     caps.thinking = match req.send().await {
         Ok(resp) => Some(resp.status().is_success()),
@@ -1362,7 +1372,12 @@ async fn connection_test(
 
     let mut req = client.post(&completions_url).json(&request_body);
     if let Some(ref key) = api_key {
-        req = req.bearer_auth(key);
+        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
+        if crate::config::api_key::assert_credential_endpoint_safe(&completions_url, true).is_ok() {
+            req = req.bearer_auth(key);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {completions_url}");
+        }
     }
 
     let resp = req
@@ -1456,7 +1471,12 @@ async fn test_tool_calling(
         .timeout(connection_test_timeout(config))
         .json(&request_body);
     if let Some(key) = api_key {
-        req = req.bearer_auth(key);
+        // Don't leak the key over plaintext HTTP to a remote host / userinfo URL.
+        if crate::config::api_key::assert_credential_endpoint_safe(completions_url, true).is_ok() {
+            req = req.bearer_auth(key);
+        } else {
+            eprintln!("  ⚠ not sending API key to unsafe endpoint {completions_url}");
+        }
     }
 
     let resp = match req.send().await {
