@@ -501,6 +501,126 @@ async fn check_msrv() -> DoctorCheck {
 }
 
 // ---------------------------------------------------------------------------
+// Selfware log health check (surfaces observability::log_analysis)
+// ---------------------------------------------------------------------------
+
+/// Directory where telemetry writes the daily-rolled `selfware.log` files
+/// (kept in sync with the file appender in `observability::telemetry`).
+#[cfg(feature = "log-analysis")]
+fn selfware_log_dir() -> std::path::PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("selfware")
+        .join("logs")
+}
+
+/// Locate the newest selfware log file in `dir`. The daily rolling appender
+/// names files `selfware.log.YYYY-MM-DD`; a plain `*.log` extension is also
+/// accepted.
+#[cfg(feature = "log-analysis")]
+fn newest_log_file(dir: &Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .map(|n| {
+                        let n = n.to_string_lossy();
+                        n.starts_with("selfware.log") || n.ends_with(".log")
+                    })
+                    .unwrap_or(false)
+        })
+        .max_by_key(|p| {
+            p.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        })
+}
+
+/// Count error-level entries and anomalies in a log file (last `max_lines`
+/// lines). Returns `None` when the file can't be read — doctor treats that as
+/// "no logs yet", not a failure.
+#[cfg(feature = "log-analysis")]
+fn analyze_log_file(path: &Path, max_lines: usize) -> Option<(usize, u64)> {
+    use crate::observability::log_analysis::{LogAnalyzer, LogFormat, LogLevel};
+
+    let content = std::fs::read_to_string(path).ok()?;
+    let analyzer = LogAnalyzer::new(LogFormat::Plain);
+    let mut errors = 0usize;
+    for line in content
+        .lines()
+        .rev()
+        .take(max_lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if let Some(entry) = analyzer.process_line(line) {
+            if entry.level == LogLevel::Error {
+                errors += 1;
+            }
+        }
+    }
+    let summary = analyzer.summary();
+    Some((errors, summary.anomalies.anomalies_detected))
+}
+
+/// Analyze the newest selfware log file for recent error lines and anomalies.
+#[cfg(feature = "log-analysis")]
+fn check_log_health() -> DoctorCheck {
+    let no_logs = || DoctorCheck {
+        name: "selfware log health".to_string(),
+        category: Category::Core,
+        status: CheckStatus::Ok,
+        version: None,
+        message: "no logs yet".to_string(),
+        fix_hint: None,
+    };
+
+    let Some(path) = newest_log_file(&selfware_log_dir()) else {
+        return no_logs();
+    };
+    let Some((errors, anomalies)) = analyze_log_file(&path, 500) else {
+        return no_logs();
+    };
+
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    if errors > 0 {
+        DoctorCheck {
+            name: "selfware log health".to_string(),
+            category: Category::Core,
+            status: CheckStatus::Warning,
+            version: None,
+            message: format!(
+                "{} error lines, {} anomalies in {}",
+                errors, anomalies, file
+            ),
+            fix_hint: Some(format!(
+                "Review recent errors: `tail -n 500 {}`",
+                path.display()
+            )),
+        }
+    } else {
+        DoctorCheck {
+            name: "selfware log health".to_string(),
+            category: Category::Core,
+            status: CheckStatus::Ok,
+            version: None,
+            message: format!(
+                "{} error lines, {} anomalies in {}",
+                errors, anomalies, file
+            ),
+            fix_hint: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Configuration sanity checks
 // ---------------------------------------------------------------------------
 
@@ -686,6 +806,8 @@ pub async fn run_doctor(config_path: Option<&str>) -> DoctorReport {
         ck("cargo", Category::Core, true, &["cargo"], &["--version"]),
         ck("git", Category::Core, true, &["git"], &["--version"]),
         Box::pin(check_msrv()),
+        #[cfg(feature = "log-analysis")]
+        Box::pin(async move { check_log_health() }),
     ];
 
     let platform: Vec<CheckFut> = platform_checks();
@@ -1324,6 +1446,25 @@ mod tests {
         let api_check = checks.iter().find(|c| c.name == "api_key").unwrap();
         assert_eq!(api_check.status, CheckStatus::Missing);
         assert!(api_check.fix_hint.is_some());
+    }
+
+    #[cfg(feature = "log-analysis")]
+    #[test]
+    fn analyze_log_file_counts_errors_and_anomalies() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("selfware.log");
+        // Lines shaped like real selfware logs ("<ts>  LEVEL target: msg") —
+        // the Plain parser recognizes `[LEVEL]` or space-delimited ` LEVEL `.
+        std::fs::write(
+            &log,
+            "2026-07-17T00:00:00Z  INFO selfware: boot\n\
+             2026-07-17T00:00:01Z  ERROR selfware: failed to connect\n\
+             2026-07-17T00:00:02Z  ERROR selfware: failed to connect\n\
+             2026-07-17T00:00:03Z  WARN selfware: retry\n",
+        )
+        .unwrap();
+        let (errors, _anomalies) = analyze_log_file(&log, 500).unwrap();
+        assert_eq!(errors, 2);
     }
 
     #[tokio::test]
