@@ -169,7 +169,10 @@ impl BrowserBenchRunner {
 
         // Phase 1: Execute web tasks and capture traces
         eprintln!("\n--- Phase 1: Executing web tasks ---");
-        let traces = self.executor.execute_all(tasks).await;
+        let traces = self
+            .executor
+            .execute_all(tasks, self.config.max_browser_concurrent)
+            .await;
 
         let tasks_passed = traces
             .iter()

@@ -340,12 +340,20 @@ impl BrowserTaskExecutor {
     /// session. Sequential by design: each task drives a full Playwright
     /// browser, so running many at once would spawn many heavyweight browser
     /// processes for little benchmarking value.
-    pub async fn execute_all(&self, tasks: &[WebTask]) -> Vec<InteractionTrace> {
-        let mut traces = Vec::with_capacity(tasks.len());
-        for task in tasks {
-            traces.push(self.execute(task).await);
-        }
-        traces
+    pub async fn execute_all(
+        &self,
+        tasks: &[WebTask],
+        concurrency: usize,
+    ) -> Vec<InteractionTrace> {
+        use futures::stream::StreamExt;
+        // Run up to `concurrency` browser tasks at once — each `execute` spawns
+        // its own browser — while preserving task order via `buffered`. This
+        // previously ran strictly sequentially despite the advertised
+        // `max_browser_concurrent`, so the benchmark never used the parallelism.
+        futures::stream::iter(tasks.iter().map(|task| self.execute(task)))
+            .buffered(concurrency.max(1))
+            .collect()
+            .await
     }
 }
 
@@ -589,7 +597,7 @@ mod tests {
     async fn execute_all_empty_is_empty() {
         let dir = std::env::temp_dir().join(format!("bx_empty_{}", std::process::id()));
         let ex = BrowserTaskExecutor::new(dir.clone()).unwrap();
-        let traces = ex.execute_all(&[]).await;
+        let traces = ex.execute_all(&[], 4).await;
         assert!(traces.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
