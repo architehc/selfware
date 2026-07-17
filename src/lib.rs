@@ -57,7 +57,6 @@ pub mod api;
 pub mod cli;
 pub mod computer;
 pub mod concurrency;
-pub mod concurrent_queue;
 pub mod config;
 pub mod doctor;
 pub mod errors;
@@ -146,8 +145,6 @@ pub mod profiles;
 // Utility modules
 // ============================================================================
 pub mod interview;
-#[cfg(feature = "tokens")]
-pub mod kv_store;
 pub mod llm_doctor;
 pub mod memory;
 pub mod output;
