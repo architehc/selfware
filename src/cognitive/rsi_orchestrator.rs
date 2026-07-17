@@ -643,7 +643,12 @@ mod tests {
     // production fix is orthogonal to that shell dependency.
     #[cfg(unix)]
     #[tokio::test]
+    // The state lock is intentionally held across awaits: it keeps the
+    // process-global cwd and HOME stable for the sandbox git-clone and for
+    // the rustup-shimmed `cargo` invocations in `sandbox.verify()`.
+    #[allow(clippy::await_holding_lock)]
     async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
+        let _state = crate::test_support::CwdGuard::hold();
         let dir = create_rsi_fixture_project();
         let project_root = dir.path().to_path_buf();
         let state_path = project_root.join(".selfware/rsi_state.json");

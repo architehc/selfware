@@ -31,11 +31,17 @@ impl CompilationSandbox {
         }
 
         // Clone the repo to get a clean working tree without build artifacts.
+        // Pin the child's cwd to the source repo. Without this the clone
+        // inherits the process-global cwd, which other tests (and the
+        // worktree/subagent flows) can move or delete mid-run; git then fails
+        // the checkout with "fatal: this operation must be run in a work
+        // tree" and the whole clone errors out intermittently.
         let status = Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
             .arg(&original_dir)
             .arg(&work_dir)
+            .current_dir(&original_dir)
             .status()?;
 
         if !status.success() {

@@ -891,6 +891,9 @@ mod tests {
 
     #[test]
     fn test_apply_target_in_sandbox_updates_file() {
+        // Serialize against tests that mutate process-global state (cwd, HOME):
+        // the sandbox git-clone and the fixture's git commands inherit both.
+        let _state = crate::test_support::CwdGuard::hold();
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().to_path_buf();
         let src_dir = project_root.join("src");
