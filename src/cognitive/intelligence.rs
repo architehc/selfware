@@ -648,7 +648,7 @@ impl GitState {
         // Get current branch
         if let Ok(head) = repo.head() {
             if head.is_branch() {
-                self.branch = head.shorthand().map(String::from);
+                self.branch = head.shorthand().ok().map(String::from);
             }
             if let Some(oid) = head.target() {
                 self.commit = Some(oid.to_string());
@@ -662,7 +662,7 @@ impl GitState {
         self.staged.clear();
 
         for entry in statuses.iter() {
-            if let Some(path) = entry.path() {
+            if let Ok(path) = entry.path() {
                 let path = PathBuf::from(path);
                 let status = entry.status();
 

@@ -33,6 +33,11 @@ ignore = [
     # rand 0.9.x/0.10.x: unsound only with a custom logger calling rand::rng().
     # We do not invoke rand from a custom logger; not exploitable in our use.
     "RUSTSEC-2026-0097",
+    # quick-xml 0.30: only a BUILD dependency of xcb (parses xcb's own
+    # bundled protocol XML at build time; not attacker-controlled input).
+    # The runtime quick-xml via plist/syntect is 0.41.0 (fixed).
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 # Treat unmaintained crates as errors (all = error for any unmaintained crate)
 unmaintained = "all"

@@ -1496,7 +1496,7 @@ pub fn capture_git_state(repo_path: &str) -> Option<GitCheckpointInfo> {
     let branch = head
         .shorthand()
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "HEAD".to_string());
+        .unwrap_or_else(|_| "HEAD".to_string());
 
     // Get current commit
     let commit = head.peel_to_commit().ok()?;

@@ -140,40 +140,9 @@ jobs:
       - name: Test (no default features)
         run: cargo test --no-default-features
 
-  cross-compile-mac:
-    name: Cross-compile check aarch64-apple-darwin
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add aarch64-apple-darwin target
-        run: rustup target add aarch64-apple-darwin
-
-      - name: Cache cargo registry
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-cross-aarch64-darwin-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-cross-aarch64-darwin-
-
-      # check, not build: linking for apple targets needs the macOS SDK,
-      # which Linux runners do not have. This catches macOS-only compile
-      # breakage, which is the intent.
-      - name: Check for aarch64-apple-darwin (no default features)
-        run: cargo check --target aarch64-apple-darwin --no-default-features
+  # NOTE: a Linux-based aarch64-apple-darwin cross-check is not viable:
+  # ring's build script compiles C even under `cargo check`, which needs an
+  # Apple toolchain. The macos-14 test job already covers macOS compilation.
 
   # Minimum supported Rust version
   msrv:

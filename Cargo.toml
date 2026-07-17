@@ -70,7 +70,7 @@ reqwest = { version = "0.13", features = ["json", "stream", "blocking"] }
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-git2 = "0.20"  # Updated for security fixes (CVE-2024-24575, CVE-2024-24577)
+git2 = "0.21"  # Updated for security fixes (RUSTSEC-2026-0183, RUSTSEC-2026-0184)
 walkdir = "2.4"
 wait-timeout = "0.2"
 regex = "1.11"
