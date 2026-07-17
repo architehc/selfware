@@ -3772,6 +3772,15 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
             args.prompt_mode
         );
     }
+    // Same for the prompt profile: an unknown value silently fell back to the
+    // Default profile (see runner.rs), so a typo ran the wrong prompt without
+    // any signal. Only the two known profiles are valid.
+    if !matches!(args.prompt_profile.as_str(), "swebench_pro" | "default") {
+        anyhow::bail!(
+            "invalid --prompt-profile '{}': expected 'swebench_pro' or 'default'",
+            args.prompt_profile
+        );
+    }
     let opts = SwebenchProOpts {
         quants,
         instance_ids,
