@@ -105,7 +105,7 @@ impl MultiAgentChat {
     ///
     /// Spend guardrails: `--max-budget-tokens` / `--max-cost-usd` (merged by
     /// the CLI into `config.agent`) are enforced across the fan-out — see
-    /// [`BudgetGuard`]. `--max-turns` (`agent.max_iterations`) has no meaning
+    /// `BudgetGuard`. `--max-turns` (`agent.max_iterations`) has no meaning
     /// here because every agent makes exactly one call; it is deliberately
     /// ignored rather than silently half-applied.
     ///

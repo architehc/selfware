@@ -19,21 +19,38 @@ use tracing::{debug, warn};
 /// Maximum number of cached token counts before the cache is cleared.
 const MAX_CACHE_ENTRIES: usize = 1_000;
 
+/// Model name registered by the CLI entry point once it has loaded the
+/// effective [`Config`](crate::config::Config) (see `set_configured_model`).
+/// The tokenizer must never reload the config file itself: a mid-session
+/// `Config::load(None)` ignored `--config`/`-c` and printed a spurious
+/// `config: <path>` line into the session output (P2-11).
+static CONFIGURED_MODEL: RwLock<Option<String>> = RwLock::new(None);
+
+/// Record the model name from the already-loaded config so the tokenizer can
+/// pick a matching HF tokenizer. Call once, early at startup — the tokenizer
+/// is built lazily on first use, so registration after the first token
+/// count has no effect.
+pub fn set_configured_model(model: &str) {
+    if let Ok(mut slot) = CONFIGURED_MODEL.write() {
+        *slot = Some(model.to_string());
+    }
+}
+
+/// Resolve the model whose tokenizer we should try to match.
+/// Precedence: `SELFWARE_MODEL` env var, then the registered config model.
+fn configured_model_name() -> Option<String> {
+    std::env::var("SELFWARE_MODEL")
+        .ok()
+        .or_else(|| CONFIGURED_MODEL.read().ok().and_then(|slot| slot.clone()))
+}
+
 // Try to load a tokenizer matching the configured model, fall back to tiktoken
 // cl100k_base, and finally to a heuristic.  TokenizerState is Send + Sync
 // (both Tokenizer and CoreBPE are), and count() only requires &self, so no
 // Mutex is needed — Lazy alone provides safe one-time initialization and
 // lock-free concurrent reads.
-static TOKENIZER: Lazy<TokenizerState> = Lazy::new(|| {
-    // Determine the configured model name (if any) so we can pick a matching
-    // tokenizer instead of hardcoding one.  We deliberately swallow config
-    // load errors — token counting is best-effort and must never panic.
-    let configured_model = std::env::var("SELFWARE_MODEL")
-        .ok()
-        .or_else(|| crate::config::Config::load(None).ok().map(|c| c.model));
-
-    TokenizerState::for_model(configured_model.as_deref())
-});
+static TOKENIZER: Lazy<TokenizerState> =
+    Lazy::new(|| TokenizerState::for_model(configured_model_name().as_deref()));
 
 /// Thread-safe cache mapping content hash (u64) -> token count.
 static TOKEN_CACHE: Lazy<RwLock<HashMap<u64, usize>>> =
@@ -276,5 +293,23 @@ mod tests {
         let state = TokenizerState::for_model(None);
         let count = state.count("hello world");
         assert!(count > 0);
+    }
+
+    #[test]
+    fn test_configured_model_slot_used_when_env_absent() {
+        // The CLI registers the loaded config's model here instead of the
+        // tokenizer reloading the config itself (P2-11).
+        let _guard = crate::config::test_helpers::clear_env();
+        set_configured_model("slot-model");
+        assert_eq!(configured_model_name().as_deref(), Some("slot-model"));
+    }
+
+    #[test]
+    fn test_env_var_beats_configured_model_slot() {
+        let _guard = crate::config::test_helpers::clear_env();
+        set_configured_model("slot-model");
+        std::env::set_var("SELFWARE_MODEL", "env-model");
+        assert_eq!(configured_model_name().as_deref(), Some("env-model"));
+        // The guard re-clears SELFWARE_MODEL on drop.
     }
 }

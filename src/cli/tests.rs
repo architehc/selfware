@@ -724,3 +724,255 @@ fn endpoint_is_local_detects_localhost_variants() {
     assert!(!endpoint_is_local("https://openrouter.ai/api/v1"));
     assert!(!endpoint_is_local("https://api.example.com/v1"));
 }
+
+// ── P1-5: --coordinator / --profile are global (usable after the subcommand) ──
+//
+// `selfware multi-chat --coordinator` used to be a clap parse error because
+// both flags were top-level-only, unlike every other common flag.
+
+#[test]
+fn cli_multi_chat_trailing_coordinator_flag() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "multi-chat", "--coordinator"]).unwrap();
+    assert!(cli.coordinator);
+    assert!(matches!(cli.command.unwrap(), Commands::MultiChat { .. }));
+}
+
+#[test]
+fn cli_leading_coordinator_before_multi_chat() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "--coordinator", "multi-chat"]).unwrap();
+    assert!(cli.coordinator);
+    assert!(matches!(cli.command.unwrap(), Commands::MultiChat { .. }));
+}
+
+#[test]
+fn cli_profile_before_multi_chat() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "--profile", "swarm-8", "multi-chat"]).unwrap();
+    assert_eq!(cli.profile.as_deref(), Some("swarm-8"));
+    assert!(matches!(cli.command.unwrap(), Commands::MultiChat { .. }));
+}
+
+#[test]
+fn cli_trailing_profile_after_multi_chat() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "multi-chat", "--profile", "quick"]).unwrap();
+    assert_eq!(cli.profile.as_deref(), Some("quick"));
+}
+
+// ── P1-4: multi-chat one-shot task parsing ──
+
+#[test]
+fn cli_multi_chat_positional_task() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "multi-chat", "fix the bug"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::MultiChat { task, concurrency } => {
+            assert_eq!(task.as_deref(), Some("fix the bug"));
+            assert_eq!(concurrency, DEFAULT_MULTI_CHAT_CONCURRENCY);
+        }
+        other => panic!("Expected MultiChat, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_multi_chat_without_task_is_interactive() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "multi-chat"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::MultiChat { task, .. } => assert!(task.is_none()),
+        other => panic!("Expected MultiChat, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_multi_chat_task_with_coordinator_and_concurrency() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "multi-chat",
+        "ship it",
+        "--coordinator",
+        "-n",
+        "8",
+    ])
+    .unwrap();
+    assert!(cli.coordinator);
+    match cli.command.unwrap() {
+        Commands::MultiChat { task, concurrency } => {
+            assert_eq!(task.as_deref(), Some("ship it"));
+            assert_eq!(concurrency, 8);
+        }
+        other => panic!("Expected MultiChat, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_prompt_combined_with_multi_chat_parses() {
+    use clap::Parser;
+    // The one-shot routing happens in run(); this only checks the parse shape.
+    let cli = Cli::try_parse_from(["selfware", "-p", "do it", "multi-chat"]).unwrap();
+    assert_eq!(cli.prompt.as_deref(), Some("do it"));
+    match cli.command.unwrap() {
+        Commands::MultiChat { task, .. } => assert!(task.is_none()),
+        other => panic!("Expected MultiChat, got {:?}", other),
+    }
+}
+
+// ── P1-4: one-shot fan-out against a mock LLM endpoint ──
+
+/// Minimal config pointed at the mock server; multi-chat makes no tool
+/// calls, so no safety/yolo setup is needed.
+fn mock_multi_chat_config(endpoint: String) -> Config {
+    Config {
+        endpoint,
+        model: "mock-model".to_string(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn multi_chat_one_shot_success_returns_ok() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "mock answer".to_string(),
+        ))
+        .build()
+        .await;
+    let config = mock_multi_chat_config(format!("{}/v1", server.url()));
+    let ctx = WorkshopContext::from_config(&config.endpoint, &config.model)
+        .with_mode(ExecutionMode::Normal);
+
+    // quiet=true keeps human output out of the test log; exit semantics are
+    // what matters: all agents succeed → Ok.
+    let result = run_multi_chat_one_shot(
+        &config,
+        &ctx,
+        4,
+        false,
+        "say hi",
+        HeadlessOutputFormat::Text,
+        true,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "one-shot should succeed: {:?}",
+        result.err()
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn multi_chat_one_shot_coordinator_assigns_and_runs() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_default_response(crate::testing::mock_api::MockResponse::Text(
+            "mock answer".to_string(),
+        ))
+        .build()
+        .await;
+    let config = mock_multi_chat_config(format!("{}/v1", server.url()));
+    let ctx = WorkshopContext::from_config(&config.endpoint, &config.model)
+        .with_mode(ExecutionMode::Normal);
+
+    // Coordinator mode: the swarm mirrors the role fleet 1:1, so the
+    // assignment gate passes and the fan-out executes.
+    let result = run_multi_chat_one_shot(
+        &config,
+        &ctx,
+        4,
+        true,
+        "say hi",
+        HeadlessOutputFormat::Text,
+        true,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "coordinator one-shot should succeed: {:?}",
+        result.err()
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn multi_chat_one_shot_any_failure_returns_err() {
+    use crate::testing::mock_api::{MockLlmServer, MockResponse};
+
+    // 401 is non-retryable, so every agent fails immediately.
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Error {
+            status: 401,
+            body: r#"{"error":"unauthorized"}"#.to_string(),
+        })
+        .build()
+        .await;
+    let config = mock_multi_chat_config(format!("{}/v1", server.url()));
+    let ctx = WorkshopContext::from_config(&config.endpoint, &config.model)
+        .with_mode(ExecutionMode::Normal);
+
+    let result = run_multi_chat_one_shot(
+        &config,
+        &ctx,
+        4,
+        false,
+        "say hi",
+        HeadlessOutputFormat::Text,
+        true,
+    )
+    .await;
+    let err = result.expect_err("any agent failure must make the one-shot fail");
+    assert!(
+        format!("{err}").contains("agents failed"),
+        "error should report the failure count: {err}"
+    );
+
+    server.stop().await;
+}
+
+#[test]
+fn multi_agent_result_json_shape() {
+    // The machine-readable one-shot output: per-agent array entries carry
+    // identity, success, content, error, and provider-reported usage.
+    let result = multiagent::AgentResult {
+        agent_id: 0,
+        agent_name: "Agent-0-Coder".to_string(),
+        role: crate::swarm::AgentRole::Coder,
+        content: "answer".to_string(),
+        usage: Some(crate::api::types::Usage {
+            prompt_tokens: 30,
+            completion_tokens: 12,
+            total_tokens: 42,
+            cost: Some(0.001),
+        }),
+        duration: std::time::Duration::from_millis(1500),
+        success: true,
+        error: None,
+    };
+    let v = multi_agent_result_json(&result);
+    assert_eq!(v["agent_name"], "Agent-0-Coder");
+    assert_eq!(v["role"], "Coder");
+    assert_eq!(v["success"], true);
+    assert_eq!(v["usage"]["total_tokens"], 42);
+    assert_eq!(v["usage"]["cost"], 0.001);
+    assert!(v["error"].is_null());
+}

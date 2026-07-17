@@ -11,6 +11,38 @@ fn workflow_codegen_prints_rust_stub() {
         .stdout(predicates::str::is_empty().not());
 }
 
+/// P1-4/P1-5 regression: `multi-chat --help` must list the optional one-shot
+/// task argument and the global `--coordinator` flag (both used to be
+/// absent — the flag was even a parse error after the subcommand).
+#[test]
+fn multi_chat_help_mentions_task_and_coordinator() {
+    let mut cmd = assert_cmd::Command::cargo_bin("selfware").unwrap();
+    cmd.args(["multi-chat", "--help"])
+        .assert()
+        .success()
+        .stdout(
+            predicates::str::contains("[TASK]").and(predicates::str::contains("--coordinator")),
+        );
+}
+
+/// P1-5 regression: `multi-chat --coordinator` must parse (previously exit 2,
+/// "unexpected argument '--coordinator'"). With a missing config file it
+/// fails later on config load — not on clap.
+#[test]
+fn multi_chat_trailing_coordinator_flag_is_not_a_parse_error() {
+    let mut cmd = assert_cmd::Command::cargo_bin("selfware").unwrap();
+    cmd.args([
+        "multi-chat",
+        "--coordinator",
+        "noop",
+        "-c",
+        "/nonexistent/definitely-missing.toml",
+    ])
+    .assert()
+    .failure()
+    .stderr(predicates::str::contains("unexpected argument").not());
+}
+
 /// Regression test for the Windows stack overflow: building the clap
 /// command tree plus polling the `cli::run()` dispatch needs more stack
 /// than Windows' 1MB main-thread default (debug builds). The binary

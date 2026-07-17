@@ -83,10 +83,14 @@ pub(crate) struct Cli {
     #[arg(long, value_name = "NAME")]
     pub(crate) resume_session: Option<String>,
 
-    /// Run in coordinator mode (multi-agent orchestration)
-    /// When set, the agent runs as a coordinator with restricted tool access,
-    /// orchestrating parallel work across multiple worker agents.
-    #[arg(long)]
+    /// Multi-chat: assign each task to role-matched idle swarm agents by trust.
+    ///
+    /// Only meaningful with `multi-chat`. The coordinator's assignment gates
+    /// execution — a task that cannot be assigned makes no LLM calls — but
+    /// execution itself is the same single-completion-per-agent fan-out as
+    /// plain multi-chat; there are no separate worker agents and no
+    /// restricted tool set. Other subcommands ignore this flag (with a note).
+    #[arg(long, global = true)]
     pub(crate) coordinator: bool,
 
     /// Validate the configuration file and exit without running the agent
@@ -129,7 +133,7 @@ pub(crate) struct Cli {
     /// Configuration profile to apply (e.g. `architect`, `swarm-8`, `batch-16`,
     /// `batch-32`, `visual`, `quick`).  Overrides `max_tokens` and
     /// `temperature` from the profile's built-in defaults.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", global = true)]
     pub(crate) profile: Option<String>,
 }
 
@@ -345,9 +349,16 @@ pub(crate) enum Commands {
         save: bool,
     },
 
-    /// Multi-agent chat with concurrent streams
+    /// Multi-agent chat with concurrent streams.
+    ///
+    /// Without a TASK, starts an interactive session. With a TASK, runs a
+    /// single fan-out across the role agents, prints the aggregated results,
+    /// and exits (headless one-shot); `-p <task> multi-chat` is equivalent.
     #[command(alias = "m", display_order = 10)]
     MultiChat {
+        /// Run one fan-out for this task and exit instead of starting an
+        /// interactive session.
+        task: Option<String>,
         /// Maximum concurrent agents (1-16)
         #[arg(short = 'n', long, default_value_t = DEFAULT_MULTI_CHAT_CONCURRENCY)]
         concurrency: usize,

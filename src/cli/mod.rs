@@ -545,6 +545,12 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // Tell the tokenizer which model is configured so it can pick a matching
+    // HF tokenizer. It must NOT reload the config itself: a mid-session
+    // `Config::load(None)` ignores `-c` and prints a spurious
+    // `config: <path>` line into the session output (P2-11).
+    crate::token_count::set_configured_model(&config.model);
+
     // ── Merge CLI debug flag onto config + re-apply env overrides ──
     // Precedence: defaults < TOML < CLI flag < env vars.  `Config::load`
     // already applied env overrides once after TOML parse; merging CLI on
@@ -745,19 +751,24 @@ pub async fn run() -> Result<()> {
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 
+    // `--coordinator` is global (so it can follow the subcommand) but only
+    // means something to `multi-chat`; say so instead of silently ignoring it.
+    if cli.coordinator && !matches!(cli.command, Some(Commands::MultiChat { .. })) {
+        eprintln!("note: --coordinator only affects `multi-chat`; ignoring it for this command");
+    }
+    // `--max-turns` bounds the single-agent ReAct loop; multi-chat agents
+    // each make exactly one completion, so the flag has no meaning there
+    // (P0-3). Don't hard-fail — just say it.
+    if cli.max_turns.is_some() && matches!(cli.command, Some(Commands::MultiChat { .. })) {
+        eprintln!(
+            "note: --max-turns has no effect in multi-chat mode \
+             (each agent makes a single completion)"
+        );
+    }
+
     // Headless mode: run prompt directly and exit (like qwen -p)
     if let Some(prompt) = cli.prompt {
         use std::io::IsTerminal;
-
-        // Fail fast BEFORE any LLM call: in Normal mode every mutating tool
-        // needs an interactive confirmation, and with no terminal on stdin
-        // there is nobody to answer — the agent would refuse every write,
-        // burn tokens for the whole turn budget, then die at MAX_ITERATIONS.
-        if let Some(reason) =
-            headless::headless_mode_block_reason(exec_mode, std::io::stdin().is_terminal())
-        {
-            anyhow::bail!("{}", reason);
-        }
 
         // Support reading from stdin with "-p -"
         let actual_prompt = if prompt == "-" {
@@ -771,6 +782,42 @@ pub async fn run() -> Result<()> {
 
         if actual_prompt.is_empty() {
             anyhow::bail!("Empty prompt provided");
+        }
+
+        // `-p` combined with `multi-chat` is a multi-agent one-shot fan-out,
+        // not the single-agent headless path below — previously this silently
+        // degraded to single-agent, ignoring both multi-chat and
+        // --coordinator (P1-4). Route it before the interactive-confirmation
+        // guard: multi-chat agents make no tool calls, so there is nothing
+        // to confirm even without a terminal on stdin.
+        if let Some(Commands::MultiChat { concurrency, task }) = &cli.command {
+            if let Some(positional) = task {
+                anyhow::bail!(
+                    "task supplied twice: via -p and as the `multi-chat` positional \
+                     argument ('{}'); pass it once",
+                    positional
+                );
+            }
+            return run_multi_chat_one_shot(
+                &config,
+                &ctx,
+                *concurrency,
+                cli.coordinator,
+                &actual_prompt,
+                cli.output_format,
+                cli.quiet,
+            )
+            .await;
+        }
+
+        // Fail fast BEFORE any LLM call: in Normal mode every mutating tool
+        // needs an interactive confirmation, and with no terminal on stdin
+        // there is nobody to answer — the agent would refuse every write,
+        // burn tokens for the whole turn budget, then die at MAX_ITERATIONS.
+        if let Some(reason) =
+            headless::headless_mode_block_reason(exec_mode, std::io::stdin().is_terminal())
+        {
+            anyhow::bail!("{}", reason);
         }
 
         let is_json = cli.output_format == HeadlessOutputFormat::Json;
@@ -1036,6 +1083,272 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     Ok(())
 }
 
+/// Run a single multi-agent fan-out over `task` and return — the headless
+/// one-shot form of `multi-chat` (P1-4).
+///
+/// Reached via a positional task (`selfware multi-chat "task"`) or `-p`
+/// combined with the subcommand (`selfware -p "task" multi-chat`). In
+/// coordinator mode the swarm assignment gates execution exactly as in the
+/// interactive swarm loop: a task the coordinator cannot assign to the full
+/// role fleet makes no LLM calls and is reported as an error.
+///
+/// Output follows the global `--output-format`: `json`/`stream-json` emit a
+/// machine-readable array of per-agent results (including provider-reported
+/// usage); `text` prints the per-agent summary and the aggregated result.
+///
+/// Exit semantics: `Ok(())` when every agent succeeded; an error (process
+/// exit 1) when any agent failed.
+async fn run_multi_chat_one_shot(
+    config: &Config,
+    ctx: &WorkshopContext,
+    concurrency: usize,
+    coordinator: bool,
+    task: &str,
+    output_format: HeadlessOutputFormat,
+    quiet: bool,
+) -> Result<()> {
+    let is_json = output_format == HeadlessOutputFormat::Json;
+    let is_stream_json = output_format == HeadlessOutputFormat::StreamJson;
+    let is_structured = is_json || is_stream_json;
+
+    // In JSON/stream-JSON modes, suppress all human-oriented stdout so only
+    // machine-readable JSON is emitted.
+    if is_structured {
+        output::set_json_mode(true);
+    }
+
+    if !quiet && !is_structured {
+        println!("{}", render_header(ctx));
+        println!(
+            "\n{} {} with {} concurrent streams{}\n",
+            Glyphs::gear(),
+            "Multi-Agent One-Shot".workshop_title(),
+            concurrency.to_string().emphasis(),
+            if coordinator {
+                " (coordinator mode)"
+            } else {
+                ""
+            }
+        );
+    }
+
+    let agent_config = multiagent::MultiAgentConfig::default().with_concurrency(concurrency);
+
+    let start = std::time::Instant::now();
+    let results = if coordinator {
+        run_coordinated_fan_out(config, agent_config, task, quiet || is_structured).await?
+    } else {
+        multiagent::run_multiagent_task(config, task, concurrency).await?
+    };
+
+    if is_structured {
+        let json = serde_json::Value::Array(
+            results
+                .iter()
+                .map(multi_agent_result_json)
+                .collect::<Vec<_>>(),
+        );
+        // stream-json is line-delimited: the whole array goes on one line.
+        if is_stream_json {
+            println!("{}", serde_json::to_string(&json)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&json)?);
+        }
+    } else if !quiet {
+        print_multi_agent_summary(&results);
+
+        let summary = multiagent::MultiAgentChat::aggregate_results(&results);
+        println!("\n{}", "Aggregated Result:".bright_cyan().bold());
+        // Truncate long summaries for display (UTF-8 safe), same as the
+        // interactive loop.
+        const MAX_AGGREGATE_DISPLAY_CHARS: usize = 2000;
+        let preview = if summary.len() > MAX_AGGREGATE_DISPLAY_CHARS {
+            let mut end = MAX_AGGREGATE_DISPLAY_CHARS;
+            while end > 0 && !summary.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!(
+                "{}...\n[{} more chars]",
+                &summary[..end],
+                summary.len() - end
+            )
+        } else {
+            summary
+        };
+        println!("{}", preview);
+        println!(
+            "\n{} Total time: {:.2}s",
+            "⏱".bright_yellow(),
+            start.elapsed().as_secs_f64()
+        );
+    }
+
+    let failed = results.iter().filter(|r| !r.success).count();
+    if failed > 0 {
+        anyhow::bail!(
+            "multi-chat one-shot: {failed}/{} agents failed",
+            results.len()
+        );
+    }
+    Ok(())
+}
+
+/// Coordinator-mode fan-out for the one-shot path: the swarm assignment
+/// gates execution, mirroring `MultiAgentChat::interactive_swarm`. The task
+/// runs only when the coordinator assigns the full role fleet; otherwise no
+/// LLM calls are made and this returns an error. Kept in the CLI layer
+/// because the interactive helper is private to the orchestration module.
+async fn run_coordinated_fan_out(
+    config: &Config,
+    agent_config: multiagent::MultiAgentConfig,
+    task: &str,
+    quiet: bool,
+) -> Result<Vec<multiagent::AgentResult>> {
+    use crate::swarm::{Agent as SwarmAgent, Swarm, SwarmTask, TaskStatus};
+
+    let role_count = agent_config.roles.len();
+
+    // Build the swarm 1:1 from the configured roles so the coordinator's
+    // assignment is authoritative: a full assignment is exactly the set of
+    // agents `run_task` will execute.
+    let mut swarm = Swarm::new();
+    let mut swarm_agent_ids = Vec::with_capacity(role_count);
+    for (i, role) in agent_config.roles.iter().enumerate() {
+        let id = swarm.add_agent(SwarmAgent::new(
+            format!("Agent-{}-{}", i, role.name()),
+            *role,
+        ));
+        swarm_agent_ids.push(id);
+    }
+
+    let mut swarm_task = SwarmTask::new(task);
+    for role in &agent_config.roles {
+        swarm_task = swarm_task.with_role(*role);
+    }
+    swarm.queue_task(swarm_task)?;
+    let task_id = swarm
+        .next_task()
+        .ok_or_else(|| anyhow::anyhow!("coordinator: no task available from swarm queue"))?;
+
+    // The coordinator's assignment GATES execution: running (and billing) a
+    // different set of agents than the coordinator assigned is not allowed.
+    let assigned = swarm.assign_task(&task_id);
+    if assigned.len() < role_count {
+        swarm.fail_task(&task_id);
+        anyhow::bail!(
+            "coordinator assigned only {}/{} role agents — task not run (no LLM calls made)",
+            assigned.len(),
+            role_count
+        );
+    }
+    if !quiet {
+        println!(
+            "  {} Swarm coordinator assigned {} agents to task",
+            "📋".bright_blue(),
+            assigned.len()
+        );
+    }
+
+    let multi_agent = multiagent::MultiAgentChat::new(config, agent_config)?;
+    let results = multi_agent.run_task(task).await?;
+
+    // Feed results back to the swarm with the ACTUAL per-agent success flag
+    // so trust scores and failure counters reflect reality (`complete_task`
+    // also returns each agent to Idle).
+    for result in &results {
+        if let Some(agent_id) = swarm_agent_ids.get(result.agent_id) {
+            swarm.complete_task(&task_id, agent_id, result.content.clone(), result.success);
+        }
+    }
+    // Settle the task: an assigned agent that never reported a result must
+    // not leave the SwarmTask stuck InProgress forever.
+    let task_completed = swarm
+        .get_task(&task_id)
+        .map(|t| t.status == TaskStatus::Completed)
+        .unwrap_or(true);
+    if !task_completed {
+        swarm.fail_task(&task_id);
+    }
+
+    Ok(results)
+}
+
+/// Serialize one agent result for the one-shot JSON output.
+fn multi_agent_result_json(result: &multiagent::AgentResult) -> serde_json::Value {
+    serde_json::json!({
+        "agent_id": result.agent_id,
+        "agent_name": result.agent_name,
+        "role": result.role.name(),
+        "success": result.success,
+        "duration_secs": result.duration.as_secs_f64(),
+        "content": result.content,
+        "error": result.error,
+        "usage": result.usage,
+    })
+}
+
+/// Honest per-agent summary for the one-shot text output: what each agent
+/// actually returned, provider-reported usage/cost when available, the error
+/// for failed agents, and a totals line. (Mirror of the interactive loop's
+/// summary, kept local because that helper is private to the orchestration
+/// module.)
+fn print_multi_agent_summary(results: &[multiagent::AgentResult]) {
+    println!("\n{}", "Agent Results:".bright_cyan().bold());
+
+    let mut any_usage = false;
+    let mut total_tokens = 0usize;
+    let mut total_cost = 0.0f64;
+    let mut any_cost = false;
+
+    for result in results {
+        let status = if result.success {
+            "✓".bright_green()
+        } else {
+            "✗".bright_red()
+        };
+        println!(
+            "  {} {} ({}) — {:.2}s",
+            status,
+            result.agent_name,
+            result.role.name(),
+            result.duration.as_secs_f64()
+        );
+        if let Some(usage) = &result.usage {
+            any_usage = true;
+            total_tokens += usage.total_tokens;
+            match usage.cost {
+                Some(cost) => {
+                    any_cost = true;
+                    total_cost += cost;
+                    println!(
+                        "    {} tokens ({} prompt + {} completion), ${:.6}",
+                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, cost
+                    );
+                }
+                None => {
+                    println!(
+                        "    {} tokens ({} prompt + {} completion)",
+                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
+                    );
+                }
+            }
+        }
+        if !result.success {
+            if let Some(error) = &result.error {
+                println!("    error: {}", error);
+            }
+        }
+    }
+
+    if any_usage {
+        if any_cost {
+            println!("  Total: {} tokens, ${:.6}", total_tokens, total_cost);
+        } else {
+            println!("  Total: {} tokens", total_tokens);
+        }
+    }
+}
+
 async fn handle_command(
     command: Commands,
     quiet: bool,
@@ -1072,11 +1385,27 @@ async fn handle_command(
             agent.interactive().await?;
         }
 
-        Commands::MultiChat { concurrency } => {
+        Commands::MultiChat { task, concurrency } => {
+            // Headless one-shot: a positional task runs a single fan-out and
+            // exits instead of entering the interactive REPL (P1-4).
+            // (`-p <task> multi-chat` is routed to the same function from the
+            // headless entry path.)
+            if let Some(task) = task {
+                return run_multi_chat_one_shot(
+                    &config,
+                    ctx,
+                    concurrency,
+                    coordinator,
+                    &task,
+                    output_format,
+                    quiet,
+                )
+                .await;
+            }
+
             // The --coordinator flag selects the swarm coordinator path.
-            // When set, the multi-agent chat is orchestrated through the
-            // Swarm coordinator (queue/assign/consensus) instead of the
-            // plain fan-out.
+            // When set, each task is queued in a Swarm mirroring the fleet
+            // and the coordinator's role/trust assignment gates execution.
             let use_coordinator = coordinator;
             if !quiet {
                 println!("{}", render_header(ctx));
