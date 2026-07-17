@@ -3,6 +3,12 @@
 Status: decision records only; merging is follow-up work, out of scope for the
 2026-07-16 cleanup. Each entry picks a winner and sketches the merge path.
 
+Status 2026-07-17: executed the `devops/container.rs` deletion (item 2) plus
+removal of verified-caller-less modules: safety autonomy/sandbox/threat_modeling,
+ui swarm_viz/input_handler/diff_viewer/selections, agent subagent/worktree,
+observability dashboard trim, TUI swarm cluster, bin/swarm_folder_analyzer, and
+the dead lib.rs shims container/sandbox/threat_modeling.
+
 ## 1. Workflow engines: `swl/` vs `orchestration/workflows.rs`
 
 - **Winner:** `orchestration/workflows.rs` (production-ready, powers the SWL

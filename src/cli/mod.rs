@@ -1277,7 +1277,7 @@ async fn handle_command(
         }
 
         #[cfg(feature = "tui")]
-        Commands::Dashboard { swarm_mode: _ } => {
+        Commands::Dashboard => {
             // Dashboard launches the same live agent-driven TUI as the
             // default no-subcommand path — no canned agent-less loop.
             return run_live_agent_tui(config).await;

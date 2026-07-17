@@ -3,20 +3,15 @@
 //! This module contains security-related functionality including:
 //! - Safety checking and validation
 //! - Security scanning
-//! - Threat modeling
-//! - Sandboxing
 //! - Execution control modes
 
 pub mod audit;
-pub mod autonomy;
 pub mod checker;
 pub mod path_validator;
 pub mod permissions;
 pub mod process_env;
 pub mod redact;
-pub mod sandbox;
 pub mod scanner;
-pub mod threat_modeling;
 pub mod tool_metadata;
 
 #[cfg(feature = "execution-modes")]
@@ -26,16 +21,13 @@ pub mod dry_run;
 pub mod yolo;
 
 // Re-exports for convenience
-pub use autonomy::{AutonomyContext, AutonomyController, AutonomyLevel};
 pub use checker::validation::{
     is_private_or_internal, normalize_shell_command, split_shell_commands, PinnedDnsResolver,
 };
 pub use checker::SafetyChecker;
-pub use sandbox::{FilesystemPolicy, NetworkPolicy, ResourceLimits};
 pub use scanner::{
     SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,
 };
-pub use threat_modeling::{Asset, SecurityControl, StrideCategory, Threat};
 pub use tool_metadata::{
     default_tool_metadata, ExecutionMode, PermissionChecker, PermissionResult, RiskLevel,
     ToolMetadata,
@@ -93,17 +85,6 @@ mod tests {
     }
 
     #[test]
-    fn test_autonomy_level_name() {
-        assert_eq!(AutonomyLevel::SuggestOnly.name(), "Suggest Only");
-        assert_eq!(
-            AutonomyLevel::ConfirmDestructive.name(),
-            "Confirm Destructive"
-        );
-        assert_eq!(AutonomyLevel::SemiAutonomous.name(), "Semi-Autonomous");
-        assert_eq!(AutonomyLevel::FullAutonomous.name(), "Full Autonomous");
-    }
-
-    #[test]
     fn test_execution_mode_default() {
         let default: ExecutionMode = Default::default();
         assert_eq!(default, ExecutionMode::Normal);
@@ -140,38 +121,5 @@ mod tests {
         assert!(matches!(allow, PermissionResult::Allow));
         assert!(matches!(deny, PermissionResult::Deny { .. }));
         assert!(matches!(prompt, PermissionResult::Prompt { .. }));
-    }
-
-    #[test]
-    fn test_filesystem_policy_default() {
-        let policy = FilesystemPolicy::default();
-        assert!(policy.allowed_paths.is_empty());
-        assert!(policy.denied_paths.is_empty());
-    }
-
-    #[test]
-    fn test_network_policy_default() {
-        let policy = NetworkPolicy::default();
-        assert!(policy.rules.is_empty());
-        // Default is false (derived), but new() sets it to true
-        assert!(!policy.allow_localhost);
-    }
-
-    #[test]
-    fn test_network_policy_new() {
-        let policy = NetworkPolicy::new();
-        assert!(policy.rules.is_empty());
-        assert!(policy.allow_localhost);
-    }
-
-    #[test]
-    fn test_resource_limits_default() {
-        let limits = ResourceLimits::default();
-        assert!(limits.max_cpu_time.is_none());
-        assert!(limits.max_memory.is_none());
-        assert!(limits.max_fds.is_none());
-        assert!(limits.max_processes.is_none());
-        assert!(limits.max_output_size.is_none());
-        assert!(limits.timeout.is_none());
     }
 }

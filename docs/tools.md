@@ -688,7 +688,7 @@ Capture a screenshot of the screen, a specific window, or a region. Returns the 
 
 ## FIM (Fill-in-the-Middle)
 
-### `fim_edit`
+### `file_fim_edit`
 
 Use intelligent Fill-in-the-Middle to replace a block of code. Provide the path, start/end lines of the block to replace, and an instruction for what should go there.
 

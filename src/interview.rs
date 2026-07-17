@@ -13,10 +13,9 @@
 //! // inject `section` into the system prompt before handing off to the agent
 //! ```
 //!
-//! The interview is designed to be invoked from `src/cli.rs` (via a `--interview`
-//! flag) or from `src/agent/interactive.rs` (via a `/interview` command).  This
-//! module intentionally does **not** modify those files — integration is left to
-//! the caller.
+//! The interview is invoked from `src/cli/init_wizard.rs` as part of
+//! `selfware init` (project scaffolding).  This module intentionally does
+//! **not** modify the CLI — integration is left to the caller.
 
 use anyhow::Result;
 use colored::*;

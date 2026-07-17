@@ -595,8 +595,6 @@ SWL supports two workflow formats:
 
 ## Further Reading
 
-- See `SWL_DESIGN.md` for design philosophy
-- See `SWL_IMPLEMENTATION_ROADMAP.md` for implementation details
 - See example workflows in this directory
 
 
@@ -630,5 +628,4 @@ selfware workflow run workflows/product_build.yml \
   --dry-run
 ```
 
-For the remote 122B endpoint, the checked-in `selfware-auto-txn545-Qwen3-5-122B-A10B-NVFP4.toml`
-is the safest starting point because it already disables backend thinking.
+For a configuration starting point, see the checked-in `selfware.example.toml`.

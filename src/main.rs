@@ -99,6 +99,3 @@ impl ShutdownSignals {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
-
-// Auto-scaler integration placeholder
-// To use: add `mod autoscaler;` and integrate into CLI

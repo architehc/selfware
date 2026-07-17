@@ -110,7 +110,6 @@ Prefix a message with `!` to mark it as high-priority. High-priority items are p
 | `/review <file>` | Review a specific code file |
 | `/plan <task>` | Create a task plan (reasoning only) |
 | `/swarm <task>` | Run task with multi-agent swarm |
-| `/interview` | Start interview mode -- answer structured questions (language, framework, testing strategy, project type) before the agent begins a task |
 
 ## Mode & Display Controls
 

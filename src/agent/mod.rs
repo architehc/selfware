@@ -99,7 +99,6 @@ pub mod prompt_builder;
 mod recovery;
 mod session_log;
 mod streaming;
-pub mod subagent;
 mod task_runner;
 mod tool_collect;
 mod tool_dispatch;
@@ -107,7 +106,6 @@ mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
 mod verification;
-pub mod worktree;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
 use compression::CompressionOrchestrator;

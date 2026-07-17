@@ -267,16 +267,6 @@ generate_report() {
 
     local report_file="$RESULTS_DIR/REPORT.md"
 
-    # Generate markdown report
-    if [[ -f "$RESULTS_DIR/report.json" ]]; then
-        # Use Rust to generate report
-        cargo run --quiet --example generate_report -- \
-            "$RESULTS_DIR/report.json" \
-            "$report_file" 2>/dev/null || {
-            log_warn "Could not generate report from JSON"
-        }
-    fi
-
     # Create summary
     cat > "$RESULTS_DIR/SUMMARY.txt" << EOF
 SWE-bench Evaluation Summary

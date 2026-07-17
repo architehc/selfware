@@ -13,7 +13,7 @@ A step-by-step guide to running selfware with local models on macOS using LM Stu
   ```
 - **Selfware** installed:
   ```bash
-  cargo install selfware
+  cargo install --git https://github.com/architehc/selfware
   ```
 - **LM Studio** downloaded from [https://lmstudio.ai/](https://lmstudio.ai/)
 

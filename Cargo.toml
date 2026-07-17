@@ -23,7 +23,6 @@ exclude = [
     "demos/",
     "selfware.toml",
     "selfware-eval.toml",
-    "selfware-extended-test.toml",
     "selfware-longrun.toml",
     "*.zip",
     "*.profraw",

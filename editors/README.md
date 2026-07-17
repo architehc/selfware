@@ -13,7 +13,7 @@ cargo run --bin codegraph
 | Editor | Status | Install |
 |--------|--------|---------|
 | VS Code | Full | See ../vscode-selfware/ |
-| Zed | Scaffold | See zed/ |
+| Zed | Scaffold | See ../zed-extension/ |
 | Neovim | Functional | See neovim/ |
 | JetBrains | Scaffold | See jetbrains/ |
 | Helix | CLI only | See helix/ |

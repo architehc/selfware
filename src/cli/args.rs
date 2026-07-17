@@ -404,11 +404,7 @@ pub(crate) enum Commands {
 
     /// Launch dashboard mode explicitly
     #[cfg(feature = "tui")]
-    Dashboard {
-        /// Enable swarm-oriented dashboard hints
-        #[arg(long)]
-        swarm_mode: bool,
-    },
+    Dashboard,
 
     /// Launch Command Center for SWL workflow monitoring
     #[cfg(feature = "tui")]

@@ -1113,21 +1113,6 @@ fn test_create_dev_swarm_has_all_roles() {
     assert_eq!(swarm.agents_by_role(AgentRole::Reviewer).len(), 1);
 }
 
-#[test]
-fn test_create_security_swarm() {
-    let swarm = super::factory::create_security_swarm();
-    assert!(!swarm.agents_by_role(AgentRole::Security).is_empty());
-}
-
-#[test]
-fn test_create_security_swarm_has_roles() {
-    let swarm = super::factory::create_security_swarm();
-    assert_eq!(swarm.agents_by_role(AgentRole::Security).len(), 1);
-    assert_eq!(swarm.agents_by_role(AgentRole::Reviewer).len(), 1);
-    assert_eq!(swarm.agents_by_role(AgentRole::Tester).len(), 1);
-    assert_eq!(swarm.list_agents().len(), 3);
-}
-
 // ============================================================================
 // Coordinator Routing Tests
 // ============================================================================

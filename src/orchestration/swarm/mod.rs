@@ -21,7 +21,7 @@ mod tests;
 
 // Re-export all public types
 pub use coordinator::{ConflictStrategy, Swarm, SwarmStats};
-pub use factory::{create_dev_swarm, create_security_swarm};
+pub use factory::create_dev_swarm;
 pub use memory::{MemoryAccess, MemoryAction, MemoryEntry, SharedMemory};
 pub use types::{
     Agent, AgentRole, AgentStatus, Decision, DecisionStatus, SwarmTask, TaskStatus, Vote,

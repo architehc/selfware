@@ -96,8 +96,6 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 ╰───────────────────────────────────────────────────────────╯
 ```
 
-> **Screenshots & GIFs**: See the [`docs/`](docs/) directory for full-resolution screenshots and animated GIFs of each mode in action.
-
 ---
 
 ## Quick Start
@@ -738,7 +736,7 @@ Semantic code intelligence via language servers (rust-analyzer, pyright, tsserve
 
 ### Interview Mode
 
-Structured pre-task questions (language, framework, scope, testing preference) with smart defaults and auto-detection. Start `selfware chat`, then run `/interview` before the agent begins work.
+Structured pre-task questions (language, framework, scope, testing preference) with smart defaults and auto-detection. The interview runs as part of `selfware init` when scaffolding a new project.
 
 ### Claude Code-like UI
 
@@ -1038,7 +1036,6 @@ During a chat session, use slash commands to control the agent:
 | `/think` | Toggle extended thinking |
 | `/hooks` | Toggle hook presets on/off |
 | `/queue` | View and manage the work queue |
-| `/interview` | Run the pre-task interview |
 
 ---
 
@@ -1066,11 +1063,7 @@ src/
 ├── api/            LLM client with timeout, retry, streaming
 ├── ui/             Terminal aesthetic (themes, animations, banners, fox mascot)
 │   ├── tui/        Full ratatui dashboard (garden view, swarm widgets, particles)
-│   ├── task_display.rs   Task progress display
-│   ├── diff_viewer.rs    Inline colored diff viewer (unified + side-by-side)
-│   ├── input_handler.rs  Claude Code-like input handling (ESC, history, queue)
-│   ├── selections.rs     Active selection wizard
-│   └── swarm_viz.rs      Swarm visualization panels
+│   └── task_display.rs   Task progress display
 ├── analysis/       Code analysis, BM25 search, vector store
 ├── cognitive/      PDVR cycle, working/episodic memory, RAG, token budget
 ├── config/         Configuration management (TOML + env + CLI)

@@ -2,10 +2,10 @@
 
 ## Installation
 
-### From crates.io
+### From Git
 
 ```bash
-cargo install selfware
+cargo install --git https://github.com/architehc/selfware
 ```
 
 ### From source
@@ -52,11 +52,10 @@ Or run a named task:
 selfware run "Add error handling to src/main.rs"
 ```
 
-Or start interview mode to answer a few questions before the agent begins (language, framework, testing strategy, etc.):
+Or answer a few structured interview questions (language, framework, testing strategy, etc.) while scaffolding a new project:
 
 ```bash
-selfware chat
-> /interview
+selfware init
 ```
 
 ## Configuration

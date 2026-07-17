@@ -18,9 +18,6 @@ Get started with SWE-bench evaluation for selfware in 5 minutes.
 mkdir -p data/swebench
 curl -L -o data/swebench/lite.json \
   https://raw.githubusercontent.com/princeton-nlp/SWE-bench/main/swebench/assets/swe-bench_lite.json
-
-# Or use the existing sample
-ls bench_results/swebench_lite_20.json
 ```
 
 ### 2. Build the Evaluation Binary

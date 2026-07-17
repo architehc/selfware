@@ -109,8 +109,6 @@ pub use safety::redact;
 
 // Re-export shutdown_tracing for main.rs
 pub use observability::telemetry::shutdown_tracing;
-pub use safety::sandbox;
-pub use safety::threat_modeling;
 
 // Backward-compatible re-exports for analysis module
 pub use analysis::analyzer;
@@ -130,7 +128,6 @@ pub use orchestration::visual_loop;
 pub use orchestration::workflows;
 
 // Backward-compatible re-exports for devops module
-pub use devops::container;
 pub use devops::process_manager;
 
 // Backward-compatible re-exports for testing module
