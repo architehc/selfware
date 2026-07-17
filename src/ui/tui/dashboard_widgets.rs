@@ -222,10 +222,16 @@ impl DashboardState {
             } => {
                 // Token usage came back from the model — we're demonstrably connected.
                 self.connected = true;
-                self.tokens_used += completion_tokens;
+                // Honest total: prompt tokens are real billed usage too, not noise.
+                self.tokens_used += prompt_tokens + completion_tokens;
                 self.log(
                     LogLevel::Debug,
-                    &format!("+{} tokens (prompt: {})", completion_tokens, prompt_tokens),
+                    &format!(
+                        "+{} tokens ({} prompt + {} completion)",
+                        prompt_tokens + completion_tokens,
+                        prompt_tokens,
+                        completion_tokens
+                    ),
                 );
             }
             TuiEvent::StatusUpdate { message } => {
@@ -600,9 +606,9 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ("Ctrl+G", "Toggle garden view"),
         ("Ctrl+L", "Toggle log view"),
         ("Tab", "Cycle focus between panes"),
-        ("Space", "Pause/resume (input empty)"),
+        ("Space", "Hold display updates"),
         ("z", "Toggle zoom on focused pane"),
-        ("Esc", "Unzoom / close overlay"),
+        ("Esc", "Cancel task / close overlay"),
         ("Alt+1-6", "Quick layout presets"),
     ];
 
@@ -1025,7 +1031,8 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 50,
         });
-        assert_eq!(state.tokens_used, 50);
+        // Total billed usage: prompt + completion.
+        assert_eq!(state.tokens_used, 150);
         assert_eq!(state.logs.len(), 1);
     }
 

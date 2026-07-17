@@ -1012,10 +1012,18 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     let (user_input_tx, user_input_rx) = mpsc::channel();
     let (permission_tx, permission_rx) = mpsc::channel();
 
+    // Keep a sender copy so the bridge can surface honest "unsupported
+    // command" messages to the TUI log panel instead of dropping them.
+    let bridge_event_tx = event_tx.clone();
+
     let mut agent = Agent::new(config.clone())
         .await?
         .with_event_sender(event_tx)
         .with_permission_channel(permission_rx);
+
+    // Shared cancellation token: the TUI latches it on Esc to abort the
+    // running task; the bridge resets it before each new task below.
+    let cancel_token = agent.cancel_token();
 
     let shared_state = crate::ui::tui::SharedDashboardState::default();
     let model = config.model.clone();
@@ -1032,6 +1040,7 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
             event_rx,
             user_input_tx,
             permission_tx,
+            cancel_token,
         )
     });
 
@@ -1050,17 +1059,42 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     agent.clear_conversation();
                     continue;
                 }
-                // Other slash commands must NOT be sent to the LLM as prompts.
-                // In TUI dashboard mode the full interactive command
-                // dispatcher is not available, so we skip LLM routing
-                // for any input starting with '/'.
-                if input.starts_with('/') {
-                    warn!(
-                        "Slash command '{}' ignored in TUI mode — use interactive mode for command dispatch",
-                        input
-                    );
+                // Plan-mode commands drive the real agent state via the same
+                // public setters the interactive dispatcher uses; the
+                // execution gate keys off the `plan_mode` bool.
+                if input == "/plan" {
+                    agent.set_plan_mode(true);
+                    agent.enter_plan_mode();
                     continue;
                 }
+                if input == "/execute" {
+                    agent.approve_plan();
+                    agent.set_plan_mode(false);
+                    continue;
+                }
+                if input == "/modify" {
+                    agent.clear_plan();
+                    agent.set_plan_mode(false);
+                    continue;
+                }
+                // Other slash commands must NOT be sent to the LLM as prompts.
+                // In TUI dashboard mode the full interactive command
+                // dispatcher is not available, so skip LLM routing and say so
+                // honestly in the TUI log panel instead of dropping silently.
+                if input.starts_with('/') {
+                    warn!("Slash command '{}' not supported in TUI mode", input);
+                    let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::Log {
+                        level: crate::ui::tui::LogLevel::Warning,
+                        message: format!(
+                            "'{}' is not supported in TUI mode — use interactive CLI mode",
+                            input
+                        ),
+                    });
+                    continue;
+                }
+                // A stale latched cancel token (e.g. Esc pressed just as the
+                // previous run finished) must not abort the new task.
+                agent.reset_cancellation();
                 // Run the task — this will emit events to the TUI through event_tx
                 if let Err(e) = agent.run_task(&input).await {
                     warn!("Agent failed to run task: {}", e);

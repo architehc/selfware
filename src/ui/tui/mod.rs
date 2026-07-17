@@ -53,7 +53,6 @@ use ratatui::{
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tracing::warn;
 
 /// Global flag indicating a termination signal has been received.
 /// Shared between the signal handler and the TUI event loops.
@@ -415,551 +414,88 @@ fn truncate_for_display(input: &str, max_chars: usize) -> String {
     input.chars().take(max_chars).collect()
 }
 
-/// Run the TUI application
+/// Apply one agent event to the chat/progress view (`app`).
 ///
-/// This creates a full terminal UI with chat, command palette, and status bar.
-/// Returns when the user quits (q or Ctrl+C).
-pub fn run_tui(model: &str) -> Result<Vec<String>> {
-    let mut terminal = TuiTerminal::new()?;
-    let mut app = App::new(model);
-    let mut user_inputs = Vec::new();
-    let mut quit_armed_at: Option<Instant> = None;
-
-    // Create layout engine for advanced pane management
-    let mut layout_engine = LayoutEngine::new();
-    layout_engine.apply_preset(LayoutPreset::Focus);
-
-    // Create widgets for status display
-    let mut spinner = GardenSpinner::new("Processing...");
-
-    // Create markdown renderer for rich message display
-    let md_renderer = MarkdownRenderer::new();
-
-    // Throttle redraws to ~30fps to avoid wasting CPU
-    let min_draw_interval = Duration::from_millis(33);
-    let mut last_draw = Instant::now() - min_draw_interval;
-    let mut needs_redraw = true;
-
-    loop {
-        // Update spinner animation
-        spinner.tick();
-
-        // Only redraw if enough time has passed and something changed
-        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-            // Render the app
-            terminal.terminal().draw(|frame| {
-                app.render(frame);
-
-                // Render additional widgets based on state
-                if app.state == AppState::RunningTask {
-                    if let Some(ref progress) = app.task_progress {
-                        let gauge = GrowthGauge::new(
-                            progress.current_step as f64
-                                / progress.total_steps.unwrap_or(10) as f64,
-                            "Task",
-                        );
-                        // Gauge would be rendered in the progress area
-                        let _ = gauge; // Use the gauge
-                    }
-                }
-
-                // Layout engine manages pane positions
-                let _panes = layout_engine.calculate_layout(frame.area());
-
-                // Markdown renderer would format assistant messages
-                let _ = &md_renderer;
-            })?;
-            last_draw = Instant::now();
-            needs_redraw = false;
-        } // end redraw throttle
-
-        // Handle events
-        if let Some(Event::Key(key)) = read_event(100)? {
-            needs_redraw = true; // Any event triggers a redraw
-
-            // Check if we're in input mode (chatting with non-empty input)
-            let in_input_mode = app.state == AppState::Chatting;
-            let allow_q_quit = !in_input_mode || app.input.is_empty();
-
-            // Use evaluate_quit_key for consistent quit handling:
-            // - Ctrl+C: immediate quit
-            // - 'q': armed quit (press twice within 2 seconds)
-            match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
-                QuitDecision::Quit => {
-                    break;
-                }
-                QuitDecision::Armed => {
-                    app.status =
-                        "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
-                    continue;
-                }
-                QuitDecision::None => {}
+/// Extracted from the event loop so events HELD while the display is paused
+/// replay through exactly the same path as live events.
+fn apply_agent_event(
+    app: &mut App,
+    pending_permission: &mut Option<(String, String)>,
+    event: &TuiEvent,
+) {
+    // Connect agent responses to the chat pane
+    match event {
+        TuiEvent::AgentCompleted { message } => {
+            // Finalize the final turn's live stream (what the user
+            // watched) into a committed message. Only fall back to
+            // the terminal event's `message` when nothing streamed
+            // this turn (e.g. a synthesized/replayed answer) — this
+            // avoids showing the answer twice or a placeholder line.
+            let had_live = app
+                .streaming_assistant
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty());
+            app.commit_streaming();
+            if !had_live && !message.trim().is_empty() {
+                app.add_assistant_message(message);
             }
-
-            // Handle garden view mode separately
-            if app.state == AppState::GardenView {
-                match key.code {
-                    KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
-                        // Let quit handler deal with it
-                    }
-                    KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
-                        app.toggle_garden_view();
-                    }
-                    KeyCode::Esc => {
-                        app.toggle_garden_view();
-                    }
-                    KeyCode::Up => {
-                        app.garden_view.select_prev();
-                    }
-                    KeyCode::Down => {
-                        app.garden_view.select_next();
-                    }
-                    KeyCode::Enter | KeyCode::Right => {
-                        app.garden_view.toggle_expand();
-                    }
-                    KeyCode::Left => {
-                        // Collapse if expanded
-                        if let Some(GardenItem::Bed { expanded: true, .. }) =
-                            app.garden_view.selected_item()
+            app.clear_progress();
+        }
+        TuiEvent::AgentError { message } => {
+            app.clear_streaming();
+            app.add_system_message(&format!("Error: {}", message));
+            app.clear_progress();
+        }
+        TuiEvent::AgentStarted => {
+            app.set_progress(TaskProgress {
+                description: "Processing...".into(),
+                current_step: 0,
+                total_steps: None,
+                current_action: "Thinking".into(),
+                elapsed_secs: 0,
+            });
+        }
+        TuiEvent::ToolStarted { name } => {
+            // The prose that led to this tool call is a complete
+            // turn — commit it as its own message before the tool.
+            app.commit_streaming();
+            app.add_tool_message(name, "started");
+        }
+        TuiEvent::StatusUpdate { message } if message.starts_with("Step ") => {
+            // A new step began — finalize the previous turn's
+            // streamed prose so turns render as separate messages
+            // instead of one ever-growing block.
+            app.commit_streaming();
+            // Drive the progress gauge from "Step {cur}/{max}" so
+            // it advances during a run instead of sitting at 0.
+            if let Some(rest) = message.strip_prefix("Step ") {
+                if let Some(tok) = rest.split_whitespace().next() {
+                    if let Some((c, m)) = tok.split_once('/') {
+                        if let (Ok(cur), Ok(max)) =
+                            (c.trim().parse::<usize>(), m.trim().parse::<usize>())
                         {
-                            app.garden_view.toggle_expand();
-                        }
-                    }
-                    KeyCode::Char('r') => {
-                        // Refresh garden
-                        if let Ok(garden) = crate::ui::garden::build_garden_from_path(".") {
-                            app.garden_view.set_garden(garden);
-                            app.status = "Garden refreshed".to_string();
-                        }
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            match key.code {
-                KeyCode::Enter => {
-                    if let Some(input) = app.on_enter() {
-                        if input.starts_with('/') {
-                            // Command
-                            app.add_user_message(&input);
-                            app.status = format!("Executed: {}", input);
-                        } else {
-                            // Regular message
-                            app.add_user_message(&input);
-                            user_inputs.push(input);
+                            app.update_step_progress(cur, max);
                         }
                     }
                 }
-                KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                    app.toggle_palette();
-                }
-                KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
-                    app.toggle_garden_view();
-                    if app.state == AppState::GardenView {
-                        app.status =
-                            "Garden view: ↑↓ navigate, Enter expand, r refresh, Esc/Ctrl+G exit"
-                                .to_string();
-                    }
-                }
-                KeyCode::Char(c) => app.on_char(c),
-                KeyCode::Backspace => app.on_backspace(),
-                KeyCode::Left => app.on_left(),
-                KeyCode::Right => app.on_right(),
-                KeyCode::Up => app.on_up(),
-                KeyCode::Down => app.on_down(),
-                KeyCode::Esc => app.on_escape(),
-                KeyCode::Tab => {
-                    // Cycle through panes
-                    layout_engine.focus_next();
-                }
-                _ => {}
             }
         }
+        TuiEvent::ToolCompleted {
+            name,
+            success,
+            duration_ms,
+        } => {
+            let status = if *success { "completed" } else { "failed" };
+            app.add_tool_message(name, &format!("{} ({}ms)", status, duration_ms));
+        }
+        TuiEvent::PermissionRequested { tool_name, reason } => {
+            *pending_permission = Some((tool_name.clone(), reason.clone()));
+        }
+        TuiEvent::AssistantDelta { text } => {
+            app.append_streaming(text);
+        }
+        _ => {}
     }
-
-    terminal.restore()?;
-    Ok(user_inputs)
-}
-
-/// Run TUI with a message handler callback
-pub fn run_tui_with_handler<F>(model: &str, mut handler: F) -> Result<()>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    let mut terminal = TuiTerminal::new()?;
-    let mut app = App::new(model);
-    let mut quit_armed_at: Option<Instant> = None;
-
-    // Throttle redraws to ~30fps to avoid wasting CPU
-    let min_draw_interval = Duration::from_millis(33);
-    let mut last_draw = Instant::now() - min_draw_interval;
-    let mut needs_redraw = true;
-
-    loop {
-        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-            terminal.terminal().draw(|frame| {
-                app.render(frame);
-            })?;
-            last_draw = Instant::now();
-            needs_redraw = false;
-        }
-
-        if let Some(Event::Key(key)) = read_event(100)? {
-            needs_redraw = true;
-
-            // Check if we're in input mode (chatting with non-empty input)
-            let in_input_mode = app.state == AppState::Chatting;
-            let allow_q_quit = !in_input_mode || app.input.is_empty();
-
-            // Use evaluate_quit_key for consistent quit handling:
-            // - Ctrl+C: immediate quit
-            // - 'q': armed quit (press twice within 2 seconds)
-            match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
-                QuitDecision::Quit => {
-                    break;
-                }
-                QuitDecision::Armed => {
-                    app.status =
-                        "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
-                    continue;
-                }
-                QuitDecision::None => {}
-            }
-
-            match key.code {
-                KeyCode::Enter => {
-                    if let Some(input) = app.on_enter() {
-                        app.add_user_message(&input);
-
-                        // Call handler and get response
-                        if let Some(response) = handler(&input) {
-                            app.add_assistant_message(&response);
-                        }
-                    }
-                }
-                KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                    app.toggle_palette();
-                }
-                KeyCode::Char(c) => app.on_char(c),
-                KeyCode::Backspace => app.on_backspace(),
-                KeyCode::Left => app.on_left(),
-                KeyCode::Right => app.on_right(),
-                KeyCode::Up => app.on_up(),
-                KeyCode::Down => app.on_down(),
-                KeyCode::Esc => app.on_escape(),
-                _ => {}
-            }
-        }
-    }
-
-    terminal.restore()?;
-    Ok(())
-}
-
-/// Run the TUI dashboard mode
-///
-/// This creates a full terminal dashboard UI with:
-/// - Status bar showing model, tokens, elapsed time
-/// - Main chat pane (60% width)
-/// - Garden health widget
-/// - Active tools widget
-/// - Logs panel at bottom
-///
-/// Keyboard shortcuts:
-/// - q (press twice) / Ctrl+C: Quit
-/// - ?: Toggle help overlay
-/// - Ctrl+D: Toggle dashboard/focus mode
-/// - Ctrl+G: Toggle garden view zoom
-/// - Ctrl+L: Toggle logs view zoom
-/// - Tab: Cycle focus between panes
-/// - z: Toggle zoom on focused pane
-/// - Alt+1-6: Quick layout presets
-pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
-    let mut terminal = TuiTerminal::new()?;
-    let mut app = App::new(model);
-    let mut layout_engine = LayoutEngine::new();
-    let mut dashboard_state = DashboardState::new(model);
-    let mut garden_view = garden_view::GardenView::new();
-    let mut user_inputs = Vec::new();
-    let mut show_help = false;
-    let mut paused = false;
-    let mut quit_armed_at: Option<Instant> = None;
-
-    // Scan current directory for garden view
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let garden = crate::ui::garden::scan_directory(&cwd);
-    dashboard_state.log(
-        LogLevel::Info,
-        &format!("Scanned garden: {} plants", garden.total_plants),
-    );
-    garden_view.set_garden(garden);
-
-    // Apply dashboard layout preset
-    layout_engine.apply_preset(LayoutPreset::Dashboard);
-    dashboard_state.log(LogLevel::Info, "Dashboard initialized");
-    // Honest status: state the configured model rather than asserting a live
-    // connection — no request has been sent yet, so "Connected" would be a lie.
-    dashboard_state.log(LogLevel::Info, &format!("Model: {model}"));
-
-    // Throttle redraws to ~30fps to avoid wasting CPU
-    let min_draw_interval = Duration::from_millis(33);
-    let mut last_draw = Instant::now() - min_draw_interval;
-    let mut needs_redraw = true;
-
-    loop {
-        // Only redraw if enough time has passed and something changed
-        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-            // Render the dashboard with watchdog timing
-            let draw_start = Instant::now();
-            terminal.terminal().draw(|frame| {
-                let area = frame.area();
-
-                // Calculate pane layouts
-                let pane_layouts = layout_engine.calculate_layout(area);
-
-                // Render each pane based on its type
-                for (pane_id, pane_area) in &pane_layouts {
-                    if let Some(pane) = layout_engine.get_pane(*pane_id) {
-                        match pane.pane_type {
-                            PaneType::StatusBar => {
-                                render_status_bar(frame, *pane_area, &dashboard_state);
-                            }
-                            PaneType::Chat => {
-                                // Render chat in this pane
-                                render_chat_pane(frame, *pane_area, &app, pane.focused);
-                            }
-                            PaneType::GardenHealth => {
-                                render_garden_health(frame, *pane_area, &dashboard_state);
-                            }
-                            PaneType::ActiveTools => {
-                                render_active_tools(frame, *pane_area, &dashboard_state);
-                            }
-                            PaneType::Logs => {
-                                render_logs(frame, *pane_area, &dashboard_state);
-                            }
-                            PaneType::GardenView => {
-                                render_garden_view(
-                                    frame,
-                                    *pane_area,
-                                    &mut garden_view,
-                                    pane.focused,
-                                );
-                            }
-                            PaneType::Editor => {
-                                render_editor_pane(frame, *pane_area, pane);
-                            }
-                            PaneType::Terminal => {
-                                render_terminal_pane(frame, *pane_area, pane, &dashboard_state);
-                            }
-                            PaneType::Explorer => {
-                                render_explorer_pane(frame, *pane_area, pane);
-                            }
-                            PaneType::Diff => {
-                                render_diff_pane(frame, *pane_area, pane, &dashboard_state);
-                            }
-                            PaneType::Debug => {
-                                render_debug_pane(frame, *pane_area, pane, &dashboard_state);
-                            }
-                            PaneType::Help => {
-                                render_help_pane(frame, *pane_area, pane);
-                            }
-                        }
-                    }
-                }
-
-                // Render help overlay if active
-                if show_help {
-                    render_help_overlay(frame, area);
-                }
-
-                // Render pause indicator if paused
-                if paused {
-                    render_pause_indicator(frame, area);
-                }
-            })?;
-            let draw_elapsed = draw_start.elapsed();
-            if draw_elapsed > Duration::from_millis(500) {
-                warn!(
-                    elapsed_ms = draw_elapsed.as_millis() as u64,
-                    "TUI draw frame exceeded 500ms watchdog threshold"
-                );
-            }
-            last_draw = Instant::now();
-            needs_redraw = false;
-        } // end redraw throttle
-
-        // Handle events
-        if let Some(Event::Key(key)) = read_event(100)? {
-            needs_redraw = true;
-            // Check if we're in input mode (chat focused with non-empty input or chatting state)
-            let in_input_mode = app.state == AppState::Chatting && !show_help;
-            let allow_q_quit = !in_input_mode || app.input.is_empty();
-
-            match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
-                QuitDecision::Quit => {
-                    dashboard_state.log(LogLevel::Info, "Shutting down...");
-                    break;
-                }
-                QuitDecision::Armed => {
-                    dashboard_state.log(
-                        LogLevel::Warning,
-                        "Press q again within 2s to quit (or Ctrl+C to force quit).",
-                    );
-                    continue;
-                }
-                QuitDecision::None => {}
-            }
-
-            match key.code {
-                // Toggle help overlay (works anywhere)
-                KeyCode::Char('?') if !in_input_mode || app.input.is_empty() => {
-                    show_help = !show_help;
-                }
-
-                // Toggle dashboard/focus mode (Ctrl+D or 'd' when input is empty)
-                KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
-                    if layout_engine.current_preset() == LayoutPreset::Dashboard {
-                        layout_engine.apply_preset(LayoutPreset::Focus);
-                        dashboard_state.log(LogLevel::Info, "Switched to focus mode");
-                    } else {
-                        layout_engine.apply_preset(LayoutPreset::Dashboard);
-                        dashboard_state.log(LogLevel::Info, "Switched to dashboard mode");
-                    }
-                }
-
-                // Toggle garden view (Ctrl+G)
-                KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
-                    // Find garden pane and focus/zoom it
-                    for pane_id in layout_engine.pane_ids() {
-                        if let Some(pane) = layout_engine.get_pane(pane_id) {
-                            if pane.pane_type == PaneType::GardenView {
-                                layout_engine.set_focus(pane_id);
-                                layout_engine.toggle_zoom();
-                                dashboard_state.log(LogLevel::Info, "Toggled garden view");
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Toggle logs view (Ctrl+L)
-                KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
-                    for pane_id in layout_engine.pane_ids() {
-                        if let Some(pane) = layout_engine.get_pane(pane_id) {
-                            if pane.pane_type == PaneType::Logs {
-                                layout_engine.set_focus(pane_id);
-                                layout_engine.toggle_zoom();
-                                dashboard_state.log(LogLevel::Info, "Toggled logs view");
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                // Pause/resume (works when input is empty)
-                KeyCode::Char(' ') if app.input.is_empty() => {
-                    paused = !paused;
-                    if paused {
-                        dashboard_state.log(LogLevel::Warning, "Streaming paused");
-                    } else {
-                        dashboard_state.log(LogLevel::Info, "Streaming resumed");
-                    }
-                }
-
-                // Zoom toggle
-                KeyCode::Char('z') => {
-                    layout_engine.toggle_zoom();
-                }
-
-                // Animation speed controls
-                KeyCode::Char('+') | KeyCode::Char('=') => {
-                    app.on_plus();
-                    dashboard_state.log(LogLevel::Info, &app.status);
-                }
-                KeyCode::Char('-') | KeyCode::Char('_') => {
-                    app.on_minus();
-                    dashboard_state.log(LogLevel::Info, &app.status);
-                }
-
-                // Cycle focus
-                KeyCode::Tab => {
-                    layout_engine.focus_next();
-                }
-                KeyCode::BackTab => {
-                    layout_engine.focus_prev();
-                }
-
-                // Quick layout presets
-                KeyCode::Char('1') if key.modifiers == KeyModifiers::ALT => {
-                    layout_engine.apply_preset(LayoutPreset::Focus);
-                    dashboard_state.log(LogLevel::Info, "Layout: Focus");
-                }
-                KeyCode::Char('2') if key.modifiers == KeyModifiers::ALT => {
-                    layout_engine.apply_preset(LayoutPreset::Coding);
-                    dashboard_state.log(LogLevel::Info, "Layout: Coding");
-                }
-                KeyCode::Char('3') if key.modifiers == KeyModifiers::ALT => {
-                    layout_engine.apply_preset(LayoutPreset::Debugging);
-                    dashboard_state.log(LogLevel::Info, "Layout: Debugging");
-                }
-                KeyCode::Char('4') if key.modifiers == KeyModifiers::ALT => {
-                    layout_engine.apply_preset(LayoutPreset::Review);
-                    dashboard_state.log(LogLevel::Info, "Layout: Review");
-                }
-                KeyCode::Char('5') if key.modifiers == KeyModifiers::ALT => {
-                    layout_engine.apply_preset(LayoutPreset::Explore);
-                    dashboard_state.log(LogLevel::Info, "Layout: Explore");
-                }
-                KeyCode::Char('6') if key.modifiers == KeyModifiers::ALT => {
-                    layout_engine.apply_preset(LayoutPreset::FullWorkspace);
-                    dashboard_state.log(LogLevel::Info, "Layout: Full Workspace");
-                }
-
-                // Chat input handling
-                KeyCode::Enter if !show_help => {
-                    if let Some(input) = app.on_enter() {
-                        if input.starts_with('/') {
-                            app.add_user_message(&input);
-                            app.status = format!("Executed: {}", input);
-                            dashboard_state.log(LogLevel::Info, &format!("Command: {}", input));
-                        } else {
-                            app.add_user_message(&input);
-                            user_inputs.push(input.clone());
-                            dashboard_state.log(
-                                LogLevel::Info,
-                                &format!("User: {}", truncate_for_display(&input, 50)),
-                            );
-                        }
-                    }
-                }
-
-                KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                    app.toggle_palette();
-                }
-
-                KeyCode::Char(c) if !show_help => app.on_char(c),
-                KeyCode::Backspace if !show_help => app.on_backspace(),
-                KeyCode::Left if !show_help => app.on_left(),
-                KeyCode::Right if !show_help => app.on_right(),
-                KeyCode::Up if !show_help => app.on_up(),
-                KeyCode::Down if !show_help => app.on_down(),
-                KeyCode::Esc => {
-                    if show_help {
-                        show_help = false;
-                    } else if layout_engine.is_zoomed() {
-                        layout_engine.toggle_zoom();
-                    } else {
-                        app.on_escape();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    terminal.restore()?;
-    Ok(user_inputs)
 }
 
 /// Run the TUI dashboard with shared state and event receiver
@@ -967,12 +503,17 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
 /// This version allows external code (like the Agent) to send events that
 /// update the dashboard in real-time. The event_rx is polled non-blocking
 /// on each frame.
+///
+/// `cancel_token` is shared with the agent run (see `run_live_agent_tui`):
+/// Esc latches it to request cancellation of the in-flight task; the bridge
+/// resets it before each new task.
 pub fn run_tui_dashboard_with_events(
     model: &str,
     shared_state: SharedDashboardState,
     event_rx: std::sync::mpsc::Receiver<TuiEvent>,
     user_input_tx: std::sync::mpsc::Sender<String>,
     permission_response_tx: std::sync::mpsc::Sender<bool>,
+    cancel_token: std::sync::Arc<AtomicBool>,
 ) -> Result<()> {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
@@ -984,6 +525,9 @@ pub fn run_tui_dashboard_with_events(
     let mut pending_permission: Option<(String, String)> = None;
     let mut show_help = false;
     let mut paused = false;
+    // Display events received while `paused` are held here and replayed on
+    // resume (permission prompts are never held — see the drain loop).
+    let mut held_events: Vec<TuiEvent> = Vec::new();
     let mut quit_armed_at: Option<Instant> = None;
 
     // Discover user skills
@@ -1037,79 +581,15 @@ pub fn run_tui_dashboard_with_events(
         loop {
             match event_rx.try_recv() {
                 Ok(event) => {
-                    // Connect agent responses to the chat pane
-                    match &event {
-                        TuiEvent::AgentCompleted { message } => {
-                            // Finalize the final turn's live stream (what the user
-                            // watched) into a committed message. Only fall back to
-                            // the terminal event's `message` when nothing streamed
-                            // this turn (e.g. a synthesized/replayed answer) — this
-                            // avoids showing the answer twice or a placeholder line.
-                            let had_live = app
-                                .streaming_assistant
-                                .as_ref()
-                                .is_some_and(|s| !s.trim().is_empty());
-                            app.commit_streaming();
-                            if !had_live && !message.trim().is_empty() {
-                                app.add_assistant_message(message);
-                            }
-                            app.clear_progress();
-                        }
-                        TuiEvent::AgentError { message } => {
-                            app.clear_streaming();
-                            app.add_system_message(&format!("Error: {}", message));
-                            app.clear_progress();
-                        }
-                        TuiEvent::AgentStarted => {
-                            app.set_progress(TaskProgress {
-                                description: "Processing...".into(),
-                                current_step: 0,
-                                total_steps: None,
-                                current_action: "Thinking".into(),
-                                elapsed_secs: 0,
-                            });
-                        }
-                        TuiEvent::ToolStarted { name } => {
-                            // The prose that led to this tool call is a complete
-                            // turn — commit it as its own message before the tool.
-                            app.commit_streaming();
-                            app.add_tool_message(name, "started");
-                        }
-                        TuiEvent::StatusUpdate { message } if message.starts_with("Step ") => {
-                            // A new step began — finalize the previous turn's
-                            // streamed prose so turns render as separate messages
-                            // instead of one ever-growing block.
-                            app.commit_streaming();
-                            // Drive the progress gauge from "Step {cur}/{max}" so
-                            // it advances during a run instead of sitting at 0.
-                            if let Some(rest) = message.strip_prefix("Step ") {
-                                if let Some(tok) = rest.split_whitespace().next() {
-                                    if let Some((c, m)) = tok.split_once('/') {
-                                        if let (Ok(cur), Ok(max)) =
-                                            (c.trim().parse::<usize>(), m.trim().parse::<usize>())
-                                        {
-                                            app.update_step_progress(cur, max);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        TuiEvent::ToolCompleted {
-                            name,
-                            success,
-                            duration_ms,
-                        } => {
-                            let status = if *success { "completed" } else { "failed" };
-                            app.add_tool_message(name, &format!("{} ({}ms)", status, duration_ms));
-                        }
-                        TuiEvent::PermissionRequested { tool_name, reason } => {
-                            pending_permission = Some((tool_name.clone(), reason.clone()));
-                        }
-                        TuiEvent::AssistantDelta { text } => {
-                            app.append_streaming(text);
-                        }
-                        _ => {}
+                    // While the display is paused, hold pure display events
+                    // and replay them on resume. Permission prompts are NEVER
+                    // held: the agent blocks until it gets an answer, so
+                    // holding one would deadlock the run.
+                    if paused && !matches!(event, TuiEvent::PermissionRequested { .. }) {
+                        held_events.push(event);
+                        continue;
                     }
+                    apply_agent_event(&mut app, &mut pending_permission, &event);
                     with_dashboard_state(&shared_state, |state| state.process_event(event));
                     needs_redraw = true;
                 }
@@ -1295,15 +775,29 @@ pub fn run_tui_dashboard_with_events(
                         }
                     }
                 }
+                // Display pause: incoming display events are held (see the
+                // drain loop) and replayed here on resume. The agent itself
+                // keeps running — the log line says exactly that.
                 KeyCode::Char(' ') if app.input.is_empty() => {
                     paused = !paused;
-                    with_dashboard_state(&shared_state, |state| {
-                        if paused {
-                            state.log(LogLevel::Warning, "Streaming paused");
-                        } else {
-                            state.log(LogLevel::Info, "Streaming resumed");
+                    if paused {
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(
+                                LogLevel::Warning,
+                                "Display paused — agent keeps running; updates held",
+                            );
+                        });
+                    } else {
+                        // Replay held events through the normal path.
+                        for event in held_events.drain(..) {
+                            apply_agent_event(&mut app, &mut pending_permission, &event);
+                            with_dashboard_state(&shared_state, |state| state.process_event(event));
                         }
-                    });
+                        needs_redraw = true;
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Info, "Display resumed");
+                        });
+                    }
                 }
                 KeyCode::Char('z') if !in_input_mode => {
                     layout_engine.toggle_zoom();
@@ -1422,7 +916,7 @@ pub fn run_tui_dashboard_with_events(
                                                /skills         -- List available skills\n  \
                                                /<skill>        -- Activate a skill\n\
                                              \n\
-                                             Keyboard: q (quit), ? (help), Ctrl+D (dashboard), Ctrl+G (garden), Tab (cycle panes)"
+                                             Keyboard: q (quit), ? (help), Esc (cancel task), Space (hold display), Ctrl+D (dashboard), Tab (cycle panes)"
                                         );
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Displayed help text");
@@ -1811,6 +1305,17 @@ pub fn run_tui_dashboard_with_events(
                         show_help = false;
                     } else if layout_engine.is_zoomed() {
                         layout_engine.toggle_zoom();
+                    } else if app.state == AppState::RunningTask {
+                        // Cancel the in-flight agent task for real: the token
+                        // is shared with the Agent (wired in
+                        // `run_live_agent_tui`) and every cancellation check
+                        // in the agent/tool/streaming paths observes it. The
+                        // bridge resets it before the next task.
+                        cancel_token.store(true, Ordering::Relaxed);
+                        app.add_system_message("⏹ Cancelling current task…");
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Warning, "Task cancellation requested (Esc)");
+                        });
                     } else {
                         app.on_escape();
                     }
@@ -1941,6 +1446,33 @@ pub(crate) fn wrap_chat_message<'a>(
     ListItem::new(Text::from(lines))
 }
 
+/// Push the wrapped rows of one chat message onto `items`, one `ListItem`
+/// per row.
+///
+/// ratatui's `List` stops rendering at the first item that does not fit the
+/// remaining area, so a single multi-row item taller than the pane renders
+/// NOTHING at all — `/help` output or any long answer used to blank the
+/// chat pane. Per-row items always fill the pane; a message whose wrapped
+/// height exceeds the pane contributes its TAIL (the newest rows) instead
+/// of vanishing.
+fn push_wrapped_rows<'a>(
+    items: &mut Vec<ratatui::widgets::ListItem<'a>>,
+    prefix_str: &str,
+    content: &str,
+    style: Style,
+    width: usize,
+    height: usize,
+) {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::ListItem;
+
+    let rows = wrap_chat_message_lines(prefix_str, content, width);
+    let start = rows.len().saturating_sub(height);
+    for row in rows.into_iter().skip(start) {
+        items.push(ListItem::new(Line::from(Span::styled(row, style))));
+    }
+}
+
 /// Render a chat pane
 fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     use ratatui::text::Span;
@@ -1974,16 +1506,20 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         ])
         .split(inner);
 
-    // Render messages with line wrapping
+    // Render messages with line wrapping — one ListItem per wrapped ROW (see
+    // push_wrapped_rows): a single multi-row item taller than the pane is
+    // skipped by ratatui entirely, which used to blank the chat pane for
+    // /help and long answers.
     let msg_width = chunks[0].width as usize;
+    let msg_height = chunks[0].height as usize;
     let mut items: Vec<ListItem> = Vec::new();
     // Live streaming assistant response, shown as the newest line (the list is
     // rendered newest-first) with a cursor marker while generating.
     if let Some(live) = app.streaming_assistant.as_ref().filter(|s| !s.is_empty()) {
         let style = Style::default().fg(TuiPalette::GARDEN_GREEN);
-        items.push(wrap_chat_message("🦊 ▌", live, style, msg_width));
+        push_wrapped_rows(&mut items, "🦊 ▌", live, style, msg_width, msg_height);
     }
-    items.extend(app.messages.iter().rev().skip(app.scroll).map(|msg| {
+    for msg in app.messages.iter().rev().skip(app.scroll) {
         let style = match msg.role {
             MessageRole::User => Style::default().fg(TuiPalette::AMBER),
             MessageRole::Assistant => Style::default().fg(TuiPalette::GARDEN_GREEN),
@@ -1999,8 +1535,15 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         };
 
         let prefix_str = format!("{} {} ", msg.timestamp, prefix);
-        wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
-    }));
+        push_wrapped_rows(
+            &mut items,
+            &prefix_str,
+            &msg.content,
+            style,
+            msg_width,
+            msg_height,
+        );
+    }
 
     let messages = List::new(items);
     frame.render_widget(messages, chunks[0]);
@@ -2279,7 +1822,7 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
     frame.render_widget(block, indicator_area);
 
     let text = Paragraph::new(Span::styled(
-        "  ⏸ PAUSED  ",
+        " ⏸ DISPLAY PAUSED ",
         Style::default()
             .fg(TuiPalette::PARCHMENT)
             .add_modifier(Modifier::BOLD),
@@ -2324,6 +1867,49 @@ mod tests {
         assert!(lines.len() > 1, "long line should wrap: {:?}", lines);
         assert_eq!(lines[0], "> abcd"); // width 6, prefix 2 -> 4 chars
         assert!(lines[1].starts_with("  ")); // continuation indented
+    }
+
+    #[test]
+    fn oversized_message_renders_its_tail_not_a_blank_pane() {
+        use ratatui::backend::TestBackend;
+
+        // 30 logical lines in a ~10-row message area: wrapped height far
+        // exceeds the pane height. ratatui's List stops at the first item
+        // that does not fit, so a single multi-row ListItem rendered NOTHING
+        // — the chat pane went blank (e.g. for /help output).
+        let backend = TestBackend::new(40, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new("test-model");
+        let content = (1..=30)
+            .map(|i| format!("line{:02}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.add_system_message(&content);
+
+        terminal
+            .draw(|frame| render_chat_pane(frame, Rect::new(0, 0, 40, 15), &app, true))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+
+        // The pane must not be blank, and the TAIL of the oversized message
+        // must be visible.
+        assert!(
+            text.contains("line30"),
+            "tail row of oversized message missing:\n{}",
+            text
+        );
+        assert!(
+            text.contains("line21"),
+            "late rows of oversized message missing:\n{}",
+            text
+        );
     }
 
     #[test]
