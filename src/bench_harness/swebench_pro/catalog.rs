@@ -284,13 +284,11 @@ mod tests {
         let base = quant_catalog();
         let first = base.keys().next().expect("catalog non-empty").clone();
         // A brand-new entry is added; an existing label is overridden.
-        let json = format!(
-            r#"{{ "custom-quant": {{ "label":"custom-quant","gguf":"c.gguf","alias":"c","mmproj":"","name":"Custom","ctx":4096,"max_parallel":1,"kv_cache_type":"q8_0","tensor_split":null,"temperature":1.0,"thinking_policy":"Disable","backend":"LlamaCpp" }} }}"#
-        );
+        let json = r#"{ "custom-quant": { "label":"custom-quant","gguf":"c.gguf","alias":"c","mmproj":"","name":"Custom","ctx":4096,"max_parallel":1,"kv_cache_type":"q8_0","tensor_split":null,"temperature":1.0,"thinking_policy":"Disable","backend":"LlamaCpp" } }"#.to_string();
         let merged = apply_external_catalog(base.clone(), &json);
         assert!(merged.contains_key("custom-quant"));
         assert!(merged.contains_key(&first)); // originals preserved
-        // Malformed JSON returns the base unchanged.
+                                              // Malformed JSON returns the base unchanged.
         let unchanged = apply_external_catalog(base.clone(), "not json");
         assert_eq!(unchanged.len(), base.len());
     }

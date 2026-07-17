@@ -1383,6 +1383,7 @@ To call a tool, use this EXACT XML structure:
     /// - `ReloadCredentials`: obtains a key from `SELFWARE_API_KEY` or the
     ///   OS keyring, sets `self.config.model_api_key`, rebuilds the client,
     ///   and returns `Ok(true)`.  If no key is found, returns `Ok(false)`.
+    #[cfg(feature = "resilience")]
     pub(crate) async fn apply_recovery_action(
         &mut self,
         directive: &crate::self_healing::RecoveryDirective,
@@ -2384,6 +2385,7 @@ To call a tool, use this EXACT XML structure:
     /// `ResolutionOutcome`? Returns `true` for `Escalate` and
     /// `Unresolvable` (auto-recovery could NOT fix the failure), `false`
     /// for `Resolved` (auto-recovery succeeded).
+    #[cfg(feature = "resilience")]
     pub fn should_enter_rigor(outcome: &crate::self_healing::ResolutionOutcome) -> bool {
         matches!(
             outcome,

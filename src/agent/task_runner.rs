@@ -1255,6 +1255,7 @@ impl Agent {
                     // This sits BETWEEN the consecutive_error_recoveries
                     // terminal and the existing nudge/advice logic so the
                     // terminal guard still fires at MAX.
+                    #[cfg(feature = "resilience")]
                     if self.config.continuous_work.auto_recovery {
                         let kind = crate::self_healing::recovery_tree::classify(&error);
                         let signal = crate::self_healing::FailureSignal {
@@ -3223,18 +3224,21 @@ mod tests {
     // =========================================================================
 
     #[test]
+    #[cfg(feature = "resilience")]
     fn test_should_enter_rigor_escalate() {
         let outcome = crate::self_healing::ResolutionOutcome::Escalate;
         assert!(Agent::should_enter_rigor(&outcome));
     }
 
     #[test]
+    #[cfg(feature = "resilience")]
     fn test_should_enter_rigor_unresolvable() {
         let outcome = crate::self_healing::ResolutionOutcome::Unresolvable;
         assert!(Agent::should_enter_rigor(&outcome));
     }
 
     #[test]
+    #[cfg(feature = "resilience")]
     fn test_should_enter_rigor_resolved_is_false() {
         let action = crate::self_healing::RecoveryAction::Fallback {
             target: "http://localhost:11434/v1".to_string(),

@@ -213,6 +213,38 @@ jobs:
             artifacts/selfware-windows-x86_64/selfware-windows-x86_64.zip
             artifacts/sbom/selfware-sbom.json
 
+  verify-release:
+    name: Verify release assets are downloadable
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      # Regression guard: v0.3.0 shipped with zero assets and the README's
+      # prebuilt-binary URLs 404'd. Fail the workflow if any expected asset
+      # is missing from the release we just created.
+      - name: Download every expected asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for asset in selfware-linux-x86_64.tar.gz selfware-linux-aarch64.tar.gz selfware-macos-aarch64.zip selfware-macos-x86_64.zip selfware-windows-x86_64.zip selfware-sbom.json; do
+            echo "checking $asset"
+            gh release download "${{ steps.version.outputs.version }}" \
+              --repo "${{ github.repository }}" \
+              -p "$asset" --dir /tmp/verify-assets --clobber
+          done
+          ls -la /tmp/verify-assets
+
   sign-release:
     name: Sign Release Artifacts
     needs: release

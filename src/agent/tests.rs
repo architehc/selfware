@@ -1004,6 +1004,7 @@ async fn test_agent_new_rejects_tiny_context_budget() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+#[cfg(feature = "resilience")]
 async fn test_apply_recovery_action_fallback_switches_endpoint() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let remote_endpoint = format!("{}/v1", server.url());
@@ -1040,6 +1041,7 @@ async fn test_apply_recovery_action_fallback_switches_endpoint() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+#[cfg(feature = "resilience")]
 async fn test_apply_recovery_action_fallback_same_endpoint_returns_false() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let endpoint = format!("{}/v1", server.url());
@@ -1079,6 +1081,7 @@ async fn test_apply_recovery_action_fallback_same_endpoint_returns_false() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+#[cfg(feature = "resilience")]
 async fn test_apply_recovery_action_compress_context() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = Config {
@@ -1134,6 +1137,7 @@ async fn test_apply_recovery_action_compress_context() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+#[cfg(feature = "resilience")]
 async fn test_apply_recovery_action_reload_credentials_with_env() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = Config {
@@ -1178,6 +1182,7 @@ async fn test_apply_recovery_action_reload_credentials_with_env() {
     target_os = "windows",
     ignore = "mock TCP server unreliable on Windows CI"
 )]
+#[cfg(feature = "resilience")]
 async fn test_apply_recovery_action_reload_credentials_no_key_returns_false() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let config = Config {
