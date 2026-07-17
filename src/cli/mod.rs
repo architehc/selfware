@@ -382,7 +382,7 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
                 | Commands::Doctor
                 | Commands::LlmDoctor
                 | Commands::Test { .. }
-                | Commands::Status { .. }
+                | Commands::Status
         )
     );
     if is_diagnostic {
@@ -741,6 +741,18 @@ pub async fn run() -> Result<()> {
 
     // Headless mode: run prompt directly and exit (like qwen -p)
     if let Some(prompt) = cli.prompt {
+        use std::io::IsTerminal;
+
+        // Fail fast BEFORE any LLM call: in Normal mode every mutating tool
+        // needs an interactive confirmation, and with no terminal on stdin
+        // there is nobody to answer — the agent would refuse every write,
+        // burn tokens for the whole turn budget, then die at MAX_ITERATIONS.
+        if let Some(reason) =
+            headless::headless_mode_block_reason(exec_mode, std::io::stdin().is_terminal())
+        {
+            anyhow::bail!("{}", reason);
+        }
+
         // Support reading from stdin with "-p -"
         let actual_prompt = if prompt == "-" {
             use std::io::{self, Read};
@@ -855,7 +867,7 @@ pub async fn run() -> Result<()> {
     }
 
     // Default to Chat if no subcommand specified (non-extras builds)
-    let command = cli.command.unwrap_or(Commands::Chat { yolo: false });
+    let command = cli.command.unwrap_or(Commands::Chat);
     handle_command(
         command,
         cli.quiet,
@@ -1022,7 +1034,7 @@ async fn handle_command(
     command: Commands,
     quiet: bool,
     coordinator: bool,
-    mut config: Config,
+    config: Config,
     ctx: &WorkshopContext,
     exec_mode: ExecutionMode,
     resume_session: Option<String>,
@@ -1030,19 +1042,11 @@ async fn handle_command(
     config_path: Option<String>,
 ) -> Result<()> {
     match command {
-        Commands::Chat { yolo } => {
-            if yolo {
-                config.execution_mode = ExecutionMode::Yolo;
-            }
+        Commands::Chat => {
             if !quiet {
                 println!("{}", ui::components::render_welcome(ctx));
             }
             let mut agent = Agent::new(config).await?;
-            // If the subcommand --yolo flag was set, ensure the YoloManager
-            // is enabled after construction.
-            if yolo {
-                agent.set_execution_mode(ExecutionMode::Yolo);
-            }
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {
                 match agent.resume_named_session(session_name) {
@@ -1062,10 +1066,7 @@ async fn handle_command(
             agent.interactive().await?;
         }
 
-        Commands::MultiChat { concurrency, yolo } => {
-            if yolo {
-                config.execution_mode = ExecutionMode::Yolo;
-            }
+        Commands::MultiChat { concurrency } => {
             // The --coordinator flag selects the swarm coordinator path.
             // When set, the multi-agent chat is orchestrated through the
             // Swarm coordinator (queue/assign/consensus) instead of the
@@ -1101,9 +1102,16 @@ async fn handle_command(
             }
         }
 
-        Commands::Run { task, yolo, skill } => {
-            if yolo {
-                config.execution_mode = ExecutionMode::Yolo;
+        Commands::Run { task, skill } => {
+            // Fail fast BEFORE any LLM call: Normal mode cannot confirm tool
+            // executions without a terminal on stdin (see the -p entry path).
+            {
+                use std::io::IsTerminal;
+                if let Some(reason) =
+                    headless::headless_mode_block_reason(exec_mode, std::io::stdin().is_terminal())
+                {
+                    anyhow::bail!("{}", reason);
+                }
             }
             let is_json = output_format == HeadlessOutputFormat::Json;
             let is_stream_json = output_format == HeadlessOutputFormat::StreamJson;
@@ -1132,12 +1140,6 @@ async fn handle_command(
 
             let start = std::time::Instant::now();
             let mut agent = Agent::new(config).await?;
-            // If the subcommand --yolo flag was set, ensure the YoloManager
-            // is enabled after construction (covers the case where the
-            // top-level --yolo was not passed but the subcommand flag was).
-            if yolo {
-                agent.set_execution_mode(ExecutionMode::Yolo);
-            }
             // Resume named session if --resume-session was provided
             if let Some(ref session_name) = resume_session {
                 match agent.resume_named_session(session_name) {
@@ -1473,7 +1475,7 @@ async fn handle_command(
             }
         }
 
-        Commands::Status { output_format } => {
+        Commands::Status => {
             // Count journal entries
             let tasks = match Agent::list_tasks() {
                 Ok(tasks) => tasks,
@@ -1496,8 +1498,10 @@ async fn handle_command(
                 })
                 .count();
 
+            // The global --output-format flag covers this command: both JSON
+            // variants emit a single machine-readable object here.
             match output_format {
-                OutputFormat::Json => {
+                HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson => {
                     let status = serde_json::json!({
                         "model": ctx.model_name,
                         "endpoint": config.endpoint,
@@ -1512,7 +1516,7 @@ async fn handle_command(
                     });
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
-                OutputFormat::Text => {
+                HeadlessOutputFormat::Text => {
                     if !quiet {
                         println!("{}", render_header(ctx));
                     }
@@ -2532,6 +2536,19 @@ async fn handle_command(
             ConfigCommands::Show { json } => {
                 config_show(&config, json)?;
             }
+            ConfigCommands::SetKey { key } => {
+                let key = match key {
+                    Some(k) => k,
+                    None => {
+                        eprintln!("Enter API key (input echoed; prefer your OS keyring prompt in the future):");
+                        let mut buf = String::new();
+                        std::io::stdin().read_line(&mut buf)?;
+                        buf.trim().to_string()
+                    }
+                };
+                let endpoint = crate::config::set_api_key_for_endpoint(&config, &key)?;
+                println!("API key stored in the OS keyring for {}", endpoint);
+            }
         },
 
         Commands::McpServer => {
@@ -3223,6 +3240,17 @@ max_recovery_attempts = 3
 
             match command {
                 RunsCommand::Start { task } => {
+                    use std::io::IsTerminal;
+
+                    // Same fail-fast as the headless `-p` path: a supervised
+                    // run in Normal mode has nobody to answer confirmations.
+                    if let Some(reason) = headless::headless_mode_block_reason(
+                        config.execution_mode,
+                        std::io::stdin().is_terminal(),
+                    ) {
+                        anyhow::bail!("{}", reason);
+                    }
+
                     let supervisor = RunSupervisor::new();
                     if !quiet {
                         println!("{} Starting supervised run…", Glyphs::gear());

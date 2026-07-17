@@ -22,8 +22,8 @@ Brief description of the changes in this PR.
 
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] New and existing unit tests pass locally with my changes
-- [ ] I have run `cargo test --all-features`
-- [ ] I have run `cargo clippy --all-features`
+- [ ] I have run `cargo test --features extras`
+- [ ] I have run `cargo clippy --all-targets --features extras -- -D warnings`
 
 ## Checklist
 

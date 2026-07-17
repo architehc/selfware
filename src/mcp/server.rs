@@ -3,9 +3,10 @@
 //! Exposes Selfware's tools and project resources to external AI clients
 //! via the Model Context Protocol (JSON-RPC 2.0 over stdio).
 //!
-//! The server reads Content-Length framed JSON-RPC requests from stdin and
-//! writes Content-Length framed JSON-RPC responses to stdout. This is the
-//! same framing used by LSP (Language Server Protocol).
+//! The wire framing of each incoming message is auto-detected:
+//! newline-delimited JSON-RPC (the MCP stdio spec, protocol 2024-11-05) or
+//! LSP-style `Content-Length` headers (legacy clients). Every response is
+//! written in the same framing as the request that produced it.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -76,8 +77,69 @@ const SERVER_NAME: &str = "selfware";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------
-// Content-Length framed I/O helpers
+// Wire framing (newline-delimited JSON-RPC and LSP-style Content-Length)
 // ---------------------------------------------------------------------------
+
+/// Wire framing detected for an incoming message.
+///
+/// The MCP stdio spec (protocol 2024-11-05) frames messages as
+/// newline-delimited JSON-RPC, but this server historically spoke (and some
+/// LSP-derived clients still speak) `Content-Length` header framing. The
+/// framing is auto-detected per message, and each response is written in the
+/// same framing as the request that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    /// LSP-style `Content-Length: <n>\r\n\r\n<body>`.
+    ContentLength,
+    /// One JSON-RPC message per line (MCP stdio spec, 2024-11-05).
+    NewlineDelimited,
+}
+
+/// Peek at the buffered bytes to detect which framing the peer is using.
+///
+/// A header-framed message always starts with `Content-Length:`, while a
+/// newline-delimited JSON-RPC message is a single JSON object on one line —
+/// and a JSON document can never start with `C`. The first byte therefore
+/// decides unambiguously, even if the peer's write arrived in several chunks.
+/// Returns `Ok(None)` on EOF.
+async fn detect_framing<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<Framing>> {
+    let buf = reader.fill_buf().await?;
+    if buf.is_empty() {
+        // EOF
+        return Ok(None);
+    }
+    Ok(Some(if buf[0] == b'C' {
+        Framing::ContentLength
+    } else {
+        Framing::NewlineDelimited
+    }))
+}
+
+/// Read the next message from `reader`, auto-detecting its framing.
+///
+/// Returns `Ok(None)` on clean EOF and `Ok(Some((body, framing)))` on a
+/// successful read. The returned framing is the one the response to this
+/// message must use so the peer sees the same framing it sent.
+///
+/// Test-only helper: the serve loop calls [`detect_framing`] and the two
+/// framing-specific readers directly so it can answer malformed frames in
+/// the framing they arrived in.
+#[cfg(test)]
+async fn read_message<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<(String, Framing)>> {
+    let framing = match detect_framing(reader).await? {
+        Some(framing) => framing,
+        None => return Ok(None),
+    };
+    let body = match framing {
+        Framing::ContentLength => read_content_length_message(reader).await?,
+        Framing::NewlineDelimited => read_newline_message(reader).await?,
+    };
+    Ok(body.map(|body| (body, framing)))
+}
 
 /// Read a single Content-Length framed message from `reader`.
 ///
@@ -87,7 +149,10 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// \r\n
 /// <n bytes of JSON>
 /// ```
-async fn read_message<R: tokio::io::AsyncRead + Unpin>(
+///
+/// Returns `Ok(None)` on EOF, `Ok(Some(body))` on a successful read, and
+/// `Err` when headers are malformed or the body is truncated.
+async fn read_content_length_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Option<String>> {
     let mut content_length: Option<usize> = None;
@@ -128,6 +193,22 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
         .map(Some)
 }
 
+/// Read a single newline-delimited JSON-RPC message (one line).
+///
+/// Per the MCP stdio spec (2024-11-05), messages are UTF-8 JSON-RPC with no
+/// embedded newlines, delimited by `\n`. Returns `Ok(None)` on EOF.
+async fn read_newline_message<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<String>> {
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line).await?;
+    if bytes_read == 0 {
+        // EOF
+        return Ok(None);
+    }
+    Ok(Some(line.trim().to_string()))
+}
+
 /// Write a Content-Length framed message to `writer`.
 async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &str) -> Result<()> {
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
@@ -135,6 +216,27 @@ async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &
     writer.write_all(body.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// Write a message to `writer` using the requested framing.
+///
+/// Responses must use the framing of the request they answer. The compact
+/// `serde_json` serialization escapes control characters inside strings, so
+/// a newline-delimited body never contains a raw `\n` of its own.
+async fn write_framed_message<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    body: &str,
+    framing: Framing,
+) -> Result<()> {
+    match framing {
+        Framing::ContentLength => write_message(writer, body).await,
+        Framing::NewlineDelimited => {
+            writer.write_all(body.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            Ok(())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -842,40 +944,81 @@ pub async fn run_mcp_server(
     // Arc<AtomicBool> (initialized flag) and Arc<RwLock<ToolRegistry>>.
     let server = Arc::new(McpServer::with_config(config_path.map(|s| s.to_string())));
 
-    let stdin = tokio::io::stdin();
-    let mut reader = BufReader::new(stdin);
+    serve_io(server, tokio::io::stdin(), tokio::io::stdout()).await?;
+
+    eprintln!("selfware MCP server stopped.");
+    Ok(())
+}
+
+/// Serve MCP requests read from `input`, writing responses to `output`.
+///
+/// The framing of each request is auto-detected (see [`detect_framing`]) and
+/// every response is written in the same framing as its request. Runs until
+/// EOF on `input` or a `shutdown` request / `notifications/exit` notification.
+///
+/// Split out from [`run_mcp_server`] so the full wire protocol can be tested
+/// over in-memory duplex streams instead of real stdin/stdout.
+async fn serve_io<I, O>(server: Arc<McpServer>, input: I, output: O) -> Result<()>
+where
+    I: tokio::io::AsyncRead + Unpin,
+    O: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let mut reader = BufReader::new(input);
 
     // Bounded channel (256) for responses — provides backpressure so a fast
     // client cannot create unlimited in-flight response messages.  The single
-    // writer task drains this channel and serializes all stdout writes.
-    let (tx, mut rx) = mpsc::channel::<String>(256);
+    // writer task drains this channel and serializes all output writes.
+    // Each item carries the framing the response must be written in (always
+    // the framing of the request that produced it).
+    let (tx, mut rx) = mpsc::channel::<(String, Framing)>(256);
 
     // Semaphore (32 permits) to cap concurrent in-flight request handler
     // tasks.  Each request acquires a permit before spawning; the permit is
     // dropped when the handler completes, preventing unbounded task growth.
     let request_semaphore = Arc::new(Semaphore::new(32));
 
-    // Spawn ONE writer task that owns stdout — this serializes all writes
-    // so concurrent handler tasks never interleave their Content-Length frames.
+    // Spawn ONE writer task that owns the output stream — this serializes all
+    // writes so concurrent handler tasks never interleave their frames.
     let writer_task = tokio::spawn(async move {
-        let mut so = tokio::io::stdout();
-        while let Some(body) = rx.recv().await {
-            // Ignore write errors — there's nothing we can do if stdout is broken.
-            if let Err(e) = write_message(&mut so, &body).await {
+        let mut out = output;
+        while let Some((body, framing)) = rx.recv().await {
+            // Ignore write errors — there's nothing we can do if the output is broken.
+            if let Err(e) = write_framed_message(&mut out, &body, framing).await {
                 eprintln!("MCP server: write error: {}", e);
             }
         }
     });
 
     loop {
-        let message = match read_message(&mut reader).await {
-            Ok(Some(msg)) => msg,
+        // Peek at the next bytes to learn the framing before consuming the
+        // message; the response must use the same framing.
+        let framing = match detect_framing(&mut reader).await {
+            Ok(Some(framing)) => framing,
             Ok(None) => {
-                info!("MCP server: stdin closed, shutting down");
+                info!("MCP server: input closed, shutting down");
                 break;
             }
             Err(e) => {
-                // Send a parse error response via the channel.
+                // I/O error on the input stream itself — nothing sensible we
+                // can answer, so shut down rather than spin.
+                debug!("MCP server: input read error: {}", e);
+                break;
+            }
+        };
+
+        let message = match framing {
+            Framing::ContentLength => read_content_length_message(&mut reader).await,
+            Framing::NewlineDelimited => read_newline_message(&mut reader).await,
+        };
+        let message = match message {
+            Ok(Some(msg)) => msg,
+            Ok(None) => {
+                info!("MCP server: input closed, shutting down");
+                break;
+            }
+            Err(e) => {
+                // Malformed frame — send a parse error response in the same
+                // framing the broken bytes arrived in.
                 let error_response = JsonRpcResponse {
                     jsonrpc: "2.0",
                     id: Value::Null,
@@ -887,7 +1030,7 @@ pub async fn run_mcp_server(
                     }),
                 };
                 if let Ok(body) = serde_json::to_string(&error_response) {
-                    let _ = tx.send(body).await;
+                    let _ = tx.send((body, framing)).await;
                 }
                 continue;
             }
@@ -908,7 +1051,7 @@ pub async fn run_mcp_server(
                     }),
                 };
                 if let Ok(body) = serde_json::to_string(&error_response) {
-                    let _ = tx.send(body).await;
+                    let _ = tx.send((body, framing)).await;
                 }
                 continue;
             }
@@ -946,7 +1089,7 @@ pub async fn run_mcp_server(
                 let _permit = permit;
                 if let Some(resp) = server.handle_request(&request).await {
                     if let Ok(body) = serde_json::to_string(&resp) {
-                        let _ = tx.send(body).await;
+                        let _ = tx.send((body, framing)).await;
                     }
                 }
             });
@@ -965,7 +1108,6 @@ pub async fn run_mcp_server(
     // Wait for the writer task to drain remaining responses and exit.
     let _ = writer_task.await;
 
-    eprintln!("selfware MCP server stopped.");
     Ok(())
 }
 
@@ -1397,10 +1539,11 @@ mod tests {
         );
         assert_eq!(String::from_utf8(buffer.clone()).unwrap(), expected);
 
-        // Read back
+        // Read back — auto-detection must pick Content-Length framing.
         let mut reader = BufReader::new(buffer.as_slice());
-        let read_back = read_message(&mut reader).await.unwrap().unwrap();
+        let (read_back, framing) = read_message(&mut reader).await.unwrap().unwrap();
         assert_eq!(read_back, message_body);
+        assert_eq!(framing, Framing::ContentLength);
     }
 
     #[tokio::test]
@@ -1409,6 +1552,342 @@ mod tests {
         let mut reader = BufReader::new(empty);
         let result = read_message(&mut reader).await.unwrap();
         assert!(result.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Wire framing: auto-detection and framing-matched responses (P0-8)
+    //
+    // The MCP stdio spec (2024-11-05) frames messages as newline-delimited
+    // JSON-RPC, but this server originally only spoke LSP-style
+    // Content-Length framing — spec-standard clients got zero bytes back and
+    // the server looked dead. The server now auto-detects the framing per
+    // message and answers in the same framing.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_newline_framing_roundtrip() {
+        let message_body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        write_framed_message(&mut buffer, message_body, Framing::NewlineDelimited)
+            .await
+            .unwrap();
+
+        // On the wire: exactly the body plus a trailing newline, no headers.
+        let on_wire = String::from_utf8(buffer.clone()).unwrap();
+        assert_eq!(on_wire, format!("{}\n", message_body));
+
+        let mut reader = BufReader::new(buffer.as_slice());
+        let (read_back, framing) = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(read_back, message_body);
+        assert_eq!(framing, Framing::NewlineDelimited);
+
+        // After the message, the next read must hit clean EOF.
+        let eof = read_message(&mut reader).await.unwrap();
+        assert!(eof.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_detect_framing_per_message() {
+        // A Content-Length message followed by a newline-delimited one on the
+        // same stream must each be detected correctly.
+        let cl_body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let nl_body = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        write_message(&mut buffer, cl_body).await.unwrap();
+        write_framed_message(&mut buffer, nl_body, Framing::NewlineDelimited)
+            .await
+            .unwrap();
+
+        let mut reader = BufReader::new(buffer.as_slice());
+        let (body1, framing1) = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(
+            (body1.as_str(), framing1),
+            (cl_body, Framing::ContentLength)
+        );
+        let (body2, framing2) = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(
+            (body2.as_str(), framing2),
+            (nl_body, Framing::NewlineDelimited)
+        );
+        assert!(read_message(&mut reader).await.unwrap().is_none());
+    }
+
+    /// A newline-delimited message that arrives byte-by-byte must still be
+    /// read as one message (BufReader awaits the rest of the line).
+    #[tokio::test]
+    async fn test_newline_framing_partial_writes() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+
+        let (client, mut server_side) = tokio::io::duplex(4096);
+        let writer = tokio::spawn(async move {
+            for chunk in body.as_bytes().chunks(7) {
+                server_side.write_all(chunk).await.unwrap();
+                server_side.flush().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            server_side.write_all(b"\n").await.unwrap();
+            server_side.flush().await.unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let (recovered, framing) = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(recovered, body);
+        assert_eq!(framing, Framing::NewlineDelimited);
+        writer.await.unwrap();
+    }
+
+    // -- Full serve_io sessions over in-memory duplex streams ---------------
+
+    /// Spin up `serve_io` on one end of a duplex pair; return the client end.
+    fn spawn_test_server() -> (tokio::io::DuplexStream, tokio::task::JoinHandle<Result<()>>) {
+        let server = Arc::new(McpServer::new());
+        let (client, server_side) = tokio::io::duplex(1024 * 1024);
+        let (server_in, server_out) = tokio::io::split(server_side);
+        let handle = tokio::spawn(serve_io(server, server_in, server_out));
+        (client, handle)
+    }
+
+    /// Send one newline-delimited request and read the newline-delimited
+    /// response, asserting the wire shape (single line, no headers).
+    async fn newline_roundtrip(
+        writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        reader: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        request: &str,
+    ) -> Value {
+        writer.write_all(request.as_bytes()).await.unwrap();
+        writer.write_all(b"\n").await.unwrap();
+        writer.flush().await.unwrap();
+
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await.unwrap();
+        assert!(n > 0, "server must answer a newline-delimited request");
+        assert!(
+            !line.starts_with("Content-Length:"),
+            "newline-delimited request must not get a header-framed response: {:?}",
+            line
+        );
+        serde_json::from_str(&line)
+            .unwrap_or_else(|e| panic!("response is not JSON: {e}: {line:?}"))
+    }
+
+    /// Send one Content-Length framed request and read the response,
+    /// asserting the exact LSP-style wire shape.
+    async fn content_length_roundtrip(
+        writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        reader: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        request: &str,
+    ) -> Value {
+        write_message(writer, request).await.unwrap();
+
+        let mut header = String::new();
+        let n = reader.read_line(&mut header).await.unwrap();
+        assert!(n > 0, "server must answer a Content-Length request");
+        let length: usize = header
+            .strip_prefix("Content-Length: ")
+            .unwrap_or_else(|| panic!("expected Content-Length header, got: {header:?}"))
+            .trim()
+            .parse()
+            .expect("Content-Length must be a number");
+        let mut blank = String::new();
+        reader.read_line(&mut blank).await.unwrap();
+        assert_eq!(blank, "\r\n", "expected CRLF after headers");
+
+        let mut buf = vec![0u8; length];
+        reader.read_exact(&mut buf).await.unwrap();
+        serde_json::from_slice(&buf).unwrap_or_else(|e| panic!("response body is not JSON: {e}"))
+    }
+
+    /// Spec-standard session: newline-delimited initialize → tools/list →
+    /// tools/call → shutdown, all answered newline-delimited. This is the
+    /// exact scenario that previously got zero bytes back (P0-8).
+    #[tokio::test]
+    async fn test_serve_io_newline_delimited_session() {
+        let (client, server_task) = spawn_test_server();
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_read);
+
+        // initialize
+        let resp = newline_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"spec-client","version":"1.0"}}}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(resp["result"]["serverInfo"]["name"], "selfware");
+
+        // notifications/initialized — no response expected.
+        client_write
+            .write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .await
+            .unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+        client_write.flush().await.unwrap();
+
+        // tools/list
+        let resp = newline_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 2);
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        assert!(tools.len() > 10, "tools/list should return the catalog");
+        assert!(tools[0]["name"].is_string());
+        assert!(tools[0]["inputSchema"].is_object());
+
+        // tools/call
+        let resp = newline_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"echo hello"}}}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 3);
+        assert_eq!(resp["result"]["isError"], false);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("hello"), "expected echo output, got: {text}");
+
+        // shutdown — server answers, then the serve loop exits cleanly.
+        let resp = newline_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 4);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server must exit after shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Back-compat session: a legacy client speaking Content-Length framing
+    /// must keep working, with Content-Length framed responses.
+    #[tokio::test]
+    async fn test_serve_io_content_length_session() {
+        let (client, server_task) = spawn_test_server();
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_read);
+
+        // initialize
+        let resp = content_length_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"legacy-client","version":"1.0"}}}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 1);
+        assert_eq!(resp["result"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+
+        // tools/list
+        let resp = content_length_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 2);
+        assert!(resp["result"]["tools"].as_array().unwrap().len() > 10);
+
+        // tools/call
+        let resp = content_length_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"shell_exec","arguments":{"command":"echo hello"}}}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 3);
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("hello"), "expected echo output, got: {text}");
+
+        // shutdown
+        let resp = content_length_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":4,"method":"shutdown"}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 4);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server must exit after shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Framing is detected per message, not per connection: a client may mix
+    /// framings on one stream and each response matches its request.
+    #[tokio::test]
+    async fn test_serve_io_mixed_framing_session() {
+        let (client, server_task) = spawn_test_server();
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_read);
+
+        // newline-delimited initialize → newline-delimited response
+        let resp = newline_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 1);
+
+        // Content-Length ping → Content-Length response
+        let resp = content_length_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 2);
+        assert!(resp["result"].is_object());
+
+        // newline-delimited shutdown → newline-delimited response
+        let resp = newline_roundtrip(
+            &mut client_write,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":3,"method":"shutdown"}"#,
+        )
+        .await;
+        assert_eq!(resp["id"], 3);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server must exit after shutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Invalid JSON on a newline-delimited stream gets a newline-delimited
+    /// JSON-RPC parse error, not silence.
+    #[tokio::test]
+    async fn test_serve_io_parse_error_matches_newline_framing() {
+        let (client, server_task) = spawn_test_server();
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut reader = BufReader::new(client_read);
+
+        let resp = newline_roundtrip(&mut client_write, &mut reader, "this is not json").await;
+        assert_eq!(resp["error"]["code"], PARSE_ERROR);
+        assert!(resp["id"].is_null());
+
+        // EOF on the client side shuts the server down cleanly. Both halves
+        // of the duplex stream must go: tokio's split shares one underlying
+        // stream, which only signals EOF once it is fully dropped.
+        drop(client_write);
+        drop(reader);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server must exit on EOF")
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

@@ -31,7 +31,10 @@ pub mod unpack;
 mod validation;
 
 pub use agent::*;
-pub use api_key::{is_local_endpoint, load_api_key_from_keyring, save_api_key_to_keyring};
+pub use api_key::{
+    is_local_endpoint, is_openrouter_endpoint, load_api_key_from_keyring, save_api_key_to_keyring,
+    set_api_key_for_endpoint,
+};
 pub use auto_config::*;
 pub use debug::DebugConfig;
 pub use model::*;
@@ -115,6 +118,15 @@ pub fn validate_extra_body(
 pub fn default_context_length() -> usize {
     1048576
 }
+
+/// Conservative context window (tokens) assumed for a model NO built-in
+/// profile recognizes and the user did not configure explicitly. The 1M
+/// `default_context_length()` describes the shipped default model; applying
+/// it to an arbitrary (typically local) model derives a ~630k token budget
+/// that overflows real local contexts. 32k fits most local deployments;
+/// `auto-config` / `unpack` still write the real value detected from the
+/// endpoint's `/models`, and an explicit `context_length` always wins.
+pub(crate) const UNKNOWN_MODEL_CONTEXT_LENGTH: usize = 32_768;
 pub fn default_endpoint() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
@@ -381,6 +393,7 @@ pub mod test_helpers {
                 "SELFWARE_ENDPOINT",
                 "SELFWARE_MODEL",
                 "SELFWARE_API_KEY",
+                "OPENROUTER_API_KEY",
                 "SELFWARE_MAX_TOKENS",
                 "SELFWARE_TEMPERATURE",
                 "SELFWARE_TIMEOUT",
@@ -403,6 +416,7 @@ pub mod test_helpers {
             "SELFWARE_ENDPOINT",
             "SELFWARE_MODEL",
             "SELFWARE_API_KEY",
+            "OPENROUTER_API_KEY",
             "SELFWARE_MAX_TOKENS",
             "SELFWARE_TEMPERATURE",
             "SELFWARE_TIMEOUT",

@@ -2,6 +2,15 @@
 
 ## Installation
 
+Both methods below compile from source, which requires a few native packages.
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  pkg-config libssl-dev cmake libdbus-1-dev \
+  libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+```
+
 ### From Git
 
 ```bash
@@ -67,13 +76,27 @@ Selfware looks for configuration in this order:
 3. `selfware.toml` in the current directory
 4. `~/.config/selfware/config.toml`
 
-If no config file is found, defaults are used (localhost:8000, Qwen model).
+If no config file is found, built-in defaults are used: the hosted OpenRouter
+endpoint (`https://openrouter.ai/api/v1`) with model `z-ai/glm-5.2`, which
+requires an API key (see below). For a local backend, write a config file
+pointing at it.
 
 ### Create your config
 
+Run the setup wizard:
+
+```bash
+selfware init
+```
+
+Or create the file manually. Do not leave it empty — an empty file is valid
+TOML, so selfware would silently start with the hosted OpenRouter defaults
+above and no API key. Put real values in (see the backend examples below),
+then restrict permissions:
+
 ```bash
 mkdir -p ~/.config/selfware
-touch ~/.config/selfware/config.toml
+$EDITOR ~/.config/selfware/config.toml   # see examples below
 chmod 600 ~/.config/selfware/config.toml
 ```
 

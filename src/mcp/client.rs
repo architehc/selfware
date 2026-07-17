@@ -29,6 +29,7 @@ impl McpClient {
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
         let transport = super::StdioTransport::spawn(&config.command, &config.args, &config.env)
             .await
+            .map(|t| t.with_framing(config.framing))
             .with_context(|| format!("Failed to spawn MCP server '{}'", config.name))?;
 
         let transport: Arc<dyn Transport> = Arc::new(transport);

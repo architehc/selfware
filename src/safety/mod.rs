@@ -29,8 +29,8 @@ pub use scanner::{
     SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,
 };
 pub use tool_metadata::{
-    default_tool_metadata, ExecutionMode, PermissionChecker, PermissionResult, RiskLevel,
-    ToolMetadata,
+    classify_tool_metadata, default_tool_metadata, normal_mode_needs_confirmation, ExecutionMode,
+    PermissionChecker, PermissionResult, RiskLevel, ToolMetadata,
 };
 
 #[cfg(test)]

@@ -158,6 +158,37 @@ pub fn endpoint_has_userinfo(endpoint: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the endpoint's URL host is exactly `openrouter.ai`. Uses proper URL
+/// parsing (never substring matching) so lookalike hosts such as
+/// `openrouter.ai.evil.com` do NOT match — this gates which endpoints may
+/// receive the `OPENROUTER_API_KEY` credential.
+pub fn is_openrouter_endpoint(endpoint: &str) -> bool {
+    url::Url::parse(endpoint)
+        .map(|u| {
+            u.host_str()
+                .map(|h| h.eq_ignore_ascii_case("openrouter.ai"))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Store an API key in the OS keyring for the endpoint of the active
+/// (already-loaded) configuration.
+///
+/// This is the backing implementation for `selfware config set-key <KEY>`:
+/// it makes the keyring path (previously reachable only via the `init`
+/// wizard) available as a one-shot command. The key is scoped to
+/// `config.endpoint` via [`keyring_account_for_endpoint`], which is exactly
+/// the account `Config::load` probes — so the next run picks the key up
+/// without any plaintext `api_key` on disk. Returns the endpoint the key
+/// was stored for, so the caller can tell the user where it applies.
+pub fn set_api_key_for_endpoint(config: &super::Config, api_key: &str) -> Result<String> {
+    let trimmed = api_key.trim();
+    anyhow::ensure!(!trimmed.is_empty(), "API key must not be empty");
+    save_api_key_to_keyring(&config.endpoint, trimmed)?;
+    Ok(config.endpoint.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +279,28 @@ mod tests {
         assert!(!is_insecure_remote_endpoint("http://localhost:1234/v1")); // local ok
         assert!(!is_insecure_remote_endpoint("http://127.0.0.1:8000/v1")); // loopback ok
         assert!(!is_insecure_remote_endpoint("http://[::1]:8000/v1")); // ipv6 loopback ok
+    }
+
+    #[test]
+    fn openrouter_endpoint_detection_is_host_exact() {
+        assert!(is_openrouter_endpoint("https://openrouter.ai/api/v1"));
+        assert!(is_openrouter_endpoint("https://OpenRouter.AI/api/v1"));
+        // Lookalike hosts must NOT match (credential-safety).
+        assert!(!is_openrouter_endpoint(
+            "https://openrouter.ai.evil.com/api/v1"
+        ));
+        assert!(!is_openrouter_endpoint(
+            "https://api.openrouter.ai.evil.com/v1"
+        ));
+        assert!(!is_openrouter_endpoint("https://api.openai.com/v1"));
+        assert!(!is_openrouter_endpoint("http://127.0.0.1:8000/v1"));
+        assert!(!is_openrouter_endpoint("not a url"));
+    }
+
+    #[test]
+    fn set_api_key_rejects_empty_key() {
+        let config = super::super::Config::default();
+        assert!(set_api_key_for_endpoint(&config, "").is_err());
+        assert!(set_api_key_for_endpoint(&config, "   ").is_err());
     }
 }

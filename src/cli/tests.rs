@@ -110,7 +110,7 @@ fn default_workflow_name_falls_back_for_empty_path() {
     assert_eq!(default_workflow_name(Path::new("/")), DEFAULT_WORKFLOW_NAME);
 }
 
-// ── Theme / OutputFormat enum tests ──
+// ── Theme / HeadlessOutputFormat enum tests ──
 
 #[test]
 fn theme_default_is_amber() {
@@ -119,9 +119,9 @@ fn theme_default_is_amber() {
 }
 
 #[test]
-fn output_format_default_is_text() {
-    let fmt: OutputFormat = Default::default();
-    assert!(matches!(fmt, OutputFormat::Text));
+fn headless_output_format_default_is_text() {
+    let fmt: HeadlessOutputFormat = Default::default();
+    assert!(matches!(fmt, HeadlessOutputFormat::Text));
 }
 
 // ── Constants sanity checks ──
@@ -145,41 +145,36 @@ fn constants_have_reasonable_values() {
 fn cli_chat_yolo_short_flag() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "chat", "-y"]).unwrap();
-    match cli.command.unwrap() {
-        Commands::Chat { yolo } => assert!(yolo, "chat -y should set yolo=true"),
-        other => panic!("Expected Chat, got {:?}", other),
-    }
+    assert!(
+        cli.yolo,
+        "trailing -y after subcommand should set the global yolo flag"
+    );
+    assert!(matches!(cli.command.unwrap(), Commands::Chat));
 }
 
 #[test]
 fn cli_chat_yolo_long_flag() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "chat", "--yolo"]).unwrap();
-    match cli.command.unwrap() {
-        Commands::Chat { yolo } => assert!(yolo),
-        other => panic!("Expected Chat, got {:?}", other),
-    }
+    assert!(cli.yolo);
+    assert!(matches!(cli.command.unwrap(), Commands::Chat));
 }
 
 #[test]
 fn cli_chat_no_yolo() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "chat"]).unwrap();
-    match cli.command.unwrap() {
-        Commands::Chat { yolo } => assert!(!yolo, "chat without -y should be yolo=false"),
-        other => panic!("Expected Chat, got {:?}", other),
-    }
+    assert!(!cli.yolo, "chat without -y should leave yolo=false");
+    assert!(matches!(cli.command.unwrap(), Commands::Chat));
 }
 
 #[test]
 fn cli_run_yolo_flag() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "run", "-y", "fix bug"]).unwrap();
+    assert!(cli.yolo, "run -y should set the global yolo flag");
     match cli.command.unwrap() {
-        Commands::Run { yolo, task, .. } => {
-            assert!(yolo, "run -y should set yolo=true");
-            assert_eq!(task, "fix bug");
-        }
+        Commands::Run { task, .. } => assert_eq!(task, "fix bug"),
         other => panic!("Expected Run, got {:?}", other),
     }
 }
@@ -188,10 +183,8 @@ fn cli_run_yolo_flag() {
 fn cli_multichat_yolo_flag() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "multi-chat", "-y"]).unwrap();
-    match cli.command.unwrap() {
-        Commands::MultiChat { yolo, .. } => assert!(yolo),
-        other => panic!("Expected MultiChat, got {:?}", other),
-    }
+    assert!(cli.yolo);
+    assert!(matches!(cli.command.unwrap(), Commands::MultiChat { .. }));
 }
 
 #[test]
@@ -205,7 +198,7 @@ fn cli_global_yolo_still_works() {
 fn cli_default_command_is_chat() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware"]).unwrap();
-    // No subcommand → defaults to Chat { yolo: false }
+    // No subcommand → defaults to Chat
     assert!(cli.command.is_none());
 }
 
@@ -213,6 +206,120 @@ fn cli_default_command_is_chat() {
 fn cli_command_tree_has_no_duplicate_aliases() {
     use clap::CommandFactory;
     Cli::command().debug_assert();
+}
+
+// ── P0-1 regression: `selfware status` must parse (clap TypeId panic) ──
+//
+// The Status subcommand used to declare its own `output_format` arg of a
+// different enum type than the global `--output-format`, which made clap
+// panic with "Mismatch between definition and access of 'output_format'"
+// (exit 101) on every `selfware status` invocation. The per-subcommand arg
+// was removed; the global flag now covers it.
+
+#[test]
+fn cli_status_parses_without_args() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "status"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Commands::Status));
+}
+
+#[test]
+fn cli_status_uses_global_output_format() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "status", "--output-format", "json"]).unwrap();
+    assert!(matches!(cli.command.unwrap(), Commands::Status));
+    assert_eq!(cli.output_format, HeadlessOutputFormat::Json);
+}
+
+#[test]
+fn cli_every_subcommand_help_is_valid() {
+    // debug_assert validates the whole command tree recursively (arg
+    // conflicts, duplicate shorts/longs from global propagation, etc.).
+    // This catches the P0-1 class of bug at test time instead of at runtime.
+    use clap::CommandFactory;
+    Cli::command().debug_assert();
+}
+
+// ── P0-3 regression: flags must be accepted AFTER the subcommand ──
+//
+// Only `--output-format` was global, so `selfware run "task" -m yolo` died
+// with "unexpected argument '-m'" (exit 2). The common flags are now global.
+
+#[test]
+fn cli_trailing_mode_and_max_turns_after_run() {
+    use clap::Parser;
+    let cli =
+        Cli::try_parse_from(["selfware", "run", "x", "-m", "yolo", "--max-turns", "1"]).unwrap();
+    assert_eq!(cli.mode, Some(ExecutionMode::Yolo));
+    assert_eq!(cli.max_turns, Some(1));
+    match cli.command.unwrap() {
+        Commands::Run { task, .. } => assert_eq!(task, "x"),
+        other => panic!("Expected Run, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_trailing_yolo_after_run_task() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "run", "fix the bug", "-y"]).unwrap();
+    assert!(cli.yolo);
+    match cli.command.unwrap() {
+        Commands::Run { task, .. } => assert_eq!(task, "fix the bug"),
+        other => panic!("Expected Run, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_trailing_config_workdir_quiet_verbose_after_subcommand() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware", "status", "-q", "-v", "-c", "my.toml", "-C", "/tmp",
+    ])
+    .unwrap();
+    assert!(cli.quiet);
+    assert!(cli.verbose);
+    assert_eq!(cli.config.as_deref(), Some("my.toml"));
+    assert_eq!(cli.workdir.as_deref(), Some("/tmp"));
+}
+
+#[test]
+fn cli_trailing_max_budget_flags_after_run() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "run",
+        "x",
+        "--max-budget-tokens",
+        "1000",
+        "--max-wall-secs",
+        "60",
+        "--max-cost-usd",
+        "0.5",
+    ])
+    .unwrap();
+    assert_eq!(cli.max_budget_tokens, Some(1000));
+    assert_eq!(cli.max_wall_secs, Some(60));
+    assert_eq!(cli.max_cost_usd, Some(0.5));
+}
+
+#[test]
+fn cli_hidden_dev_commands_still_parse() {
+    // Hidden from --help but still functional.
+    use clap::Parser;
+    for argv in [
+        &["selfware", "test"][..],
+        &["selfware", "bench"][..],
+        &["selfware", "long-test"][..],
+        &["selfware", "lsp"][..],
+        &["selfware", "batch", "-f", "tasks.txt"][..],
+        &["selfware", "swe-bench", "diagnose", "/tmp/out"][..],
+    ] {
+        assert!(
+            Cli::try_parse_from(argv).is_ok(),
+            "hidden command should still parse: {:?}",
+            argv
+        );
+    }
 }
 
 // ── resolve_config_path tests ──

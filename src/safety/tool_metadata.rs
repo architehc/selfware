@@ -491,6 +491,39 @@ pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
         .unwrap_or_else(|| ToolMetadata::custom(false, false, RiskLevel::Medium, false, false))
 }
 
+/// Normal-mode confirmation decision driven by tool metadata.
+///
+/// Historically the interactive Normal-mode prompt consulted a hardcoded
+/// ~8-tool safe list, so harmless read-only tools (`lsp_diagnostics`,
+/// `process_list`, even `ask_user`) demanded confirmation — pushing users
+/// toward `yolo`. This routes the decision through the explicit tool
+/// classification instead:
+///
+/// 1. A session permission grant (`PermissionGrant::session`, the "always
+///    allow" prompt option) skips the prompt.
+/// 2. Tools named in `safety.require_confirmation` always prompt.
+/// 3. Explicitly classified read-only + Low-risk tools never prompt.
+/// 4. Everything else (Medium/High risk: writes, shell, network, ...) prompts.
+///
+/// Unclassified tools (e.g. dynamic `mcp_*` names) keep the old behavior:
+/// they prompt.
+pub fn normal_mode_needs_confirmation(
+    tool_name: &str,
+    require_confirmation: &[String],
+    grants: &crate::safety::permissions::PermissionStore,
+) -> bool {
+    if grants.is_authorized(tool_name, None) {
+        return false;
+    }
+    if require_confirmation.iter().any(|t| t == tool_name) {
+        return true;
+    }
+    match classify_tool_metadata(tool_name) {
+        Some(meta) => !(meta.read_only && meta.risk_level == RiskLevel::Low),
+        None => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +642,117 @@ mod tests {
             default_tool_metadata("tool_search").risk_level,
             RiskLevel::Low
         );
+    }
+
+    // ===== normal_mode_needs_confirmation tests (P1-5) =====
+
+    fn no_grants() -> crate::safety::permissions::PermissionStore {
+        crate::safety::permissions::PermissionStore::new()
+    }
+
+    #[test]
+    fn test_normal_mode_read_only_tools_skip_confirmation() {
+        // The old hardcoded safe list prompted for these harmless read-only
+        // tools; metadata classification must now let them through.
+        for tool in [
+            // previously safe-listed
+            "file_read",
+            "directory_tree",
+            "glob_find",
+            "grep_search",
+            "symbol_search",
+            "tool_search",
+            "git_status",
+            "git_diff",
+            // the P1-5 report's examples
+            "lsp_diagnostics",
+            "process_list",
+            "ask_user",
+            // other metadata-classified read-only tools
+            "port_check",
+            "lsp_hover",
+            "code_metrics",
+            "list_worktrees",
+            "knowledge_query",
+            "vision_analyze",
+        ] {
+            assert!(
+                !normal_mode_needs_confirmation(tool, &[], &no_grants()),
+                "read-only tool '{}' must not prompt in Normal mode",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_normal_mode_mutating_tools_still_prompt() {
+        for tool in [
+            "file_write",
+            "file_edit",
+            "file_multi_edit",
+            "patch_apply",
+            "file_delete",
+            "shell_exec",
+            "pty_shell",
+            "git_commit",
+            "git_push",
+            "cargo_test",
+        ] {
+            assert!(
+                normal_mode_needs_confirmation(tool, &[], &no_grants()),
+                "mutating tool '{}' must still prompt in Normal mode",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_normal_mode_network_tools_still_prompt() {
+        // Network tools are read_only=true but Medium risk — they must keep
+        // prompting (only Low-risk read-only tools are exempt).
+        for tool in ["http_request", "browser_fetch", "page_control"] {
+            assert!(
+                normal_mode_needs_confirmation(tool, &[], &no_grants()),
+                "network tool '{}' must still prompt in Normal mode",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_normal_mode_unclassified_tool_prompts() {
+        // Dynamic MCP tool names have no explicit classification — keep the
+        // old prompt-by-default behavior.
+        assert!(normal_mode_needs_confirmation(
+            "mcp_server_thing",
+            &[],
+            &no_grants()
+        ));
+    }
+
+    #[test]
+    fn test_normal_mode_require_confirmation_overrides_metadata() {
+        // An operator-listed read-only tool must still prompt when present
+        // in safety.require_confirmation.
+        let require = vec!["file_read".to_string()];
+        assert!(normal_mode_needs_confirmation(
+            "file_read",
+            &require,
+            &no_grants()
+        ));
+    }
+
+    #[test]
+    fn test_normal_mode_session_grant_skips_confirmation() {
+        // The "always allow" prompt option records a session grant; a grant
+        // must short-circuit even tools that would otherwise prompt.
+        let mut store = crate::safety::permissions::PermissionStore::new();
+        store.add(crate::safety::permissions::PermissionGrant::session(
+            "shell_exec",
+        ));
+        assert!(!normal_mode_needs_confirmation("shell_exec", &[], &store));
+        // The grant is tool-scoped: other tools are unaffected.
+        assert!(normal_mode_needs_confirmation("file_write", &[], &store));
     }
 
     #[test]

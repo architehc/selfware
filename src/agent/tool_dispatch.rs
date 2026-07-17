@@ -803,6 +803,9 @@ fn make_is_mutation_imperative(lower: &str) -> bool {
 pub(crate) enum ConfirmDecision {
     /// Approve just this one tool call.
     ExecuteOnce,
+    /// Approve this tool for the rest of the session (records a
+    /// session-scoped `PermissionGrant` so future calls skip the prompt).
+    AlwaysAllow,
     /// Disable confirmations for the rest of the session (YOLO).
     EnableYolo,
     /// Do not execute this tool call.
@@ -811,10 +814,13 @@ pub(crate) enum ConfirmDecision {
 
 /// Parse a confirm-prompt response. Enabling session-wide YOLO requires the
 /// explicit full word "yolo" — a single stray keystroke (e.g. "s") must NOT
-/// silently disable every future confirmation; it means "skip".
+/// silently disable every future confirmation; it means "skip". The
+/// session-scoped "always allow this tool" middle ground is a deliberate
+/// single keystroke ("a"), mirroring the `[y/n/a]` idiom of other agent CLIs.
 pub(crate) fn parse_confirm_response(response: &str) -> ConfirmDecision {
     match response.trim().to_lowercase().as_str() {
         "y" | "yes" => ConfirmDecision::ExecuteOnce,
+        "a" | "always" => ConfirmDecision::AlwaysAllow,
         "yolo" => ConfirmDecision::EnableYolo,
         _ => ConfirmDecision::Skip,
     }
@@ -3157,7 +3163,25 @@ impl Agent {
             }
         }
 
-        if !self.needs_confirmation(name) {
+        // Normal mode decides via the tool-metadata classification (P1-5):
+        // read-only/Low-risk tools (`lsp_diagnostics`, `process_list`,
+        // `ask_user`, ...) no longer prompt — only Medium/High-risk tools do.
+        // Session permission grants ("always allow") and the operator's
+        // `safety.require_confirmation` list keep their precedence. The other
+        // modes keep the legacy `needs_confirmation()` rules.
+        let confirmation_needed = if matches!(
+            self.config.execution_mode,
+            crate::config::ExecutionMode::Normal
+        ) {
+            crate::safety::normal_mode_needs_confirmation(
+                name,
+                &self.config.safety.require_confirmation,
+                &self.permission_store,
+            )
+        } else {
+            self.needs_confirmation(name)
+        };
+        if !confirmation_needed {
             return Ok(true);
         }
 
@@ -3219,7 +3243,7 @@ impl Agent {
             name.bright_cyan(),
             args_display.bright_white()
         );
-        print!("\n\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m");
+        print!("\n\x1b[0m\x1b[1m\x1b[97mExecute? [y = once / a = always allow this tool (session) / N = skip / type \"yolo\" to disable confirmations]: \x1b[0m");
         let _ = tokio::io::stdout().flush().await;
 
         let response =
@@ -3227,6 +3251,19 @@ impl Agent {
         if let Ok(response) = response {
             match parse_confirm_response(&response) {
                 ConfirmDecision::ExecuteOnce => return Ok(true),
+                ConfirmDecision::AlwaysAllow => {
+                    // Session-scoped grant: `needs_confirmation`/`normal_mode_
+                    // needs_confirmation` consult the permission store first,
+                    // so future calls of this tool skip the prompt.
+                    self.permission_store
+                        .add(crate::safety::permissions::PermissionGrant::session(name));
+                    cli_println!(
+                        "{} '{}' allowed for the rest of this session",
+                        "✓".bright_green(),
+                        name.bright_cyan()
+                    );
+                    return Ok(true);
+                }
                 ConfirmDecision::EnableYolo => {
                     self.set_execution_mode(crate::config::ExecutionMode::Yolo);
                     cli_println!(
@@ -3850,6 +3887,27 @@ mod tests {
         assert_eq!(parse_confirm_response("skip"), ConfirmDecision::Skip);
         assert_eq!(parse_confirm_response("n"), ConfirmDecision::Skip);
         assert_eq!(parse_confirm_response(""), ConfirmDecision::Skip);
+    }
+
+    #[test]
+    fn confirm_response_always_allow_is_tool_scoped_session_grant() {
+        use super::{parse_confirm_response, ConfirmDecision};
+        // "a"/"always" = always allow THIS tool for the session (P1-5b) —
+        // deliberately distinct from "yolo", which drops ALL confirmations.
+        assert_eq!(parse_confirm_response("a"), ConfirmDecision::AlwaysAllow);
+        assert_eq!(parse_confirm_response("A"), ConfirmDecision::AlwaysAllow);
+        assert_eq!(
+            parse_confirm_response("always"),
+            ConfirmDecision::AlwaysAllow
+        );
+        assert_eq!(
+            parse_confirm_response(" Always "),
+            ConfirmDecision::AlwaysAllow
+        );
+        // Nearby keystrokes must not be misread as always-allow.
+        assert_ne!(parse_confirm_response("al"), ConfirmDecision::AlwaysAllow);
+        assert_eq!(parse_confirm_response("y"), ConfirmDecision::ExecuteOnce);
+        assert_eq!(parse_confirm_response("yolo"), ConfirmDecision::EnableYolo);
     }
 
     #[test]

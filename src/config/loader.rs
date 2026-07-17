@@ -109,7 +109,7 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
 use std::path::PathBuf;
 
 use super::api_key::{
-    endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint,
+    endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint, is_openrouter_endpoint,
     load_api_key_from_keyring, ApiKeySource,
 };
 use super::model::{default_modalities, ModelProfile, RedactedString};
@@ -117,6 +117,16 @@ use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
 use super::provenance::{ConfigSource, ConfigSources};
 use super::types::ExecutionMode;
 use super::Config;
+
+/// Emit a user-actionable config warning. These MUST be visible by default:
+/// they go through `tracing::warn!` (captured by the log file when tracing is
+/// enabled) AND straight to stderr, because `init_tracing()` only installs a
+/// subscriber when RUST_LOG / SELFWARE_LOG_LEVEL is set — a tracing-only
+/// warning is invisible on a default run.
+fn config_warning(message: &str) {
+    warn!("{}", message);
+    eprintln!("Config warning: {}", message);
+}
 
 /// Walk a parsed TOML value and record `ConfigSource::ConfigFile(path)` for
 /// every leaf key reachable from a known top-level field. Nested keys are
@@ -155,6 +165,37 @@ fn config_is_checkout_local(config_path: &std::path::Path) -> bool {
     config_path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
 }
 
+/// Known sub-keys of a fixed config section, derived by serializing the
+/// section's default struct — the list therefore cannot drift from the
+/// schema the way a hand-maintained list would. Returns `None` for sections
+/// whose keys are dynamic (`models`, `extra_body`, `mcp`, `hooks`, `qa`) or
+/// unrecognized; those get no nested-key check. None of the section structs
+/// uses `skip_serializing_if` or `flatten`, so every schema key appears in
+/// the serialized form.
+fn known_section_keys(section: &str) -> Option<std::collections::HashSet<String>> {
+    let value = match section {
+        "agent" => toml::Value::try_from(super::agent::AgentConfig::default()).ok()?,
+        "safety" => toml::Value::try_from(super::safety::SafetyConfig::default()).ok()?,
+        "yolo" => toml::Value::try_from(super::types::YoloFileConfig::default()).ok()?,
+        "ui" => toml::Value::try_from(super::types::UiConfig::default()).ok()?,
+        "continuous_work" => {
+            toml::Value::try_from(super::types::ContinuousWorkConfig::default()).ok()?
+        }
+        "retry" => toml::Value::try_from(super::types::RetrySettings::default()).ok()?,
+        "resources" => toml::Value::try_from(super::resources::ResourcesConfig::default()).ok()?,
+        "concurrency" => toml::Value::try_from(super::types::ConcurrencyConfig::default()).ok()?,
+        "evolution" => toml::Value::try_from(super::types::EvolutionTomlConfig::default()).ok()?,
+        "cache" => toml::Value::try_from(crate::session::cache::LlmCacheConfig::default()).ok()?,
+        "debug" => toml::Value::try_from(super::debug::DebugConfig::default()).ok()?,
+        _ => return None,
+    };
+    value.as_table().map(|t| {
+        t.keys()
+            .cloned()
+            .collect::<std::collections::HashSet<String>>()
+    })
+}
+
 /// If the value for `key` originated from an untrusted, checkout-local
 /// `selfware.toml`, return that file's path; otherwise `None`.
 ///
@@ -183,6 +224,15 @@ impl Config {
             .and_then(|value| value.get("agent").cloned())
             .and_then(|agent| agent.as_table().cloned())
             .map(|agent| agent.contains_key("token_budget"))
+            .unwrap_or(false)
+    }
+
+    /// Whether the raw TOML sets a TOP-LEVEL `context_length` key (an explicit
+    /// user choice the loader must not override with a smarter default).
+    fn content_sets_context_length(content: &str) -> bool {
+        toml::from_str::<toml::Value>(content)
+            .ok()
+            .map(|value| value.get("context_length").is_some())
             .unwrap_or(false)
     }
 
@@ -268,17 +318,35 @@ impl Config {
         origin.map(|p| (p, reset))
     }
 
-    /// Warn about unknown top-level TOML keys that would be silently ignored.
+    /// Warn about unknown top-level TOML keys that would be silently ignored,
+    /// and about unknown SUB-keys inside known fixed sections (a nested typo
+    /// like `[agent] max_iteration = 5` is otherwise dropped by serde and the
+    /// value silently stays at its default).
     fn warn_unknown_keys(content: &str) {
         if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(content) {
-            for key in table.keys() {
+            for (key, value) in table.iter() {
                 if !TOP_LEVEL_CONFIG_KEYS.contains(&key.as_str()) {
-                    warn!(
-                        key = %key,
+                    config_warning(&format!(
                         "Unknown config key [{}] — this section is ignored. \
                          Check for typos or remove it.",
                         key
-                    );
+                    ));
+                    continue;
+                }
+                // Nested check: within a known fixed section, flag sub-keys the
+                // section struct does not define (they deserialize to nothing).
+                if let toml::Value::Table(section_table) = value {
+                    if let Some(known_sub_keys) = known_section_keys(key) {
+                        for sub_key in section_table.keys() {
+                            if !known_sub_keys.contains(sub_key.as_str()) {
+                                config_warning(&format!(
+                                    "Unknown config key [{}].{} — this key is ignored. \
+                                     Check for typos or remove it.",
+                                    key, sub_key
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -309,13 +377,13 @@ impl Config {
                         path
                     );
                 }
-                warn!(
-                    config_path = %path,
-                    file_mode = format_args!("{:o}", mode & 0o777),
-                    "Config file is accessible by other users. \
+                config_warning(&format!(
+                    "Config file '{}' is accessible by other users (mode {:o}). \
                      This file may contain API keys. Consider running: chmod 600 {}",
+                    path,
+                    mode & 0o777,
                     path
-                );
+                ));
             }
         }
         Ok(())
@@ -396,6 +464,30 @@ impl Config {
             }
         };
 
+        // Surface which file won the precedence search (and when a
+        // checkout-local `selfware.toml` shadows the global config) — this
+        // makes the cwd-shadows-global trap visible on every run instead of
+        // silently loading an unexpected file. The loaded path is also
+        // recorded in the provenance map under a reserved key so downstream
+        // diagnostics (`doctor`, `llm-doctor`) can report it.
+        if let Some(ref p) = loaded_from_path {
+            let shadowed_home = if config_is_checkout_local(std::path::Path::new(p)) {
+                dirs::home_dir()
+                    .map(|h| h.join(".config/selfware/config.toml"))
+                    .filter(|h| h.is_file())
+            } else {
+                None
+            };
+            match shadowed_home {
+                Some(h) => eprintln!("config: {} (shadowing {})", p, h.display()),
+                None => eprintln!("config: {}", p),
+            }
+            sources.set(
+                "__config_path".to_string(),
+                ConfigSource::ConfigFile(PathBuf::from(p)),
+            );
+        }
+
         // On Unix, check if the config file has overly permissive permissions.
         // Strict mode (error instead of warning) is enabled by either the
         // config option `safety.strict_permissions = true` or the environment
@@ -427,14 +519,32 @@ impl Config {
         }
 
         // --- API key resolution hierarchy ---
-        // 1. Environment variable (highest priority, never persisted to disk)
-        // 2. System keyring (set via SELFWARE_API_KEY or manually in OS keyring)
+        // 1. Environment variable (highest priority, never persisted to disk):
+        //    SELFWARE_API_KEY, then OPENROUTER_API_KEY when the configured
+        //    endpoint IS openrouter.ai (de-facto-standard var name there).
+        // 2. System keyring (set via `selfware config set-key`, the init
+        //    wizard, or manually in the OS keyring)
         // 3. Config file (lowest priority, plaintext on disk -- warn the user)
         let mut api_key_source = ApiKeySource::None;
 
         if let Ok(api_key) = std::env::var("SELFWARE_API_KEY") {
             config.api_key = Some(RedactedString::new(api_key));
             api_key_source = ApiKeySource::EnvVar;
+        }
+
+        // OpenRouter convenience fallback: a user who exported the standard
+        // OPENROUTER_API_KEY expects it to "just work" against the default
+        // OpenRouter endpoint. Host-exact check — a lookalike host must never
+        // receive this credential.
+        if matches!(api_key_source, ApiKeySource::None) && is_openrouter_endpoint(&config.endpoint)
+        {
+            if let Ok(api_key) = std::env::var("OPENROUTER_API_KEY") {
+                if !api_key.trim().is_empty() {
+                    config.api_key = Some(RedactedString::new(api_key));
+                    api_key_source = ApiKeySource::EnvVar;
+                    sources.set("api_key", ConfigSource::EnvVar("OPENROUTER_API_KEY".into()));
+                }
+            }
         }
 
         // Try the system keyring if no env var was set.
@@ -455,12 +565,12 @@ impl Config {
         if matches!(api_key_source, ApiKeySource::None) && plaintext_key_in_config {
             api_key_source = ApiKeySource::ConfigFile;
             if let Some(ref cfg_path) = loaded_from_path {
-                warn!(
-                    config_path = %cfg_path,
-                    "API key loaded from plaintext config file. \
+                config_warning(&format!(
+                    "API key loaded from plaintext config file '{}'. \
                      For production use, set the SELFWARE_API_KEY environment variable \
-                     or store it in the OS keyring."
-                );
+                     or store it in the OS keyring (`selfware config set-key`).",
+                    cfg_path
+                ));
 
                 // In strict mode, plaintext keys on disk are not tolerated.
                 let env_strict = std::env::var("SELFWARE_STRICT_PERMISSIONS")
@@ -473,6 +583,23 @@ impl Config {
                     );
                 }
             }
+        }
+
+        // Missing key against a REMOTE endpoint: the run will fail with an
+        // upstream `401 No cookie auth credentials found` — say so now, with
+        // the concrete fix, instead of after a wasted round-trip.
+        if config.api_key.is_none() && !is_local_endpoint(&config.endpoint) {
+            config_warning(&format!(
+                "no API key configured for remote endpoint '{}' — requests will fail with 401. \
+                 Fix: export SELFWARE_API_KEY=<key>{}, or run `selfware config set-key <key>` \
+                 to store it in the OS keyring, or add `api_key = \"...\"` to your config file.",
+                config.endpoint,
+                if is_openrouter_endpoint(&config.endpoint) {
+                    " (or OPENROUTER_API_KEY)"
+                } else {
+                    ""
+                },
+            ));
         }
         // Suppress unused-variable warning; the value is consumed by the
         // match arms above and kept around only for clarity / future use.
@@ -528,12 +655,12 @@ impl Config {
         // such field before it can reach the Agent (which activates hooks / MCP /
         // permissions / yolo / post-edit at construction time).
         if let Some((path, keys)) = config.restrict_untrusted_project_config(&sources) {
-            warn!(
-                config = %path.display(),
-                ignored = %keys.join(", "),
-                "Untrusted project selfware.toml: ignored privileged settings. Run \
-                 `selfware trust` in this directory to enable them."
-            );
+            config_warning(&format!(
+                "Untrusted project selfware.toml '{}': ignored privileged settings [{}]. Run \
+                 `selfware trust` in this directory to enable them.",
+                path.display(),
+                keys.join(", ")
+            ));
         }
 
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
@@ -545,6 +672,22 @@ impl Config {
                 );
             }
         }
+
+        // Conservative context window for UNRECOGNIZED models: the 1M built-in
+        // default describes the shipped default model, not an arbitrary one —
+        // deriving a ~630k token budget from it overflows typical local
+        // contexts. When the user did not set `context_length` and no built-in
+        // profile matches the model, assume a conservative 32k. Explicit
+        // `context_length` (top-level or per-model) always wins, and
+        // `auto-config` / `unpack` write the real value detected from /models.
+        let context_length_explicit = raw_toml_content
+            .as_deref()
+            .map(Self::content_sets_context_length)
+            .unwrap_or(false);
+        if !context_length_explicit && match_profile(&config.model).is_none() {
+            config.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+        }
+
         if !token_budget_was_explicit {
             // Default token_budget to 60% of context_length — this is the usable
             // conversation budget for the ContextMap L1/L2/L3 file tracking.
@@ -741,6 +884,50 @@ impl Config {
                 );
             }
             self.agent.token_safety_margin = clamped_margin;
+        }
+    }
+
+    /// Apply the load-time derivations a generated config needs before it can
+    /// pass [`Config::validate`]: derive `token_budget` from `context_length`
+    /// when unset, then clamp the safety margin. Mirrors what `Config::load`
+    /// does after parsing so wizard output validates exactly the way a file
+    /// read back from disk would.
+    fn apply_generated_derivations(&mut self) {
+        if self.agent.token_budget == 0 {
+            self.agent.token_budget = self.context_length * 3 / 5;
+        }
+        self.normalize_agent_limits();
+    }
+
+    /// Validate this in-memory generated config the way the loader would.
+    /// Wizards (auto-config / unpack) call this before persisting so they can
+    /// never emit a config `Config::load` would reject.
+    pub fn validate_generated(&mut self) -> Result<()> {
+        self.apply_generated_derivations();
+        self.validate()
+            .context("generated config failed validation — refusing to write it")
+    }
+
+    /// Parse and validate a GENERATED config body exactly the way
+    /// `Config::load` would after reading it from disk. Wizards
+    /// (`init`, `unpack --save`) must run this before writing so they fail
+    /// loudly instead of emitting a file the loader rejects.
+    pub fn validate_generated_toml(content: &str) -> Result<()> {
+        let mut cfg: Config =
+            toml::from_str(content).context("generated config does not match the Config schema")?;
+        cfg.apply_generated_derivations();
+        cfg.validate()
+            .context("generated config failed validation — refusing to write it")?;
+        Ok(())
+    }
+
+    /// Path of the config file this `Config` was loaded from, if any.
+    /// Recorded by `Config::load` under a reserved provenance key; `None`
+    /// for `Config::default()` and hand-built configs.
+    pub fn loaded_config_path(&self) -> Option<&std::path::Path> {
+        match self.sources.get("__config_path") {
+            Some(ConfigSource::ConfigFile(p)) => Some(p.as_path()),
+            _ => None,
         }
     }
 
@@ -2299,6 +2486,7 @@ mod tests {
             args: vec![],
             env: Default::default(),
             init_timeout_secs: 30,
+            framing: Default::default(),
         }];
         config.agent.post_edit_test_command = Some("rm -rf /".into());
         config.yolo.enabled = true;
@@ -2367,5 +2555,283 @@ mod tests {
         assert!(restricted.is_none(), "trusted-origin values must be kept");
         assert_eq!(config.safety.permissions.len(), 1, "env grant preserved");
         assert_eq!(config.hooks.len(), 1, "non-checkout hooks preserved");
+    }
+
+    // =========================================================================
+    // OPENROUTER_API_KEY fallback (P0-6)
+    // =========================================================================
+
+    #[test]
+    fn test_openrouter_api_key_fallback_used_for_openrouter_endpoint() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "https://openrouter.ai/api/v1"
+            model = "z-ai/glm-5.2"
+            "#,
+            "or_fallback.toml",
+        );
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-test-key");
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.api_key.as_ref().map(|k| k.expose()),
+            Some("sk-or-test-key"),
+            "OPENROUTER_API_KEY must be honored against the openrouter.ai endpoint"
+        );
+        assert!(matches!(
+            config.sources.get("api_key"),
+            Some(ConfigSource::EnvVar(name)) if name == "OPENROUTER_API_KEY"
+        ));
+    }
+
+    #[test]
+    fn test_openrouter_api_key_ignored_for_other_endpoints() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "https://api.openai.com/v1"
+            model = "gpt-4"
+            "#,
+            "or_ignored.toml",
+        );
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-test-key");
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert!(
+            config.api_key.is_none(),
+            "OPENROUTER_API_KEY must NOT leak to a non-OpenRouter endpoint"
+        );
+    }
+
+    #[test]
+    fn test_openrouter_api_key_not_sent_to_lookalike_host() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "https://openrouter.ai.evil.example/api/v1"
+            model = "anything"
+            "#,
+            "or_lookalike.toml",
+        );
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-test-key");
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert!(
+            config.api_key.is_none(),
+            "a lookalike host must never receive the OpenRouter credential"
+        );
+    }
+
+    #[test]
+    fn test_selfware_api_key_wins_over_openrouter_api_key() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "https://openrouter.ai/api/v1"
+            model = "z-ai/glm-5.2"
+            "#,
+            "or_precedence.toml",
+        );
+        std::env::set_var("SELFWARE_API_KEY", "sk-selfware-wins");
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-loses");
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.api_key.as_ref().map(|k| k.expose()),
+            Some("sk-selfware-wins"),
+            "SELFWARE_API_KEY has priority over the OpenRouter fallback"
+        );
+    }
+
+    #[test]
+    fn test_missing_key_against_remote_endpoint_is_nonfatal() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "https://openrouter.ai/api/v1"
+            model = "z-ai/glm-5.2"
+            "#,
+            "or_no_key.toml",
+        );
+        // No key anywhere — load must still succeed (the fix hint is a
+        // warning printed at load time, not a hard error).
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert!(config.api_key.is_none());
+    }
+
+    // =========================================================================
+    // Conservative context_length for unknown models (P1-8)
+    // =========================================================================
+
+    #[test]
+    fn test_unknown_model_gets_conservative_context_length() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "some-random-local-model"
+            "#,
+            "unknown_model.toml",
+        );
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.context_length,
+            crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+            "unmatched model with no explicit context_length must not inherit the 1M default"
+        );
+        assert_eq!(
+            config.agent.token_budget,
+            crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH * 3 / 5,
+            "token budget derives from the conservative context"
+        );
+    }
+
+    #[test]
+    fn test_explicit_context_length_preserved_for_unknown_model() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "some-random-local-model"
+            context_length = 131072
+            "#,
+            "explicit_ctx.toml",
+        );
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(
+            config.context_length, 131072,
+            "an explicit context_length always wins"
+        );
+        assert_eq!(config.agent.token_budget, 131072 * 3 / 5);
+    }
+
+    #[test]
+    fn test_profile_matched_model_keeps_default_context_length() {
+        let _guard = clear_env();
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "qwen3.6-35b-a3b"
+            "#,
+            "matched_model.toml",
+        );
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert!(
+            config.matched_profile.is_some(),
+            "qwen3.6-* should match a built-in profile"
+        );
+        assert_eq!(
+            config.context_length,
+            default_context_length(),
+            "profile-recognized models keep the built-in context default"
+        );
+    }
+
+    // =========================================================================
+    // Wizard validate-before-write helpers (P0-7)
+    // =========================================================================
+
+    #[test]
+    fn test_validate_generated_toml_accepts_valid_wizard_output() {
+        let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "qwen3-coder"
+
+[safety]
+allowed_paths = ["."]
+"#;
+        Config::validate_generated_toml(content).unwrap();
+    }
+
+    #[test]
+    fn test_validate_generated_toml_rejects_zero_context_length() {
+        // The exact garbage `auto-config --save` used to write.
+        let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "m0"
+max_tokens = 8192
+context_length = 0
+temperature = 0.7
+
+[agent]
+token_budget = 0
+"#;
+        let err = Config::validate_generated_toml(content).unwrap_err();
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("context_length"),
+            "error chain should name the offending field: {}",
+            chain
+        );
+    }
+
+    #[test]
+    fn test_validate_generated_toml_derives_token_budget_sentinel() {
+        // token_budget = 0 is the serde sentinel for "derive at load time";
+        // the derivation must run before validation, like the loader does.
+        let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "m0"
+context_length = 32768
+
+[agent]
+token_budget = 0
+"#;
+        Config::validate_generated_toml(content).unwrap();
+    }
+
+    #[test]
+    fn test_validate_generated_toml_rejects_schema_mismatch() {
+        let err = Config::validate_generated_toml("endpoint = 42").unwrap_err();
+        assert!(err.to_string().contains("schema"), "{}", err);
+    }
+
+    #[test]
+    fn test_loaded_config_path_recorded_and_absent_for_default() {
+        let _guard = clear_env();
+        assert!(Config::default().loaded_config_path().is_none());
+        let (_dir, path) = write_temp_config(
+            r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "m"
+            "#,
+            "path_tracking.toml",
+        );
+        let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert_eq!(config.loaded_config_path(), Some(path.as_path()));
+    }
+
+    // =========================================================================
+    // Nested unknown-key check (P1-1, promoted to production)
+    // =========================================================================
+
+    #[test]
+    fn test_known_section_keys_derived_from_schema() {
+        let agent_keys = known_section_keys("agent").unwrap();
+        for key in ["max_iterations", "token_budget", "streaming"] {
+            assert!(
+                agent_keys.contains(key),
+                "agent section should know '{}'",
+                key
+            );
+        }
+        let safety_keys = known_section_keys("safety").unwrap();
+        assert!(safety_keys.contains("allowed_paths"));
+        // Dynamic / unrecognized sections get no nested check.
+        assert!(known_section_keys("models").is_none());
+        assert!(known_section_keys("extra_body").is_none());
+        assert!(known_section_keys("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_warn_unknown_keys_nested_typo_does_not_panic() {
+        // [agent] max_iteration (missing 's') is a silent no-op; the warning
+        // path must handle it (and every other shape) without panicking.
+        Config::warn_unknown_keys(
+            r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [agent]
+            max_iteration = 5
+            max_iterations = 50
+            "#,
+        );
     }
 }

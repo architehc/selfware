@@ -251,11 +251,7 @@ impl ApiClient {
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
-                    return Err(ApiError::HttpStatus {
-                        status: status.as_u16(),
-                        message: text,
-                    }
-                    .into());
+                    return Err(Self::http_status_error(&self.base_url, status, text));
                 }
                 Err(e) => {
                     if attempt < max_attempts {
@@ -596,11 +592,7 @@ impl ApiClient {
                             delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                             continue;
                         }
-                        return Err(ApiError::HttpStatus {
-                            status: status.as_u16(),
-                            message: text,
-                        }
-                        .into());
+                        return Err(Self::http_status_error(&self.base_url, status, text));
                     }
                     Err(e) => {
                         if attempt < max_attempts {
@@ -627,8 +619,40 @@ impl ApiClient {
         Err(ApiError::Network("Streaming request exhausted retries".to_string()).into())
     }
 
-    fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
         status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+    }
+
+    /// Build the terminal error for a non-retryable HTTP status. A 401 gets a
+    /// concrete remediation hint attached — a missing/wrong key otherwise
+    /// surfaces only as the upstream `401 No cookie auth credentials found`
+    /// with no indication of what to do.
+    pub(crate) fn http_status_error(
+        endpoint: &str,
+        status: reqwest::StatusCode,
+        body: String,
+    ) -> anyhow::Error {
+        let message = if status == reqwest::StatusCode::UNAUTHORIZED {
+            format!(
+                "{}\nHint: authentication failed against '{}'. Set SELFWARE_API_KEY{} in your \
+                 environment, run `selfware config set-key <key>` to store it in the OS keyring, \
+                 or add `api_key = \"...\"` to your config file.",
+                body.trim(),
+                endpoint,
+                if crate::config::is_openrouter_endpoint(endpoint) {
+                    " (or OPENROUTER_API_KEY)"
+                } else {
+                    ""
+                },
+            )
+        } else {
+            body
+        };
+        ApiError::HttpStatus {
+            status: status.as_u16(),
+            message,
+        }
+        .into()
     }
 
     /// Parse a `Retry-After` response header (delta-seconds form) into seconds.
@@ -891,13 +915,9 @@ impl ApiClient {
                         continue;
                     }
 
-                    let status_code = status.as_u16();
+                    let status_code = status;
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(ApiError::HttpStatus {
-                        status: status_code,
-                        message: error_text,
-                    }
-                    .into());
+                    return Err(Self::http_status_error(endpoint, status_code, error_text));
                 }
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {

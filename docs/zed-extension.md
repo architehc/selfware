@@ -12,7 +12,7 @@ Selfware includes a Zed editor extension that launches `selfware lsp` for editor
 
 1. Install selfware:
    ```bash
-   cargo install selfware
+   cargo install --git https://github.com/architehc/selfware
    ```
 
 2. Have a running LLM backend (see [Getting Started](getting-started.md))

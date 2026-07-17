@@ -201,6 +201,14 @@ unzip -o /tmp/selfware.zip -d /tmp/selfware && sudo mv /tmp/selfware/selfware /u
 > selfware depends on a Git-only crate (`llmfit-core`), so it is distributed via Git and
 > release binaries rather than crates.io.
 
+Compiling from source requires a few native packages. On Debian/Ubuntu:
+
+```bash
+sudo apt-get update && sudo apt-get install -y \
+  pkg-config libssl-dev cmake libdbus-1-dev \
+  libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+```
+
 ```bash
 cargo install --git https://github.com/architehc/selfware
 ```
@@ -208,11 +216,24 @@ cargo install --git https://github.com/architehc/selfware
 **Option C: Build from source**
 
 ```bash
+# Native build dependencies (Debian/Ubuntu) — as above
+sudo apt-get update && sudo apt-get install -y \
+  pkg-config libssl-dev cmake libdbus-1-dev \
+  libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
 git clone https://github.com/architehc/selfware.git
 cd selfware
-cargo build --release --all-features
+cargo build --release
 ./target/release/selfware --help
 ```
+
+> The default feature set already includes the TUI, resilience, execution
+> modes, log analysis, tokens, self-improvement, and consolidation modules —
+> you don't need `--all-features`. That flag is not covered by CI and
+> additionally enables the security-sensitive `hot-reload` module plus
+> test-only features (`system-tests`, `integration`) that require a live LLM
+> endpoint. To opt into the full optional set, use `--features extras` (this
+> is what CI tests and release builds use; note it does include `hot-reload`).
 
 **Option D: Docker**
 
@@ -338,13 +359,13 @@ selfware --tui
 
 Recent improvements landing in 0.3.0-beta:
 
-- **Config provenance.** `--show-config` now reports the *source* of every
-  setting (default / TOML / profile / env / CLI) so you can answer
+- **Config provenance.** `selfware config show` reports the *source* of every
+  setting (default / TOML / env / CLI) so you can answer
   "where is this temperature coming from?" in one command. See
   [docs/configuration.md](docs/configuration.md).
-- **Model profiles.** Define a `coder`, `vision`, or `quick` profile in
-  `[models.<name>]` and switch with `--model coder`. Vision-capable
-  profiles unlock screenshot tools automatically.
+- **Model profiles.** Define a `vision` (or other named) profile in
+  `[models.<name>]` alongside your top-level `endpoint`/`model`. Vision-capable
+  profiles are picked up automatically by the screenshot/vision tools.
 - **Per-turn artifacts.** Every agent turn is dumped to
   `~/.selfware/artifacts/turns/<session>/<turn>.json` with secrets
   redacted, so you can replay or diff a session after the fact.
@@ -740,7 +761,7 @@ Structured pre-task questions (language, framework, scope, testing preference) w
 
 ### Claude Code-like UI
 
-ESC to interrupt generation, fixed input line for typing anytime, work queue with delayed execution (`@5m run tests`), and full input history. The interactive experience is designed to feel responsive even with slow local models.
+ESC to interrupt generation, fixed input line for typing anytime, a work queue for messages typed while the agent is busy, and full input history. The interactive experience is designed to feel responsive even with slow local models.
 
 ### Visual Verification
 
@@ -1016,12 +1037,12 @@ bash system_tests/projecte2e/run_full_sab.sh
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `SELFWARE_ENDPOINT` | LLM API endpoint | `http://localhost:8000/v1` |
-| `SELFWARE_MODEL` | Model name | `Qwen/Qwen3-Coder-Next-FP8` |
+| `SELFWARE_ENDPOINT` | LLM API endpoint | `https://openrouter.ai/api/v1` |
+| `SELFWARE_MODEL` | Model name | `z-ai/glm-5.2` |
 | `SELFWARE_API_KEY` | API key (if required) | None |
 | `SELFWARE_MAX_TOKENS` | Max tokens per response | `65536` |
-| `SELFWARE_TEMPERATURE` | Sampling temperature | `0.7` |
-| `SELFWARE_TIMEOUT` | Request timeout (seconds) | `600` |
+| `SELFWARE_TEMPERATURE` | Sampling temperature | `1.0` |
+| `SELFWARE_TIMEOUT` | Per-step timeout (seconds) | `300` |
 | `SELFWARE_DEBUG` | Enable debug logging | Disabled |
 | `SELFWARE_ASCII` | Force ASCII-only mode | Disabled |
 | `NO_COLOR` | Disable colors (standard) | Disabled |
@@ -1101,11 +1122,11 @@ docs/               User documentation (8 guides)
 ### Run Tests
 
 ```bash
-# All tests (7,000+ tests)
-cargo test --all-features
+# All tests (7,000+ tests; same feature set CI uses)
+cargo test --features extras
 
 # Quick unit tests only
-cargo test --lib --all-features
+cargo test --lib --features extras
 
 # Evolution engine tests (95 tests)
 cargo test --features self-improvement evolution::
@@ -1129,9 +1150,9 @@ cargo test --features integration
 ### Code Quality
 
 ```bash
-cargo clippy --all-features -- -D warnings
+cargo clippy --all-targets --features extras -- -D warnings
 cargo fmt -- --check
-cargo llvm-cov --lib --all-features --summary-only
+cargo llvm-cov --lib --features extras --summary-only
 ```
 
 ---

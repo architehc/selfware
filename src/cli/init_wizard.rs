@@ -299,6 +299,29 @@ allowed_paths = {}
     )
 }
 
+/// Probe whether something is listening on the endpoint's host:port.
+/// TCP-connect only — no HTTP, no async — so it is safe to call from the
+/// sync wizard. A `false` result means "nothing answered in time", i.e. the
+/// endpoint is almost certainly dead; it does not prove the URL path is
+/// right, only that a server is (not) there.
+fn probe_endpoint_tcp(endpoint: &str, timeout: std::time::Duration) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    let Ok(url) = url::Url::parse(endpoint) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port_or_known_default() else {
+        return false;
+    };
+    let Ok(mut addrs) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.any(|addr| TcpStream::connect_timeout(&addr, timeout).is_ok())
+}
+
 fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &str) -> Result<()> {
     use std::path::PathBuf;
 
@@ -329,12 +352,49 @@ fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &st
 
     let content = build_config_content(endpoint, model, allowed_paths);
 
+    // Never write a config selfware itself would reject: validate the exact
+    // TOML body the way the loader would after reading it from disk, and fail
+    // loudly instead of persisting garbage.
+    crate::config::Config::validate_generated_toml(&content)?;
+
+    // Probe the endpoint before declaring success — a config pointing at a
+    // dead endpoint is the most common first-run failure. TCP-connect only
+    // (no HTTP, no async runtime), so this is safe in the sync wizard.
+    let endpoint_reachable = probe_endpoint_tcp(endpoint, std::time::Duration::from_secs(2));
+
     std::fs::write(&config_path, &content)?;
     wizard_print!(
         "  {} Configuration saved to {}",
         Glyphs::bloom(),
         config_path.display()
     );
+
+    // The new project-local file shadows any global config in this directory —
+    // name that explicitly so a working global setup doesn't look "lost".
+    if let Some(home_config) = dirs::home_dir().map(|h| h.join(".config/selfware/config.toml")) {
+        if home_config.is_file() {
+            wizard_print!(
+                "  {} Note: {} takes precedence over your global config ({}) in this directory.",
+                Glyphs::frost(),
+                config_path.display(),
+                home_config.display()
+            );
+        }
+    }
+
+    if endpoint_reachable {
+        wizard_print!("  {} Endpoint {} is reachable.", Glyphs::bloom(), endpoint);
+    } else {
+        wizard_print!();
+        wizard_print!(
+            "  {} WARNING: could not reach {} — the config was written UNVERIFIED.",
+            Glyphs::frost(),
+            endpoint
+        );
+        wizard_print!(
+            "     Start your LLM server (or fix the endpoint), then verify with `selfware llm-doctor`."
+        );
+    }
     wizard_print!();
     // Echo the run command for the mode the user picked — the mode isn't
     // persisted (see the config comment), so tell them exactly how to get it.
@@ -384,5 +444,43 @@ mod tests {
             !content.contains("api_key"),
             "config must never contain the api key: {content}"
         );
+    }
+
+    #[test]
+    fn generated_config_passes_loader_validation() {
+        // P0-7: the wizard must never emit a config selfware rejects. Every
+        // endpoint/model variant the wizard offers goes through the same
+        // validation the loader applies on disk reads.
+        for (endpoint, model) in [
+            ("http://127.0.0.1:1234/v1", "qwen3-coder"),
+            ("https://api.openai.com/v1", "gpt-4"),
+            ("https://openrouter.ai/api/v1", "z-ai/glm-5.2"),
+        ] {
+            let content = build_config_content(endpoint, model, "[\".\"]");
+            crate::config::Config::validate_generated_toml(&content).unwrap_or_else(|e| {
+                panic!("generated config for {} must validate: {}", endpoint, e)
+            });
+        }
+    }
+
+    #[test]
+    fn probe_endpoint_tcp_detects_listener_and_dead_port() {
+        // A bound listener is reachable; a closed loopback port is not.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(super::probe_endpoint_tcp(
+            &format!("http://127.0.0.1:{}/v1", port),
+            std::time::Duration::from_millis(500)
+        ));
+        // Port 1 on loopback is (virtually) always closed → fast `false`.
+        assert!(!super::probe_endpoint_tcp(
+            "http://127.0.0.1:1/v1",
+            std::time::Duration::from_millis(200)
+        ));
+        // Unparseable endpoint → false, never a panic.
+        assert!(!super::probe_endpoint_tcp(
+            "not a url",
+            std::time::Duration::from_millis(50)
+        ));
     }
 }

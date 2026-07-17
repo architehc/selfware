@@ -1660,8 +1660,11 @@ temperature = 0.3
     assert_eq!(config.endpoint, "http://localhost:9999/v1");
     assert_eq!(config.model, "loaded-model");
     assert_eq!(config.max_tokens, 2048);
-    // token_budget defaults to context_length * 3 / 5 = 1048576 * 3 / 5 = 629145
-    assert_eq!(config.agent.token_budget, 1048576 * 3 / 5);
+    // "loaded-model" matches no built-in profile and the file sets no explicit
+    // context_length → the conservative unknown-model context (32k) applies.
+    assert_eq!(config.context_length, 32768);
+    // token_budget defaults to context_length * 3 / 5 = 32768 * 3 / 5 = 19660
+    assert_eq!(config.agent.token_budget, 32768 * 3 / 5);
     // default safety_margin (8192) < token_budget, so no clamping
     assert_eq!(config.agent.token_safety_margin, 8192);
     assert!((config.temperature - 0.3).abs() < f32::EPSILON);
@@ -1719,8 +1722,11 @@ max_tokens = 4096
     std::env::remove_var("SELFWARE_MAX_TOKENS");
 
     assert_eq!(config.max_tokens, 8192);
-    // token_budget defaults to context_length * 3 / 5 = 1048576 * 3 / 5 = 629145
-    assert_eq!(config.agent.token_budget, 1048576 * 3 / 5);
+    // "loaded-model" matches no built-in profile and the file sets no explicit
+    // context_length → the conservative unknown-model context (32k) applies.
+    assert_eq!(config.context_length, 32768);
+    // token_budget defaults to context_length * 3 / 5 = 32768 * 3 / 5 = 19660
+    assert_eq!(config.agent.token_budget, 32768 * 3 / 5);
     // default safety_margin (8192) < token_budget, so no clamping
     assert_eq!(config.agent.token_safety_margin, 8192);
 }

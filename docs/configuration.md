@@ -10,54 +10,61 @@ Selfware is configured via TOML files. Config is loaded from (in order of priori
 ## Precedence Chain
 
 Once a config file is selected, individual *values* are resolved through a
-five-layer cascade. Higher layers override lower layers:
+cascade. Higher layers override lower layers:
 
 ```
-defaults  <  toml file  <  [models.<name>] profile  <  env var  <  CLI flag
+built-in defaults  <  model-defaults profile  <  TOML file  <  env var  <  CLI flag
 ```
 
 | Layer | Example source | Notes |
 |-------|----------------|-------|
 | 1. Built-in defaults | `default_endpoint()`, `default_temperature()` | Compiled in |
-| 2. TOML file | `selfware.toml` top-level fields | Loaded once |
-| 3. Model profile | `[models.coder]` section | Selected by `--model coder` |
+| 2. Model-defaults profile | Built-in rule matched by the configured model name (e.g. GLM-5.2, Qwen3.6) | Fills only fields you did **not** set explicitly via TOML or env |
+| 3. TOML file | `selfware.toml` top-level fields | Loaded once |
 | 4. Env var | `SELFWARE_TEMPERATURE=0.2` | Per-process |
-| 5. CLI flag | `selfware --temperature 0.1` | Per-invocation |
+| 5. CLI flag | `selfware --max-turns 20` | Per-invocation; only some settings have flags |
+
+There are no `--endpoint` / `--model` / `--temperature` CLI flags — use the
+`SELFWARE_ENDPOINT` / `SELFWARE_MODEL` / `SELFWARE_TEMPERATURE` environment
+variables for per-invocation overrides. The CLI flags that do adjust
+configuration are `--mode` / `-y` / `--daemon` (execution mode),
+`--profile <name>` (built-in profiles `architect`, `swarm-8`, `batch-16`,
+`batch-32`, `visual`, `quick` — overrides `max_tokens`, `temperature`,
+iteration and timeout limits), `--max-turns`, `--max-budget-tokens`,
+`--max-wall-secs`, `--max-cost-usd` (run bounds), and `--theme` / `--compact`
+/ `--verbose` / `--show-tokens` (display).
 
 For example, given:
 
 ```toml
 # selfware.toml
 endpoint    = "http://localhost:8000/v1"
+model       = "Qwen/Qwen3.5-27B"
 temperature = 0.7
-
-[models.coder]
-endpoint    = "http://gpu-rig:8000/v1"
-temperature = 0.3
 ```
 
 ```bash
-SELFWARE_TEMPERATURE=0.5 selfware --model coder --temperature 0.1 run "..."
+SELFWARE_TEMPERATURE=0.5 selfware --max-turns 20 run "..."
 ```
 
 …the agent ends up with:
 
-- `endpoint = "http://gpu-rig:8000/v1"` *(from `[models.coder]`; CLI gave no `--endpoint`)*
-- `temperature = 0.1` *(from CLI; beats env var, which beats profile, which beats TOML)*
+- `endpoint = "http://localhost:8000/v1"` and `model = "Qwen/Qwen3.5-27B"` *(from the TOML file; no env var or CLI flag overrides them)*
+- `temperature = 0.5` *(from the env var, which beats the TOML value)*
+- `agent.max_iterations = 20` *(from the `--max-turns` CLI flag)*
 
-The (planned) `Config::provenance(field)` API exposes the source of every
-value at runtime, so `--show-config` can print "endpoint: gpu-rig (from
-profile.coder)".
+Run `selfware config show` to print the effective configuration annotated
+with the source (default / TOML / env / CLI) of every value.
 
 ## Top-Level Settings
 
 ```toml
 # API endpoint URL (must start with http:// or https://)
-# Default: "http://localhost:8000/v1"
+# Default: "https://openrouter.ai/api/v1"
 endpoint = "http://localhost:8000/v1"
 
 # Model identifier sent to the API
-# Default: "Qwen/Qwen3-Coder-Next-FP8"
+# Default: "z-ai/glm-5.2"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 
 # Maximum tokens in the model response
@@ -110,7 +117,7 @@ max_iterations = 100
 step_timeout_secs = 300
 
 # Token budget for a single session
-# Default: 500000
+# Default: 0 (derived at load time as 60% of context_length)
 token_budget = 500000
 
 # Use native function calling (requires backend support like sglang --tool-call-parser)
@@ -152,6 +159,9 @@ denied_paths = [
 
 # Git branches that cannot be pushed to directly
 # Default: ["main", "master"]
+# Note: this guards `git push` only (the git_push tool and explicit
+# `git push <remote> <branch>` via shell_exec) — committing directly on a
+# protected branch is NOT blocked.
 protected_branches = ["main", "master"]
 
 # Tools that require user confirmation before execution
@@ -365,7 +375,12 @@ test_retry_iterations = 2
 
 ## `[models.*]` -- Named Model Profiles
 
-Define multiple LLM backends for different purposes:
+Define multiple LLM backends for different purposes. The top-level
+`endpoint`/`model`/... fields define the primary (`default`) profile; named
+profiles are picked up automatically by the features that need them — for
+example, the vision/screenshot tools use a `[models.vision]` profile when one
+is defined and vision-capable. There is no CLI flag to switch between named
+profiles.
 
 ```toml
 [models.coder]
@@ -395,7 +410,7 @@ Profile fields:
 - `max_tokens` -- max response tokens (default: 65536)
 - `temperature` -- sampling temperature (default: 1.0)
 - `modalities` -- `["text"]` or `["text", "vision"]` (default: `["text"]`)
-- `context_length` -- context window in tokens (default: 131072)
+- `context_length` -- context window in tokens (default: 1048576)
 - `extra_body` -- per-profile extra request fields
 
 ## `[resources]` -- Resource Limits
@@ -421,25 +436,32 @@ config_keys = []
 
 ## Feature Flags (Cargo)
 
-Selfware uses Cargo feature flags to gate optional modules. Enable them with `cargo install selfware --features <flag>` or `cargo build --features <flag>`.
+Selfware uses Cargo feature flags to gate optional modules. Enable them with `cargo build --features <flag>` (or `cargo install --git https://github.com/architehc/selfware --features <flag>`).
+
+Enabled by default: `tui`, `resilience`, `execution-modes`, `log-analysis`, `tokens`, `self-improvement`, `consolidation`.
 
 | Feature | Description |
 |---------|-------------|
-| `extras` | Convenience flag that enables all optional modules below |
+| `extras` | Convenience flag: all default modules plus `hot-reload`, `vlm-bench`, `bench-harness` |
 | `tui` | TUI dashboard mode with animations and demos |
-| `workflows` | Workflow automation and parallel execution |
 | `resilience` | Error recovery and self-healing |
 | `execution-modes` | Auto-edit, yolo, daemon modes |
-| `cache` | Response caching |
 | `log-analysis` | Log file analysis tools |
 | `tokens` | Token counting and budget tracking |
 | `self-improvement` | Evolution and self-improvement daemon |
-| `hot-reload` | Hot-reload config on file change |
+| `consolidation` | Memory consolidation ("sleep") system |
+| `hot-reload` | Dynamic library hot-reload (security-sensitive, off by default) |
 | `vlm-bench` | Vision LLM benchmarking |
+| `bench-harness` | Concurrent benchmark harness for throughput testing |
+| `redis` | Redis backend for workflow state (requires a Redis server) |
+| `vendored-openssl` | Vendored OpenSSL for cross-compilation (used by release builds) |
 | `system-tests` | System-level E2E tests (require a live LLM endpoint; not included in `extras`) |
 | `integration` | Integration tests (not included in `extras`) |
+| `context-select`, `tool-verify` | Benchmark experiments under `experiments/` |
 
 The `system-tests` feature is intended for manual testing against a live backend. It is not enabled by default or by `extras` because it requires a running LLM endpoint.
+
+Avoid `--all-features`: it additionally compiles the test-only features above and is not covered by CI (which builds and tests with `--features extras`).
 
 ## Environment Variables
 

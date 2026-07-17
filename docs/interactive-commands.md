@@ -73,34 +73,17 @@ selfware --resume-session my-session
 
 ## Work Queue
 
-Queue messages to be processed after the current task completes. The queue supports delayed execution and priority levels.
+Queue messages to be processed after the current task completes. Messages you type while the agent is working are queued automatically; you can also enqueue one explicitly.
 
-| Command | Alias | Description |
-|---------|-------|-------------|
-| `/queue` | `/q` | Show all queued items |
-| `/queue clear` | `/q clear` | Clear all queued items |
-| `/queue next` | `/q next` | Peek at the next item |
+| Command | Description |
+|---------|-------------|
+| `/queue <message>` | Enqueue a message for later processing |
+| `/queue` | Show queue usage and pending count |
+| `/queue list` | Show all queued messages |
+| `/queue clear` | Clear all queued messages |
+| `/queue drop <n>` | Remove a queued message by index (see `/queue list`) |
 
-### Delayed Execution
-
-Prefix a message with `@<duration>` to delay its execution:
-
-```
-@5m run tests
-@30s check the build
-@2h deploy to staging
-```
-
-Supported units: `s` (seconds), `m` (minutes), `h` (hours). Delayed items become eligible for execution after the specified duration elapses.
-
-### Priority Queue
-
-Prefix a message with `!` to mark it as high-priority. High-priority items are processed before normal items:
-
-```
-!fix this compilation error
-!run the failing test
-```
+> **Note:** `/q` is **not** a queue alias — it exits the session (see [Exiting](#exiting)). A leading `!` runs a shell command (see [Shell Escape](#shell-escape)), so it cannot be used to mark priority.
 
 ## Code Analysis
 
@@ -191,4 +174,5 @@ Type any of:
 - `quit`
 - `/exit`
 - `/quit`
+- `/q`
 - `Ctrl+C` twice (double-tap)

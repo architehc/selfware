@@ -2,10 +2,28 @@
 
 use crate::config::DiskConfig;
 use crate::errors::ResourceError;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
 use tracing::{debug, info, warn};
+
+/// Create a state directory at the point of first write.
+///
+/// `DiskManager::new` deliberately does NOT create its checkpoints/logs/models
+/// directories up front: every CLI command (even read-only ones like
+/// `selfware config show` or `selfware unpack --scan`) constructs a
+/// `DiskManager` via the resource monitor, and eager creation polluted the
+/// user's working directory with empty `checkpoints/`, `logs/`, `models/`
+/// dirs. Creation happens here instead, only when something actually writes.
+async fn ensure_dir(path: &Path) -> Result<(), ResourceError> {
+    fs::create_dir_all(path).await.map_err(|e| {
+        ResourceError::DiskExhausted(format!(
+            "Failed to create directory {}: {}",
+            path.display(),
+            e
+        ))
+    })
+}
 
 /// Disk manager for storage management
 pub struct DiskManager {
@@ -43,7 +61,12 @@ impl StorageEstimate {
 }
 
 impl DiskManager {
-    /// Create a new disk manager
+    /// Create a new disk manager.
+    ///
+    /// Resolves the state-directory paths (env overrides or `./checkpoints`,
+    /// `./logs`, `./models` defaults) but does NOT create them: directories
+    /// are created lazily at the point of first write (see [`ensure_dir`]),
+    /// so read-only commands never pollute the working directory.
     pub async fn new(config: &DiskConfig) -> Result<Self, ResourceError> {
         let checkpoints_path = std::env::var("SELFWARE_CHECKPOINT_DIR")
             .map(PathBuf::from)
@@ -57,15 +80,6 @@ impl DiskManager {
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./models"));
 
-        // Ensure directories exist
-        for path in [&checkpoints_path, &logs_path, &models_path] {
-            if !path.exists() {
-                fs::create_dir_all(path).await.map_err(|e| {
-                    ResourceError::DiskExhausted(format!("Failed to create directory: {}", e))
-                })?;
-            }
-        }
-
         info!(
             checkpoints = %checkpoints_path.display(),
             logs = %logs_path.display(),
@@ -73,13 +87,30 @@ impl DiskManager {
             "Disk manager initialized"
         );
 
-        Ok(Self {
+        Ok(Self::with_paths(
+            config,
+            checkpoints_path,
+            logs_path,
+            models_path,
+        ))
+    }
+
+    /// Construct a manager over explicit state-directory paths.
+    ///
+    /// The directories are not created here; see [`ensure_dir`].
+    fn with_paths(
+        config: &DiskConfig,
+        checkpoints_path: PathBuf,
+        logs_path: PathBuf,
+        models_path: PathBuf,
+    ) -> Self {
+        Self {
             config: config.clone(),
             checkpoints_path,
             logs_path,
             models_path,
             models_size_cache: std::sync::Mutex::new(None),
-        })
+        }
     }
 
     /// Get disk usage
@@ -248,6 +279,13 @@ impl DiskManager {
 
         let mut new_path = path.clone();
         new_path.set_extension("chk.zst");
+
+        // Lazy state-dir creation: the target directory is created at the
+        // point of first write, never at startup. (In practice the dir
+        // already exists because `path` was found inside it.)
+        if let Some(parent) = new_path.parent() {
+            ensure_dir(parent).await?;
+        }
 
         fs::write(&new_path, &compressed).await.map_err(|e| {
             ResourceError::DiskExhausted(format!("Failed to write compressed file: {}", e))
@@ -617,5 +655,109 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ---- Lazy state-dir creation tests (cwd-pollution fix) ----
+
+    /// Constructing a DiskManager must NOT create the checkpoints/logs/models
+    /// directories: read-only commands (`config show`, `unpack --scan`) build
+    /// one via the resource monitor and must leave the working dir untouched.
+    #[tokio::test]
+    async fn test_construction_does_not_create_state_dirs() {
+        let root = std::env::temp_dir().join(format!("selfware_lazy_new_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let checkpoints = root.join("checkpoints");
+        let logs = root.join("logs");
+        let models = root.join("models");
+
+        let config = DiskConfig::default();
+        let dm =
+            DiskManager::with_paths(&config, checkpoints.clone(), logs.clone(), models.clone());
+        drop(dm);
+
+        assert!(
+            !root.exists(),
+            "no state dirs may be created at construction, found: {:?}",
+            root
+        );
+        assert!(!checkpoints.exists());
+        assert!(!logs.exists());
+        assert!(!models.exists());
+    }
+
+    /// The write-side helper creates the directory on demand (and is
+    /// idempotent), so the first actual write still succeeds.
+    #[tokio::test]
+    async fn test_ensure_dir_creates_on_demand() {
+        let root =
+            std::env::temp_dir().join(format!("selfware_lazy_ensure_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let nested = root.join("checkpoints").join("task-1");
+
+        assert!(!nested.exists());
+        ensure_dir(&nested).await.unwrap();
+        assert!(nested.is_dir());
+        // Idempotent: a second write to the same dir is fine.
+        ensure_dir(&nested).await.unwrap();
+        assert!(nested.is_dir());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Maintenance is a read/clean path over the state dirs: it must tolerate
+    /// them being absent (lazy creation) and must not recreate them.
+    #[tokio::test]
+    async fn test_maintenance_does_not_create_missing_dirs() {
+        let root = std::env::temp_dir().join(format!("selfware_lazy_maint_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let checkpoints = root.join("checkpoints");
+        let logs = root.join("logs");
+        let models = root.join("models");
+
+        let config = DiskConfig::default();
+        let dm =
+            DiskManager::with_paths(&config, checkpoints.clone(), logs.clone(), models.clone());
+
+        dm.perform_maintenance()
+            .await
+            .expect("maintenance must tolerate missing state dirs");
+
+        assert!(!checkpoints.exists());
+        assert!(!logs.exists());
+        assert!(!models.exists());
+    }
+
+    /// The write path still works end to end: compressing an old checkpoint
+    /// produces the `.chk.zst` next to it and removes the original.
+    #[tokio::test]
+    async fn test_compress_file_writes_on_demand() {
+        let root =
+            std::env::temp_dir().join(format!("selfware_lazy_compress_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let checkpoints = root.join("checkpoints");
+        std::fs::create_dir_all(&checkpoints).unwrap();
+        let original = checkpoints.join("old_task.json");
+        std::fs::write(&original, b"{\"some\":\"checkpoint\"}").unwrap();
+
+        let config = DiskConfig::default();
+        let dm = DiskManager::with_paths(
+            &config,
+            checkpoints.clone(),
+            root.join("logs"),
+            root.join("models"),
+        );
+
+        dm.compress_file(&original).await.unwrap();
+
+        let compressed = checkpoints.join("old_task.chk.zst");
+        assert!(compressed.exists(), "compressed file must be written");
+        assert!(!original.exists(), "original must be removed");
+        // Untouched state dirs stay absent.
+        assert!(!root.join("logs").exists());
+        assert!(!root.join("models").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

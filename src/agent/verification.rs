@@ -377,6 +377,24 @@ fn task_mentions_artifact_path(task: &str, raw_path: &str) -> bool {
         || (!basename.is_empty() && task.contains(basename))
 }
 
+/// True when the task is explicitly about writing or fixing tests, so a
+/// test-only patch is the requested deliverable rather than a missing source
+/// fix. Shared by the `TestOnlyPatch` gate and the workflow validator so both
+/// apply the same exemption.
+fn task_is_test_writing_task(task_desc: &str) -> bool {
+    let task_lower = task_desc.to_lowercase();
+    task_lower.contains("test")
+        && (task_lower.contains("write")
+            || task_lower.contains("add")
+            || task_lower.contains("create")
+            || task_lower.contains("coverage")
+            || task_lower.contains("regression")
+            || task_lower.contains("reproducer")
+            || task_lower.contains("fix test")
+            || task_lower.contains("update test")
+            || task_lower.contains("improve"))
+}
+
 fn task_has_source_change_intent(task: &str) -> bool {
     let lower = task.to_ascii_lowercase();
     let mentions_extension = |extension: &str| {
@@ -801,12 +819,89 @@ impl Agent {
         })
     }
 
+    /// Task text for completion-gate classification: the live task context
+    /// when set, otherwise the checkpoint's original task description (the
+    /// same fallback `non_code_artifact_readback` uses).
+    fn completion_gate_task(&self) -> &str {
+        if self.current_task_context.trim().is_empty() {
+            self.current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_description.as_str())
+                .unwrap_or("")
+        } else {
+            self.task_context_for_classification()
+        }
+    }
+
+    /// Paths changed by commits created during this run. A task whose final
+    /// step is `git commit` leaves a clean working tree, so `git diff HEAD`
+    /// is empty even though the change landed; without this evidence the
+    /// EmptyDiff gate refuses the run forever. Only commits with a committer
+    /// date at or after the checkpoint's creation time count, so pre-existing
+    /// history is never mistaken for the agent's work. The `--since` bound
+    /// (with slack) is purely a performance guard; the per-commit timestamp
+    /// filter is authoritative.
+    async fn committed_paths_for_completion_gate(&self) -> Option<Vec<String>> {
+        let checkpoint = self.current_checkpoint.as_ref()?;
+        let run_start = checkpoint.created_at.timestamp();
+        let since = checkpoint.created_at - chrono::Duration::seconds(60);
+        let root = super::current_project_root();
+        // Async process spawn — see diff_paths_for_completion_gate.
+        let output = tokio::process::Command::new("git")
+            .args([
+                "log",
+                "--pretty=format:--%ct",
+                "--name-only",
+                &format!("--since={}", since.to_rfc3339()),
+                "--",
+            ])
+            .current_dir(root)
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut commit_ts: i64 = 0;
+        let mut paths: Vec<String> = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| {
+                if let Some(ts) = line.strip_prefix("--") {
+                    commit_ts = ts.parse().unwrap_or(0);
+                    return None;
+                }
+                (commit_ts >= run_start).then(|| line.to_string())
+            })
+            .collect();
+        paths.sort();
+        paths.dedup();
+        Some(paths)
+    }
+
     async fn mutation_completion_gate(&self) -> Option<String> {
         if !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification()) {
             return None;
         }
 
+        let task = self.completion_gate_task();
+
         if let Some(paths) = self.diff_paths_for_completion_gate().await {
+            // A task whose final step is `git commit` leaves a clean working
+            // tree, so `git diff HEAD` is empty even though the change landed.
+            // Fall back to paths from commits created during this run before
+            // declaring the diff empty — otherwise committed work is refused
+            // forever as EmptyDiff.
+            let paths = if paths.is_empty() {
+                self.committed_paths_for_completion_gate()
+                    .await
+                    .unwrap_or(paths)
+            } else {
+                paths
+            };
+
             if paths.is_empty() {
                 return Some(
                     "EmptyDiff: this task requires a code change, but `git diff` is empty. \
@@ -820,7 +915,9 @@ impl Agent {
                 .any(|path| Self::gate_path_is_source(path) && !Self::gate_path_is_test(path));
             let all_test_files = paths.iter().all(|path| Self::gate_path_is_test(path));
 
-            if all_test_files {
+            // A test-only patch is the requested deliverable when the task is
+            // explicitly about writing/fixing tests ("write tests for X").
+            if all_test_files && !task_is_test_writing_task(task) {
                 return Some(format!(
                     "TestOnlyPatch: the current diff only modifies test files ({:?}). \
                      SWE-style repair tasks require a source-code fix. Edit the implementation file before completing.",
@@ -828,7 +925,18 @@ impl Agent {
                 ));
             }
 
-            if !has_source_edit {
+            // The supported-source list exists for SWE-bench repair tasks. When
+            // the task itself names the changed artifact (e.g. "update
+            // deploy.sh"), that file IS the deliverable — demanding a
+            // supported-language source edit livelocks the run. An all-test
+            // diff reaching this point passed the test-writing exemption
+            // above, so the tests are the deliverable too.
+            if !has_source_edit
+                && !all_test_files
+                && !paths
+                    .iter()
+                    .any(|path| task_mentions_artifact_path(task, path))
+            {
                 return Some(format!(
                     "NoSourceEdit: the current diff does not include a supported source file ({:?}). \
                      Edit source code in Python, JavaScript, TypeScript, Java, C#, C/C++, SQL, Go, Swift, or Rust before completing.",
@@ -902,6 +1010,26 @@ impl Agent {
             ));
         }
 
+        // Non-code artifacts use exact same-path readback rather than a build
+        // or supported-source diff. This is checkpoint-based, so a newly
+        // created, still-untracked `.txt` file is handled correctly. Mixed
+        // source+artifact tasks continue through every existing source gate.
+        //
+        // This runs BEFORE the min-steps check so a trivial task that is
+        // already complete AND verified (e.g. one `file_write` plus one
+        // read-back) can stop at step 1 instead of being taxed up to
+        // `min_completion_steps` with refusals of correct behavior. It stays
+        // after the required-tools check so an explicit tool requirement
+        // still wins.
+        if let Some(readback) = self.non_code_artifact_readback() {
+            if !readback.missing_paths.is_empty() {
+                return Some(artifact_readback_guidance(&readback.missing_paths));
+            }
+            if readback.artifact_only {
+                return None;
+            }
+        }
+
         let step_count = self.loop_control.current_step();
         let min_steps = self.config.agent.min_completion_steps;
         // A read-only task (review / analysis / answer) has nothing to write or
@@ -954,19 +1082,6 @@ impl Agent {
                  Use the tools that are available and answer directly from their results instead of giving a capability disclaimer."
                     .to_string(),
             );
-        }
-
-        // Non-code artifacts use exact same-path readback rather than a build
-        // or supported-source diff. This is checkpoint-based, so a newly
-        // created, still-untracked `.txt` file is handled correctly. Mixed
-        // source+artifact tasks continue through every existing source gate.
-        if let Some(readback) = self.non_code_artifact_readback() {
-            if !readback.missing_paths.is_empty() {
-                return Some(artifact_readback_guidance(&readback.missing_paths));
-            }
-            if readback.artifact_only {
-                return None;
-            }
         }
 
         // Reject completion if the last assistant response contains code that
@@ -1152,19 +1267,7 @@ impl Agent {
         // (unless the task is explicitly about writing tests)
         if all_test_files && !needs_source_change {
             // Check if task is explicitly about writing tests
-            let task_lower = task_desc.to_lowercase();
-            let is_test_task = task_lower.contains("test")
-                && (task_lower.contains("write")
-                    || task_lower.contains("add")
-                    || task_lower.contains("create")
-                    || task_lower.contains("coverage")
-                    || task_lower.contains("regression")
-                    || task_lower.contains("reproducer")
-                    || task_lower.contains("fix test")
-                    || task_lower.contains("update test")
-                    || task_lower.contains("improve"));
-
-            if !is_test_task {
+            if !task_is_test_writing_task(&task_desc) {
                 warn!(
                     "Workflow validator: only test files edited ({:?}), no source files modified",
                     edited_files
@@ -1655,7 +1758,15 @@ mod tests {
         }
 
         async fn artifact_agent(task: &str, tool_calls: Vec<ToolCallLog>) -> Agent {
-            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            artifact_agent_with_config(test_config(), task, tool_calls).await
+        }
+
+        async fn artifact_agent_with_config(
+            config: Config,
+            task: &str,
+            tool_calls: Vec<ToolCallLog>,
+        ) -> Agent {
+            let mut agent = Agent::new(config).await.expect("agent should build");
             let mut checkpoint = TaskCheckpoint::new("artifact_task".to_string(), task.to_string());
             for tc in tool_calls {
                 checkpoint.log_tool_call(tc);
@@ -1664,6 +1775,71 @@ mod tests {
             agent.current_checkpoint = Some(checkpoint);
             agent.has_written_any_file = true;
             agent.last_assistant_response = "Done.".to_string();
+            agent
+        }
+
+        /// Run a git command in `dir` with a fixed identity; panics on failure.
+        fn git(dir: &Path, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "gate-test")
+                .env("GIT_AUTHOR_EMAIL", "gate-test@example.com")
+                .env("GIT_COMMITTER_NAME", "gate-test")
+                .env("GIT_COMMITTER_EMAIL", "gate-test@example.com")
+                .status()
+                .expect("git should be available for gate tests");
+            assert!(
+                status.success(),
+                "git {:?} failed in {}",
+                args,
+                dir.display()
+            );
+        }
+
+        /// Init a repo in a fresh temp dir with `files` committed as the base
+        /// revision, chdir into it (serialized, auto-restored), and return the
+        /// dir guard + cwd guard. The base commit is dated far in the past so
+        /// the committed-work fallback never confuses it with run work.
+        fn git_repo(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::test_support::CwdGuard) {
+            let dir = tempfile::tempdir().unwrap();
+            git(dir.path(), &["init", "-q"]);
+            for (path, content) in files {
+                let full = dir.path().join(path);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent).unwrap();
+                }
+                std::fs::write(full, content).unwrap();
+            }
+            git(dir.path(), &["add", "-A"]);
+            let status = std::process::Command::new("git")
+                .args(["commit", "-q", "-m", "base"])
+                .current_dir(dir.path())
+                .env("GIT_AUTHOR_NAME", "gate-test")
+                .env("GIT_AUTHOR_EMAIL", "gate-test@example.com")
+                .env("GIT_COMMITTER_NAME", "gate-test")
+                .env("GIT_COMMITTER_EMAIL", "gate-test@example.com")
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .status()
+                .expect("git should be available for gate tests");
+            assert!(
+                status.success(),
+                "base commit failed in {}",
+                dir.path().display()
+            );
+            let guard = crate::test_support::CwdGuard::enter(dir.path());
+            (dir, guard)
+        }
+
+        /// An agent whose task requires a mutation, for mutation-gate tests.
+        async fn mutation_task_agent(task: &str) -> Agent {
+            let mut agent = Agent::new(test_config()).await.expect("agent should build");
+            agent.current_task_context = task.to_string();
+            agent.current_checkpoint = Some(TaskCheckpoint::new(
+                "mutation_task".to_string(),
+                task.to_string(),
+            ));
             agent
         }
 
@@ -1955,6 +2131,204 @@ mod tests {
                     agent.task_context_for_classification()
                 ),
                 "a read-only task must stay read-only despite a file_edit tool appendix"
+            );
+        }
+
+        // P0-2a regression: the NoSourceEdit supported-language list exists for
+        // SWE-bench repair tasks. When the task itself names the changed
+        // artifact ("update deploy.sh"), that file IS the deliverable and the
+        // gate must not livelock the run demanding a supported-language edit.
+        #[tokio::test]
+        async fn no_source_edit_gate_skips_when_task_names_the_deliverable() {
+            let (_dir, _cwd) = git_repo(&[("deploy.sh", "#!/bin/sh\nexit 0\n")]);
+            // The agent edits the tracked, task-named non-source artifact.
+            std::fs::write("deploy.sh", "#!/bin/sh\necho deployed\nexit 0\n").unwrap();
+
+            let agent = mutation_task_agent("Update deploy.sh to print deployed").await;
+            assert!(
+                agent.mutation_completion_gate().await.is_none(),
+                "a task-named artifact deliverable must not be rejected as NoSourceEdit"
+            );
+        }
+
+        #[tokio::test]
+        async fn no_source_edit_gate_still_rejects_unnamed_non_source_diffs() {
+            let (_dir, _cwd) = git_repo(&[("deploy.sh", "#!/bin/sh\nexit 0\n")]);
+            std::fs::write("deploy.sh", "#!/bin/sh\necho deployed\nexit 0\n").unwrap();
+
+            // Same diff, but the task does NOT name the artifact — the
+            // SWE-style source-edit requirement still applies.
+            let agent = mutation_task_agent("Fix the deployment automation").await;
+            let message = agent
+                .mutation_completion_gate()
+                .await
+                .expect("an unnamed non-source diff must still be rejected");
+            assert!(
+                message.contains("NoSourceEdit"),
+                "expected NoSourceEdit, got: {}",
+                message
+            );
+        }
+
+        // P0-2b regression: a test-only patch is the requested deliverable when
+        // the task is "write tests for X" — the exemption the workflow
+        // validator already had must also apply to the TestOnlyPatch gate.
+        #[tokio::test]
+        async fn test_only_patch_accepted_when_task_is_writing_tests() {
+            let (_dir, _cwd) = git_repo(&[("tests/test_calc.py", "def test_div():\n    pass\n")]);
+            std::fs::write(
+                "tests/test_calc.py",
+                "def test_div():\n    assert 6 / 2 == 3\n",
+            )
+            .unwrap();
+
+            let agent = mutation_task_agent("Write tests for the calc module").await;
+            assert!(
+                agent.mutation_completion_gate().await.is_none(),
+                "a test-only patch must be accepted for a test-writing task"
+            );
+        }
+
+        #[tokio::test]
+        async fn test_only_patch_still_rejected_for_source_repair_task() {
+            let (_dir, _cwd) = git_repo(&[("tests/test_calc.py", "def test_div():\n    pass\n")]);
+            std::fs::write(
+                "tests/test_calc.py",
+                "def test_div():\n    assert 6 / 2 == 3\n",
+            )
+            .unwrap();
+
+            let agent = mutation_task_agent("Fix the divide-by-zero bug in the calc module").await;
+            let message = agent
+                .mutation_completion_gate()
+                .await
+                .expect("a test-only patch must still be rejected for a repair task");
+            assert!(
+                message.contains("TestOnlyPatch"),
+                "expected TestOnlyPatch, got: {}",
+                message
+            );
+        }
+
+        // The workflow validator shares the same exemption via
+        // `task_is_test_writing_task`.
+        #[tokio::test]
+        async fn workflow_validator_keeps_test_writing_exemption() {
+            let mut agent = mutation_task_agent("Write tests for the calc module").await;
+            agent.messages.push(crate::api::types::Message {
+                role: "assistant".to_string(),
+                content: crate::api::types::MessageContent::Text(String::new()),
+                reasoning_content: None,
+                tool_calls: Some(vec![crate::api::types::ToolCall {
+                    id: "tc_test".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::api::types::ToolFunction {
+                        name: "file_write".to_string(),
+                        arguments: r#"{"path":"tests/test_calc.py","content":"x"}"#.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            });
+            assert!(
+                agent.validate_workflow_edits().is_none(),
+                "a test-writing task must be allowed to edit only test files"
+            );
+        }
+
+        // P0-2c regression: a task that ends in `git commit` leaves a clean
+        // working tree; committed-HEAD evidence must satisfy the EmptyDiff gate
+        // instead of refusing the run forever.
+        #[tokio::test]
+        async fn empty_diff_gate_counts_work_committed_during_the_run() {
+            let (_dir, _cwd) = git_repo(&[("README.md", "base\n")]);
+            let agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+
+            // The agent fixes the source and ends the task with `git commit`.
+            std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+            git(Path::new("."), &["add", "calc.py"]);
+            git(
+                Path::new("."),
+                &["commit", "-q", "-m", "fix divide-by-zero"],
+            );
+
+            assert!(
+                agent.mutation_completion_gate().await.is_none(),
+                "work committed during the run must satisfy the EmptyDiff gate"
+            );
+        }
+
+        #[tokio::test]
+        async fn empty_diff_gate_still_rejects_when_nothing_changed() {
+            let (_dir, _cwd) = git_repo(&[("README.md", "base\n")]);
+            let agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+
+            // Clean tree, no commits during the run: the gate must still fire.
+            let message = agent
+                .mutation_completion_gate()
+                .await
+                .expect("a clean tree with no run commits must still be EmptyDiff");
+            assert!(
+                message.contains("EmptyDiff"),
+                "expected EmptyDiff, got: {}",
+                message
+            );
+        }
+
+        // P1-6 regression: a trivial artifact task that is complete AND
+        // verified (write + read-back) must stop before min_completion_steps
+        // instead of being refused for "not enough steps".
+        #[tokio::test]
+        async fn verified_trivial_artifact_task_completes_before_min_steps() {
+            let mut config = test_config();
+            config.agent.min_completion_steps = 3;
+            let agent = artifact_agent_with_config(
+                config,
+                "Create notes.txt containing hello.",
+                vec![
+                    checkpoint_call(
+                        "file_write",
+                        json!({"path": "notes.txt", "content": "hello\n"}),
+                        true,
+                    ),
+                    checkpoint_call("file_read", json!({"path": "notes.txt"}), true),
+                ],
+            )
+            .await;
+            assert_eq!(
+                agent.loop_control.current_step(),
+                0,
+                "the test agent must be below min_completion_steps"
+            );
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "a verified-complete trivial task must not be taxed up to min_completion_steps"
+            );
+        }
+
+        #[tokio::test]
+        async fn unverified_artifact_task_is_still_blocked_with_min_steps() {
+            let mut config = test_config();
+            config.agent.min_completion_steps = 3;
+            let agent = artifact_agent_with_config(
+                config,
+                "Create notes.txt containing hello.",
+                vec![checkpoint_call(
+                    "file_write",
+                    json!({"path": "notes.txt", "content": "hello\n"}),
+                    true,
+                )],
+            )
+            .await;
+            // The read-back guidance now fires before the min-steps nudge.
+            let message = agent
+                .check_completion_gate()
+                .await
+                .expect("an unverified artifact must not complete");
+            assert!(
+                message.contains("file_read"),
+                "expected read-back guidance, got: {}",
+                message
             );
         }
     }

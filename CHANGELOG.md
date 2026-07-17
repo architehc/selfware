@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1-beta.1] - 2026-07-17
+
+### Added
+- Git commit SHA embedded in version output via `build.rs` (`selfware --version` now prints e.g. `0.3.1-beta.1+g7e0c3e3c`; plain version outside a git checkout)
+- First-run auth: `OPENROUTER_API_KEY` environment fallback, 401 remediation guidance, and `config set-key`
+- Init/config wizards validate before writing and probe the endpoint
+
+### Changed
+- Version bumped to `0.3.1-beta.1` — `0.3.0-beta.1` semver-sorted below the already-published v0.3.0
+- Config warnings are now visible and the loaded config path is printed (provenance)
+- Help output reorganized
+- Docs truth pass across README and docs/
+- Conservative default `context_length` for unknown models
+
+### Fixed
+- Panic in the `status` command
+- Global flags now accepted in trailing position
+- Headless mode fails fast in Normal (ask) mode instead of blocking on prompts
+- Completion-gate honesty, including an explicit blocked-by-safety outcome
+- MCP newline-delimited framing
+- Min-steps ordering
+
+### Removed
+- Large dead-code cleanup (commit 7e0c3e3c)
+
 ## [0.3.0-beta.1] - 2026-04-12
 
 ### Added
@@ -100,5 +125,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.3.1-beta.1...HEAD
+[0.3.1-beta.1]: https://github.com/architehc/selfware/compare/v0.3.0...v0.3.1-beta.1
 [0.1.0]: https://github.com/architehc/selfware/releases/tag/v0.1.0

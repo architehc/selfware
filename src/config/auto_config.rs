@@ -216,13 +216,25 @@ impl AutoConfigurator {
     }
 
     /// Generate a Config based on model info and pre-computed detection results.
+    ///
+    /// The returned config is run through the same validation the loader
+    /// applies on disk reads ([`Config::validate_generated`]), so callers can
+    /// persist it directly — a config selfware would reject is an error here,
+    /// not a file on disk.
     pub async fn generate_config(&self, model: &str) -> Result<Config> {
         let models = self.fetch_models().await?;
         let model_info = models.iter().find(|m| m.id == model);
         // Re-run tests to get results (cached in practice by the CLI handler)
         let results = self.run_tests(model).await?;
 
-        let max_model_len = model_info.map(|m| m.max_model_len).unwrap_or(131072);
+        // A model missing from /models — or listed WITHOUT a max_model_len
+        // (common on hosted gateways like OpenRouter) — yields 0, which the
+        // loader rejects ("context_length must be greater than 0"). Treat 0
+        // as "unknown" and fall back to the conservative unknown-model context.
+        let max_model_len = model_info
+            .map(|m| m.max_model_len)
+            .filter(|&n| n > 0)
+            .unwrap_or(super::UNKNOWN_MODEL_CONTEXT_LENGTH);
         let model_root = model_info.map(|m| m.root.as_str()).unwrap_or(model);
 
         let max_tokens = if results.thinking_eats_tokens {
@@ -256,6 +268,9 @@ impl AutoConfigurator {
 
         config.agent.native_function_calling = results.function_calling;
         config.agent.streaming = results.streaming;
+        // Preferred budget: context minus headroom for output + overhead. When
+        // that saturates to 0 (small/unknown context), the 0 sentinel lets
+        // `validate_generated` derive the standard 60%-of-context budget.
         config.agent.token_budget = max_model_len.saturating_sub(max_tokens + 50_000);
 
         if results.thinking_eats_tokens {
@@ -266,6 +281,10 @@ impl AutoConfigurator {
             );
             config.extra_body = Some(extra);
         }
+
+        // Never hand back a config the loader would refuse: derive the
+        // remaining limits and validate exactly as a disk read would.
+        config.validate_generated()?;
 
         Ok(config)
     }
@@ -485,5 +504,89 @@ mod tests {
     fn test_configurator_strips_trailing_slash() {
         let c = AutoConfigurator::new("http://localhost:8000/v1/", None);
         assert_eq!(c.endpoint, "http://localhost:8000/v1");
+    }
+
+    // ── generate_config: never emit a config the loader rejects ─────────────
+
+    /// Minimal OpenAI-ish HTTP server: serves `/models` reporting the given
+    /// `max_model_len` and a canned non-streaming chat completion. Raw TCP in
+    /// a background thread — no async runtime needed on the serving side.
+    fn spawn_mock_server(max_model_len: u64) -> String {
+        use std::io::{BufRead, BufReader, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { break };
+                let mut reader = BufReader::new(stream);
+                // Read the request line + headers (body not needed).
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    continue;
+                }
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line) {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let body = if request_line.contains("/models") {
+                    format!(
+                        r#"{{"data":[{{"id":"m0","root":"m0","owned_by":"vllm","max_model_len":{}}}]}}"#,
+                        max_model_len
+                    )
+                } else {
+                    // chat/completions (streaming probe only checks the status)
+                    r#"{"choices":[{"message":{"content":"HELLO_SELFWARE"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#.to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let mut stream = reader.into_inner();
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{}/v1", addr)
+    }
+
+    #[tokio::test]
+    async fn test_generate_config_zero_max_model_len_uses_conservative_context() {
+        // A /models listing WITHOUT a usable max_model_len (0) used to produce
+        // context_length=0 / token_budget=0 — a config the loader rejects.
+        let url = spawn_mock_server(0);
+        let configurator = AutoConfigurator::new(&url, None);
+        let config = configurator.generate_config("m0").await.unwrap();
+        assert_eq!(
+            config.context_length,
+            crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+            "unknown context must fall back to the conservative default, not 0"
+        );
+        assert!(
+            config.agent.token_budget > 0,
+            "token_budget must never be 0 in a generated config"
+        );
+        // And the whole thing passes the same validation a disk read applies.
+        config.validate().unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_generate_config_uses_reported_context_length() {
+        let url = spawn_mock_server(131072);
+        let configurator = AutoConfigurator::new(&url, None);
+        let config = configurator.generate_config("m0").await.unwrap();
+        assert_eq!(config.context_length, 131072);
+        // context minus output+overhead headroom, unchanged from before.
+        assert_eq!(config.agent.token_budget, 131072 - (16384 + 50_000));
+        config.validate().unwrap();
     }
 }

@@ -4035,3 +4035,93 @@ async fn test_chat_and_chat_with_profile_agree_on_tool_choice() {
 
     server.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// 401 remediation hint (P0-6): a missing/wrong key must surface with the fix
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_http_status_error_401_includes_remediation_hint() {
+    let err = client::ApiClient::http_status_error(
+        "https://api.openai.com/v1",
+        reqwest::StatusCode::UNAUTHORIZED,
+        "No cookie auth credentials found".to_string(),
+    );
+    let msg = format!("{}", err);
+    assert!(msg.contains("401"), "status preserved: {}", msg);
+    assert!(
+        msg.contains("No cookie auth credentials found"),
+        "upstream body kept: {}",
+        msg
+    );
+    assert!(
+        msg.contains("SELFWARE_API_KEY"),
+        "fix hint present: {}",
+        msg
+    );
+    assert!(
+        msg.contains("config set-key"),
+        "keyring path named: {}",
+        msg
+    );
+    assert!(
+        !msg.contains("OPENROUTER_API_KEY"),
+        "OpenRouter var only named for OpenRouter: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_http_status_error_401_names_openrouter_var_for_openrouter() {
+    let err = client::ApiClient::http_status_error(
+        "https://openrouter.ai/api/v1",
+        reqwest::StatusCode::UNAUTHORIZED,
+        "unauthorized".to_string(),
+    );
+    let msg = format!("{}", err);
+    assert!(msg.contains("OPENROUTER_API_KEY"), "{}", msg);
+    assert!(msg.contains("SELFWARE_API_KEY"), "{}", msg);
+}
+
+#[test]
+fn test_http_status_error_non_401_has_no_hint() {
+    let err = client::ApiClient::http_status_error(
+        "https://openrouter.ai/api/v1",
+        reqwest::StatusCode::BAD_REQUEST,
+        "bad request body".to_string(),
+    );
+    let msg = format!("{}", err);
+    assert!(msg.contains("bad request body"), "{}", msg);
+    assert!(
+        !msg.contains("SELFWARE_API_KEY"),
+        "no auth hint on non-401: {}",
+        msg
+    );
+    // And the typed status is preserved for exit-code mapping.
+    match err.downcast_ref::<crate::errors::ApiError>() {
+        Some(crate::errors::ApiError::HttpStatus { status, .. }) => assert_eq!(*status, 400),
+        other => panic!("expected ApiError::HttpStatus, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_retryable_status_excludes_4xx() {
+    // The don't-retry-4xx invariant across every client retry path: only
+    // 5xx and 429 may be retried; auth/4xx failures must fail fast.
+    for status in [400u16, 401, 403, 404, 405, 422] {
+        let code = reqwest::StatusCode::from_u16(status).unwrap();
+        assert!(
+            !client::ApiClient::is_retryable_status(code),
+            "{} must not be retried",
+            status
+        );
+    }
+    for status in [429u16, 500, 502, 503, 504] {
+        let code = reqwest::StatusCode::from_u16(status).unwrap();
+        assert!(
+            client::ApiClient::is_retryable_status(code),
+            "{} should be retried",
+            status
+        );
+    }
+}

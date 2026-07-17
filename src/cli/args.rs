@@ -19,23 +19,23 @@ pub(crate) struct Cli {
     pub(crate) prompt: Option<String>,
 
     /// Config file path
-    #[arg(short, long, value_name = "FILE")]
+    #[arg(short, long, value_name = "FILE", global = true)]
     pub(crate) config: Option<String>,
 
-    /// Working directory (your garden)
-    #[arg(short = 'C', long, value_name = "DIR")]
+    /// Working directory
+    #[arg(short = 'C', long, value_name = "DIR", global = true)]
     pub(crate) workdir: Option<String>,
 
     /// Quiet mode (minimal output)
-    #[arg(short, long)]
+    #[arg(short, long, global = true)]
     pub(crate) quiet: bool,
 
     /// Execution mode: normal (ask), auto-edit, yolo, daemon
-    #[arg(short = 'm', long, value_enum)]
+    #[arg(short = 'm', long, value_enum, global = true)]
     pub(crate) mode: Option<ExecutionMode>,
 
     /// Shortcut for --mode=yolo
-    #[arg(short = 'y', long)]
+    #[arg(short = 'y', long, global = true)]
     pub(crate) yolo: bool,
 
     /// Shortcut for --mode=daemon (run forever)
@@ -64,7 +64,7 @@ pub(crate) struct Cli {
     pub(crate) compact: bool,
 
     /// Verbose mode (detailed tool output and debug info)
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long, global = true)]
     pub(crate) verbose: bool,
 
     /// Always display token usage after each response
@@ -111,19 +111,19 @@ pub(crate) struct Cli {
     pub(crate) output_format: HeadlessOutputFormat,
 
     /// Maximum number of agent loop iterations (hard limit)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) max_turns: Option<usize>,
 
     /// Maximum total prompt+completion tokens before stopping
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) max_budget_tokens: Option<usize>,
 
     /// Maximum wall-clock seconds before stopping
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) max_wall_secs: Option<u64>,
 
     /// Maximum provider-reported USD cost before stopping (e.g. OpenRouter usage.cost)
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub(crate) max_cost_usd: Option<f64>,
 
     /// Configuration profile to apply (e.g. `architect`, `swarm-8`, `batch-16`,
@@ -160,16 +160,6 @@ pub(crate) enum HeadlessOutputFormat {
     StreamJson,
 }
 
-/// Output format for CLI (currently only affects `status` command)
-#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
-pub enum OutputFormat {
-    /// Human-readable text (default)
-    #[default]
-    Text,
-    /// JSON output for scripting
-    Json,
-}
-
 /// Output format for `selfware graph`
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum GraphFormat {
@@ -194,15 +184,54 @@ pub(crate) enum DemoScenarioKind {
 #[derive(Subcommand, Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Commands {
+    /// Interactive setup wizard for first-time configuration
+    #[command(display_order = 1)]
+    Init {
+        /// Use a specific template (rust, python, node, minimal)
+        #[arg(long)]
+        template: Option<String>,
+        /// Ask what to build, then scaffold it into the current directory
+        #[arg(long)]
+        scaffold: bool,
+    },
+
+    /// Start an interactive chat session
+    #[command(alias = "c", display_order = 2)]
+    Chat,
+
+    /// Run a task headless and exit
+    #[command(alias = "r", display_order = 3)]
+    Run {
+        /// The task to run
+        task: String,
+        /// Inject a user skill's instructions (from ~/.selfware/skills or ./.selfware/skills)
+        #[arg(long)]
+        skill: Option<String>,
+    },
+
+    /// Resume a task from a journal entry
+    #[command(display_order = 4)]
+    Resume {
+        /// Journal entry ID
+        task_id: String,
+    },
+
+    /// Show model, endpoint, and journal status
+    #[command(display_order = 5)]
+    Status,
+
     /// Check system dependencies and tool availability
+    #[command(display_order = 6)]
     Doctor,
 
     /// Diagnose the configured LLM backend and model setup
+    #[command(display_order = 7)]
     LlmDoctor,
 
     /// Trust the current repo's ./selfware.toml so its remote endpoint may
     /// receive a globally-exported SELFWARE_API_KEY. Records the config's
     /// canonical path in ~/.selfware/trusted_repos.
+    #[command(display_order = 10)]
     Trust {
         /// Path to the config to trust (default: ./selfware.toml).
         #[arg(default_value = "selfware.toml")]
@@ -210,7 +239,7 @@ pub(crate) enum Commands {
     },
 
     /// Test local development workflow
-    #[command(alias = "t")]
+    #[command(alias = "t", hide = true)]
     Test {
         /// Test pattern to run (all, unit, integration, e2e, workflow)
         #[arg(short, long, default_value = "workflow")]
@@ -221,7 +250,7 @@ pub(crate) enum Commands {
     },
 
     /// SWE-bench commands
-    #[command(alias = "swe")]
+    #[command(alias = "swe", hide = true)]
     SWEBench {
         #[command(subcommand)]
         command: SWEBenchCommands,
@@ -231,7 +260,7 @@ pub(crate) enum Commands {
     ///
     /// With no subcommand, runs the legacy throughput/e2e suite (back-compat
     /// with previous releases).  Use a subcommand for newer benchmarks.
-    #[command(alias = "bm")]
+    #[command(alias = "bm", hide = true)]
     Bench {
         #[command(subcommand)]
         command: Option<BenchCommand>,
@@ -242,12 +271,12 @@ pub(crate) enum Commands {
         #[arg(short, long, default_value = "throughput,e2e")]
         suite: String,
         /// Number of concurrent tasks (legacy mode)
-        #[arg(short, long, default_value_t = 4)]
+        #[arg(short = 'n', long, default_value_t = 4)]
         concurrent: usize,
     },
 
     /// Run long-running system test (8+ hours)
-    #[command(alias = "lt")]
+    #[command(alias = "lt", hide = true)]
     LongTest {
         /// Duration in hours (default: 8)
         #[arg(short = 'H', long, default_value_t = 8)]
@@ -256,10 +285,10 @@ pub(crate) enum Commands {
         #[arg(short, long, default_value_t = 900)]
         timeout: u64,
         /// Maximum iterations per project (default: 80)
-        #[arg(short, long, default_value_t = 80)]
+        #[arg(short = 'i', long, default_value_t = 80)]
         max_iters: usize,
         /// Maximum concurrent projects (default: 1)
-        #[arg(short, long, default_value_t = 1)]
+        #[arg(short = 'n', long, default_value_t = 1)]
         concurrent: usize,
         /// Endpoint URL (defaults to config)
         #[arg(short, long)]
@@ -276,14 +305,14 @@ pub(crate) enum Commands {
     },
 
     /// Auto-detect and configure endpoint settings
-    #[command(alias = "ac")]
+    #[command(alias = "ac", display_order = 10)]
     AutoConfig {
         /// API endpoint URL to test (e.g., http://127.0.0.1:1234/v1)
         #[arg(short, long)]
         endpoint: Option<String>,
 
         /// Model name to test (auto-detected if not provided)
-        #[arg(short, long)]
+        #[arg(long)]
         model: Option<String>,
 
         /// API key for authenticated endpoints
@@ -300,7 +329,7 @@ pub(crate) enum Commands {
     },
 
     /// Zero-config auto-setup: scan local LLM servers, detect models, generate config
-    #[command(alias = "up")]
+    #[command(alias = "up", display_order = 10)]
     Unpack {
         /// Just scan without writing config
         #[arg(long)]
@@ -311,57 +340,24 @@ pub(crate) enum Commands {
         save: bool,
     },
 
-    /// Interactive setup wizard for first-time configuration
-    Init {
-        /// Use a specific template (rust, python, node, minimal)
-        #[arg(long)]
-        template: Option<String>,
-        /// Ask what to build, then scaffold it into the current directory
-        #[arg(long)]
-        scaffold: bool,
-    },
-
-    /// Open your workshop for an interactive session
-    #[command(alias = "c")]
-    Chat {
-        /// Shortcut for --mode=yolo (skip all confirmations)
-        #[arg(short = 'y', long)]
-        yolo: bool,
-    },
-
     /// Multi-agent chat with concurrent streams
-    #[command(alias = "m")]
+    #[command(alias = "m", display_order = 10)]
     MultiChat {
         /// Maximum concurrent agents (1-16)
         #[arg(short = 'n', long, default_value_t = DEFAULT_MULTI_CHAT_CONCURRENCY)]
         concurrency: usize,
-        /// Shortcut for --mode=yolo (skip all confirmations)
-        #[arg(short = 'y', long)]
-        yolo: bool,
     },
 
-    /// Tend to a specific task in your garden
-    #[command(alias = "r")]
-    Run {
-        /// What shall we tend to?
-        task: String,
-        /// Shortcut for --mode=yolo (skip all confirmations)
-        #[arg(short = 'y', long)]
-        yolo: bool,
-        /// Inject a user skill's instructions (from ~/.selfware/skills or ./.selfware/skills)
-        #[arg(long)]
-        skill: Option<String>,
-    },
-
-    /// Survey your garden (analyze codebase)
-    #[command(alias = "a")]
+    /// Analyze a codebase
+    #[command(alias = "a", display_order = 10)]
     Analyze {
-        /// Path to survey
+        /// Path to analyze
         #[arg(default_value = ".")]
         path: String,
     },
 
-    /// View your garden as a living ecosystem
+    /// Render the codebase as an ecosystem visualization
+    #[command(display_order = 10)]
     Garden {
         /// Path to visualize
         #[arg(default_value = ".")]
@@ -369,6 +365,7 @@ pub(crate) enum Commands {
     },
 
     /// Explore the workspace as a code knowledge graph
+    #[command(display_order = 10)]
     Graph {
         /// Workspace path to index
         #[arg(default_value = ".")]
@@ -393,6 +390,7 @@ pub(crate) enum Commands {
 
     /// Run an animated multi-agent demo scenario
     #[cfg(feature = "tui")]
+    #[command(hide = true)]
     Demo {
         /// Demo scenario to run
         #[arg(value_enum, default_value_t = DemoScenarioKind::FeatureFactory)]
@@ -404,14 +402,15 @@ pub(crate) enum Commands {
 
     /// Launch dashboard mode explicitly
     #[cfg(feature = "tui")]
+    #[command(display_order = 10)]
     Dashboard,
 
     /// Launch Command Center for SWL workflow monitoring
     #[cfg(feature = "tui")]
-    #[command(alias = "cc")]
+    #[command(alias = "cc", hide = true)]
     CommandCenter {
         /// Update mode: poll or stream
-        #[arg(short, long, default_value = "poll")]
+        #[arg(short = 'u', long = "update-mode", default_value = "poll")]
         mode: String,
 
         /// Auto-refresh interval in milliseconds
@@ -419,37 +418,27 @@ pub(crate) enum Commands {
         refresh: u64,
     },
 
-    /// Resume tending from a journal entry
-    Resume {
-        /// Journal entry ID
-        task_id: String,
-    },
-
-    /// Browse your journal entries
-    #[command(alias = "j")]
+    /// List journal entries from past tasks
+    #[command(alias = "j", display_order = 10)]
     Journal,
 
     /// View a specific journal entry
+    #[command(display_order = 10)]
     JournalEntry {
         /// Entry ID
         task_id: String,
     },
 
     /// Remove a journal entry
+    #[command(display_order = 10)]
     JournalDelete {
         /// Entry ID
         task_id: String,
     },
 
-    /// Show workshop status and statistics
-    Status {
-        /// Output format for machine consumption
-        #[arg(long, value_enum, default_value = "text")]
-        output_format: OutputFormat,
-    },
-
     /// Self-improve: analyze and edit the selfware codebase
     #[cfg(feature = "self-improvement")]
+    #[command(hide = true)]
     Improve {
         /// Analyze and propose improvements without making changes
         #[arg(long)]
@@ -466,6 +455,7 @@ pub(crate) enum Commands {
 
     /// Evolve: run the evolutionary self-improvement daemon
     #[cfg(feature = "self-improvement")]
+    #[command(hide = true)]
     Evolve {
         /// Number of generations (0 = infinite)
         #[arg(short, long, default_value = "10")]
@@ -489,13 +479,15 @@ pub(crate) enum Commands {
     },
 
     /// Run as MCP server (stdio transport) so other AI tools can use Selfware's capabilities
+    #[command(display_order = 10)]
     McpServer,
 
     /// Start selfware in LSP server mode (for editor extensions)
+    #[command(hide = true)]
     Lsp,
 
     /// Experimental batch entrypoint — runs tasks from a file sequentially
-    #[command(alias = "bat")]
+    #[command(alias = "bat", hide = true)]
     Batch {
         /// File containing tasks (one per line)
         #[arg(short, long)]
@@ -515,26 +507,28 @@ pub(crate) enum Commands {
     },
 
     /// Workflow commands (SWL and YAML)
-    #[command(alias = "w")]
+    #[command(alias = "w", display_order = 10)]
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommands,
     },
 
     /// Inspect or manipulate selfware configuration
+    #[command(display_order = 10)]
     Config {
         #[command(subcommand)]
         command: ConfigCommands,
     },
 
     /// Inspect workflow state
-    #[command(alias = "st")]
+    #[command(alias = "st", display_order = 10)]
     State {
         #[command(subcommand)]
         command: StateCommands,
     },
 
     /// Supervised run management (start, list, abort agent runs)
+    #[command(display_order = 10)]
     Runs {
         #[command(subcommand)]
         command: RunsCommand,
@@ -707,6 +701,12 @@ pub(crate) enum ConfigCommands {
         /// Render as JSON instead of the human-readable table
         #[arg(long)]
         json: bool,
+    },
+
+    /// Store an API key in the OS keyring for the configured endpoint
+    SetKey {
+        /// The API key to store (kept out of files; omit to be prompted)
+        key: Option<String>,
     },
 }
 

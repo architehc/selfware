@@ -17,8 +17,63 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
-// Content-Length framed I/O helpers (LSP-style, mirrors server.rs)
+// Wire framing (newline-delimited JSON-RPC and LSP-style Content-Length,
+// mirrors server.rs)
 // ---------------------------------------------------------------------------
+
+/// Wire framing for JSON-RPC messages.
+///
+/// The MCP stdio spec (protocol 2024-11-05) frames messages as
+/// newline-delimited JSON-RPC, but some legacy/LSP-derived servers speak
+/// `Content-Length` header framing. The client *sends* in the configured
+/// framing ([`NewlineDelimited`](Framing::NewlineDelimited) by default) and
+/// *reads* both via auto-detection, since a server may reply in either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Framing {
+    /// LSP-style `Content-Length: <n>\r\n\r\n<body>` (legacy servers).
+    ContentLength,
+    /// One JSON-RPC message per line (MCP stdio spec, 2024-11-05). Default.
+    #[default]
+    NewlineDelimited,
+}
+
+/// Peek at the buffered bytes to detect which framing the peer is using.
+///
+/// A header-framed message always starts with `Content-Length:`, while a
+/// newline-delimited JSON-RPC message is a single JSON object on one line —
+/// and a JSON document can never start with `C`. The first byte therefore
+/// decides unambiguously, even if the peer's write arrived in several chunks.
+/// Returns `Ok(None)` on EOF.
+pub(crate) async fn detect_framing<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<Framing>> {
+    let buf = reader.fill_buf().await?;
+    if buf.is_empty() {
+        // EOF
+        return Ok(None);
+    }
+    Ok(Some(if buf[0] == b'C' {
+        Framing::ContentLength
+    } else {
+        Framing::NewlineDelimited
+    }))
+}
+
+/// Read the next message from `reader`, auto-detecting its framing.
+///
+/// Servers may reply in either framing (spec-compliant ones newline-delimited,
+/// legacy ones with `Content-Length` headers), so the read path accepts both.
+/// Returns `Ok(None)` on clean EOF and `Ok(Some(body))` on a successful read.
+pub(crate) async fn read_message<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<String>> {
+    match detect_framing(reader).await? {
+        Some(Framing::ContentLength) => read_content_length_message(reader).await,
+        Some(Framing::NewlineDelimited) => read_newline_message(reader).await,
+        None => Ok(None),
+    }
+}
 
 /// Read a single Content-Length framed message from `reader`.
 ///
@@ -31,7 +86,7 @@ use tracing::{debug, info};
 ///
 /// Returns `Ok(None)` on EOF, `Ok(Some(body))` on a successful read, and
 /// `Err` when headers are malformed or the body is truncated.
-pub(crate) async fn read_message<R: tokio::io::AsyncRead + Unpin>(
+pub(crate) async fn read_content_length_message<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut BufReader<R>,
 ) -> Result<Option<String>> {
     let mut content_length: Option<usize> = None;
@@ -72,6 +127,22 @@ pub(crate) async fn read_message<R: tokio::io::AsyncRead + Unpin>(
         .map(Some)
 }
 
+/// Read a single newline-delimited JSON-RPC message (one line).
+///
+/// Per the MCP stdio spec (2024-11-05), messages are UTF-8 JSON-RPC with no
+/// embedded newlines, delimited by `\n`. Returns `Ok(None)` on EOF.
+pub(crate) async fn read_newline_message<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> Result<Option<String>> {
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line).await?;
+    if bytes_read == 0 {
+        // EOF
+        return Ok(None);
+    }
+    Ok(Some(line.trim().to_string()))
+}
+
 /// Write a Content-Length framed message to `writer`.
 pub(crate) async fn write_message<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
@@ -82,6 +153,26 @@ pub(crate) async fn write_message<W: tokio::io::AsyncWrite + Unpin>(
     writer.write_all(body.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+/// Write a message to `writer` using the requested framing.
+///
+/// The compact `serde_json` serialization escapes control characters inside
+/// strings, so a newline-delimited body never contains a raw `\n` of its own.
+pub(crate) async fn write_framed_message<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    body: &str,
+    framing: Framing,
+) -> Result<()> {
+    match framing {
+        Framing::ContentLength => write_message(writer, body).await,
+        Framing::NewlineDelimited => {
+            writer.write_all(body.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await?;
+            Ok(())
+        }
+    }
 }
 
 /// JSON-RPC 2.0 request.
@@ -139,10 +230,17 @@ pub struct StdioTransport {
     child: Arc<Mutex<Child>>,
     /// Background reader task handle.
     reader_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Framing used for *outgoing* requests/notifications. Incoming messages
+    /// are always auto-detected, so a server may reply in either framing.
+    framing: Framing,
 }
 
 impl StdioTransport {
     /// Spawn a child process and set up the stdio transport.
+    ///
+    /// Requests are sent newline-delimited (the MCP stdio spec framing,
+    /// protocol 2024-11-05). Use [`with_framing`](Self::with_framing) to
+    /// override this for legacy `Content-Length`-framed servers.
     pub async fn spawn(
         command: &str,
         args: &[String],
@@ -189,8 +287,11 @@ impl StdioTransport {
             Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
 
-        // Spawn background task to read JSON-RPC responses from stdout
-        // Uses Content-Length framing (LSP-style) per the MCP spec.
+        // Spawn background task to read JSON-RPC responses from stdout.
+        // The framing of each incoming message is auto-detected (see
+        // `detect_framing`): spec-compliant servers reply newline-delimited
+        // (MCP stdio spec, 2024-11-05), legacy ones with `Content-Length`
+        // headers — both are accepted regardless of the send framing.
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
 
@@ -265,7 +366,18 @@ impl StdioTransport {
             next_id: AtomicU64::new(1),
             child: Arc::new(Mutex::new(child)),
             reader_handle: Mutex::new(Some(reader_handle)),
+            framing: Framing::default(),
         })
+    }
+
+    /// Override the framing used for outgoing requests/notifications.
+    ///
+    /// The default is [`Framing::NewlineDelimited`] (the MCP stdio spec);
+    /// select [`Framing::ContentLength`] only for legacy servers that expect
+    /// LSP-style headers. The read path auto-detects either way.
+    pub fn with_framing(mut self, framing: Framing) -> Self {
+        self.framing = framing;
+        self
     }
 }
 
@@ -290,10 +402,11 @@ impl Transport for StdioTransport {
             pending.insert(id, tx);
         }
 
-        // Send request with Content-Length framing
+        // Send the request in the configured framing (newline-delimited per
+        // the MCP stdio spec unless overridden via `with_framing`).
         {
             let mut stdin = self.stdin.lock().await;
-            write_message(&mut *stdin, &body).await?;
+            write_framed_message(&mut *stdin, &body, self.framing).await?;
         }
 
         debug!("Sent JSON-RPC request: {} (id={})", method, id);
@@ -324,7 +437,7 @@ impl Transport for StdioTransport {
         let body = serde_json::to_string(&notification)?;
 
         let mut stdin = self.stdin.lock().await;
-        write_message(&mut *stdin, &body).await?;
+        write_framed_message(&mut *stdin, &body, self.framing).await?;
 
         debug!("Sent JSON-RPC notification: {}", method);
         Ok(())
@@ -412,13 +525,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Content-Length framing tests (Bug A regression coverage)
+    // Framing tests (Content-Length regression + newline-delimited spec path)
     // -----------------------------------------------------------------------
 
-    /// Round-trip: client write_message → server-style read_message recovers
-    /// the exact body. Both sides share the same helpers (this module's
-    /// `read_message`/`write_message` were copied from `server.rs` to fix
-    /// the framing mismatch with spec-compliant external MCP servers).
+    /// Round-trip: client write_message → read_message recovers the exact
+    /// body. `read_message` auto-detects the framing, so a Content-Length
+    /// framed buffer takes the header-framed read path (both helpers mirror
+    /// `server.rs`, which accepts either framing).
     #[tokio::test]
     async fn test_framing_roundtrip_client_to_server() {
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
@@ -426,7 +539,7 @@ mod tests {
         let mut buffer: Vec<u8> = Vec::new();
         write_message(&mut buffer, body).await.unwrap();
 
-        // Verify on-the-wire shape matches the LSP/MCP spec.
+        // Verify on-the-wire shape matches LSP-style Content-Length framing.
         let on_wire = String::from_utf8(buffer.clone()).unwrap();
         let expected_header = format!("Content-Length: {}\r\n\r\n", body.len());
         assert!(
@@ -525,13 +638,134 @@ mod tests {
     }
 
     /// Missing Content-Length header is a hard error (not silently treated
-    /// as a 0-byte body).
+    /// as a 0-byte body). The buffer starts with `C` so auto-detection takes
+    /// the Content-Length read path; a buffer starting with any other byte
+    /// would be read as newline-delimited instead.
     #[tokio::test]
     async fn test_framing_missing_content_length_errors() {
-        let bytes: &[u8] = b"X-Other: foo\r\n\r\n";
+        let bytes: &[u8] = b"Content-Type: application/json\r\n\r\n";
         let mut reader = BufReader::new(bytes);
         let result = read_message(&mut reader).await;
         assert!(result.is_err(), "missing Content-Length must error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Send-framing selection (newline-delimited default, Content-Length opt-in)
+    // -----------------------------------------------------------------------
+
+    /// The spec default: newline-delimited framing writes exactly the JSON
+    /// body followed by a single `\n` — no headers.
+    #[tokio::test]
+    async fn test_write_framed_message_newline_delimited_wire_bytes() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        write_framed_message(&mut buffer, body, Framing::NewlineDelimited)
+            .await
+            .unwrap();
+
+        let on_wire = String::from_utf8(buffer).unwrap();
+        assert_eq!(
+            on_wire,
+            format!("{}\n", body),
+            "newline-delimited framing must be '<json>\\n', got: {:?}",
+            on_wire
+        );
+        assert!(!on_wire.starts_with("Content-Length:"));
+    }
+
+    /// The legacy escape hatch: Content-Length framing remains available.
+    #[tokio::test]
+    async fn test_write_framed_message_content_length_wire_bytes() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        write_framed_message(&mut buffer, body, Framing::ContentLength)
+            .await
+            .unwrap();
+
+        let on_wire = String::from_utf8(buffer).unwrap();
+        let expected = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        assert_eq!(on_wire, expected);
+    }
+
+    /// The read path must accept both framings, even mixed on one stream:
+    /// spec-compliant servers reply newline-delimited, legacy ones with
+    /// Content-Length headers.
+    #[tokio::test]
+    async fn test_read_message_parses_both_framings() {
+        let nl_body = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+        let cl_body = r#"{"jsonrpc":"2.0","id":2,"result":{"ok":false}}"#;
+
+        let mut buffer: Vec<u8> = Vec::new();
+        write_framed_message(&mut buffer, nl_body, Framing::NewlineDelimited)
+            .await
+            .unwrap();
+        write_framed_message(&mut buffer, cl_body, Framing::ContentLength)
+            .await
+            .unwrap();
+
+        let mut reader = BufReader::new(buffer.as_slice());
+        let first = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(first, nl_body);
+        let second = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(second, cl_body);
+        assert!(read_message(&mut reader).await.unwrap().is_none());
+    }
+
+    /// Newline-delimited read path over a duplex stream: a body containing an
+    /// escaped `\n` inside a string stays one line on the wire and parses as
+    /// a single message.
+    #[tokio::test]
+    async fn test_read_newline_message_with_escaped_newline() {
+        let body = r#"{"jsonrpc":"2.0","id":2,"result":{"text":"line1\nline2"}}"#;
+
+        let (client, mut server) = tokio::io::duplex(4096);
+        let writer_handle = tokio::spawn(async move {
+            server.write_all(body.as_bytes()).await.unwrap();
+            server.write_all(b"\n").await.unwrap();
+            server.flush().await.unwrap();
+        });
+
+        let mut reader = BufReader::new(client);
+        let got = read_message(&mut reader).await.unwrap().unwrap();
+        assert_eq!(got, body);
+
+        writer_handle.await.unwrap();
+    }
+
+    /// The transport sends newline-delimited by default (the MCP stdio spec
+    /// framing), and `with_framing` opts back into Content-Length for legacy
+    /// servers.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_transport_send_framing_default_and_override() {
+        use std::collections::HashMap;
+        assert_eq!(Framing::default(), Framing::NewlineDelimited);
+
+        let transport = StdioTransport::spawn("sleep", &["300".to_string()], &HashMap::new())
+            .await
+            .expect("spawn sleep");
+        assert_eq!(transport.framing, Framing::NewlineDelimited);
+
+        let transport = transport.with_framing(Framing::ContentLength);
+        assert_eq!(transport.framing, Framing::ContentLength);
+        // Dropping the transport reaps the child (covered by the drop test).
+    }
+
+    /// `Framing` deserializes from the config strings the per-server escape
+    /// hatch would use (`framing = "content_length"` / `"newline_delimited"`).
+    #[test]
+    fn test_framing_serde_config_strings() {
+        let cl: Framing = serde_json::from_str(r#""content_length""#).unwrap();
+        assert_eq!(cl, Framing::ContentLength);
+        let nl: Framing = serde_json::from_str(r#""newline_delimited""#).unwrap();
+        assert_eq!(nl, Framing::NewlineDelimited);
+        // Serializing the default round-trips to the spec spelling.
+        assert_eq!(
+            serde_json::to_string(&Framing::default()).unwrap(),
+            r#""newline_delimited""#
+        );
     }
 
     #[cfg(unix)]

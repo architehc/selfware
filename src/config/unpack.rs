@@ -367,16 +367,39 @@ pub async fn unpack() -> Result<Option<Config>> {
     }
 }
 
+/// Whether `key`'s effective value came from an explicit user source (a
+/// config file, an env var, or a CLI arg) rather than a built-in default or
+/// a previous auto-calibration. This — not value-equality with the built-in
+/// defaults — decides "unconfigured": a user whose config legitimately
+/// matches the shipped defaults (e.g. the README OpenRouter block) must not
+/// have it hijacked back to localhost by a locally-detected backend.
+fn provenance_is_user_set(config: &Config, key: &str) -> bool {
+    matches!(
+        config.sources.get(key),
+        Some(super::provenance::ConfigSource::ConfigFile(_))
+            | Some(super::provenance::ConfigSource::EnvVar(_))
+            | Some(super::provenance::ConfigSource::CliArg(_))
+    )
+}
+
 /// Aggressive auto-calibration: scan, start backends, pull models, detect,
 /// and update `config`. Returns `true` if the config was modified.
 pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
-    let is_default_endpoint = config.endpoint == super::default_endpoint()
-        || config.endpoint == "http://localhost:8000/v1"
-        || config.endpoint == "http://127.0.0.1:1234/v1";
-    let is_default_model = config.model == super::default_model();
+    // "Unconfigured" is decided by load PROVENANCE first: a value the user
+    // set explicitly (config file / env var / CLI arg) is never overwritten,
+    // even when it equals a built-in default — the README's OpenRouter setup
+    // IS the default value set, and the old value-equality heuristic hijacked
+    // it back to a detected localhost backend. Value-equality survives only
+    // as a fallback for hand-built Configs that carry no provenance at all.
+    let endpoint_user_set = provenance_is_user_set(config, "endpoint")
+        || (config.endpoint != super::default_endpoint()
+            && config.endpoint != "http://localhost:8000/v1"
+            && config.endpoint != "http://127.0.0.1:1234/v1");
+    let model_user_set =
+        provenance_is_user_set(config, "model") || config.model != super::default_model();
 
     // Skip calibration if the user explicitly configured things
-    if !is_default_endpoint && !is_default_model {
+    if endpoint_user_set && model_user_set {
         return Ok(false);
     }
 
@@ -698,6 +721,11 @@ step_timeout_secs = {}
         config.agent.step_timeout_secs,
         extra_body_str
     );
+
+    // Never write a config the loader would reject: validate the exact TOML
+    // body the way a disk read would, and fail loudly instead of persisting
+    // garbage (e.g. a zero context_length / token_budget).
+    Config::validate_generated_toml(&content)?;
 
     std::fs::write(&path, content)?;
     Ok(path)
@@ -1092,10 +1120,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_calibrate_does_not_skip_when_default_endpoint_only() {
-        // When endpoint is default but model is custom, it should NOT skip
-        // (is_default_endpoint is true, is_default_model is false → one is default)
-        // Actually re-reading: the skip condition is `!is_default_endpoint && !is_default_model`
-        // So if either is default, it does NOT skip. This test verifies it proceeds.
+        // Endpoint is the built-in default (no provenance) but the model was
+        // set to a custom value → the model looks user-configured while the
+        // endpoint does not, so calibration should still proceed.
         let mut config = Config::default();
         // Keep endpoint as default, set model to custom
         config.model = "custom-model".to_string();
@@ -1110,6 +1137,33 @@ mod tests {
             result.unwrap(),
             "should return true when at least one field is still default"
         );
+    }
+
+    #[tokio::test]
+    async fn test_auto_calibrate_skips_when_provenance_is_user_even_at_default_values() {
+        // Regression test for the default-cloud-config hijack: a LOADED config
+        // whose endpoint/model happen to equal the built-in defaults (exactly
+        // the README OpenRouter setup) must NOT be "calibrated" back to a
+        // local backend. Provenance — not value-equality — decides.
+        let mut config = Config::default(); // endpoint/model == built-in defaults
+        let user_file = std::path::PathBuf::from("/home/user/.config/selfware/config.toml");
+        config.sources.set(
+            "endpoint",
+            super::super::provenance::ConfigSource::ConfigFile(user_file.clone()),
+        );
+        config.sources.set(
+            "model",
+            super::super::provenance::ConfigSource::ConfigFile(user_file),
+        );
+
+        let result = auto_calibrate(&mut config).await;
+        assert!(result.is_ok());
+        assert!(
+            !result.unwrap(),
+            "user-configured endpoint/model must never be hijacked, even at default values"
+        );
+        assert_eq!(config.endpoint, crate::config::default_endpoint());
+        assert_eq!(config.model, crate::config::default_model());
     }
 
     // =========================================================================
@@ -1216,6 +1270,38 @@ mod tests {
                 "content should contain temperature: {}",
                 content
             );
+        });
+    }
+
+    #[test]
+    fn test_save_unpack_config_refuses_invalid_config_and_writes_nothing() {
+        with_temp_cwd(|| {
+            let mut config = Config::default();
+            config.context_length = 0; // the exact garbage the loader rejects
+            let result = save_unpack_config(&config);
+            assert!(
+                result.is_err(),
+                "an invalid generated config must fail loudly, not be written"
+            );
+            assert!(
+                !std::path::Path::new("selfware.toml").exists(),
+                "no file may be left behind on validation failure"
+            );
+        });
+    }
+
+    #[test]
+    fn test_save_unpack_config_derives_token_budget_sentinel() {
+        with_temp_cwd(|| {
+            let mut config = Config::default();
+            config.context_length = 32768;
+            config.agent.token_budget = 0; // serde sentinel: derive at load time
+            let path = save_unpack_config(&config).expect("save should succeed");
+            let content = std::fs::read_to_string(&path).expect("should read file");
+            // The written file carries the sentinel; the loader-side
+            // derivation (validated before writing) turns it into 32768*3/5.
+            assert!(content.contains("token_budget = 0"), "{}", content);
+            Config::validate_generated_toml(&content).unwrap();
         });
     }
 

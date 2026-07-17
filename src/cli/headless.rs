@@ -10,7 +10,31 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::agent::progress::{ProgressEmitter, ProgressEvent};
+use crate::config::ExecutionMode;
 use crate::observability::dashboard::TokenUsage;
+
+/// Reason a headless run must not start, or `None` when it may proceed.
+///
+/// In `Normal` execution mode every mutating tool requires an interactive
+/// confirmation. When stdin is not a terminal (piped, cron, CI, `selfware -p`
+/// from a script) there is nobody to answer, so every write tool is refused,
+/// the model flails for the whole turn budget burning real API tokens, and the
+/// run finally dies at MAX_ITERATIONS with advice pointing the wrong way.
+/// Detecting this up front lets the CLI fail fast BEFORE any LLM call with a
+/// message that names the real cause and the fix.
+pub fn headless_mode_block_reason(mode: ExecutionMode, stdin_is_terminal: bool) -> Option<String> {
+    if mode == ExecutionMode::Normal && !stdin_is_terminal {
+        Some(
+            "headless run in `--mode normal` cannot confirm tool executions \
+             (stdin is not a terminal): every write tool would be refused and the \
+             agent would spend tokens until MAX_ITERATIONS without making progress. \
+             Re-run with `-m yolo` or `-m auto-edit`, e.g. `selfware -m yolo -p \"...\"`."
+                .to_string(),
+        )
+    } else {
+        None
+    }
+}
 
 /// Final session result emitted once at the end of a headless run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +375,37 @@ mod tests {
     use crate::agent::progress::ProgressEvent;
     use crate::observability::dashboard::TokenUsage;
     use serde_json::Value;
+
+    // ── headless_mode_block_reason ───────────────────────────────────────
+
+    #[test]
+    fn headless_block_reason_normal_mode_without_tty_is_blocked() {
+        let reason = headless_mode_block_reason(ExecutionMode::Normal, false)
+            .expect("Normal mode + non-TTY stdin must be blocked");
+        assert!(
+            reason.contains("-m yolo") && reason.contains("-m auto-edit"),
+            "message must name the fix, got: {}",
+            reason
+        );
+        assert!(
+            reason.contains("stdin is not a terminal"),
+            "message must name the real cause, got: {}",
+            reason
+        );
+    }
+
+    #[test]
+    fn headless_block_reason_normal_mode_with_tty_is_allowed() {
+        // Interactive terminal: the confirmation prompt can be answered.
+        assert!(headless_mode_block_reason(ExecutionMode::Normal, true).is_none());
+    }
+
+    #[test]
+    fn headless_block_reason_autonomous_modes_allowed_without_tty() {
+        assert!(headless_mode_block_reason(ExecutionMode::Yolo, false).is_none());
+        assert!(headless_mode_block_reason(ExecutionMode::AutoEdit, false).is_none());
+        assert!(headless_mode_block_reason(ExecutionMode::Daemon, false).is_none());
+    }
 
     // ── SessionResult serialization ──────────────────────────────────────
 

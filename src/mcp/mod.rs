@@ -15,7 +15,7 @@ pub mod transport;
 pub use client::McpClient;
 pub use discovery::discover_tools;
 pub use tool_bridge::McpTool;
-pub use transport::{StdioTransport, Transport};
+pub use transport::{Framing, StdioTransport, Transport};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,10 @@ pub struct McpServerConfig {
     /// Timeout in seconds for server initialization (default: 30).
     #[serde(default = "default_init_timeout")]
     pub init_timeout_secs: u64,
+    /// Wire framing for this server's stdio protocol
+    /// (default: newline-delimited per the MCP spec).
+    #[serde(default)]
+    pub framing: Framing,
 }
 
 fn default_init_timeout() -> u64 {
@@ -95,6 +99,7 @@ mod tests {
                 m
             },
             init_timeout_secs: 30,
+            framing: Default::default(),
         };
         let json = serde_json::to_string(&server).unwrap();
         let parsed: McpServerConfig = serde_json::from_str(&json).unwrap();
@@ -141,6 +146,7 @@ mod tests {
             args: vec!["--arg".to_string()],
             env: std::collections::HashMap::new(),
             init_timeout_secs: 60,
+            framing: Default::default(),
         };
         let cloned = server.clone();
         assert_eq!(cloned.name, "test");
@@ -156,6 +162,7 @@ mod tests {
                 args: vec![],
                 env: std::collections::HashMap::new(),
                 init_timeout_secs: 30,
+                framing: Default::default(),
             }],
         };
         let cloned = config.clone();
@@ -198,6 +205,7 @@ mod tests {
             args: vec![],
             env: std::collections::HashMap::new(),
             init_timeout_secs: 30,
+            framing: Default::default(),
         };
         let debug_str = format!("{:?}", server);
         assert!(debug_str.contains("test"));

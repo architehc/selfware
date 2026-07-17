@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Selfware! This document provides 
 
 ### Prerequisites
 
-- Rust 1.85.0 or later (MSRV)
+- Rust 1.91.0 or later (MSRV)
 - Git
 - A local LLM backend for testing (optional, but recommended)
 
@@ -20,8 +20,8 @@ cd selfware
 # Build in debug mode
 cargo build
 
-# Build with all features
-cargo build --all-features
+# Build with all optional features (what CI tests)
+cargo build --features extras
 
 # Build release
 cargo build --release
@@ -33,8 +33,8 @@ cargo build --release
 # Run all tests
 cargo test
 
-# Run tests with all features
-cargo test --all-features
+# Run tests with all optional features (what CI runs)
+cargo test --features extras
 
 # Run specific test file
 cargo test --test e2e_tools_test
@@ -51,8 +51,8 @@ We use `rustfmt` for formatting and `clippy` for linting:
 # Format code
 cargo fmt
 
-# Run clippy
-cargo clippy --all-targets --all-features -- -D warnings
+# Run clippy (same invocation as CI)
+cargo clippy --all-targets --features extras -- -D warnings
 ```
 
 ## Making Changes
@@ -148,7 +148,7 @@ Place test fixtures in `tests/e2e-projects/`.
 src/
 ├── agent/          # Core agent logic, checkpointing, self-healing integration
 ├── api/            # LLM API client with timeout and retry
-├── tools/          # 54 built-in tool implementations
+├── tools/          # 70+ built-in tool implementations
 ├── ui/             # CLI UI components (style, animations, banners, TUI)
 ├── analysis/       # Code analysis, BM25 search, vector store
 ├── cognitive/      # PDVR cycle, working/episodic memory
@@ -168,7 +168,7 @@ src/
 ### Key Abstractions
 
 - **Agent**: The main execution loop that coordinates LLM calls and tool execution
-- **Tool**: Interface for implementing new tools (54 built-in)
+- **Tool**: Interface for implementing new tools (70+ built-in)
 - **SafetyChecker**: Validates operations before execution
 - **SelfHealingEngine**: Error classification, recovery strategies, exponential backoff
 - **Config**: Runtime configuration management
@@ -221,19 +221,23 @@ Available feature flags in `Cargo.toml`:
 
 | Flag | Description |
 |------|-------------|
-| `tui` | TUI dashboard mode with animations and demos |
-| `workflows` | Workflow automation and parallel execution |
-| `resilience` | Self-healing, error classification, recovery strategies |
-| `execution-modes` | Execution control (dry-run, confirm, yolo) |
-| `cache` | Response caching layer |
-| `log-analysis` | Log analysis and diagnostics |
-| `tokens` | Token counting and management |
-| `extras` | Convenience flag enabling all optional modules |
+| `tui` | TUI dashboard mode with animations and demos (default) |
+| `resilience` | Self-healing, error classification, recovery strategies (default) |
+| `execution-modes` | Execution control (dry-run, confirm, yolo) (default) |
+| `log-analysis` | Log analysis and diagnostics (default) |
+| `tokens` | Token counting and management (default) |
+| `self-improvement` | Evolution engine and self-improvement daemon (default) |
+| `consolidation` | Memory consolidation ("sleep") system (default) |
+| `extras` | Convenience flag enabling all defaults plus `hot-reload`, `vlm-bench`, `bench-harness` |
+| `hot-reload` | Dynamic library hot-reload (security-sensitive, off by default) |
+| `vlm-bench` | VLM benchmark suite |
+| `bench-harness` | Concurrent benchmark harness |
 | `integration` | Enables integration tests |
+| `system-tests` | System-level E2E tests (require a live LLM endpoint) |
 
 ```bash
-# Build with all features
-cargo build --all-features
+# Build with all optional features (what CI tests)
+cargo build --features extras
 
 # Build with specific features
 cargo build --features "resilience,tui"
@@ -241,6 +245,8 @@ cargo build --features "resilience,tui"
 # Run tests with resilience
 cargo test --features resilience
 ```
+
+Avoid `--all-features`: it also enables test-only features (`system-tests`, `integration`, ...) that require a live LLM endpoint, and CI does not test that combination.
 
 ## Questions?
 

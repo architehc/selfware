@@ -194,6 +194,22 @@ mod tests {
     }
 
     #[test]
+    fn test_session_grant_authorizes_tool_for_session() {
+        // Backs the confirmation prompt's "always allow this tool" option:
+        // a session grant must authorize that tool (and only that tool) for
+        // the rest of the session.
+        let grant = PermissionGrant::session("shell_exec");
+        assert!(!grant.is_expired());
+        assert!(grant.matches_tool("shell_exec"));
+        assert!(!grant.matches_tool("file_delete"));
+
+        let mut store = PermissionStore::new();
+        store.add(PermissionGrant::session("shell_exec"));
+        assert!(store.is_authorized("shell_exec", None));
+        assert!(!store.is_authorized("file_write", None));
+    }
+
+    #[test]
     fn test_expired_grant() {
         let mut grant = PermissionGrant::permanent("test");
         grant.expires_at = Some(Utc::now() - Duration::hours(1));

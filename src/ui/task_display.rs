@@ -352,11 +352,13 @@ pub fn render_welcome_banner() -> String {
         Glyphs::corner_br(),
     );
 
+    let title = format!("Selfware Workshop v{}", env!("CARGO_PKG_VERSION"));
     let line1 = format!(
-        "{}  {} Selfware Workshop v0.1.5{}{}",
+        "{}  {} {}{}{}",
         v,
         Glyphs::sprout(),
-        " ".repeat(width - 30),
+        title,
+        " ".repeat(width.saturating_sub(6 + title.len())),
         v,
     );
     let line2 = format!(
@@ -687,7 +689,7 @@ mod tests {
     fn test_render_welcome_banner() {
         let banner = render_welcome_banner();
         assert!(banner.contains("Selfware Workshop"));
-        assert!(banner.contains("v0.1.5"));
+        assert!(banner.contains(env!("CARGO_PKG_VERSION")));
         assert!(banner.contains("Software that improves itself"));
         assert!(banner.contains("Local-first"));
         assert!(banner.contains("Privacy-owned"));

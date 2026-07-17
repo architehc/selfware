@@ -313,7 +313,7 @@ These settings are found in the LM Studio server configuration panel:
 This is a known parser issue that can occur when models generate malformed XML in tool calls, especially with HTML content. Update to the latest selfware version:
 
 ```bash
-cargo install selfware --force
+cargo install --git https://github.com/architehc/selfware --force
 ```
 
 ### Model outputs gibberish or loops

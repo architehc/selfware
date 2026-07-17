@@ -344,15 +344,13 @@ impl YoloManager {
                     }
                     if let Some(secret) = reads_sensitive_path(cmd) {
                         return YoloDecision::RequireConfirmation(format!(
-                            "Shell command reads a sensitive path ({secret}) — requires confirmation. \
-                             File path-deny globs do not cover shell_exec; set allow_destructive_shell \
-                             to bypass."
+                            "Shell command reads a sensitive path ({secret}) — requires confirmation."
                         ));
                     }
                     if let Some(pattern) = reads_denied_path(cmd, &self.config.denied_paths) {
                         return YoloDecision::RequireConfirmation(format!(
                             "Shell command reads a path matching a denied glob ('{pattern}') — \
-                             requires confirmation. Set allow_destructive_shell to bypass."
+                             requires confirmation."
                         ));
                     }
                 }
@@ -1326,6 +1324,39 @@ mod tests {
             manager.should_auto_approve("shell_exec", &ok),
             YoloDecision::AutoApprove
         );
+    }
+
+    #[test]
+    fn shell_exec_block_reason_does_not_coach_bypass() {
+        // P1-8: these reasons are pushed into the model-visible conversation
+        // in unattended sessions — they must not describe how to bypass the
+        // denied-path guards.
+        let mut config = YoloConfig::fully_autonomous();
+        config.denied_paths = vec!["**/vault/**".to_string()];
+        let manager = YoloManager::new(config);
+
+        for args in [
+            serde_json::json!({ "command": "cat app/vault/master.key" }),
+            serde_json::json!({ "command": "cat ~/.ssh/id_rsa" }),
+        ] {
+            match manager.should_auto_approve("shell_exec", &args) {
+                YoloDecision::RequireConfirmation(reason) => {
+                    assert!(
+                        reason.contains("requires confirmation"),
+                        "reason should say what happened: {reason}"
+                    );
+                    assert!(
+                        !reason.contains("bypass"),
+                        "reason must not coach a bypass: {reason}"
+                    );
+                    assert!(
+                        !reason.contains("do not cover"),
+                        "reason must not describe the coverage gap: {reason}"
+                    );
+                }
+                other => panic!("expected RequireConfirmation, got {other:?}"),
+            }
+        }
     }
 
     #[test]

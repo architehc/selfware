@@ -812,8 +812,16 @@ impl Agent {
                                         warn!("Failed to checkpoint after planning error: {}", ce);
                                     }
                                     planning_attempt += 1;
+                                    // A terminal 4xx from the API (e.g. 401
+                                    // from a missing/invalid key) can never
+                                    // succeed on retry — fail fast so the user
+                                    // sees the remediation hint immediately
+                                    // instead of after duplicated retries.
+                                    let terminal_client_error =
+                                        super::assistant_response::is_terminal_api_client_error(&e);
                                     if self.is_cancelled()
                                         || planning_attempt >= MAX_PLANNING_RETRIES
+                                        || terminal_client_error
                                     {
                                         if mode == LoopMode::NewTask {
                                             self.emit_event(AgentEvent::Error {
@@ -1624,7 +1632,7 @@ mod tests {
     use super::*;
     use crate::checkpoint::{CheckpointManager, TaskCheckpoint, ToolCallLog};
     use crate::config::{AgentConfig, Config, ExecutionMode, SafetyConfig};
-    use crate::testing::mock_api::MockLlmServer;
+    use crate::testing::mock_api::{MockLlmServer, MockResponse};
     use chrono::Utc;
 
     #[test]
@@ -2242,6 +2250,91 @@ mod tests {
             result.err()
         );
         assert!(agent.current_checkpoint.is_some());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_terminal_401_planning_error_not_retried() {
+        // Every request gets a 401. Client-level retries are disabled so each
+        // planning attempt is exactly one HTTP request, and the mock records
+        // how many hit the wire. The agent-level planning retry loop must NOT
+        // retry a terminal 4xx — it can never succeed and the user should see
+        // the auth remediation hint immediately.
+        let server = MockLlmServer::builder()
+            .with_default_response(MockResponse::Error {
+                status: 401,
+                body: r#"{"error":"No cookie auth credentials found"}"#.to_string(),
+            })
+            .build()
+            .await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+        config.retry = crate::config::RetrySettings {
+            max_retries: 0,
+            base_delay_ms: 1,
+            max_delay_ms: 1,
+        };
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Do a simple task").await;
+
+        assert!(result.is_err(), "run_task should fail on a terminal 401");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Hint"),
+            "expected the auth remediation hint to reach the user, got: {err}"
+        );
+        let requests = server.captured_request_bodies().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "terminal 401 must fail after a single planning attempt, got {} requests",
+            requests.len()
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_503_planning_error_still_retried() {
+        // A 503 is a transient server error: the planning-level retry loop
+        // must preserve its existing behavior (MAX_PLANNING_RETRIES = 3
+        // attempts) for retryable failures. Client-level retries are disabled
+        // so each planning attempt is exactly one HTTP request.
+        let server = MockLlmServer::builder()
+            .with_default_response(MockResponse::Error {
+                status: 503,
+                body: r#"{"error":"service unavailable"}"#.to_string(),
+            })
+            .build()
+            .await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+        config.retry = crate::config::RetrySettings {
+            max_retries: 0,
+            base_delay_ms: 1,
+            max_delay_ms: 1,
+        };
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Do a simple task").await;
+
+        assert!(
+            result.is_err(),
+            "run_task should fail after exhausting planning retries on 503"
+        );
+        let requests = server.captured_request_bodies().await;
+        assert_eq!(
+            requests.len(),
+            3,
+            "503 planning errors must still be retried up to MAX_PLANNING_RETRIES, got {} requests",
+            requests.len()
+        );
         server.stop().await;
     }
 

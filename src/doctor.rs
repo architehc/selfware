@@ -634,6 +634,45 @@ fn check_log_health() -> DoctorCheck {
 pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
     let mut out = Vec::new();
 
+    // Which config file is in effect — the single most useful piece of
+    // provenance when debugging "why is my config ignored". Flags the
+    // cwd-shadows-global trap explicitly.
+    match config.loaded_config_path() {
+        Some(path) => {
+            let home_config = dirs::home_dir().map(|h| h.join(".config/selfware/config.toml"));
+            let shadows_global = path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
+                && home_config.as_ref().map(|h| h.is_file()).unwrap_or(false)
+                && Some(path) != home_config.as_deref();
+            out.push(DoctorCheck {
+                name: "config file".to_string(),
+                category: Category::Configuration,
+                status: CheckStatus::Ok,
+                version: None,
+                message: if shadows_global {
+                    format!(
+                        "config: {} (shadowing {})",
+                        path.display(),
+                        home_config.unwrap().display()
+                    )
+                } else {
+                    format!("config: {}", path.display())
+                },
+                fix_hint: None,
+            });
+        }
+        None => out.push(DoctorCheck {
+            name: "config file".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Ok,
+            version: None,
+            message: "config: none found — using built-in defaults".to_string(),
+            fix_hint: Some(
+                "Run `selfware init` to create a config, or write ~/.config/selfware/config.toml."
+                    .to_string(),
+            ),
+        }),
+    }
+
     // Endpoint URL parses
     match url::Url::parse(&config.endpoint) {
         Ok(u) => out.push(DoctorCheck {

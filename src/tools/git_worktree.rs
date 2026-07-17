@@ -784,6 +784,10 @@ detached
 
     #[tokio::test]
     async fn test_list_worktrees_execute() {
+        // The tool runs `git worktree list` in the process cwd — a shared
+        // global. Hold the cwd guard so a concurrent test that `chdir`s into
+        // a temp dir can't make git fail underneath us (see test_support.rs).
+        let _g = crate::test_support::CwdGuard::hold();
         let tool = ListWorktreesTool::new();
         let args = serde_json::json!({});
 

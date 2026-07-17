@@ -47,6 +47,11 @@ pub enum FailureKind {
     /// Token budget (`max_budget_tokens`) exhausted — distinct from a
     /// wall-clock timeout; the fix is a bigger token budget, not more wall time.
     BudgetExhausted,
+    /// Safety policy refused the operations the task depended on, so the run
+    /// burned its budget with no way forward. Distinct from `Timeout`: more
+    /// wall-clock or iterations cannot fix a (correct) safety refusal — the
+    /// task or the safety configuration must change.
+    BlockedBySafety,
     /// `max_iterations` hit without any other distinguishing signal.
     MaxIterations,
     /// Model emitted "Final answer:" without ever mutating a tool.
@@ -68,6 +73,7 @@ impl FailureKind {
             FailureKind::SelfwareError => "SELFWARE_ERROR",
             FailureKind::NoChange => "NO_CHANGES",
             FailureKind::BudgetExhausted => "BUDGET_EXHAUSTED",
+            FailureKind::BlockedBySafety => "BLOCKED_BY_SAFETY",
             FailureKind::MaxIterations => "MAX_ITERATIONS",
             FailureKind::FakeComplete => "FAKE_COMPLETE",
             FailureKind::Unknown => "UNKNOWN",
@@ -119,6 +125,11 @@ impl FailureMode {
         let has_final_answer_marker = agent.last_assistant_response_has_final_answer();
         let circuit_open = agent.prefill_breaker_open();
         let prefill_400s = agent.prefill_400_count();
+        // A run that kept hitting the safety checker and never found another
+        // way forward must not be mislabeled TIMEOUT / MAX_ITERATIONS — no
+        // budget increase fixes a (correct) safety refusal. Computed once and
+        // checked before the timeout/max-iterations mappings below.
+        let safety_blocked = safety_blocked_share(agent);
 
         match outcome {
             RunOutcome::NaturalCompletion => {
@@ -215,6 +226,12 @@ impl FailureMode {
                         advice: "the model kept reading without editing — point it at the file to change; do NOT raise max_iterations".to_string(),
                     };
                 }
+                // Safety-blocked runs burn their whole budget and then get
+                // mislabeled TIMEOUT / MAX_ITERATIONS. Check the safety share
+                // BEFORE those mappings so exit status stops lying.
+                if let Some((blocked, window)) = safety_blocked {
+                    return blocked_by_safety_failure(blocked, window);
+                }
                 if reason.contains("Max iterations") {
                     return classify_max_iter_failure(
                         mutating,
@@ -223,6 +240,7 @@ impl FailureMode {
                         permanently_blocked,
                         total_calls,
                         final_answer_len,
+                        safety_blocked,
                     );
                 }
                 // Token-budget exhaustion is NOT a wall-clock timeout — the fix
@@ -269,6 +287,7 @@ impl FailureMode {
                     permanently_blocked,
                     total_calls,
                     final_answer_len,
+                    safety_blocked,
                 )
             }
             RunOutcome::Partial => classify_max_iter_failure(
@@ -278,6 +297,7 @@ impl FailureMode {
                 permanently_blocked,
                 total_calls,
                 final_answer_len,
+                safety_blocked,
             ),
         }
     }
@@ -325,6 +345,37 @@ pub enum RunOutcome {
     Partial,
 }
 
+/// Count of distinct tool calls the safety checker refused during this run.
+/// `recent_failed_tool_attempts` dedups identical (tool, args, kind) attempts,
+/// so this counts distinct refused operations, not retries of the same one.
+fn safety_blocked_count(agent: &Agent) -> usize {
+    agent
+        .recent_failed_tool_attempts
+        .iter()
+        .filter(|attempt| attempt.failure_kind == "safety")
+        .count()
+}
+
+/// `Some((blocked, window))` when safety refusals dominate the recent
+/// tool-failure window — the run could not proceed because the safety checker
+/// refused the operations the model attempted. `None` otherwise.
+fn safety_blocked_share(agent: &Agent) -> Option<(usize, usize)> {
+    let window = agent.recent_failed_tool_attempts.len();
+    let blocked = safety_blocked_count(agent);
+    (blocked >= 2 && blocked * 2 >= window).then_some((blocked, window))
+}
+
+fn blocked_by_safety_failure(blocked: usize, window: usize) -> FailureMode {
+    FailureMode {
+        kind: FailureKind::BlockedBySafety,
+        evidence: format!(
+            "safety policy refused {} of the last {} failed tool call(s); the run burned its budget with no way forward",
+            blocked, window
+        ),
+        advice: "the safety checker refused the required operations — adjust the task or the safety configuration (allowed paths/commands); do NOT raise max_iterations or the wall-clock budget".to_string(),
+    }
+}
+
 fn classify_max_iter_failure(
     mutating: usize,
     progress_guard: usize,
@@ -332,8 +383,15 @@ fn classify_max_iter_failure(
     permanently_blocked: usize,
     total_calls: usize,
     final_answer_len: usize,
+    safety_blocked: Option<(usize, usize)>,
 ) -> FailureMode {
     // Order matters: most specific signals first.
+
+    // 0) Safety-blocked: the budget burned because the safety checker refused
+    // the required operations — not a timeout/iteration problem.
+    if let Some((blocked, window)) = safety_blocked {
+        return blocked_by_safety_failure(blocked, window);
+    }
 
     // 1) Prose-only termination.
     if no_action_consecutive >= super::recovery::MAX_NO_ACTION_PROMPTS && mutating == 0 {
@@ -657,6 +715,91 @@ mod tests {
         );
     }
 
+    /// A correctly safety-blocked task burns its whole budget and must NOT be
+    /// mislabeled TIMEOUT — no budget increase fixes a safety refusal.
+    #[tokio::test]
+    async fn classify_blocked_by_safety_instead_of_timeout() {
+        let mut agent = make_agent().await;
+        // Distinct refused operations (the failure window dedups identical
+        // attempts, so each entry must differ).
+        for command in [
+            "rm -rf /",
+            "sudo dd if=/dev/zero of=/dev/sda",
+            "mkfs.ext4 /dev/sda",
+        ] {
+            agent.record_failed_tool_attempt(
+                "shell_exec",
+                &serde_json::json!({"command": command}).to_string(),
+                "safety",
+                "Safety check failed: blocked command",
+            );
+        }
+
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "wall-clock timeout after 600s".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::BlockedBySafety);
+        assert_eq!(mode.kind.tag(), "BLOCKED_BY_SAFETY");
+        assert!(
+            mode.evidence.contains("3 of the last 3"),
+            "{}",
+            mode.evidence
+        );
+        assert!(
+            mode.advice.contains("safety"),
+            "advice must point at the safety configuration: {}",
+            mode.advice
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_blocked_by_safety_on_partial_exit() {
+        let mut agent = make_agent().await;
+        for command in ["rm -rf /", "sudo shutdown now"] {
+            agent.record_failed_tool_attempt(
+                "shell_exec",
+                &serde_json::json!({"command": command}).to_string(),
+                "safety",
+                "Safety check failed: blocked command",
+            );
+        }
+
+        let mode = FailureMode::classify(&agent, RunOutcome::Partial);
+        assert_eq!(mode.kind, FailureKind::BlockedBySafety);
+    }
+
+    #[tokio::test]
+    async fn scattered_safety_blocks_do_not_relabel_a_real_timeout() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(1);
+        // One safety refusal among many execution failures — not dominant.
+        agent.record_failed_tool_attempt(
+            "shell_exec",
+            r#"{"command":"rm -rf /"}"#,
+            "safety",
+            "Safety check failed: blocked command",
+        );
+        for i in 0..5 {
+            agent.record_failed_tool_attempt(
+                "file_edit",
+                &serde_json::json!({"path": format!("f{i}.rs")}).to_string(),
+                "execution",
+                "edit failed",
+            );
+        }
+
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "wall-clock timeout after 600s".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::Timeout);
+    }
+
     #[test]
     fn cli_banner_no_change_is_neither_success_nor_abort() {
         let m = FailureMode {
@@ -673,10 +816,10 @@ mod tests {
     #[test]
     fn advice_is_operator_facing_not_selfware_internal() {
         // ReadLoop branch: progress guard fired, zero mutations.
-        let read_loop = classify_max_iter_failure(0, 1, 0, 0, 5, 0);
+        let read_loop = classify_max_iter_failure(0, 1, 0, 0, 5, 0, None);
         assert_eq!(read_loop.kind, FailureKind::ReadLoop);
         // RetryLoop branch: a tool was permanently blocked.
-        let retry_loop = classify_max_iter_failure(0, 0, 0, 1, 5, 0);
+        let retry_loop = classify_max_iter_failure(0, 0, 0, 1, 5, 0, None);
         assert_eq!(retry_loop.kind, FailureKind::RetryLoop);
         for m in [&read_loop, &retry_loop] {
             let a = m.advice.to_lowercase();
@@ -705,6 +848,7 @@ mod tests {
         // Everything else is a failure.
         for k in [
             FailureKind::BudgetExhausted,
+            FailureKind::BlockedBySafety,
             FailureKind::Timeout,
             FailureKind::FakeComplete,
             FailureKind::ReadLoop,

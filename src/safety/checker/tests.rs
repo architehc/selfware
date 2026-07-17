@@ -960,3 +960,138 @@ fn every_registered_tool_passes_the_safety_dispatch() {
          unregistered — add them to the dispatch in validation.rs: {blocked:?}"
     );
 }
+
+// ── P1-8: denied_paths must guard shell output redirects ─────────────────
+
+#[test]
+fn test_redirect_target_parsing() {
+    use crate::safety::checker::validation::shell_output_redirect_targets as targets;
+
+    assert_eq!(targets("echo x > out.txt"), vec!["out.txt"]);
+    assert_eq!(targets("echo x >> out.txt"), vec!["out.txt"]);
+    assert_eq!(targets("echo x>out.txt"), vec!["out.txt"]);
+    assert_eq!(targets("echo x > \"my file.txt\""), vec!["my file.txt"]);
+    assert_eq!(targets("echo x > './.env'"), vec!["./.env"]);
+    // Fd-qualified redirects that write a file are captured.
+    assert_eq!(targets("cmd 2> err.log"), vec!["err.log"]);
+    assert_eq!(targets("cmd &> all.log"), vec!["all.log"]);
+    assert_eq!(targets("cmd >| clobber.log"), vec!["clobber.log"]);
+    // Multiple redirects are all captured.
+    assert_eq!(
+        targets("cmd > out.log 2> err.log"),
+        vec!["out.log", "err.log"]
+    );
+}
+
+#[test]
+fn test_redirect_target_parsing_ignores_non_file_redirects() {
+    use crate::safety::checker::validation::shell_output_redirect_targets as targets;
+
+    // Descriptor duplication writes no file.
+    assert!(targets("echo x 2>&1").is_empty());
+    assert!(targets("echo x >&2").is_empty());
+    assert!(targets("echo x 2>>&1").is_empty());
+    // `>` inside quotes is not a redirect.
+    assert!(targets("grep \"a > b\" file.rs").is_empty());
+    assert!(targets("grep 'a > b' file.rs").is_empty());
+    // Process substitution and input redirects are not file writes.
+    assert!(targets("diff <(ls a) <(ls b)").is_empty());
+    assert!(targets("cat < in.txt").is_empty());
+    assert!(targets("cat <<EOF\nhello\nEOF").is_empty());
+    // No redirect at all.
+    assert!(targets("ls -la").is_empty());
+}
+
+#[test]
+fn test_shell_exec_redirect_to_denied_path_blocked() {
+    // The P1-8 bypass: file_write to a denied path is blocked, but the same
+    // write via shell redirection used to sail through.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "echo x > .env",
+        "echo x >> .env",
+        "echo x>.env",
+        "echo x > ./.env",
+        "echo x > config/.env",
+        "echo x 2> .env",
+        "echo x > \".env\"",
+        "cat /etc/hostname > .env.local",
+        "echo x > sub/secrets/api_key.txt",
+        "echo x > .git/hooks/post-commit",
+        "echo x > .git/config",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        let result = checker.check_tool_call(&call);
+        assert!(
+            result.is_err(),
+            "redirect to a denied path must be blocked: {cmd}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("denied pattern"),
+            "expected a denied-pattern error for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_redirect_to_allowed_path_works() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "echo x > output.txt",
+        "echo x >> build/results.log",
+        "cargo build 2> build-errors.log",
+        "echo x > /tmp/selfware-test-redirect-out.txt",
+        // Descriptor duplication and quoted `>` are not file writes.
+        "echo x 2>&1",
+        "grep \"a > b\" src/main.rs",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        assert!(
+            checker.check_tool_call(&call).is_ok(),
+            "redirect to an allowed path must pass: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_redirect_filename_only_denied_pattern() {
+    // A filename-only deny glob (no '/') must match a redirect target by
+    // basename, mirroring PathValidator.
+    let config = SafetyConfig {
+        denied_paths: vec!["vault_token".to_string()],
+        ..SafetyConfig::default()
+    };
+    let checker = SafetyChecker::new(&config);
+
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "echo x > config/vault_token"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+
+    let ok = create_test_call("shell_exec", r#"{"command": "echo x > config/notes.txt"}"#);
+    assert!(checker.check_tool_call(&ok).is_ok());
+}
+
+#[test]
+fn test_shell_exec_redirect_absolute_target_inside_workdir() {
+    // An absolute redirect target under the working dir must be matched
+    // against the deny globs too (lexical resolution, no filesystem access).
+    let workdir = std::env::current_dir().unwrap();
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::with_working_dir(&config, workdir.clone());
+
+    let denied = workdir.join(".env");
+    let args = serde_json::json!({"command": format!("echo x > {}", denied.display())}).to_string();
+    let call = create_test_call("shell_exec", &args);
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "absolute redirect to a denied path inside the workdir must be blocked"
+    );
+}

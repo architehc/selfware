@@ -404,6 +404,22 @@ impl SafetyChecker {
             return Err(SelfwareError::Safety(SafetyError::BlockedEncodedCommand));
         }
 
+        // denied_paths must also guard shell output redirects: without this,
+        // `echo x > denied_file` bypasses the file-tool path checks entirely
+        // (P1-8). Parse `>`/`>>` targets from the RAW command (preserving
+        // case and quoting) and match them against the deny globs.
+        for target in shell_output_redirect_targets(cmd) {
+            if let Some(pattern) = redirect_target_matches_denied(
+                &target,
+                &self.working_dir,
+                &self.config.denied_paths,
+            ) {
+                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                    pattern,
+                }));
+            }
+        }
+
         // Check command chaining
         for part in split_shell_commands(&normalized) {
             let part_trimmed = part.trim();
@@ -815,6 +831,145 @@ pub fn split_shell_commands(cmd: &str) -> Vec<&str> {
     }
 
     parts
+}
+
+/// Extract the file targets of output redirections (`>`, `>>`) from a shell
+/// command. `>` inside single/double quotes is ignored, as is descriptor
+/// duplication that writes no file (`2>&1`, `>&2`) and process substitution
+/// (`>(...)`). Fd-qualified redirects that DO write a file (`2> err.log`,
+/// `&> all.log`, `>| clobbered`) are included, quotes around the target are
+/// stripped. Input redirects (`<`) and here-docs (`<<`) are not writes and
+/// are ignored.
+pub fn shell_output_redirect_targets(cmd: &str) -> Vec<String> {
+    let chars: Vec<char> = cmd.chars().collect();
+    let mut targets = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Backslash escapes the next character (outside single quotes).
+        if c == '\\' && !in_single {
+            i += 2;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if c != '>' || in_single || in_double {
+            i += 1;
+            continue;
+        }
+
+        // A `>` outside quotes. Consume the operator: `>`, `>>`, then an
+        // optional `|` (`>|` noclobber override still writes a file).
+        let mut j = i + 1;
+        if j < chars.len() && chars[j] == '>' {
+            j += 1;
+        }
+        // Descriptor duplication (`>&1`, `>>&2`) and process substitution
+        // (`>(...)`) write no file.
+        if j < chars.len() && (chars[j] == '&' || chars[j] == '(') {
+            i = j + 1;
+            continue;
+        }
+        if j < chars.len() && chars[j] == '|' {
+            j += 1;
+        }
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+
+        // Read the target token, stripping quotes (quoted segments may
+        // contain whitespace) and resolving backslash escapes the way the
+        // shell would.
+        let mut token = String::new();
+        let mut token_quote: Option<char> = None;
+        while j < chars.len() {
+            let t = chars[j];
+            if let Some(q) = token_quote {
+                if t == q {
+                    token_quote = None;
+                } else {
+                    token.push(t);
+                }
+                j += 1;
+                continue;
+            }
+            if t.is_whitespace() || matches!(t, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                break;
+            }
+            if t == '\'' || t == '"' {
+                token_quote = Some(t);
+                j += 1;
+                continue;
+            }
+            if t == '\\' && j + 1 < chars.len() {
+                token.push(chars[j + 1]);
+                j += 2;
+                continue;
+            }
+            token.push(t);
+            j += 1;
+        }
+        // A token still starting with `&` (`foo>&2` without whitespace) is
+        // descriptor duplication, not a file.
+        if !token.is_empty() && !token.starts_with('&') {
+            targets.push(token);
+        }
+        i = j.max(i + 1);
+    }
+    targets
+}
+
+/// Match a shell output-redirect target against the configured `denied_paths`
+/// globs, mirroring `PathValidator`'s matching: full-path glob match on both
+/// the raw target and the working-dir-resolved form, plus basename matching
+/// for filename-only patterns (e.g. `.env`). Resolution is lexical only (no
+/// filesystem access), so prospective output paths work. Returns the matched
+/// pattern, or `None` when the target is not denied.
+fn redirect_target_matches_denied(
+    target: &str,
+    working_dir: &std::path::Path,
+    denied_paths: &[String],
+) -> Option<String> {
+    if denied_paths.is_empty() {
+        return None;
+    }
+    let target_path = std::path::Path::new(target);
+    let resolved = if target_path.is_absolute() {
+        crate::safety::path_validator::lexical_normalize_path(target_path)
+    } else {
+        crate::safety::path_validator::lexical_normalize_path(&working_dir.join(target_path))
+    };
+    let resolved_glob = super::to_glob_form(&resolved.to_string_lossy());
+    let raw_glob = super::to_glob_form(target.trim_start_matches("./"));
+
+    for pattern in denied_paths {
+        let compiled = match glob::Pattern::new(&super::to_glob_form(pattern)) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if compiled.matches(&resolved_glob) || compiled.matches(&raw_glob) {
+            return Some(pattern.clone());
+        }
+        // Filename-only patterns (no '/', e.g. ".env") also match by basename.
+        if !pattern.contains('/') && !pattern.contains('\\') {
+            if let Some(base) = resolved.file_name().and_then(|s| s.to_str()) {
+                if compiled.matches(&super::to_glob_form(base)) {
+                    return Some(pattern.clone());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Detect `git push` invocations (via shell_exec/container_exec, not the
