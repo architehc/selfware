@@ -230,18 +230,20 @@ impl BrowserTaskExecutor {
                 }
             };
 
-            // Record screenshot reference for Screenshot actions.
-            // The browser already wrote the PNG; we just record the path.
-            let screenshot_after = if let WebAction::Screenshot { label } = action {
-                if let Some(ref p) = screenshot_path {
-                    // Read the real PNG size from the header instead of hardcoding
-                    // (0, 0); fall back to (0, 0) only if the file can't be read.
-                    let dims = image::image_dimensions(p).unwrap_or((0, 0));
-                    recorder.record_screenshot(label, p.clone(), dims);
+            // Record a screenshot reference only for a SUCCESSFUL Screenshot action.
+            // A failed screenshot wrote no valid PNG, so recording its path/size
+            // would be misleading.
+            let screenshot_after = match (action, &outcome) {
+                (WebAction::Screenshot { label }, ActionOutcome::Success { .. }) => {
+                    if let Some(ref p) = screenshot_path {
+                        // Real PNG size from the header; fall back to (0, 0) only
+                        // if the file can't be read.
+                        let dims = image::image_dimensions(p).unwrap_or((0, 0));
+                        recorder.record_screenshot(label, p.clone(), dims);
+                    }
+                    screenshot_path.clone()
                 }
-                screenshot_path.clone()
-            } else {
-                None
+                _ => None,
             };
 
             // Handle outcome side effects. A timeout or ANY failed action fails
