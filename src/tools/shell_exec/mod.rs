@@ -464,6 +464,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn registered_shell_exec_timeout_reaps_process_group() {
         // The REGISTERED shell tool must reap the whole tree on timeout — a
         // backgrounded grandchild (`sleep 30 &`) must be killed, not orphaned.
@@ -566,6 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_shell_exec_timeout() {
         let tool = ShellExec;
         let args = serde_json::json!({

@@ -1095,3 +1095,97 @@ fn test_shell_exec_redirect_absolute_target_inside_workdir() {
         "absolute redirect to a denied path inside the workdir must be blocked"
     );
 }
+
+#[test]
+fn test_redirect_matching_windows_shaped_absolute_target() {
+    // Windows-shaped redirect targets must match deny globs lexically on
+    // EVERY host OS: `std::path::Path` only splits the host separator, so
+    // without separator-agnostic handling `C:\work\.env` is neither absolute
+    // nor basename-splittable on Unix and slips past the `.env` deny glob
+    // (the Windows CI failure for P1-8). The matcher is purely lexical, so
+    // Windows-shaped strings are exercised directly here on any platform.
+    use crate::safety::checker::validation::redirect_target_matches_denied as matches_denied;
+
+    let wd = std::path::Path::new("/home/user/work");
+    let denied = vec!["**/.env".to_string()];
+
+    // Backslash absolute path with a drive letter (what cmd/PowerShell see).
+    assert_eq!(
+        matches_denied(r"C:\work\.env", wd, &denied).as_deref(),
+        Some("**/.env")
+    );
+    // Forward-slash drive form resolves identically.
+    assert_eq!(
+        matches_denied("C:/work/.env", wd, &denied).as_deref(),
+        Some("**/.env")
+    );
+    // `..` segments across backslashes are resolved lexically:
+    // C:\work\sub\..\.env → C:/work/.env.
+    assert_eq!(
+        matches_denied(r"C:\work\sub\..\.env", wd, &denied).as_deref(),
+        Some("**/.env")
+    );
+    // A non-denied Windows target is not blocked.
+    assert!(matches_denied(r"C:\work\out.txt", wd, &denied).is_none());
+}
+
+#[test]
+fn test_redirect_matching_windows_shaped_basename_and_relative() {
+    use crate::safety::checker::validation::redirect_target_matches_denied as matches_denied;
+
+    let wd = std::path::Path::new("/home/user/work");
+
+    // Filename-only deny globs match by basename across `\` separators too.
+    let denied = vec!["vault_token".to_string()];
+    assert_eq!(
+        matches_denied(r"config\vault_token", wd, &denied).as_deref(),
+        Some("vault_token")
+    );
+
+    // Relative backslash targets resolve against the working dir for
+    // full-path globs as well.
+    let denied = vec!["**/secrets/**".to_string()];
+    assert_eq!(
+        matches_denied(r"sub\secrets\api_key.txt", wd, &denied).as_deref(),
+        Some("**/secrets/**")
+    );
+    // `..` cannot launder a denied dir away without actually leaving it:
+    // C:\secrets\sub\..\ok.txt → C:/secrets/ok.txt is still under secrets.
+    assert_eq!(
+        matches_denied(r"C:\secrets\sub\..\ok.txt", wd, &denied).as_deref(),
+        Some("**/secrets/**")
+    );
+    // ...and `..` above a drive root stays pinned at the drive:
+    // C:\..\secrets\x → C:/secrets/x is still matched.
+    assert_eq!(
+        matches_denied(r"C:\..\secrets\x", wd, &denied).as_deref(),
+        Some("**/secrets/**")
+    );
+    // A Windows target outside every denied dir is not blocked.
+    assert!(matches_denied(r"C:\work\..\ok.txt", wd, &denied).is_none());
+}
+
+#[test]
+fn test_redirect_matching_unix_behavior_unchanged() {
+    // Separator-agnostic matching must not change Unix outcomes: backslash-
+    // free targets resolve exactly as before (absolute, relative, dotdot).
+    use crate::safety::checker::validation::redirect_target_matches_denied as matches_denied;
+
+    let wd = std::path::Path::new("/home/user/work");
+    let denied = vec!["**/.env".to_string(), "vault_token".to_string()];
+
+    assert_eq!(
+        matches_denied("/home/user/work/.env", wd, &denied).as_deref(),
+        Some("**/.env")
+    );
+    assert_eq!(
+        matches_denied("config/vault_token", wd, &denied).as_deref(),
+        Some("vault_token")
+    );
+    assert_eq!(
+        matches_denied("../outside/.env", wd, &denied).as_deref(),
+        Some("**/.env")
+    );
+    assert!(matches_denied("build/results.log", wd, &denied).is_none());
+    assert!(matches_denied("/tmp/out.txt", wd, &denied).is_none());
+}

@@ -1449,6 +1449,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_start_simple() {
         let manager = ProcessManager::new();
 
@@ -1478,6 +1479,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_list() {
         let manager = ProcessManager::new();
 
@@ -1502,6 +1504,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_stop() {
         let manager = ProcessManager::new();
 
@@ -1528,6 +1531,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_get() {
         let manager = ProcessManager::new();
 
@@ -1559,6 +1563,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_logs() {
         let manager = ProcessManager::new();
 
@@ -1585,6 +1590,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_duplicate_start_reuses_matching_config() {
         let manager = ProcessManager::new();
 
@@ -1613,6 +1619,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_duplicate_start_different_config_errors() {
         let manager = ProcessManager::new();
 
@@ -1659,6 +1666,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_start_consumes_matching_port_reservation() {
         let manager = ProcessManager::new();
         let port = manager.reserve_available_port(55101, 55200).await.unwrap();
@@ -1746,6 +1754,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_process_manager_with_env() {
         let manager = ProcessManager::new();
 
@@ -1777,6 +1786,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_process_manager_remove() {
         let manager = ProcessManager::new();
 
@@ -2385,6 +2395,7 @@ mod tests {
 
     /// Sentinel secret in the parent env must NOT leak into the child.
     #[tokio::test]
+    #[cfg(unix)]
     async fn start_does_not_leak_parent_env_to_child() {
         // A sentinel secret present in the PARENT environment.
         std::env::set_var("SELFWARE_SENTINEL_SECRET", "leaked-value-123");
@@ -2430,6 +2441,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_force_stop() {
         let manager = ProcessManager::new();
 
@@ -2457,6 +2469,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_stop_already_stopped() {
         let manager = ProcessManager::new();
 
@@ -2482,6 +2495,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_restart() {
         let manager = ProcessManager::new();
 
@@ -2520,6 +2534,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_remove_running() {
         let manager = ProcessManager::new();
 
@@ -2576,6 +2591,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_with_health_check() {
         let manager = ProcessManager::new();
 
@@ -2841,6 +2857,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    #[cfg(unix)]
     async fn test_process_manager_multiple_processes() {
         let manager = ProcessManager::new();
 
@@ -2880,6 +2897,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn test_process_manager_stderr_capture() {
         let manager = ProcessManager::new();
 

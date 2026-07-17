@@ -833,6 +833,15 @@ pub fn split_shell_commands(cmd: &str) -> Vec<&str> {
     parts
 }
 
+/// Whether the platform's default shell treats `\` as an escape character
+/// outside quotes. Unix `sh` does; Windows `cmd`/`powershell` do not — there
+/// `\` is a literal path separator, so `C:\work\.env` must keep its
+/// backslashes or the redirect target gets mangled (`C:work.env`) and evades
+/// the denied_paths match entirely.
+fn shell_treats_backslash_as_escape() -> bool {
+    !cfg!(target_os = "windows")
+}
+
 /// Extract the file targets of output redirections (`>`, `>>`) from a shell
 /// command. `>` inside single/double quotes is ignored, as is descriptor
 /// duplication that writes no file (`2>&1`, `>&2`) and process substitution
@@ -848,8 +857,9 @@ pub fn shell_output_redirect_targets(cmd: &str) -> Vec<String> {
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
-        // Backslash escapes the next character (outside single quotes).
-        if c == '\\' && !in_single {
+        // Backslash escapes the next character (outside single quotes) in
+        // Unix shells; on Windows it is a literal path separator.
+        if c == '\\' && !in_single && shell_treats_backslash_as_escape() {
             i += 2;
             continue;
         }
@@ -889,7 +899,8 @@ pub fn shell_output_redirect_targets(cmd: &str) -> Vec<String> {
 
         // Read the target token, stripping quotes (quoted segments may
         // contain whitespace) and resolving backslash escapes the way the
-        // shell would.
+        // platform's shell would (Unix only — Windows shells treat `\` as a
+        // literal path separator).
         let mut token = String::new();
         let mut token_quote: Option<char> = None;
         while j < chars.len() {
@@ -911,7 +922,7 @@ pub fn shell_output_redirect_targets(cmd: &str) -> Vec<String> {
                 j += 1;
                 continue;
             }
-            if t == '\\' && j + 1 < chars.len() {
+            if t == '\\' && j + 1 < chars.len() && shell_treats_backslash_as_escape() {
                 token.push(chars[j + 1]);
                 j += 2;
                 continue;
@@ -935,7 +946,13 @@ pub fn shell_output_redirect_targets(cmd: &str) -> Vec<String> {
 /// for filename-only patterns (e.g. `.env`). Resolution is lexical only (no
 /// filesystem access), so prospective output paths work. Returns the matched
 /// pattern, or `None` when the target is not denied.
-fn redirect_target_matches_denied(
+///
+/// Matching is separator-agnostic: both `/` and `\` are treated as path
+/// separators and drive-letter prefixes (`C:\...`, `C:/...`) count as
+/// absolute, so Windows-shaped targets resolve and match identically on every
+/// host OS. Relying on `std::path::Path` alone would only recognize the HOST
+/// separator and let `echo x > C:\work\.env` slip past a `.env` deny glob.
+pub(super) fn redirect_target_matches_denied(
     target: &str,
     working_dir: &std::path::Path,
     denied_paths: &[String],
@@ -943,33 +960,76 @@ fn redirect_target_matches_denied(
     if denied_paths.is_empty() {
         return None;
     }
-    let target_path = std::path::Path::new(target);
-    let resolved = if target_path.is_absolute() {
-        crate::safety::path_validator::lexical_normalize_path(target_path)
-    } else {
-        crate::safety::path_validator::lexical_normalize_path(&working_dir.join(target_path))
-    };
-    let resolved_glob = super::to_glob_form(&resolved.to_string_lossy());
-    let raw_glob = super::to_glob_form(target.trim_start_matches("./"));
+    let resolved = resolve_redirect_target_lexical(target, working_dir);
+    let raw_glob = target.trim_start_matches("./").replace('\\', "/");
 
     for pattern in denied_paths {
         let compiled = match glob::Pattern::new(&super::to_glob_form(pattern)) {
             Ok(p) => p,
             Err(_) => continue,
         };
-        if compiled.matches(&resolved_glob) || compiled.matches(&raw_glob) {
+        if compiled.matches(&resolved) || compiled.matches(&raw_glob) {
             return Some(pattern.clone());
         }
-        // Filename-only patterns (no '/', e.g. ".env") also match by basename.
+        // Filename-only patterns (no separator, e.g. ".env") also match by
+        // basename; the basename is taken across both separator kinds.
         if !pattern.contains('/') && !pattern.contains('\\') {
-            if let Some(base) = resolved.file_name().and_then(|s| s.to_str()) {
-                if compiled.matches(&super::to_glob_form(base)) {
-                    return Some(pattern.clone());
-                }
+            let base = resolved.rsplit('/').next().unwrap_or(resolved.as_str());
+            if !base.is_empty() && compiled.matches(base) {
+                return Some(pattern.clone());
             }
         }
     }
     None
+}
+
+/// Lexically resolve a shell redirect target against `working_dir`, treating
+/// both `/` and `\` as path separators, and return the result in
+/// forward-slash (glob) form with `.`/`..` segments resolved. Purely lexical
+/// — no filesystem access — so prospective output paths and foreign-OS path
+/// shapes resolve identically on any host.
+fn resolve_redirect_target_lexical(target: &str, working_dir: &std::path::Path) -> String {
+    let target_fwd = target.replace('\\', "/");
+    let joined = if redirect_target_is_absolute(&target_fwd) {
+        target_fwd
+    } else {
+        let wd = working_dir.to_string_lossy().replace('\\', "/");
+        format!("{}/{}", wd.trim_end_matches('/'), target_fwd)
+    };
+
+    // Resolve `.` and `..` segments lexically. `..` never pops past the
+    // root, a drive letter (`C:`), or a leading `..` of a relative path.
+    let mut segments: Vec<&str> = Vec::new();
+    for seg in joined.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if matches!(segments.last(), Some(&last) if last != ".." && !is_drive_letter_segment(last))
+                {
+                    segments.pop();
+                }
+            }
+            s => segments.push(s),
+        }
+    }
+    let prefix = if joined.starts_with('/') { "/" } else { "" };
+    format!("{}{}", prefix, segments.join("/"))
+}
+
+/// A redirect target is absolute when rooted (`/x`, or `\x` after separator
+/// normalization) or drive-qualified (`C:/x`).
+fn redirect_target_is_absolute(target_fwd: &str) -> bool {
+    if target_fwd.starts_with('/') {
+        return true;
+    }
+    let bytes = target_fwd.as_bytes();
+    bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/'
+}
+
+/// Whether a normalized path segment is a Windows drive letter (`C:`).
+fn is_drive_letter_segment(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 /// Detect `git push` invocations (via shell_exec/container_exec, not the
