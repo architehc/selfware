@@ -373,6 +373,18 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id();
+        // Fork/exec race: right after spawn, /proc/<pid>/exe can still point
+        // at the test binary (whose path contains "selfware"), so
+        // pid_is_selfware would misfire and the run would be Signalled.
+        // Wait until the child has actually exec'd sleep.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_is_selfware(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child {pid} never exec'd into a non-selfware process"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         reg.write(&rec("live-1", pid, "Running", 100)).unwrap();
         let outcome = reg.abort("live-1", 200).unwrap();
         assert_eq!(outcome, AbortOutcome::WasStale);

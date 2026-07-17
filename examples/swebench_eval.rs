@@ -219,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
 
             BenchTask {
                 id: task.instance_id.clone(),
-                description: format!("{}: {}", task.repo, &task.instance_id),
+                description: format!("{}: {}", task.repo, task.instance_id),
                 messages: vec![
                     Message::system(system_msg),
                     Message::user(user_msg),

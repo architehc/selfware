@@ -178,7 +178,7 @@ pub fn is_openrouter_endpoint(endpoint: &str) -> bool {
 /// This is the backing implementation for `selfware config set-key <KEY>`:
 /// it makes the keyring path (previously reachable only via the `init`
 /// wizard) available as a one-shot command. The key is scoped to
-/// `config.endpoint` via [`keyring_account_for_endpoint`], which is exactly
+/// `config.endpoint` via `keyring_account_for_endpoint`, which is exactly
 /// the account `Config::load` probes — so the next run picks the key up
 /// without any plaintext `api_key` on disk. Returns the endpoint the key
 /// was stored for, so the caller can tell the user where it applies.

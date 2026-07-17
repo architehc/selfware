@@ -65,7 +65,7 @@ impl DiskManager {
     ///
     /// Resolves the state-directory paths (env overrides or `./checkpoints`,
     /// `./logs`, `./models` defaults) but does NOT create them: directories
-    /// are created lazily at the point of first write (see [`ensure_dir`]),
+    /// are created lazily at the point of first write (see `ensure_dir`),
     /// so read-only commands never pollute the working directory.
     pub async fn new(config: &DiskConfig) -> Result<Self, ResourceError> {
         let checkpoints_path = std::env::var("SELFWARE_CHECKPOINT_DIR")
