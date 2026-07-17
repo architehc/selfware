@@ -61,10 +61,14 @@ impl PromptProfile {
 
 #[cfg(feature = "bench-harness")]
 fn build_default_prompt(inst: &SwebenchProInstance, mode: &str) -> String {
-    let problem = inst
-        .problem_statement
-        .trim()
-        .trim_matches('"')
+    let trimmed = inst.problem_statement.trim();
+    // Unwrap at most ONE balanced surrounding pair of quotes (a wrapping
+    // artifact) instead of greedily stripping every leading/trailing quote,
+    // which mangled statements that legitimately begin or end with a quote.
+    let problem = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed)
         .replace("\\n", "\n");
 
     if mode == "official" {
@@ -109,10 +113,14 @@ fn build_default_prompt(inst: &SwebenchProInstance, mode: &str) -> String {
 
 #[cfg(feature = "bench-harness")]
 fn build_swebench_pro_prompt(inst: &SwebenchProInstance, mode: &str) -> String {
-    let problem = inst
-        .problem_statement
-        .trim()
-        .trim_matches('"')
+    let trimmed = inst.problem_statement.trim();
+    // Unwrap at most ONE balanced surrounding pair of quotes (a wrapping
+    // artifact) instead of greedily stripping every leading/trailing quote,
+    // which mangled statements that legitimately begin or end with a quote.
+    let problem = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap_or(trimmed)
         .replace("\\n", "\n");
 
     if mode == "official" {
