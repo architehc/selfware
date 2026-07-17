@@ -86,6 +86,24 @@ fn result_to_string(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
+        // The bridge wraps extracted content in an object: {"text": "..."} for a
+        // single element, {"texts": [...]} for many, {"url": "..."} for the url
+        // action. Use the inner text rather than a JSON dump of the wrapper
+        // (which would include the field names and mis-match `contains` checks).
+        Value::Object(_) => {
+            if let Some(s) = v.get("text").and_then(|t| t.as_str()) {
+                s.to_string()
+            } else if let Some(s) = v.get("url").and_then(|t| t.as_str()) {
+                s.to_string()
+            } else if let Some(arr) = v.get("texts").and_then(|t| t.as_array()) {
+                arr.iter()
+                    .filter_map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            }
+        }
         _ => serde_json::to_string(v).unwrap_or_default(),
     }
 }
@@ -547,6 +565,23 @@ mod tests {
         // missing / wrong shape -> not visible
         assert!(!result_is_visible(&json!({})));
         assert!(!result_is_visible(&json!("nope")));
+    }
+
+    #[test]
+    fn result_to_string_unwraps_bridge_text_fields() {
+        use serde_json::json;
+        assert_eq!(super::result_to_string(&json!("plain")), "plain");
+        assert_eq!(super::result_to_string(&json!({"text": "hello"})), "hello");
+        assert_eq!(
+            super::result_to_string(&json!({"url": "http://x/y"})),
+            "http://x/y"
+        );
+        assert_eq!(
+            super::result_to_string(&json!({"texts": ["a", "b"]})),
+            "a\nb"
+        );
+        // Unknown object shape still falls back to a JSON dump (not empty).
+        assert!(super::result_to_string(&json!({"other": 1})).contains("other"));
     }
 
     #[tokio::test]
