@@ -3714,6 +3714,46 @@ async fn dispatch_bench_subcommand(sub: args::BenchCommand, _config: &Config) ->
     }
 }
 
+/// Resolve the three SWE-bench Pro official-eval paths. They are required only
+/// when `--official-eval` is set; there are no machine-specific defaults.
+#[cfg(any(feature = "bench-harness", test))]
+pub(crate) fn resolve_official_eval_paths(
+    args: &crate::cli::args::SwebenchProArgs,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+    let missing: Vec<&str> = [
+        (
+            args.official_eval_script.is_none(),
+            "--official-eval-script",
+        ),
+        (
+            args.official_eval_raw_sample_path.is_none(),
+            "--official-eval-raw-sample-path",
+        ),
+        (
+            args.official_eval_scripts_dir.is_none(),
+            "--official-eval-scripts-dir",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(is_missing, flag)| is_missing.then_some(flag))
+    .collect();
+    if args.official_eval && !missing.is_empty() {
+        anyhow::bail!(
+            "--official-eval requires {}; pass the paths of your SWE-bench Pro checkout",
+            missing.join(", ")
+        );
+    }
+    Ok((
+        std::path::PathBuf::from(args.official_eval_script.clone().unwrap_or_default()),
+        std::path::PathBuf::from(
+            args.official_eval_raw_sample_path
+                .clone()
+                .unwrap_or_default(),
+        ),
+        std::path::PathBuf::from(args.official_eval_scripts_dir.clone().unwrap_or_default()),
+    ))
+}
+
 #[cfg(feature = "bench-harness")]
 async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
     use crate::bench_harness::swebench_pro::{
@@ -3721,6 +3761,11 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         run_swebench_pro, SwebenchProOpts,
     };
     use std::time::Duration;
+
+    // Fail fast: official-eval paths are required up front when --official-eval
+    // is set, before any quant/dataset work starts.
+    let (official_eval_script, official_eval_raw_sample_path, official_eval_scripts_dir) =
+        resolve_official_eval_paths(&args)?;
 
     let quants: Vec<String> = if args.quants.eq_ignore_ascii_case("all") {
         quant_catalog().keys().map(|s| s.to_string()).collect()
@@ -3810,9 +3855,9 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         prompt_mode: args.prompt_mode,
         prompt_profile: args.prompt_profile,
         official_eval: args.official_eval,
-        official_eval_script: PathBuf::from(args.official_eval_script),
-        official_eval_raw_sample_path: PathBuf::from(args.official_eval_raw_sample_path),
-        official_eval_scripts_dir: PathBuf::from(args.official_eval_scripts_dir),
+        official_eval_script,
+        official_eval_raw_sample_path,
+        official_eval_scripts_dir,
         official_eval_dockerhub_username: args.official_eval_dockerhub_username,
         official_eval_num_workers: args.official_eval_num_workers,
         official_eval_use_local_docker: !args.official_eval_modal,

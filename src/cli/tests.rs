@@ -569,9 +569,15 @@ fn bench_swebench_pro_official_eval_flags_parse() {
             BenchCommand::SwebenchPro(args) => {
                 assert!(args.official_eval);
                 assert_eq!(args.prompt_mode, "official");
-                assert_eq!(args.official_eval_script, "/tmp/eval.py");
-                assert_eq!(args.official_eval_raw_sample_path, "/tmp/sample.jsonl");
-                assert_eq!(args.official_eval_scripts_dir, "/tmp/run_scripts");
+                assert_eq!(args.official_eval_script.as_deref(), Some("/tmp/eval.py"));
+                assert_eq!(
+                    args.official_eval_raw_sample_path.as_deref(),
+                    Some("/tmp/sample.jsonl")
+                );
+                assert_eq!(
+                    args.official_eval_scripts_dir.as_deref(),
+                    Some("/tmp/run_scripts")
+                );
                 assert_eq!(args.official_eval_dockerhub_username, "example");
                 assert_eq!(args.official_eval_num_workers, 2);
                 assert!(args.official_eval_modal);
@@ -581,6 +587,25 @@ fn bench_swebench_pro_official_eval_flags_parse() {
         },
         other => panic!("expected Bench, got {:?}", other),
     }
+}
+
+#[test]
+fn official_eval_requires_explicit_paths() {
+    use args::SwebenchProArgs;
+
+    // --official-eval without the three paths must fail with a helpful error.
+    let args = SwebenchProArgs {
+        official_eval: true,
+        ..Default::default()
+    };
+    let err = crate::cli::resolve_official_eval_paths(&args).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("--official-eval-script"), "got: {msg}");
+    assert!(msg.contains("--official-eval-scripts-dir"), "got: {msg}");
+
+    // Without --official-eval the paths are unused — empty triple is fine.
+    let args = SwebenchProArgs::default();
+    assert!(crate::cli::resolve_official_eval_paths(&args).is_ok());
 }
 
 #[test]

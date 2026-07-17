@@ -565,7 +565,7 @@ pub(crate) enum BenchCommand {
 }
 
 /// Flags for `selfware bench swebench-pro`.
-#[derive(clap::Args, Clone, Debug)]
+#[derive(clap::Args, Clone, Debug, Default)]
 pub(crate) struct SwebenchProArgs {
     /// Comma-separated quant labels (or 'all' for every catalog entry)
     #[arg(
@@ -671,20 +671,17 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long)]
     pub official_eval: bool,
 
-    /// Path to the SWE-bench Pro evaluator script.
-    #[arg(long, default_value = "SWE-bench_Pro-os/swe_bench_pro_eval.py")]
-    pub official_eval_script: String,
+    /// Path to the SWE-bench Pro evaluator script (required with --official-eval).
+    #[arg(long)]
+    pub official_eval_script: Option<String>,
 
-    /// Path to the SWE-bench Pro raw sample CSV/JSONL.
-    #[arg(
-        long,
-        default_value = "SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl"
-    )]
-    pub official_eval_raw_sample_path: String,
+    /// Path to the SWE-bench Pro raw sample CSV/JSONL (required with --official-eval).
+    #[arg(long)]
+    pub official_eval_raw_sample_path: Option<String>,
 
-    /// Directory containing per-instance run_script.sh/parser.py files.
-    #[arg(long, default_value = "SWE-bench_Pro-os/run_scripts")]
-    pub official_eval_scripts_dir: String,
+    /// Directory containing per-instance run_script.sh/parser.py files (required with --official-eval).
+    #[arg(long)]
+    pub official_eval_scripts_dir: Option<String>,
 
     /// Docker Hub user/org that hosts sweap-images.
     #[arg(long, default_value = "jefzda")]
