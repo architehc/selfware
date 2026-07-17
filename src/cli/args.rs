@@ -316,6 +316,9 @@ pub(crate) enum Commands {
         /// Use a specific template (rust, python, node, minimal)
         #[arg(long)]
         template: Option<String>,
+        /// Ask what to build, then scaffold it into the current directory
+        #[arg(long)]
+        scaffold: bool,
     },
 
     /// Open your workshop for an interactive session

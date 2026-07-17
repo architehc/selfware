@@ -19,13 +19,17 @@ macro_rules! wizard_print {
     };
 }
 
-pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
+pub(crate) fn run_init_wizard(template: Option<String>, scaffold: bool) -> Result<()> {
     use std::io::{self, BufRead, Write};
     use std::path::PathBuf;
 
     // If a template is provided, skip the interactive wizard
     if let Some(ref tmpl) = template {
         return write_template_config(tmpl);
+    }
+
+    if scaffold {
+        run_scaffold_interview()?;
     }
 
     wizard_print!();
@@ -168,6 +172,32 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
 
     // Write config
     write_config_file(&endpoint, &model, mode, &allowed_paths)
+}
+
+/// Ask structured questions about the project to build, then scaffold it into
+/// the current directory via the interview-driven template engine.
+fn run_scaffold_interview() -> Result<()> {
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        wizard_print!(
+            "  {} --scaffold needs an interactive terminal; skipping.",
+            Glyphs::frost()
+        );
+        return Ok(());
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let ctx = crate::interview::run_interview("Scaffold a new project", &cwd)?;
+    match crate::templates::scaffold_from_context(&ctx, &cwd) {
+        Ok(files) => {
+            wizard_print!("  {} Scaffolded {} files:", Glyphs::bloom(), files.len());
+            for f in &files {
+                wizard_print!("    {}", f);
+            }
+        }
+        Err(e) => wizard_print!("  {} Could not scaffold: {}", Glyphs::frost(), e),
+    }
+    Ok(())
 }
 
 fn write_template_config(template: &str) -> Result<()> {

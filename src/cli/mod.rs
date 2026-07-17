@@ -3192,8 +3192,8 @@ max_recovery_attempts = 3
             println!();
         }
 
-        Commands::Init { template } => {
-            tokio::task::spawn_blocking(move || init_wizard::run_init_wizard(template))
+        Commands::Init { template, scaffold } => {
+            tokio::task::spawn_blocking(move || init_wizard::run_init_wizard(template, scaffold))
                 .await
                 .map_err(|e| anyhow::anyhow!("Task panicked: {}", e))??;
         }

@@ -1268,6 +1268,24 @@ mod tests {
         assert!(!files.iter().any(|f| f.contains("tests/")));
     }
 
+    #[test]
+    fn scaffold_from_context_writes_rust_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = crate::interview::InterviewContext {
+            language: Some("rust".into()),
+            framework: None,
+            project_type: None,
+            testing_preference: Some(crate::interview::TestingPreference::Tdd),
+            output_dir: None,
+            scope: None,
+            extra_notes: vec![],
+            task: "test scaffold".into(),
+        };
+        let files = scaffold_from_context(&ctx, dir.path()).unwrap();
+        assert!(!files.is_empty());
+        assert!(files.iter().any(|f| f.ends_with("Cargo.toml")));
+    }
+
     // -- Available templates ------------------------------------------------
 
     #[test]
