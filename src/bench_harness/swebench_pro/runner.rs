@@ -1522,25 +1522,23 @@ fn evaluate_single_pred(
     output_dir: &Path,
 ) -> Result<OfficialEvalMetrics> {
     if !opts.official_eval_script.exists() {
-        eprintln!(
-            "    official eval script not found: {}",
+        anyhow::bail!(
+            "official eval script not found: {} — eval could not run (reported as \
+             an error, not a spurious 0-resolved result)",
             opts.official_eval_script.display()
         );
-        return Ok(OfficialEvalMetrics::default());
     }
     if !opts.official_eval_raw_sample_path.exists() {
-        eprintln!(
-            "    official eval raw sample not found: {}",
+        anyhow::bail!(
+            "official eval raw sample not found: {} — eval could not run",
             opts.official_eval_raw_sample_path.display()
         );
-        return Ok(OfficialEvalMetrics::default());
     }
     if !opts.official_eval_scripts_dir.exists() {
-        eprintln!(
-            "    official eval scripts dir not found: {}",
+        anyhow::bail!(
+            "official eval scripts dir not found: {} — eval could not run",
             opts.official_eval_scripts_dir.display()
         );
-        return Ok(OfficialEvalMetrics::default());
     }
 
     std::fs::create_dir_all(output_dir)
@@ -1650,8 +1648,9 @@ fn evaluate_single_pred(
         .output()
         .with_context(|| format!("spawning {}", eval_script.display()))?;
     if !output.status.success() {
-        eprintln!(
-            "    official eval script failed (exit={:?}): {}",
+        anyhow::bail!(
+            "official eval script failed (exit={:?}): {} — reported as an error, \
+             not a spurious 0-resolved result",
             output.status.code(),
             String::from_utf8_lossy(&output.stderr).trim()
         );
