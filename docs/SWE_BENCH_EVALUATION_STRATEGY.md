@@ -210,11 +210,11 @@ async fn execute_swebench_task(
 Run a fixed set of 20 tasks before each comparison:
 
 ```bash
-# Run baseline validation
-./scripts/swebench_baseline.sh --tasks baseline_20.json --output baseline_results/
+# Run baseline validation (quick 20-task run)
+./scripts/swebench_eval.sh --quick --output baseline_results/
 
 # Compare new run against baseline
-./scripts/swebench_compare.sh --baseline baseline_results/ --new results/
+./scripts/swebench_compare.sh baseline_results/ results/
 ```
 
 ### 4.3 A/B Testing Framework
@@ -607,9 +607,9 @@ jobs:
       
       - name: Check Regression
         run: |
-          ./scripts/swebench_check_regression.sh \
-            --baseline baseline_quick.json \
-            --current results/summary.json
+          ./scripts/swebench_compare.sh \
+            baseline_quick.json \
+            results/summary.json
 ```
 
 ### 7.2 Leaderboard
@@ -656,9 +656,9 @@ src/swebench/
 scripts/
 ├── swebench_eval.sh           # Main evaluation script
 ├── swebench_quick.sh          # Quick benchmark
-├── swebench_compare.sh        # Compare results
-├── swebench_check_regression.sh  # CI check
-└── download_swebench_data.sh  # Dataset setup
+├── swebench_compare.sh        # Compare results / CI regression check
+└── swebench_pro/
+    └── run.py                 # SWE-bench Pro runner
 
 examples/
 ├── swebench_eval.rs           # Full evaluation example

@@ -1,6 +1,6 @@
 # Orchestration Module Status
 
-This document describes the current status of the orchestration module - what works, what's stubbed, and what's planned.
+This document describes the current status of the orchestration module - what works and what's planned.
 
 ## Overview
 
@@ -9,7 +9,7 @@ The orchestration module provides multi-agent coordination capabilities for the 
 - **Multi-Agent Chat** (`multiagent/`): ✅ Production Ready
 - **Workflow Engine** (`workflows.rs`): ✅ Production Ready  
 - **Swarm Coordination** (`swarm/`): ✅ Functional (in-memory)
-- **Coordinator Mode** (`coordinator.rs`): ⚠️ STUBBED/SIMULATED
+- **Coordinator Mode** (`swarm/coordinator.rs` + `multiagent/interactive.rs`): ✅ Functional — execution routes through `MultiAgentChat`
 - **Scratchpad** (`scratchpad.rs`): ✅ Functional
 
 ---
@@ -85,84 +85,23 @@ let result = executor.execute("my-workflow", inputs, working_dir).await?;
 
 ---
 
-## ⚠️ STUBBED: Coordinator Mode
+## ✅ Working: Coordinator Mode
 
-**Location**: `src/orchestration/coordinator.rs`
+**Location**: `src/orchestration/swarm/coordinator.rs` (Swarm coordinator) and `src/orchestration/multiagent/interactive.rs` (`MultiAgentChat::interactive_swarm`)
 
-**Status**: **STUBBED - SIMULATED EXECUTION**
+**Status**: Functional — task execution routes through `MultiAgentChat` (real LLM calls and tool use, no simulation).
 
-### What Works
+**How it works**:
+- Started with the `--coordinator` flag on `multichat` (selects `MultiAgentChat::interactive_swarm()`)
+- Builds a dev swarm via `create_dev_swarm()` (Architect, Coder, Tester, Reviewer) with `ConfidenceWins` conflict strategy and a 0.5 consensus threshold
+- Each user task is queued as a `SwarmTask` and assigned to role-matched idle agents by trust score
+- Execution runs through `MultiAgentChat::run_task` — the same production execution path as multi-agent chat
+- Results are fed back to the swarm via `complete_task`, and agents vote on the best response in a consensus decision
 
-- ✅ Coordinator agent creation with task description
-- ✅ Worker spawning and lifecycle management
-- ✅ Scratchpad-based communication between workers
-- ✅ Four-phase workflow structure (Research, Synthesis, Implementation, Verification)
-- ✅ Worker status tracking (Initializing → Working → Completed/Failed)
-- ✅ Message passing between coordinator and workers
-- ✅ Hierarchical worker spawning (workers can spawn sub-workers)
-- ✅ Tool restriction enforcement (coordinator vs worker tool sets)
+**Interactive commands**: `/agents`, `/status`, `/parallel N`, `/clear`, `exit`
 
-### What's Stubbed
-
-- ❌ **WorkerAgent::execute_task()** - This is the critical stub:
-  ```rust
-  async fn execute_task(id: &str, task: &str, role: &str, scratchpad: &Scratchpad) 
-      -> Result<String> {
-      // STUB: Simulating task execution
-      warn!("STUB: Worker {} SIMULATING task execution: {}", id, task);
-      
-      // Returns placeholder text, NOT actual execution results
-      Ok(format!("STUB: Worker {} SIMULATED task: {}", id, task))
-  }
-  ```
-
-- ❌ **No LLM calls** - Workers do not use the LLM API
-- ❌ **No tool execution** - Workers do not actually call tools
-- ❌ **No real results** - All findings are placeholder strings
-- ❌ **Synthesis phase** - Does not use LLM to analyze findings
-
-### Warnings in Code
-
-The code emits prominent warnings when coordinator mode is used:
-
-```
-╔══════════════════════════════════════════════════════════════════╗
-║ ⚠️  WARNING: COORDINATOR MODE USES SIMULATED WORKER EXECUTION     ║
-║    WorkerAgent::execute_task is a STUB that does NOT use LLM      ║
-║    or execute tools. Workers only log and return placeholders.    ║
-╚══════════════════════════════════════════════════════════════════╝
-```
-
-### Future Implementation
-
-To make coordinator mode functional:
-
-1. **Implement actual worker execution**:
-   - Build a prompt with task, role, and context
-   - Call LLM API with full tool access
-   - Process tool calls iteratively (ReAct pattern)
-   - Return actual results
-
-2. **Add real synthesis**:
-   - Use LLM to analyze worker findings
-   - Generate actual implementation plans
-
-3. **Integrate with existing systems**:
-   - Connect to `MultiAgentChat` for worker LLM calls
-   - Use `ToolRegistry` for tool execution
-   - Leverage `WorkflowExecutor` for complex tasks
-
-### When to Use
-
-**Current use cases** (simulated):
-- Testing the coordinator API and workflow structure
-- UI development for coordinator status display
-- Integration testing of scratchpad persistence
-
-**Future use cases** (when implemented):
-- Complex multi-file refactoring with parallel workers
-- Code analysis with specialized worker roles
-- Long-running tasks with checkpoint/resume
+**Limitations**:
+- Swarm state is in-memory; no persistence across restarts
 
 ---
 
@@ -197,7 +136,7 @@ let entry = scratchpad.read("key");
 | Multi-Agent Chat | ✅ Working | N/A (stateless) | ✅ Full | ✅ Yes |
 | Workflow Engine | ✅ Working | YAML files | Via handler | ✅ Yes |
 | Swarm Coordination | ✅ Working | ❌ In-memory only | ❌ Framework only | ⚠️ Partial |
-| **Coordinator Mode** | ⚠️ **STUBBED** | ✅ Scratchpad | ❌ **SIMULATED** | ❌ No |
+| Coordinator Mode | ✅ Working | ❌ In-memory only | ✅ Full (via MultiAgentChat) | ✅ Yes |
 | Scratchpad | ✅ Working | ✅ JSON files | N/A | ✅ Yes |
 
 ---
@@ -208,14 +147,12 @@ let entry = scratchpad.read("key");
 
 1. **Use Multi-Agent Chat** for parallel agent execution
 2. **Use Workflow Engine** for structured, repeatable processes
-3. **Avoid Coordinator Mode** for actual task execution (it's simulated)
+3. **Use Coordinator Mode** (`--coordinator`) when you want swarm task assignment and consensus voting on top of multi-agent execution
 
 ### For Development
 
-1. **Implement WorkerAgent::execute_task** if you need coordinator mode
-2. Consider integrating coordinator with MultiAgentChat for LLM calls
-3. Add persistence to Swarm if you need long-running swarm coordination
+1. Add persistence to Swarm if you need long-running swarm coordination
 
 ---
 
-*Last updated: 2026-04-12*
+*Last updated: 2026-07-17*
