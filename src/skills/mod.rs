@@ -152,6 +152,17 @@ impl SkillRegistry {
         skills
     }
 
+    /// Wrap a task string with the named skill's instructions, for headless
+    /// `run --skill`. Returns `None` when the skill is unknown.
+    pub fn wrap_task_with_skill(&self, task: &str, skill_name: &str) -> Option<String> {
+        self.get(skill_name).map(|skill| {
+            format!(
+                "[Skill: {}]\n{}\n\n[Task]\n{}",
+                skill.name, skill.content, task
+            )
+        })
+    }
+
     /// Number of discovered skills.
     pub fn len(&self) -> usize {
         self.skills.len()
@@ -203,6 +214,30 @@ Review the code for bugs, style issues, and performance problems.
     fn test_parse_skill_missing_frontmatter() {
         let markdown = "Just some markdown without frontmatter.";
         assert!(Skill::from_markdown(markdown).is_err());
+    }
+
+    #[test]
+    fn test_wrap_task_with_skill() {
+        let mut registry = SkillRegistry::new();
+        registry.skills.insert(
+            "commit".to_string(),
+            Skill {
+                name: "commit".to_string(),
+                description: "Create a git commit".to_string(),
+                tools: vec![],
+                content: "Write a concise commit message.".to_string(),
+                source: None,
+            },
+        );
+        let wrapped = registry
+            .wrap_task_with_skill("fix the bug", "commit")
+            .unwrap();
+        assert!(wrapped.contains("[Skill: commit]"));
+        assert!(wrapped.contains("Write a concise commit message."));
+        assert!(wrapped.contains("[Task]\nfix the bug"));
+        assert!(registry
+            .wrap_task_with_skill("fix the bug", "missing")
+            .is_none());
     }
 
     #[test]

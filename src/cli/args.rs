@@ -345,6 +345,9 @@ pub(crate) enum Commands {
         /// Shortcut for --mode=yolo (skip all confirmations)
         #[arg(short = 'y', long)]
         yolo: bool,
+        /// Inject a user skill's instructions (from ~/.selfware/skills or ./.selfware/skills)
+        #[arg(long)]
+        skill: Option<String>,
     },
 
     /// Survey your garden (analyze codebase)

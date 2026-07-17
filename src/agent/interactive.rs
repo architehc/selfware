@@ -423,6 +423,14 @@ impl Agent {
         self.show_startup_context();
         // Show context stats on startup (like /ctx)
         self.show_context_stats();
+        // Discover user skills so /skills can list them and /<name> injects them.
+        let skill_registry = crate::skills::SkillRegistry::discover();
+        if !skill_registry.is_empty() {
+            println!(
+                "  {} skill(s) available — /skills to list",
+                skill_registry.len()
+            );
+        }
         println!(
             "  Type {} for commands, {} for context, {} to quit",
             "/help".bright_cyan(),
@@ -2038,6 +2046,34 @@ impl Agent {
                 continue;
             }
 
+            // /skills - list discovered user skills
+            if input == "/skills" {
+                if skill_registry.is_empty() {
+                    println!("No skills found in ~/.selfware/skills or ./.selfware/skills");
+                } else {
+                    println!("Skills:");
+                    for skill in skill_registry.list() {
+                        println!("  /{:<12} - {}", skill.name, skill.description);
+                    }
+                }
+                continue;
+            }
+
+            // /<skill-name> - inject a discovered user skill as instructions
+            if let Some(name) = input.strip_prefix('/') {
+                if let Some(skill) = skill_registry.get(name) {
+                    self.messages.push(Message::system(format!(
+                        "The user invoked the /{} skill. Follow these instructions:\n\n{}",
+                        skill.name, skill.content
+                    )));
+                    println!(
+                        "  Skill '{}' loaded — instructions added to context.",
+                        skill.name
+                    );
+                    continue;
+                }
+            }
+
             // Expand @file references in input (Qwen Code style)
             let (expanded_input, included_files) = self.expand_file_references(input).await;
             if !included_files.is_empty() {
@@ -2961,6 +2997,9 @@ impl Agent {
         use std::io::IsTerminal;
         let is_tty = std::io::stdin().is_terminal();
 
+        // Discover user skills so /skills can list them and /<name> injects them.
+        let skill_registry = crate::skills::SkillRegistry::discover();
+
         loop {
             if is_tty {
                 print!("🦊 ❯ ");
@@ -3265,6 +3304,34 @@ impl Agent {
                     );
                 }
                 continue;
+            }
+
+            // /skills - list discovered user skills
+            if input == "/skills" {
+                if skill_registry.is_empty() {
+                    println!("No skills found in ~/.selfware/skills or ./.selfware/skills");
+                } else {
+                    println!("Skills:");
+                    for skill in skill_registry.list() {
+                        println!("  /{:<12} - {}", skill.name, skill.description);
+                    }
+                }
+                continue;
+            }
+
+            // /<skill-name> - inject a discovered user skill as instructions
+            if let Some(name) = input.strip_prefix('/') {
+                if let Some(skill) = skill_registry.get(name) {
+                    self.messages.push(Message::system(format!(
+                        "The user invoked the /{} skill. Follow these instructions:\n\n{}",
+                        skill.name, skill.content
+                    )));
+                    println!(
+                        "  Skill '{}' loaded — instructions added to context.",
+                        skill.name
+                    );
+                    continue;
+                }
             }
 
             // Display truncated preview and confirm for large pastes (interactive only)

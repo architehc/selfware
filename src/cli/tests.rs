@@ -176,7 +176,7 @@ fn cli_run_yolo_flag() {
     use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "run", "-y", "fix bug"]).unwrap();
     match cli.command.unwrap() {
-        Commands::Run { yolo, task } => {
+        Commands::Run { yolo, task, .. } => {
             assert!(yolo, "run -y should set yolo=true");
             assert_eq!(task, "fix bug");
         }

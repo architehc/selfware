@@ -1101,7 +1101,7 @@ async fn handle_command(
             }
         }
 
-        Commands::Run { task, yolo } => {
+        Commands::Run { task, yolo, skill } => {
             if yolo {
                 config.execution_mode = ExecutionMode::Yolo;
             }
@@ -1119,6 +1119,16 @@ async fn handle_command(
                 println!("{}", render_header(ctx));
                 println!("{}", render_task_start(&task));
             }
+
+            // Wrap the task with the requested skill's instructions, if any.
+            let task = match skill.as_deref() {
+                Some(name) => crate::skills::SkillRegistry::discover()
+                    .wrap_task_with_skill(&task, name)
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "unknown skill '{name}' (looked in ~/.selfware/skills and ./.selfware/skills)"
+                    ))?,
+                None => task,
+            };
 
             let start = std::time::Instant::now();
             let mut agent = Agent::new(config).await?;
