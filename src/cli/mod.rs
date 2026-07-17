@@ -2056,6 +2056,22 @@ async fn handle_command(
                     }
                 }
 
+                WorkflowCommands::Codegen { file } => {
+                    if !file.exists() {
+                        anyhow::bail!("Workflow file not found: {}", file.display());
+                    }
+
+                    let source = std::fs::read_to_string(&file)?;
+                    let doc = match parse_document(&source) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            anyhow::bail!("Failed to parse SWL file {}: {}", file.display(), e);
+                        }
+                    };
+
+                    print!("{}", crate::swl::codegen::generate_rust_stub(&doc));
+                }
+
                 WorkflowCommands::Run {
                     file,
                     workflow,

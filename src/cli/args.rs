@@ -743,6 +743,12 @@ pub(crate) enum WorkflowCommands {
         dry_run: bool,
     },
 
+    /// Generate a Rust stub from an SWL workflow file
+    Codegen {
+        /// Path to the .swl file
+        file: std::path::PathBuf,
+    },
+
     /// List available workflows in the current directory
     List {
         /// Directory to search for workflows (default: current directory)

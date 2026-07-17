@@ -2,6 +2,7 @@
 //!
 //! These tests cover individual components without network I/O.
 
+mod cli;
 mod test_agent;
 mod test_api;
 mod test_cognitive;
