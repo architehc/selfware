@@ -108,6 +108,7 @@ impl PlaywrightBridge {
     /// Spawn the playwright-bridge.js process.
     async fn spawn() -> Result<Self> {
         let bridge_script = Self::find_bridge_script()?;
+        Self::ensure_bridge_dependencies(&bridge_script)?;
 
         info!("Spawning playwright-bridge: {}", bridge_script.display());
 
@@ -342,6 +343,50 @@ impl PlaywrightBridge {
             );
         }
         Ok(script)
+    }
+
+    /// Ensure the extracted bridge's Node dependencies (Playwright) are present.
+    /// On the first run the bridge dir has a package.json but no node_modules, so
+    /// `require('playwright')` fails; run `npm install` (and fetch the Chromium
+    /// browser) once. Skipped when the operator configured an existing install
+    /// via SELFWARE_PLAYWRIGHT_NODE_PATH, or when playwright is already present.
+    fn ensure_bridge_dependencies(bridge_script: &std::path::Path) -> Result<()> {
+        // Operator pointed us at an existing Playwright install — trust it.
+        if std::env::var_os("SELFWARE_PLAYWRIGHT_NODE_PATH").is_some() {
+            return Ok(());
+        }
+        let dir = bridge_script
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        if dir.join("node_modules").join("playwright").exists() {
+            return Ok(());
+        }
+        eprintln!(
+            "Installing Playwright bridge dependencies in {} (first run — may take a minute)...",
+            dir.display()
+        );
+        let status = std::process::Command::new("npm")
+            .arg("install")
+            .current_dir(dir)
+            .status()
+            .with_context(|| {
+                "running `npm install` for the Playwright bridge (is Node.js + npm installed?)"
+                    .to_string()
+            })?;
+        if !status.success() {
+            bail!(
+                "`npm install` failed in {} — install Node.js + npm, or set \
+                 SELFWARE_PLAYWRIGHT_NODE_PATH to an existing Playwright install",
+                dir.display()
+            );
+        }
+        // Fetch the Chromium browser binary too (best-effort; the agent gets a
+        // clear runtime error from the bridge if it is still missing).
+        let _ = std::process::Command::new("npx")
+            .args(["playwright", "install", "chromium"])
+            .current_dir(dir)
+            .status();
+        Ok(())
     }
 }
 
