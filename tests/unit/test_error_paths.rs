@@ -62,8 +62,11 @@ mod file_read_error_tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         // FileRead now surfaces the underlying io error from tokio::fs::read.
+        // Unix says "No such file or directory"; Windows says "The system
+        // cannot find the path/file specified".
+        let msg = err.to_string().to_lowercase();
         assert!(
-            err.to_string().to_lowercase().contains("no such file"),
+            msg.contains("no such file") || msg.contains("cannot find the"),
             "unexpected read error: {err}"
         );
     }

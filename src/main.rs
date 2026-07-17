@@ -3,8 +3,26 @@ use std::process::ExitCode;
 /// Grace period after shutdown signal before force-exiting (seconds).
 const SHUTDOWN_GRACE_SECS: u64 = 10;
 
+/// Stack size for the thread the CLI actually runs on. Building the clap
+/// command tree (`Cli::parse`) and polling the large `cli::run()` dispatch
+/// each need hundreds of KB of frames in debug builds, which fits in the
+/// 8MB Linux/macOS main-thread stack but overflows Windows' 1MB default.
+/// Run the real entry point on a dedicated thread with a rustc-style
+/// large stack so every subcommand works there.
+const MAIN_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(MAIN_STACK_SIZE)
+        .spawn(async_main)
+        .expect("failed to spawn main thread")
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn async_main() -> ExitCode {
     // Spawn a signal handler that sets the global shutdown flag.
     // Components (task runner, REPL, TUI) already check for ctrl_c or
     // can poll `selfware::is_shutdown_requested()` to wind down.

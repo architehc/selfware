@@ -66,8 +66,12 @@ async fn test_file_read_nonexistent_path_returns_error() {
         "Expected Err for non-existent path, got Ok"
     );
     let err_msg = result.unwrap_err().to_string();
+    // Unix: "No such file or directory"; Windows: "The system cannot find
+    // the path/file specified".
     assert!(
-        err_msg.contains("Failed to read file") || err_msg.contains("No such file"),
+        err_msg.contains("Failed to read file")
+            || err_msg.contains("No such file")
+            || err_msg.contains("cannot find the"),
         "Unexpected error message: {}",
         err_msg
     );
