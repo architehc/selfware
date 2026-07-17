@@ -147,7 +147,7 @@ syn = { version = "2.0", features = ["full", "parsing"] }
 nix = { version = "0.29", features = ["signal"] }
 
 [features]
-default = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "self-improvement"]
+default = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "self-improvement", "consolidation"]
 integration = []  # Enable with: cargo test --features integration
 
 # Semantic feature flags (replacing monolithic "extras")
