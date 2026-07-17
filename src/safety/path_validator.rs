@@ -440,9 +440,17 @@ impl PathValidator {
                 {
                     return Ok(true);
                 }
-                // Some allow-list entries are written as `<path>/**` directly —
-                // try canonicalizing the parent and re-appending the suffix.
-                if let Some(stripped) = pattern_normalized.strip_suffix("/**") {
+            }
+
+            // Some allow-list entries are written as `<path>/**` directly —
+            // canonicalize the parent (when IT is concrete) and re-append the
+            // suffix, so short-name/symlinked parents (Windows 8.3 TEMP dirs,
+            // macOS /var symlinks) still match the canonical input. This must
+            // live OUTSIDE the concrete-pattern gate above: a `/**` suffix is
+            // itself a metacharacter, so gating on it makes the branch
+            // unreachable for exactly the patterns that need it.
+            if let Some(stripped) = pattern_normalized.strip_suffix("/**") {
+                if !stripped.is_empty() && !stripped.contains(['*', '?', '[']) {
                     let canon_parent = normalize_path(Path::new(stripped));
                     let canon_parent_glob = to_glob_form(&canon_parent.to_string_lossy());
                     if !canon_parent_glob.is_empty() {
@@ -987,6 +995,41 @@ mod tests {
         assert!(
             validator.validate(child.to_str().unwrap()).is_ok(),
             "real child of working dir must be allowed"
+        );
+    }
+
+    /// `<path>/**` allow-list patterns must match even when the pattern's
+    /// parent differs from the canonical form of the input (symlinked or
+    /// Windows 8.3-short-named parent): the parent is canonicalized before
+    /// matching. Regression test for the branch that was unreachable inside
+    /// the no-metacharacters gate.
+    #[cfg(unix)]
+    #[test]
+    fn test_allow_list_globstar_pattern_canonicalizes_symlinked_parent() {
+        let real = tempfile::tempdir().unwrap();
+        let link_dir = real
+            .path()
+            .parent()
+            .unwrap()
+            .join(format!("sw-pv-link-{}", std::process::id()));
+        std::os::unix::fs::symlink(real.path(), &link_dir).unwrap();
+
+        let pattern = format!("{}/**", link_dir.display());
+        let config = make_config(vec![pattern.as_str()], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+
+        // The canonical input lives under the REAL dir; the pattern points at
+        // the SYMLINK. Pre-fix this missed; parent canonicalization must line
+        // them up.
+        let canonical_child = real.path().canonicalize().unwrap().join("file.txt");
+        let allowed = validator
+            .is_path_in_allowed_list(&canonical_child.to_string_lossy(), "ignored")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&link_dir);
+        assert!(
+            allowed,
+            "<symlink>/** must match a canonical child of the real dir"
         );
     }
 }
