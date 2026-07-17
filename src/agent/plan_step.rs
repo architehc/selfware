@@ -272,6 +272,48 @@ impl Agent {
         // Return whether there are tool calls to execute
         Ok(has_tool_calls)
     }
+
+    /// A planning response with no tool calls may already BE the final answer
+    /// for a plain chat / analysis task. Apply the same sanity gates the
+    /// execution path applies before accepting a tool-less answer
+    /// (execution.rs:650-687): substantial cleaned length, not confused, not
+    /// narrating pending work, and the completion gate accepts it.
+    ///
+    /// Mutation tasks never finalize here — a task whose deliverable is an
+    /// edit must still go plan → execute (the EmptyDiff / NoSourceEdit /
+    /// TestOnlyPatch gates would reject it anyway; classifying first keeps
+    /// the edit path bit-identical to before). Plan mode is likewise left
+    /// untouched: the user asked to review before anything is accepted.
+    ///
+    /// Returns the cleaned answer when it can be accepted as the final one.
+    pub(super) async fn planning_answer_ready_to_finalize(&mut self) -> Option<String> {
+        if self.plan_mode || self.current_task_requires_mutation() {
+            return None;
+        }
+        // The planning response is the assistant message plan() just pushed.
+        let content = self
+            .messages
+            .last()
+            .filter(|m| m.role == "assistant")
+            .map(|m| m.content.text().to_string())?;
+        let clean = super::recovery::strip_think_blocks(&content)
+            .trim()
+            .to_string();
+        if clean.len() < 40
+            || super::verification::is_confused_response(&content)
+            || super::verification::is_incomplete_action_response(&content)
+        {
+            return None;
+        }
+        // The completion gate inspects `last_assistant_response`
+        // (incomplete-action / exact-target / capability-disclaimer checks),
+        // so point it at the candidate answer before asking.
+        self.last_assistant_response = clean.clone();
+        if self.check_completion_gate().await.is_some() {
+            return None;
+        }
+        Some(clean)
+    }
 }
 
 #[cfg(test)]

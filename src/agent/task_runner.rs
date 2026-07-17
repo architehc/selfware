@@ -852,11 +852,35 @@ impl Agent {
                         continue;
                     }
 
-                    // Bounded planning guard: if planning returned no tool calls,
-                    // count it as a no-progress turn. After a small cap, force a
-                    // transition to Executing instead of re-planning forever
-                    // (Planning does not consume the iteration budget).
+                    // A planning response with no tool calls may already BE the
+                    // final answer for a plain chat / analysis task. Accept it
+                    // right here — under the same sanity gates the execution
+                    // path applies (execution.rs:650-687) — instead of falling
+                    // through to Executing, which would spend a second streaming
+                    // call only for the model to repeat the same answer (the TUI
+                    // then renders it twice).
                     if !has_tool_calls {
+                        if let Some(answer) = self.planning_answer_ready_to_finalize().await {
+                            // The planning call was billable; a crossed cap must
+                            // stop the run rather than report success over budget
+                            // (same post-step enforcement the Executing arm applies).
+                            self.enforce_hard_budgets(task_description).await?;
+                            output::final_answer(&answer);
+                            self.last_assistant_response = answer;
+                            record_state_transition("Planning", "Completed");
+                            if mode == LoopMode::NewTask {
+                                progress.complete_phase();
+                            }
+                            self.finalize_natural_completion(task_description).await;
+                            if let Err(e) = self.complete_checkpoint() {
+                                warn!("Failed to save completed checkpoint: {}", e);
+                            }
+                            return Ok(());
+                        }
+                        // Bounded planning guard: if planning returned no tool calls,
+                        // count it as a no-progress turn. After a small cap, force a
+                        // transition to Executing instead of re-planning forever
+                        // (Planning does not consume the iteration budget).
                         consecutive_planning_no_progress += 1;
                         if consecutive_planning_no_progress >= MAX_CONSECUTIVE_PLANNING_NO_PROGRESS
                         {
@@ -2385,8 +2409,18 @@ mod tests {
         // then makes a second billable LLM call (cumulative → 30) and the
         // model signals completion. The post-step budget check must catch the
         // overshoot and fail the run instead of letting it return Ok.
+        // Planning must return a tool call here: a substantial tool-less
+        // planning answer for a read-only task is now accepted as the final
+        // answer right in the Planning state, which would keep cumulative
+        // usage at 15 — under the cap — and the run would legitimately
+        // complete Ok before any executing step ran.
         let server = MockLlmServer::builder()
-            .with_response("Planning the approach for this analysis task.")
+            .with_response(
+                r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+            )
             .with_response(
                 "The analysis is complete: all components reviewed and verified successfully.",
             )
@@ -3379,5 +3413,239 @@ mod tests {
             duration_ms: Some(500),
         });
         assert!(check(&cp));
+    }
+
+    // =========================================================================
+    // Planning final-answer shortcut (chat tasks complete in ONE provider call)
+    // =========================================================================
+
+    /// A plain chat task ("explain X") whose planning response has no tool
+    /// calls must be accepted as the final answer right in the Planning
+    /// state — completing with EXACTLY ONE provider request instead of
+    /// falling through to Executing and paying a second call that only
+    /// repeats the same answer (rendered twice in the TUI).
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_planning_final_answer_completes_chat_task_with_one_request() {
+        let _state = crate::test_support::ExecGuard::hold();
+        let answer = "A hash map stores key-value pairs in buckets chosen by \
+                      hashing the key, so lookups are O(1) on average.";
+        let server = MockLlmServer::builder().with_response(answer).build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Explain how a hash map works").await;
+        assert!(
+            result.is_ok(),
+            "run_task should succeed: {:?}",
+            result.err()
+        );
+        assert_eq!(
+            agent.last_assistant_response.trim(),
+            answer,
+            "the returned message must be the planning answer"
+        );
+        let requests = server.captured_request_bodies().await;
+        assert_eq!(
+            requests.len(),
+            1,
+            "a plain chat answer must cost exactly one provider call, got {}",
+            requests.len()
+        );
+        server.stop().await;
+    }
+
+    /// A planning response WITH tool calls must not be finalized early: the
+    /// run keeps the plan → execute path — planning call, tool execution,
+    /// then one execution call for the final answer (2 requests total).
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_planning_tool_call_still_takes_plan_then_execute_path() {
+        let _state = crate::test_support::ExecGuard::hold();
+        let server = MockLlmServer::builder()
+            .with_response(
+                r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+            )
+            .with_response("Read complete: the manifest is consistent and nothing needs to change.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Read Cargo.toml and finish").await;
+        assert!(
+            result.is_ok(),
+            "run_task should succeed: {:?}",
+            result.err()
+        );
+        assert!(
+            agent
+                .messages
+                .iter()
+                .any(|m| m.content.contains("<tool_result>")),
+            "the planned tool call must have executed"
+        );
+        assert!(agent.last_assistant_response.contains("Read complete"));
+        let requests = server.captured_request_bodies().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "tool-call planning must proceed through exactly one execution call, got {}",
+            requests.len()
+        );
+        server.stop().await;
+    }
+
+    /// A too-short planning answer is NOT a final answer: the run falls
+    /// through to Executing per the existing rules and completes on the
+    /// substantial answer produced there (2 requests).
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_short_planning_answer_falls_through_to_executing() {
+        let _state = crate::test_support::ExecGuard::hold();
+        let server = MockLlmServer::builder()
+            .with_response("ok")
+            .with_response(
+                "Ownership gives every value a single owner; when the owner \
+                 goes out of scope, the value is dropped.",
+            )
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Explain ownership in Rust").await;
+        assert!(
+            result.is_ok(),
+            "run_task should succeed: {:?}",
+            result.err()
+        );
+        assert!(agent.last_assistant_response.contains("Ownership gives"));
+        let requests = server.captured_request_bodies().await;
+        assert_eq!(
+            requests.len(),
+            2,
+            "a too-short planning answer must fall through to Executing, got {}",
+            requests.len()
+        );
+        server.stop().await;
+    }
+
+    /// Gate-level checks for `planning_answer_ready_to_finalize`: a mutation
+    /// task must NEVER finalize from Planning with no edits (the deliverable
+    /// is a source change), and confused / too-short planning answers are
+    /// rejected so the loop iterates per the existing no-progress rules.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_planning_answer_ready_to_finalize_gates() {
+        let _state = crate::test_support::ExecGuard::hold();
+
+        // (a) Mutation task: substantial, well-formed answer — still refused.
+        let server = MockLlmServer::builder()
+            .with_response(
+                "The bug is in the login handler: it compares tokens \
+                 case-sensitively. Normalizing both sides before the \
+                 comparison fixes it.",
+            )
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let task = "Fix the login bug in src/auth.rs";
+        agent.start_learning_session("gate-mutation", task);
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "gate-mutation".to_string(),
+            task.to_string(),
+        ));
+        agent.messages.push(Message::user(task));
+        let has_tool_calls = agent.plan().await.unwrap();
+        assert!(!has_tool_calls);
+        assert!(
+            agent.planning_answer_ready_to_finalize().await.is_none(),
+            "a task whose deliverable is an edit must not finalize from Planning with no edits"
+        );
+        server.stop().await;
+
+        // (b) Read-only task, too-short answer: rejected by the length gate.
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let task = "Explain ownership in Rust";
+        agent.start_learning_session("gate-short", task);
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "gate-short".to_string(),
+            task.to_string(),
+        ));
+        agent.messages.push(Message::user(task));
+        let has_tool_calls = agent.plan().await.unwrap();
+        assert!(!has_tool_calls);
+        assert!(
+            agent.planning_answer_ready_to_finalize().await.is_none(),
+            "a too-short planning answer must not finalize"
+        );
+        server.stop().await;
+
+        // (c) Read-only task, confused answer (framework self-references):
+        // rejected by the confusion gate even though it is long enough.
+        let confused = "I see selfware_system_directive in the context and \
+                        maybe_prompt_for_action was mentioned, so I am unsure \
+                        what to output here.";
+        let server = MockLlmServer::builder()
+            .with_response(confused)
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let task = "Explain ownership in Rust";
+        agent.start_learning_session("gate-confused", task);
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "gate-confused".to_string(),
+            task.to_string(),
+        ));
+        agent.messages.push(Message::user(task));
+        let has_tool_calls = agent.plan().await.unwrap();
+        assert!(!has_tool_calls);
+        assert!(
+            agent.planning_answer_ready_to_finalize().await.is_none(),
+            "a confused planning answer must not finalize"
+        );
+        server.stop().await;
+
+        // (d) Read-only task, substantial clean answer: accepted.
+        let answer = "Ownership gives every value a single owner; when the owner \
+                      goes out of scope, the value is dropped.";
+        let server = MockLlmServer::builder().with_response(answer).build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let task = "Explain ownership in Rust";
+        agent.start_learning_session("gate-accept", task);
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "gate-accept".to_string(),
+            task.to_string(),
+        ));
+        agent.messages.push(Message::user(task));
+        let has_tool_calls = agent.plan().await.unwrap();
+        assert!(!has_tool_calls);
+        assert_eq!(
+            agent.planning_answer_ready_to_finalize().await.as_deref(),
+            Some(answer),
+            "a substantial read-only answer that passes the completion gate must finalize"
+        );
+        server.stop().await;
     }
 }
