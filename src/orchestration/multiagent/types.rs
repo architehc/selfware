@@ -3,7 +3,7 @@
 //! Core types for the multi-agent system including agent instances,
 //! results, events, and status definitions.
 
-use crate::api::types::Message;
+use crate::api::types::{Message, Usage};
 use crate::swarm::AgentRole;
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,10 @@ pub struct AgentResult {
     pub agent_name: String,
     pub role: AgentRole,
     pub content: String,
-    pub tool_calls: Vec<String>,
+    /// Provider-reported token usage (and cost, when the provider includes
+    /// it — e.g. OpenRouter's `usage.cost`) for this agent's single chat
+    /// completion. `None` when the call failed before a response arrived.
+    pub usage: Option<Usage>,
     pub duration: Duration,
     pub success: bool,
     pub error: Option<String>,
@@ -55,10 +58,6 @@ pub enum MultiAgentEvent {
     AgentProgress {
         agent_id: usize,
         content: String,
-    },
-    AgentToolCall {
-        agent_id: usize,
-        tool: String,
     },
     AgentCompleted {
         agent_id: usize,

@@ -658,13 +658,13 @@ Selfware gives the LLM a full toolkit for autonomous coding:
 
 ### Multi-Agent Swarm
 
-Up to **16 concurrent agents** with role specialization:
+A fixed fleet of **4 role agents** answers the same task in parallel — `-n` only caps how many run at once (1–16, per its help), it does not add agents:
 
 ```bash
-selfware multi-chat -n 8
+selfware multi-chat -n 4
 ```
 
-Roles: **Architect**, **Coder**, **Tester**, **Reviewer**, **DevOps**, **Security** — each with its own context and tool access. The swarm coordinator distributes tasks and merges results.
+Roles: **Architect**, **Coder**, **Tester**, **Reviewer** — each with its own role-specific system prompt (more roles can be added mid-session with `/add <role>`). Each agent makes a single chat completion — no tool use, no agent loop — and the responses are aggregated for comparison, with per-run token/cost totals. With `--coordinator`, the swarm coordinator first assigns the task to role-matched agents and execution is gated on that assignment.
 
 ### Task Persistence & Recovery
 
@@ -773,7 +773,7 @@ Guided wizard with recommendations for project template, architecture, database,
 
 ### Swarm Visualization
 
-Terminal panels showing agent status, consensus log, and activity timeline for multi-agent swarm sessions. See what each agent is doing in real time.
+Animated multi-agent demo scenarios (via the hidden `selfware demo` command) render scripted terminal panels — agent avatars, token streams, activity levels — for demos and TUI development. These are canned animations, not a live view of a running session; live `multi-chat` progress is printed as per-agent event lines in the terminal.
 
 ### Inline Diff Viewer
 

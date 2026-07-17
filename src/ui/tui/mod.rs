@@ -1691,8 +1691,9 @@ pub fn run_tui_dashboard_with_events(
                                                     )
                                                 }
                                             } else {
-                                                "Coordinator mode is not active.\n\
-                                                 Use --coordinator flag to enable."
+                                                "Coordinator mode is not available in the TUI.\n\
+                                                 The --coordinator flag only applies to the\n\
+                                                 `selfware multi-chat` CLI subcommand."
                                                     .to_string()
                                             }
                                         });

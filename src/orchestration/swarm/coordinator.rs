@@ -178,7 +178,13 @@ impl Swarm {
         Arc::clone(&self.memory)
     }
 
-    /// Create a decision
+    /// Create a decision.
+    ///
+    /// NOTE: the decision/vote API is currently library-only. No production
+    /// execution path creates decisions — the multi-chat "consensus" step was
+    /// removed because every agent self-voted at a fixed confidence and the
+    /// resulting winner was deterministic (last finisher) and never used.
+    /// The API is retained for embedders and remains covered by swarm tests.
     pub fn create_decision(&mut self, question: impl Into<String>, options: Vec<String>) -> String {
         let decision = Decision::new(question, options);
         let id = decision.id.clone();
@@ -429,8 +435,21 @@ impl Swarm {
         assigned
     }
 
-    /// Complete task for an agent
-    pub fn complete_task(&mut self, task_id: &str, agent_id: &str, result: impl Into<String>) {
+    /// Complete task for an agent, recording the actual per-agent `success`
+    /// flag so trust scores and `tasks_failed` reflect reality (the flag was
+    /// previously hardcoded to `true`, so failures could never be counted).
+    ///
+    /// The agent is returned to the idle pool so it can be assigned to
+    /// subsequent tasks — `assign_task` only considers `Idle` agents, and
+    /// previously agents stayed `Completed` forever, so no agent could ever
+    /// take a second task.
+    pub fn complete_task(
+        &mut self,
+        task_id: &str,
+        agent_id: &str,
+        result: impl Into<String>,
+        success: bool,
+    ) {
         let task = match self.active_tasks.get_mut(task_id) {
             Some(t) => t,
             None => {
@@ -449,7 +468,8 @@ impl Swarm {
             tracing::warn!("Task {} has no assigned agents, cannot complete", task_id);
             // Still update the agent status
             if let Some(agent) = self.agents.get_mut(agent_id) {
-                agent.complete_task(true);
+                agent.complete_task(success);
+                agent.set_idle();
             }
             return;
         }
@@ -464,7 +484,34 @@ impl Swarm {
         // Update agent status only when task was found, keeping both
         // operations together so they succeed or fail as a unit
         if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.complete_task(true);
+            agent.complete_task(success);
+            // Return to the idle pool so future tasks can be assigned.
+            agent.set_idle();
+        }
+    }
+
+    /// Mark a task as failed and return its assigned agents to the idle pool.
+    ///
+    /// Used when a task cannot run to completion: no agents were assignable,
+    /// or some assigned agents never reported a result. Without this, such
+    /// tasks would stay `Pending`/`InProgress` forever and their agents would
+    /// stay `Working`, never assignable again.
+    pub fn fail_task(&mut self, task_id: &str) {
+        let assigned = match self.active_tasks.get_mut(task_id) {
+            Some(task) => {
+                task.status = TaskStatus::Failed;
+                task.assigned_agents.clone()
+            }
+            None => {
+                tracing::warn!("Task {} not found in active tasks during failure", task_id);
+                return;
+            }
+        };
+
+        for agent_id in &assigned {
+            if let Some(agent) = self.agents.get_mut(agent_id) {
+                agent.set_idle();
+            }
         }
     }
 

@@ -2,7 +2,7 @@
 //!
 //! Interactive CLI for the multi-agent chat system.
 
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -10,17 +10,132 @@ use colored::Colorize;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::swarm::{
-    create_dev_swarm, AgentRole, ConflictStrategy, DecisionStatus, Swarm, SwarmTask,
-};
+use crate::swarm::{Agent, AgentRole, Swarm, SwarmTask, TaskStatus};
 
 use super::chat::MultiAgentChat;
 use super::config::MultiAgentConfig;
-use super::types::{AgentInstance, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS};
+use super::types::{
+    AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS,
+};
+
+/// Classification of a `stdin().read_line` result for the interactive loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdinRead {
+    /// A line (possibly empty) was read.
+    Line,
+    /// EOF: 0 bytes read — Ctrl-D, terminal closed, or pipe ended.
+    Eof,
+    /// I/O error.
+    Error,
+}
+
+/// Decide what a `read_line` result means for the interactive loop.
+///
+/// `Ok(0)` (EOF) used to slip past the `.is_err()` check, so the loop
+/// reprinted the prompt forever on a hot loop — piped stdin without a
+/// trailing `exit` livelocked at full CPU. EOF must exit the loop.
+fn classify_stdin_read(result: &io::Result<usize>) -> StdinRead {
+    match result {
+        Ok(0) => StdinRead::Eof,
+        Ok(_) => StdinRead::Line,
+        Err(_) => StdinRead::Error,
+    }
+}
+
+/// Exit words end the session. Matched case-insensitively so `Exit`/`EXIT`
+/// don't fall through and get dispatched to every agent as a paid task.
+fn is_exit_word(input: &str) -> bool {
+    ["exit", "quit", "/exit", "/quit", "q", "/q"]
+        .iter()
+        .any(|word| input.eq_ignore_ascii_case(word))
+}
+
+/// Build a swarm with one agent per configured role, named like the chat
+/// agents. Returns the swarm and the swarm agent IDs indexed by chat-agent
+/// position, so swarm agent i always corresponds to chat agent i.
+fn build_role_swarm(roles: &[AgentRole]) -> (Swarm, Vec<String>) {
+    let mut swarm = Swarm::new();
+    let mut ids = Vec::with_capacity(roles.len());
+    for (i, role) in roles.iter().enumerate() {
+        let id = swarm.add_agent(Agent::new(format!("Agent-{}-{}", i, role.name()), *role));
+        ids.push(id);
+    }
+    (swarm, ids)
+}
+
+/// Print an honest per-agent results summary: what each agent actually
+/// returned, how long it took, provider-reported token usage and cost when
+/// available, and the error for failed agents.
+fn print_agent_summary(results: &[AgentResult]) {
+    println!("\n{}", "Agent Results:".bright_cyan().bold());
+
+    let mut any_usage = false;
+    let mut total_tokens = 0usize;
+    let mut total_cost = 0.0f64;
+    let mut any_cost = false;
+
+    for result in results {
+        let status = if result.success {
+            "✓".bright_green()
+        } else {
+            "✗".bright_red()
+        };
+        println!(
+            "  {} {} ({}) — {:.2}s",
+            status,
+            result.agent_name,
+            result.role.name(),
+            result.duration.as_secs_f64()
+        );
+        if let Some(usage) = &result.usage {
+            any_usage = true;
+            total_tokens += usage.total_tokens;
+            match usage.cost {
+                Some(cost) => {
+                    any_cost = true;
+                    total_cost += cost;
+                    println!(
+                        "    {} tokens ({} prompt + {} completion), ${:.6}",
+                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens, cost
+                    );
+                }
+                None => {
+                    println!(
+                        "    {} tokens ({} prompt + {} completion)",
+                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
+                    );
+                }
+            }
+        }
+        if !result.success {
+            if let Some(error) = &result.error {
+                println!("    error: {}", error);
+            }
+        }
+    }
+
+    if any_usage {
+        if any_cost {
+            println!("  Total: {} tokens, ${:.6}", total_tokens, total_cost);
+        } else {
+            println!("  Total: {} tokens", total_tokens);
+        }
+    }
+}
 
 impl MultiAgentChat {
     /// Run interactive multi-agent chat
     pub async fn interactive(&mut self) -> Result<()> {
+        // Fail fast BEFORE any LLM call: on a non-terminal stdin this REPL
+        // would spin on EOF (piped input without a trailing `exit` livelocked
+        // at full CPU). Mirrors the Commands::Run guard in cli/mod.rs.
+        if !io::stdin().is_terminal() {
+            anyhow::bail!(
+                "interactive multi-agent chat requires a terminal on stdin; \
+                 piped or redirected input is not supported"
+            );
+        }
+
         println!("{}", "🤖 Multi-Agent Chat System".bright_cyan().bold());
         println!(
             "Agents: {} | Max Concurrency: {}",
@@ -37,13 +152,18 @@ impl MultiAgentChat {
 
             let mut input = String::new();
             // Use block_in_place to prevent blocking the async runtime
-            if tokio::task::block_in_place(|| io::stdin().read_line(&mut input)).is_err() {
-                continue;
+            let read = tokio::task::block_in_place(|| io::stdin().read_line(&mut input));
+            match classify_stdin_read(&read) {
+                // EOF (Ctrl-D / closed pipe): exit cleanly instead of
+                // hot-looping on empty reads.
+                StdinRead::Eof => break,
+                StdinRead::Error => continue,
+                StdinRead::Line => {}
             }
 
             let input = input.trim();
 
-            if matches!(input, "exit" | "quit" | "/exit" | "/quit" | "q" | "/q") {
+            if is_exit_word(input) {
                 break;
             }
 
@@ -85,25 +205,26 @@ impl MultiAgentChat {
                 continue;
             }
 
-            if input.starts_with("/parallel ") {
-                if let Some(value) = input.strip_prefix("/parallel ").map(str::trim) {
-                    if let Ok(n) = value.parse::<usize>() {
+            if input == "/parallel" || input.starts_with("/parallel ") {
+                let value = input.strip_prefix("/parallel").unwrap_or("").trim();
+                match value.parse::<usize>() {
+                    Ok(n) => {
                         let n = n.clamp(1, MAX_CONCURRENT_AGENTS);
                         self.config.max_concurrency = n;
                         self.semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(n));
                         println!("Max concurrency set to {}", n);
                     }
-                } else {
-                    println!("Usage: /parallel <1-{ }>", MAX_CONCURRENT_AGENTS);
+                    Err(_) => println!("Usage: /parallel <1-{}>", MAX_CONCURRENT_AGENTS),
                 }
                 continue;
             }
 
-            if input.starts_with("/add ") {
-                let Some(role_str) = input.strip_prefix("/add ").map(str::trim) else {
+            if input == "/add" || input.starts_with("/add ") {
+                let role_str = input.strip_prefix("/add").unwrap_or("").trim();
+                if role_str.is_empty() {
                     println!("Usage: /add <role>");
                     continue;
-                };
+                }
                 let role_str = role_str.to_lowercase();
                 let role = match role_str.as_str() {
                     "architect" => Some(AgentRole::Architect),
@@ -135,9 +256,10 @@ impl MultiAgentChat {
                 continue;
             }
 
-            if input.starts_with("/remove ") {
-                if let Some(value) = input.strip_prefix("/remove ").map(str::trim) {
-                    if let Ok(id) = value.parse::<usize>() {
+            if input == "/remove" || input.starts_with("/remove ") {
+                let value = input.strip_prefix("/remove").unwrap_or("").trim();
+                match value.parse::<usize>() {
+                    Ok(id) => {
                         let mut agents = self.agents.write().await;
                         if id < agents.len() {
                             let removed = agents.remove(id);
@@ -150,8 +272,7 @@ impl MultiAgentChat {
                             println!("Invalid agent ID");
                         }
                     }
-                } else {
-                    println!("Usage: /remove <id>");
+                    Err(_) => println!("Usage: /remove <id>"),
                 }
                 continue;
             }
@@ -165,6 +286,14 @@ impl MultiAgentChat {
             }
 
             if input.is_empty() {
+                continue;
+            }
+
+            // Reject unrecognized slash commands instead of dispatching
+            // them to every agent as a paid task.
+            if input.starts_with('/') {
+                println!("Unknown command: {}", input);
+                println!("Type '/help' for available commands");
                 continue;
             }
 
@@ -183,14 +312,6 @@ impl MultiAgentChat {
                     match event {
                         MultiAgentEvent::AgentStarted { name, .. } => {
                             println!("  {} {} started", "▶".bright_blue(), name);
-                        }
-                        MultiAgentEvent::AgentToolCall { agent_id, tool } => {
-                            println!(
-                                "  {} Agent-{} calling {}",
-                                "🔧".bright_yellow(),
-                                agent_id,
-                                tool
-                            );
                         }
                         MultiAgentEvent::AgentCompleted { result, .. } => {
                             let status = if result.success {
@@ -237,6 +358,9 @@ impl MultiAgentChat {
             // Wait for event handler
             let _ = handle.await;
 
+            // Honest per-agent results, then the aggregated output.
+            print_agent_summary(&results);
+
             // Print aggregated results (combines all agent outputs into a
             // single coherent summary rather than disconnected previews).
             let summary = Self::aggregate_results(&results);
@@ -270,14 +394,24 @@ impl MultiAgentChat {
     /// Run interactive multi-agent chat with swarm coordinator orchestration.
     ///
     /// When `--coordinator` is set, the MultiChat handler routes here instead
-    /// of the plain `interactive()` fan-out.  A `Swarm` is built via
-    /// `create_dev_swarm()`, each user task is queued as a `SwarmTask`, the
-    /// coordinator assigns it to role-matched agents, the existing per-agent
-    /// execution (`run_task`) does the actual LLM work, results are fed back
-    /// to the swarm via `complete_task`, and a consensus decision is created
-    /// and resolved using the swarm's voting/conflict-resolution logic.
+    /// of the plain `interactive()` fan-out. A `Swarm` mirroring the chat
+    /// fleet 1:1 is built; each user task is queued as a `SwarmTask` and the
+    /// coordinator assigns it to role-matched idle agents. The assignment
+    /// gates execution: an unassignable task makes no LLM calls. The existing
+    /// per-agent execution (`run_task`) does the actual LLM work, results are
+    /// fed back to the swarm with their real per-agent success flags via
+    /// `complete_task` (which also returns agents to Idle for the next task),
+    /// and an honest per-agent summary is printed. There is no
+    /// voting/consensus step — it was removed because every agent self-voted
+    /// at a fixed confidence and the "winner" was never used.
     pub async fn interactive_swarm(&mut self) -> Result<()> {
-        use std::collections::HashMap;
+        // Same non-terminal guard as `interactive()` (see there).
+        if !io::stdin().is_terminal() {
+            anyhow::bail!(
+                "interactive swarm chat requires a terminal on stdin; \
+                 piped or redirected input is not supported"
+            );
+        }
 
         println!("{}", "🌐 Coordinator (Swarm) Mode".bright_cyan().bold());
         println!(
@@ -287,11 +421,11 @@ impl MultiAgentChat {
         );
         println!("Type 'exit' to quit, '/help' for commands\n");
 
-        // Build the swarm coordinator pre-populated with dev agents
-        // (Architect, Coder, Tester, Reviewer).
-        let mut swarm = create_dev_swarm()
-            .with_conflict_strategy(ConflictStrategy::ConfidenceWins)
-            .with_consensus_threshold(0.5);
+        // Build the swarm 1:1 from the configured roles so swarm agent i
+        // always corresponds to chat agent i. This makes the coordinator's
+        // assignment authoritative: a full assignment is exactly the set of
+        // agents `run_task` will execute.
+        let (mut swarm, mut swarm_agent_ids) = build_role_swarm(&self.config.roles);
 
         self.initialize_agents().await?;
 
@@ -300,13 +434,18 @@ impl MultiAgentChat {
             io::stdout().flush()?;
 
             let mut input = String::new();
-            if tokio::task::block_in_place(|| io::stdin().read_line(&mut input)).is_err() {
-                continue;
+            let read = tokio::task::block_in_place(|| io::stdin().read_line(&mut input));
+            match classify_stdin_read(&read) {
+                // EOF (Ctrl-D / closed pipe): exit cleanly instead of
+                // hot-looping on empty reads.
+                StdinRead::Eof => break,
+                StdinRead::Error => continue,
+                StdinRead::Line => {}
             }
 
             let input = input.trim();
 
-            if matches!(input, "exit" | "quit" | "/exit" | "/quit" | "q" | "/q") {
+            if is_exit_word(input) {
                 break;
             }
 
@@ -325,12 +464,13 @@ impl MultiAgentChat {
                 println!("Swarm agents:");
                 for agent in swarm.list_agents() {
                     println!(
-                        "  {} ({}) - {:?} | trust: {:.2} | tasks: {}",
+                        "  {} ({}) - {:?} | trust: {:.2} | tasks: {} done / {} failed",
                         agent.name,
                         agent.role.name(),
                         agent.status,
                         agent.trust_score,
                         agent.tasks_completed,
+                        agent.tasks_failed,
                     );
                 }
                 continue;
@@ -346,14 +486,16 @@ impl MultiAgentChat {
                 continue;
             }
 
-            if input.starts_with("/parallel ") {
-                if let Some(value) = input.strip_prefix("/parallel ").map(str::trim) {
-                    if let Ok(n) = value.parse::<usize>() {
+            if input == "/parallel" || input.starts_with("/parallel ") {
+                let value = input.strip_prefix("/parallel").unwrap_or("").trim();
+                match value.parse::<usize>() {
+                    Ok(n) => {
                         let n = n.clamp(1, MAX_CONCURRENT_AGENTS);
                         self.config.max_concurrency = n;
                         self.semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(n));
                         println!("Max concurrency set to {}", n);
                     }
+                    Err(_) => println!("Usage: /parallel <1-{}>", MAX_CONCURRENT_AGENTS),
                 }
                 continue;
             }
@@ -364,15 +506,23 @@ impl MultiAgentChat {
                     let mut results = self.results.lock().await;
                     results.clear();
                 }
-                // Rebuild swarm with fresh agents
-                swarm = create_dev_swarm()
-                    .with_conflict_strategy(ConflictStrategy::ConfidenceWins)
-                    .with_consensus_threshold(0.5);
+                // Rebuild the swarm 1:1 with fresh agents
+                let (fresh_swarm, fresh_ids) = build_role_swarm(&self.config.roles);
+                swarm = fresh_swarm;
+                swarm_agent_ids = fresh_ids;
                 println!("Swarm and agents reset");
                 continue;
             }
 
             if input.is_empty() {
+                continue;
+            }
+
+            // Reject unrecognized slash commands instead of dispatching
+            // them to every agent as a paid task.
+            if input.starts_with('/') {
+                println!("Unknown command: {}", input);
+                println!("Type '/help' for available commands");
                 continue;
             }
 
@@ -403,14 +553,38 @@ impl MultiAgentChat {
                 }
             };
 
+            // 4. The coordinator's assignment GATES execution: when no
+            //    agents are assignable, say so and make no LLM calls.
             let assigned = swarm.assign_task(&task_id);
+            if assigned.is_empty() {
+                println!(
+                    "  {} No idle agents available for this task — not running it (no LLM calls made)",
+                    "⚠".bright_yellow()
+                );
+                swarm.fail_task(&task_id);
+                continue;
+            }
+            if assigned.len() < self.config.roles.len() {
+                // Defensive: the swarm mirrors the chat fleet 1:1, so a
+                // partial assignment should not happen. If it ever does,
+                // don't run (and bill) a different set of agents than the
+                // coordinator assigned.
+                println!(
+                    "  {} Coordinator assigned only {}/{} roles — task not run (no LLM calls made)",
+                    "⚠".bright_yellow(),
+                    assigned.len(),
+                    self.config.roles.len()
+                );
+                swarm.fail_task(&task_id);
+                continue;
+            }
             println!(
                 "  {} Swarm coordinator assigned {} agents to task",
                 "📋".bright_blue(),
                 assigned.len()
             );
 
-            // 4. Execute the task using the existing per-agent execution path.
+            // 5. Execute the task using the existing per-agent execution path.
             let (tx, mut rx) = mpsc::channel::<MultiAgentEvent>(1000);
             self.event_tx = Some(tx);
 
@@ -463,80 +637,32 @@ impl MultiAgentChat {
             let results = self.run_task(input).await?;
             let _ = handle.await;
 
-            // 5. Feed results back to the swarm via complete_task.
-            //    Map MultiAgentChat results to swarm agents by role.
-            let role_to_agent_id: HashMap<AgentRole, String> = swarm
-                .list_agents()
-                .iter()
-                .map(|a| (a.role, a.id.clone()))
-                .collect();
-
+            // 6. Feed results back to the swarm with the ACTUAL per-agent
+            //    success flag so trust scores and failure counters reflect
+            //    reality. `complete_task` also returns each agent to Idle so
+            //    the next task can be assigned.
             for result in &results {
-                if let Some(agent_id) = role_to_agent_id.get(&result.role) {
-                    swarm.complete_task(&task_id, agent_id, result.content.clone());
+                if let Some(agent_id) = swarm_agent_ids.get(result.agent_id) {
+                    swarm.complete_task(&task_id, agent_id, result.content.clone(), result.success);
                 }
             }
 
-            // 6. Create a consensus decision and have agents vote.
-            let successful_names: Vec<String> = results
-                .iter()
-                .filter(|r| r.success)
-                .map(|r| r.agent_name.clone())
-                .collect();
-
-            if successful_names.len() > 1 {
-                let decision_id = swarm.create_decision(
-                    "Which agent's response best addresses the task?",
-                    successful_names.clone(),
-                );
-
-                // Collect vote data (voter_id, choice, confidence, reasoning).
-                // Each agent votes for its own response with moderate
-                // confidence; the swarm's consensus threshold and conflict
-                // strategy determine the final outcome.
-                let vote_data: Vec<(String, String, f32, String)> = results
-                    .iter()
-                    .filter(|r| r.success)
-                    .filter_map(|r| {
-                        let voter_id = role_to_agent_id.get(&r.role)?.clone();
-                        let reasoning: String = r.content.chars().take(200).collect();
-                        Some((voter_id, r.agent_name.clone(), 0.7, reasoning))
-                    })
-                    .collect();
-
-                for (voter_id, choice, confidence, reasoning) in &vote_data {
-                    let _ = swarm.vote(
-                        &decision_id,
-                        voter_id,
-                        choice.clone(),
-                        *confidence,
-                        reasoning.clone(),
-                    );
-                }
-
-                // Resolve the decision via consensus threshold.
-                let outcome = swarm.resolve_decision(&decision_id)?;
-
-                // Check if it resulted in a conflict.
-                let decision_status = swarm.get_decision(&decision_id).map(|d| d.status);
-
-                if decision_status == Some(DecisionStatus::Conflict) {
-                    let conflict_outcome = swarm.resolve_conflict(&decision_id)?;
-                    println!(
-                        "  ⚡ Conflict detected — resolved via ConfidenceWins strategy: {}",
-                        conflict_outcome
-                            .as_deref()
-                            .unwrap_or("(human intervention needed)")
-                    );
-                } else {
-                    println!(
-                        "  ✓ Consensus reached: {}",
-                        outcome.as_deref().unwrap_or("(no outcome)")
-                    );
-                }
+            // 7. Settle the task: if any assigned agent never reported a
+            //    result (e.g. cancelled mid-run), don't leave the SwarmTask
+            //    stuck InProgress forever — mark it Failed and release its
+            //    agents.
+            let task_completed = swarm
+                .get_task(&task_id)
+                .map(|t| t.status == TaskStatus::Completed)
+                .unwrap_or(true);
+            if !task_completed {
+                swarm.fail_task(&task_id);
             }
 
-            // 7. Print the aggregated result.
+            // 8. Honest per-agent results (no fake consensus vote), then the
+            //    aggregated output.
+            print_agent_summary(&results);
+
             let summary = Self::aggregate_results(&results);
             println!("\n{}", "Aggregated Result:".bright_cyan().bold());
             let preview = if summary.len() > 2000 {
@@ -575,4 +701,62 @@ pub async fn run_multiagent_task(
 
     let chat = MultiAgentChat::new(config, agent_config)?;
     chat.run_task(task).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdin_eof_is_classified_for_loop_exit() {
+        // Ok(0) is EOF: the interactive loops must break on it, not continue.
+        // Continuing reprinted the prompt forever — piped stdin without a
+        // trailing `exit` livelocked at full CPU (the P0-1 regression).
+        assert_eq!(classify_stdin_read(&Ok(0)), StdinRead::Eof);
+    }
+
+    #[test]
+    fn stdin_line_read_is_not_eof() {
+        assert_eq!(classify_stdin_read(&Ok(1)), StdinRead::Line);
+        assert_eq!(classify_stdin_read(&Ok(42)), StdinRead::Line);
+    }
+
+    #[test]
+    fn stdin_error_is_retriable() {
+        let err = std::io::Error::new(std::io::ErrorKind::Interrupted, "interrupted");
+        assert_eq!(classify_stdin_read(&Err(err)), StdinRead::Error);
+    }
+
+    #[test]
+    fn exit_words_match_case_insensitively() {
+        for word in [
+            "exit", "Exit", "EXIT", "quit", "Quit", "QUIT", "/exit", "/quit", "q", "Q", "/q",
+        ] {
+            assert!(is_exit_word(word), "expected exit word: {}", word);
+        }
+    }
+
+    #[test]
+    fn non_exit_words_do_not_exit() {
+        for word in ["", "exi", "exit now", "/help", "quite", "/parallel 8"] {
+            assert!(!is_exit_word(word), "unexpected exit word: {}", word);
+        }
+    }
+
+    #[test]
+    fn role_swarm_mirrors_chat_fleet_one_to_one() {
+        let roles = [
+            AgentRole::Architect,
+            AgentRole::Coder,
+            AgentRole::Tester,
+            AgentRole::Reviewer,
+        ];
+        let (swarm, ids) = build_role_swarm(&roles);
+        assert_eq!(ids.len(), roles.len());
+        for (i, id) in ids.iter().enumerate() {
+            let agent = swarm.get_agent(id).expect("swarm agent exists");
+            assert_eq!(agent.role, roles[i]);
+            assert_eq!(agent.status, crate::swarm::AgentStatus::Idle);
+        }
+    }
 }

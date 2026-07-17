@@ -6,8 +6,9 @@
 //! Features:
 //! - Specialist agent roles (architect, coder, tester, reviewer)
 //! - Role-specific system prompts
-//! - Consensus voting for decisions
-//! - Conflict resolution strategies
+//! - Consensus voting for decisions (library API — not currently wired into
+//!   any production execution path)
+//! - Conflict resolution strategies (same: library API only)
 //! - Shared working memory
 //! - Agent coordination
 

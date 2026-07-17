@@ -1,6 +1,9 @@
 //! Multi-Agent Chat
 //!
 //! The main multi-agent chat orchestrator and execution logic.
+//!
+//! Each agent in the fan-out makes exactly **one non-streaming chat
+//! completion** — no tools, no ReAct loop. Results are aggregated verbatim.
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -8,11 +11,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
-use crate::api::types::Message;
+use crate::api::types::{Message, Usage};
 use crate::api::{ApiClient, ThinkingMode};
 use crate::config::Config;
-use crate::tool_parser::parse_tool_calls;
-use crate::tools::ToolRegistry;
 
 use super::config::{MultiAgentConfig, MultiAgentFailurePolicy};
 use super::types::{
@@ -27,7 +28,6 @@ use super::types::{
 pub struct MultiAgentChat {
     pub(super) config: MultiAgentConfig,
     pub(super) client: Arc<ApiClient>,
-    pub(super) tools: Arc<ToolRegistry>,
     pub(super) semaphore: Arc<Semaphore>,
     pub(super) agents: Arc<RwLock<Vec<AgentInstance>>>,
     pub(super) results: Arc<Mutex<Vec<AgentResult>>>,
@@ -43,13 +43,11 @@ impl MultiAgentChat {
     pub fn new(api_config: &Config, agent_config: MultiAgentConfig) -> Result<Self> {
         let client = ApiClient::new(api_config).context("Failed to create API client")?;
 
-        let tools = ToolRegistry::default();
         let concurrency = agent_config.max_concurrency.clamp(1, MAX_CONCURRENT_AGENTS);
 
         Ok(Self {
             config: agent_config,
             client: Arc::new(client),
-            tools: Arc::new(tools),
             semaphore: Arc::new(Semaphore::new(concurrency)),
             agents: Arc::new(RwLock::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -95,7 +93,26 @@ impl MultiAgentChat {
         }
     }
 
-    /// Run a task across all agents concurrently
+    /// Run a task across all agents concurrently.
+    ///
+    /// Each agent makes exactly one non-streaming chat completion (no tools,
+    /// no agentic loop) and the results are returned in completion order.
+    ///
+    /// Sampling/timeout resolution per agent: `MultiAgentConfig` overrides
+    /// win when set, otherwise the loaded [`Config`] values are inherited
+    /// (`temperature`, `max_tokens`, and `agent.step_timeout_secs` for the
+    /// per-call timeout).
+    ///
+    /// Spend guardrails: `--max-budget-tokens` / `--max-cost-usd` (merged by
+    /// the CLI into `config.agent`) are enforced across the fan-out — see
+    /// [`BudgetGuard`]. `--max-turns` (`agent.max_iterations`) has no meaning
+    /// here because every agent makes exactly one call; it is deliberately
+    /// ignored rather than silently half-applied.
+    ///
+    /// Returns an error immediately when a configured limit is already
+    /// exhausted (zero budget) before any paid call is made. Otherwise the
+    /// run completes with partial results: agents that were skipped to stay
+    /// within budget appear as failed results whose error explains why.
     pub async fn run_task(&self, task: &str) -> Result<Vec<AgentResult>> {
         let start = Instant::now();
 
@@ -120,6 +137,59 @@ impl MultiAgentChat {
             agents.len()
         };
 
+        let base_config = self.client.config();
+
+        // Resolve sampling/timeout: explicit MultiAgentConfig overrides win,
+        // otherwise inherit the user's loaded Config (P1-1/P1-3).
+        let resolved_max_tokens = self.config.max_tokens.unwrap_or(base_config.max_tokens);
+        let timeout = Duration::from_secs(
+            self.config
+                .timeout_secs
+                .unwrap_or(base_config.agent.step_timeout_secs),
+        );
+
+        // ── Spend guardrails (P0-3) ─────────────────────────────────────
+        // Refuse to start a fan-out whose configured limits are already
+        // exhausted; the per-agent gate then keeps cumulative spend within
+        // the limits (see BudgetGuard).
+        let limits = BudgetLimits {
+            max_budget_tokens: base_config.agent.max_budget_tokens,
+            max_cost_usd: base_config.agent.max_cost_usd,
+        };
+        if let Some(0) = limits.max_budget_tokens {
+            anyhow::bail!(
+                "multi-chat: --max-budget-tokens is 0; no agent calls can be made. \
+                 Raise the budget or drop the flag."
+            );
+        }
+        if let Some(max) = limits.max_cost_usd {
+            anyhow::ensure!(
+                max.is_finite() && max > 0.0,
+                "multi-chat: --max-cost-usd must be a positive number (got {max}); \
+                 no agent calls can be made."
+            );
+        }
+        let budget = BudgetGuard::new(limits, resolved_max_tokens);
+
+        // Build a dedicated per-agent client only when sampling overrides
+        // are actually set; otherwise reuse the base client (which already
+        // carries the user's temperature/max_tokens).
+        let client = if self.config.temperature.is_some() || self.config.max_tokens.is_some() {
+            let mut per_agent_config = base_config.clone();
+            if let Some(t) = self.config.temperature {
+                per_agent_config.temperature = t;
+            }
+            if let Some(mt) = self.config.max_tokens {
+                per_agent_config.max_tokens = mt;
+            }
+            Arc::new(
+                ApiClient::new(&per_agent_config)
+                    .context("Failed to create per-agent API client")?,
+            )
+        } else {
+            Arc::clone(&self.client)
+        };
+
         // Shared cancellation state for FailFast policy
         let cancelled = Arc::new(tokio::sync::Notify::new());
 
@@ -127,25 +197,15 @@ impl MultiAgentChat {
         let mut join_set = JoinSet::new();
 
         for agent_id in 0..agent_count {
-            let tools = Arc::clone(&self.tools);
             let semaphore = Arc::clone(&self.semaphore);
             let agents = Arc::clone(&self.agents);
             let results = Arc::clone(&self.results);
             let task = task.to_string();
-            let timeout = Duration::from_secs(self.config.timeout_secs);
             let event_tx = self.event_tx.clone();
             let failure_policy = self.config.failure_policy;
             let cancelled = Arc::clone(&cancelled);
-            // Per-agent overrides: build a dedicated ApiClient that uses the
-            // temperature / max_tokens from MultiAgentConfig rather than the
-            // base API config values.  Config is Clone, so this is cheap.
-            let mut per_agent_config = self.client.config().clone();
-            per_agent_config.temperature = self.config.temperature;
-            per_agent_config.max_tokens = self.config.max_tokens;
-            let per_agent_client = Arc::new(
-                ApiClient::new(&per_agent_config)
-                    .context("Failed to create per-agent API client")?,
-            );
+            let client = Arc::clone(&client);
+            let budget = budget.clone();
 
             join_set.spawn(async move {
                 tokio::select! {
@@ -154,7 +214,7 @@ impl MultiAgentChat {
                         Ok(())
                     }
                     res = Self::run_single_agent(
-                        agent_id, task, per_agent_client, tools, semaphore, agents, results, timeout, event_tx,
+                        agent_id, task, client, budget, semaphore, agents, results, timeout, event_tx,
                     ) => {
                         if failure_policy == MultiAgentFailurePolicy::FailFast && res.is_err() {
                             cancelled.notify_waiters();
@@ -218,13 +278,13 @@ impl MultiAgentChat {
         Ok(results)
     }
 
-    /// Run a single agent's task
+    /// Run a single agent's task: one non-streaming chat completion, no tools.
     #[allow(clippy::too_many_arguments)]
     async fn run_single_agent(
         agent_id: usize,
         task: String,
         client: Arc<ApiClient>,
-        _tools: Arc<ToolRegistry>,
+        budget: BudgetGuard,
         semaphore: Arc<Semaphore>,
         agents: Arc<RwLock<Vec<AgentInstance>>>,
         results: Arc<Mutex<Vec<AgentResult>>>,
@@ -236,6 +296,38 @@ impl MultiAgentChat {
 
         let start = Instant::now();
 
+        // Budget gate (P0-3): check before doing any paid work. A skip is
+        // recorded honestly but is NOT an error — it must not trip FailFast
+        // and cancel sibling agents that are legitimately in flight.
+        if let Err(reason) = budget.try_reserve() {
+            let (agent_name, role) = {
+                let agents = agents.read().await;
+                match agents.get(agent_id) {
+                    Some(a) => (a.name.clone(), a.role),
+                    None => return Ok(()),
+                }
+            };
+            tracing::info!("multi-chat: agent {} not launched: {}", agent_id, reason);
+            if let Some(ref tx) = event_tx {
+                let _ = tx.try_send(MultiAgentEvent::AgentFailed {
+                    agent_id,
+                    error: reason.clone(),
+                });
+            }
+            let mut results = results.lock().await;
+            results.push(AgentResult {
+                agent_id,
+                agent_name,
+                role,
+                content: String::new(),
+                usage: None,
+                duration: start.elapsed(),
+                success: false,
+                error: Some(reason),
+            });
+            return Ok(());
+        }
+
         // Get agent info and update status + heartbeat
         let (agent_name, role, mut messages) = {
             let mut agents = agents.write().await;
@@ -244,6 +336,7 @@ impl MultiAgentChat {
                 agent.last_heartbeat = Instant::now();
                 (agent.name.clone(), agent.role, agent.messages.clone())
             } else {
+                budget.settle(None);
                 return Ok(());
             }
         };
@@ -265,6 +358,15 @@ impl MultiAgentChat {
             tokio::time::timeout(timeout, client.chat(messages, None, ThinkingMode::Disabled))
                 .await;
 
+        // Settle the budget reservation: drop the pessimistic estimate and
+        // record actual provider-reported usage, when we got a response.
+        // (A timed-out call may still have been billed by the provider, but
+        // we only account what we can see.)
+        budget.settle(match &result {
+            Ok(Ok(response)) => Some(&response.usage),
+            _ => None,
+        });
+
         let duration = start.elapsed();
 
         let agent_result = match result {
@@ -275,30 +377,12 @@ impl MultiAgentChat {
                     .map(|c| c.message.content.text().to_string())
                     .unwrap_or_default();
 
-                // Parse any tool calls
-                let parsed = parse_tool_calls(&content);
-                let tool_calls: Vec<String> = parsed
-                    .tool_calls
-                    .iter()
-                    .map(|tc| tc.tool_name.clone())
-                    .collect();
-
-                // Emit tool call events
-                for tool in &tool_calls {
-                    if let Some(ref tx) = event_tx {
-                        let _ = tx.try_send(MultiAgentEvent::AgentToolCall {
-                            agent_id,
-                            tool: tool.clone(),
-                        });
-                    }
-                }
-
                 AgentResult {
                     agent_id,
                     agent_name: agent_name.clone(),
                     role,
                     content,
-                    tool_calls,
+                    usage: Some(response.usage),
                     duration,
                     success: true,
                     error: None,
@@ -316,7 +400,7 @@ impl MultiAgentChat {
                     agent_name: agent_name.clone(),
                     role,
                     content: String::new(),
-                    tool_calls: vec![],
+                    usage: None,
                     duration,
                     success: false,
                     error: Some(e.to_string()),
@@ -335,7 +419,7 @@ impl MultiAgentChat {
                     agent_name: agent_name.clone(),
                     role,
                     content: String::new(),
-                    tool_calls: vec![],
+                    usage: None,
                     duration,
                     success: false,
                     error: Some(error),
@@ -343,9 +427,12 @@ impl MultiAgentChat {
             }
         };
 
-        // Update agent status and heartbeat, and append the assistant
-        // response back into the agent's message history so that
-        // subsequent turns include the conversation context.
+        // Update agent status and heartbeat. On success, append BOTH the
+        // user task and the assistant reply to the agent's history so the
+        // next turn sees the full conversation with correct role
+        // alternation (previously the user turn was lost, producing
+        // `[system, assistant, user]`). On failure the history is left
+        // untouched so it never ends on a dangling user message.
         {
             let mut agents = agents.write().await;
             if let Some(agent) = agents.get_mut(agent_id) {
@@ -355,9 +442,8 @@ impl MultiAgentChat {
                     AgentStatus::Failed
                 };
                 agent.last_heartbeat = Instant::now();
-                // Append the assistant response (or error text) so the
-                // agent accumulates conversation history across turns.
                 if agent_result.success {
+                    agent.messages.push(Message::user(&task));
                     agent
                         .messages
                         .push(Message::assistant(&agent_result.content));
@@ -428,5 +514,119 @@ impl MultiAgentChat {
         }
 
         summary
+    }
+
+    /// Sum provider-reported usage across agent results.
+    ///
+    /// `cost` is `Some` only when at least one agent's provider reported a
+    /// USD cost (e.g. OpenRouter's `usage.cost`); it stays `None` for
+    /// providers that don't report cost at all.
+    pub fn total_usage(results: &[AgentResult]) -> Usage {
+        let mut total = Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost: None,
+        };
+        for result in results {
+            if let Some(usage) = &result.usage {
+                total.prompt_tokens += usage.prompt_tokens;
+                total.completion_tokens += usage.completion_tokens;
+                total.total_tokens += usage.total_tokens;
+                if let Some(cost) = usage.cost {
+                    *total.cost.get_or_insert(0.0) += cost;
+                }
+            }
+        }
+        total
+    }
+}
+
+/// Spend limits for one fan-out run, read from `config.agent` (where the CLI
+/// merges `--max-budget-tokens` / `--max-cost-usd`).
+#[derive(Debug, Clone, Copy, Default)]
+struct BudgetLimits {
+    max_budget_tokens: Option<usize>,
+    max_cost_usd: Option<f64>,
+}
+
+/// Cumulative spend accounting shared by all agent tasks of one `run_task`.
+///
+/// Token enforcement is *pessimistic*: each in-flight call reserves the
+/// per-call `max_tokens` cap when it starts and settles to the
+/// provider-reported `usage.total_tokens` when it completes, so a
+/// concurrent wave cannot overshoot the token budget. Cost enforcement uses
+/// actual provider-reported `usage.cost`, which is only known after a call
+/// completes — a wave already in flight is allowed to finish, and later
+/// launches are then blocked.
+///
+/// Uses `std::sync::Mutex` (not tokio): critical sections are a few integer
+/// ops and are never held across an `.await`.
+#[derive(Debug, Default)]
+struct BudgetTracker {
+    /// Sum of `usage.total_tokens` reported by completed calls.
+    actual_tokens: usize,
+    /// Sum of provider-reported `usage.cost` from completed calls.
+    actual_cost: f64,
+    /// Pessimistic reservations held by in-flight calls.
+    reserved_tokens: usize,
+}
+
+/// Per-run spend guard passed to every agent task.
+#[derive(Debug, Clone)]
+struct BudgetGuard {
+    tracker: Arc<std::sync::Mutex<BudgetTracker>>,
+    limits: BudgetLimits,
+    /// Pessimistic per-call token estimate (the resolved `max_tokens` cap).
+    estimate: usize,
+}
+
+impl BudgetGuard {
+    fn new(limits: BudgetLimits, estimate: usize) -> Self {
+        Self {
+            tracker: Arc::new(std::sync::Mutex::new(BudgetTracker::default())),
+            limits,
+            estimate,
+        }
+    }
+
+    /// Try to reserve budget for one new call. Returns a human-readable
+    /// reason when launching the call would exceed a configured limit.
+    fn try_reserve(&self) -> Result<(), String> {
+        let mut tracker = self.tracker.lock().unwrap();
+        if let Some(max) = self.limits.max_budget_tokens {
+            let committed = tracker.actual_tokens + tracker.reserved_tokens;
+            if committed + self.estimate > max {
+                return Err(format!(
+                    "skipped to stay within --max-budget-tokens={max}: \
+                     {committed} tokens used/reserved + ~{} estimated for this call",
+                    self.estimate
+                ));
+            }
+        }
+        if let Some(max) = self.limits.max_cost_usd {
+            if tracker.actual_cost >= max {
+                return Err(format!(
+                    "skipped to stay within --max-cost-usd=${max}: \
+                     ${:.6} already spent",
+                    tracker.actual_cost
+                ));
+            }
+        }
+        tracker.reserved_tokens += self.estimate;
+        Ok(())
+    }
+
+    /// Settle a finished (or abandoned) call: release its reservation and
+    /// record actual provider-reported usage, when available.
+    fn settle(&self, usage: Option<&Usage>) {
+        let mut tracker = self.tracker.lock().unwrap();
+        tracker.reserved_tokens = tracker.reserved_tokens.saturating_sub(self.estimate);
+        if let Some(usage) = usage {
+            tracker.actual_tokens += usage.total_tokens;
+            if let Some(cost) = usage.cost {
+                tracker.actual_cost += cost;
+            }
+        }
     }
 }

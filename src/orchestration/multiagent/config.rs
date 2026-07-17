@@ -25,12 +25,23 @@ pub struct MultiAgentConfig {
     pub roles: Vec<AgentRole>,
     /// Whether to use streaming responses
     pub streaming: bool,
-    /// Timeout per agent request
-    pub timeout_secs: u64,
-    /// Temperature for generation
-    pub temperature: f32,
-    /// Max tokens per response
-    pub max_tokens: usize,
+    /// Timeout per agent request. `None` (default) inherits
+    /// `agent.step_timeout_secs` from the loaded [`Config`](crate::config::Config).
+    ///
+    /// Note: this wraps the API client's own retry policy, whose worst-case
+    /// backoff window is ~242s at the default 8 retries. A timeout shorter
+    /// than that can discard a generation the provider has already billed;
+    /// the inherited default (300s) stays clear of it.
+    pub timeout_secs: Option<u64>,
+    /// Temperature override for generation. `None` (default) inherits the
+    /// top-level `temperature` from the loaded [`Config`](crate::config::Config).
+    pub temperature: Option<f32>,
+    /// Max-tokens override per response. `None` (default) inherits the
+    /// top-level `max_tokens` from the loaded [`Config`](crate::config::Config).
+    ///
+    /// This value is also used as the pessimistic per-call estimate when
+    /// enforcing `--max-budget-tokens` (see `run_task`).
+    pub max_tokens: Option<usize>,
     /// Failure policy
     pub failure_policy: MultiAgentFailurePolicy,
 }
@@ -46,9 +57,11 @@ impl Default for MultiAgentConfig {
                 AgentRole::Reviewer,
             ],
             streaming: true,
-            timeout_secs: 120,
-            temperature: 1.0,
-            max_tokens: 65536,
+            // `None` = inherit the user's loaded Config (temperature,
+            // max_tokens, agent.step_timeout_secs) instead of clobbering it.
+            timeout_secs: None,
+            temperature: None,
+            max_tokens: None,
             failure_policy: MultiAgentFailurePolicy::BestEffort,
         }
     }

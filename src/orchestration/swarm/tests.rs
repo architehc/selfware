@@ -842,16 +842,17 @@ fn test_swarm_complete_task() {
     let assigned = swarm.assign_task(&task_id);
     assert_eq!(assigned.len(), 1);
 
-    swarm.complete_task(&task_id, &coder_id, "Done!");
+    swarm.complete_task(&task_id, &coder_id, "Done!", true);
 
     // Task should be Completed since all assigned agents submitted
     let task = swarm.get_task(&task_id).unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
     assert_eq!(task.results.get(&coder_id).unwrap(), "Done!");
 
-    // Agent should be Completed
+    // Agent bookkeeping is updated and the agent returns to Idle so it
+    // can be assigned to subsequent tasks.
     let agent = swarm.get_agent(&coder_id).unwrap();
-    assert_eq!(agent.status, AgentStatus::Completed);
+    assert_eq!(agent.status, AgentStatus::Idle);
     assert_eq!(agent.tasks_completed, 1);
 }
 
@@ -869,14 +870,14 @@ fn test_swarm_complete_task_partial() {
     swarm.assign_task(&task_id);
 
     // Only one agent completes
-    swarm.complete_task(&task_id, &c1, "Partial");
+    swarm.complete_task(&task_id, &c1, "Partial", true);
 
     let task = swarm.get_task(&task_id).unwrap();
     // Not all agents submitted, so task should still be InProgress
     assert_eq!(task.status, TaskStatus::InProgress);
 
     // Second agent completes
-    swarm.complete_task(&task_id, &c2, "Full");
+    swarm.complete_task(&task_id, &c2, "Full", true);
     let task = swarm.get_task(&task_id).unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
 }
@@ -886,7 +887,90 @@ fn test_swarm_complete_task_not_found() {
     let mut swarm = Swarm::new();
     let coder_id = swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
     // Completing a nonexistent task should not panic
-    swarm.complete_task("nonexistent", &coder_id, "result");
+    swarm.complete_task("nonexistent", &coder_id, "result", true);
+}
+
+#[test]
+fn test_swarm_complete_task_returns_agent_to_idle_for_reassignment() {
+    // Regression: agents must return to Idle after completing a task,
+    // otherwise every task after the first assigns 0 agents and tasks
+    // stay Pending forever.
+    let mut swarm = Swarm::new();
+    let coder_id = swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
+
+    // First task runs to completion.
+    let task1 = SwarmTask::new("Task 1").with_role(AgentRole::Coder);
+    let task1_id = task1.id.clone();
+    swarm.queue_task(task1).unwrap();
+    let assigned1 = swarm.assign_task(&task1_id);
+    assert_eq!(assigned1, vec![coder_id.clone()]);
+    swarm.complete_task(&task1_id, &coder_id, "done", true);
+    assert_eq!(
+        swarm.get_agent(&coder_id).unwrap().status,
+        AgentStatus::Idle
+    );
+
+    // The same agent must be assignable again for the next task.
+    let task2 = SwarmTask::new("Task 2").with_role(AgentRole::Coder);
+    let task2_id = task2.id.clone();
+    swarm.queue_task(task2).unwrap();
+    let assigned2 = swarm.assign_task(&task2_id);
+    assert_eq!(
+        assigned2,
+        vec![coder_id.clone()],
+        "agent must be assignable for the next task after completing one"
+    );
+}
+
+#[test]
+fn test_swarm_complete_task_failure_records_failure() {
+    // The real per-agent success flag must drive trust and failure counters
+    // (previously hardcoded `true`, so `tasks_failed` could never increment).
+    let mut swarm = Swarm::new();
+    let coder_id = swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
+    let initial_trust = swarm.get_agent(&coder_id).unwrap().trust_score;
+
+    let task = SwarmTask::new("Task").with_role(AgentRole::Coder);
+    let task_id = task.id.clone();
+    swarm.queue_task(task).unwrap();
+    swarm.assign_task(&task_id);
+    swarm.complete_task(&task_id, &coder_id, "boom", false);
+
+    let agent = swarm.get_agent(&coder_id).unwrap();
+    assert_eq!(agent.tasks_completed, 0);
+    assert_eq!(agent.tasks_failed, 1);
+    assert!(agent.trust_score < initial_trust);
+    // Even a failed agent returns to the idle pool for the next task.
+    assert_eq!(agent.status, AgentStatus::Idle);
+}
+
+#[test]
+fn test_swarm_fail_task_settles_status_and_releases_agents() {
+    let mut swarm = Swarm::new();
+    let coder_id = swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
+
+    let task = SwarmTask::new("Task").with_role(AgentRole::Coder);
+    let task_id = task.id.clone();
+    swarm.queue_task(task).unwrap();
+    swarm.assign_task(&task_id);
+    assert_eq!(
+        swarm.get_agent(&coder_id).unwrap().status,
+        AgentStatus::Working
+    );
+
+    swarm.fail_task(&task_id);
+
+    assert_eq!(swarm.get_task(&task_id).unwrap().status, TaskStatus::Failed);
+    assert_eq!(
+        swarm.get_agent(&coder_id).unwrap().status,
+        AgentStatus::Idle
+    );
+}
+
+#[test]
+fn test_swarm_fail_task_unknown_task_does_not_panic() {
+    let mut swarm = Swarm::new();
+    swarm.fail_task("nonexistent");
 }
 
 #[test]
@@ -1163,6 +1247,7 @@ fn test_coordinator_full_flow_queue_assign_complete_consensus() {
             &task_id,
             agent_id,
             format!("Result from agent {}", agent_id),
+            true,
         );
     }
 
@@ -1651,7 +1736,7 @@ fn test_swarm_error_handling_recovery() {
     assert!(result.is_err());
 
     // Test completing nonexistent task (should not panic)
-    swarm.complete_task("nonexistent", "agent", "result");
+    swarm.complete_task("nonexistent", "agent", "result", true);
 }
 
 #[test]
@@ -1867,7 +1952,7 @@ fn test_swarm_complete_task_not_in_assigned() {
 
     // Try to complete without assigning (task is in queue, not active_tasks)
     // This should log a warning but not panic
-    swarm.complete_task(&task_id, &coder, "result");
+    swarm.complete_task(&task_id, &coder, "result", true);
 
     // Task should still be in queue
     assert_eq!(swarm.list_tasks().len(), 1);
@@ -1965,7 +2050,7 @@ fn test_swarm_complex_workflow() {
 
     // Step 3: Complete the task
     for agent_id in &assigned {
-        swarm.complete_task(&task_id, agent_id, "Task completed successfully");
+        swarm.complete_task(&task_id, agent_id, "Task completed successfully", true);
     }
 
     let task = swarm.get_task(&task_id).unwrap();

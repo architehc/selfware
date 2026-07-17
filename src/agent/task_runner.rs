@@ -388,7 +388,7 @@ impl Agent {
             };
 
             for agent_id in &assigned {
-                swarm.complete_task(&task_id, agent_id, &result_msg);
+                swarm.complete_task(&task_id, agent_id, &result_msg, success);
             }
 
             if !success {

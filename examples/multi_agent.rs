@@ -60,11 +60,11 @@ async fn main() -> Result<()> {
         streaming: true,
 
         // Timeout per agent (2 minutes)
-        timeout_secs: 120,
+        timeout_secs: Some(120),
 
         // Generation parameters
-        temperature: 0.7,
-        max_tokens: 4096,
+        temperature: Some(0.7),
+        max_tokens: Some(4096),
 
         // Failure policy
         failure_policy: selfware::multiagent::MultiAgentFailurePolicy::BestEffort,
@@ -80,7 +80,13 @@ async fn main() -> Result<()> {
             .map(|r| r.name())
             .collect::<Vec<_>>()
     );
-    println!("  Timeout: {}s per agent", agent_config.timeout_secs);
+    println!(
+        "  Timeout: {} per agent",
+        agent_config
+            .timeout_secs
+            .map(|t| format!("{}s", t))
+            .unwrap_or_else(|| "inherited from config".to_string())
+    );
     println!();
 
     // Create event channel for progress tracking
@@ -114,9 +120,6 @@ async fn main() -> Result<()> {
                         name,
                         &task[..40.min(task.len())]
                     );
-                }
-                MultiAgentEvent::AgentToolCall { agent_id, tool } => {
-                    println!("[TOOL]  Agent-{} calling: {}", agent_id, tool);
                 }
                 MultiAgentEvent::AgentCompleted { result, .. } => {
                     let status = if result.success { "OK" } else { "FAILED" };
