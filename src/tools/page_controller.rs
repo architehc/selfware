@@ -226,29 +226,37 @@ impl PlaywrightBridge {
             pending.insert(id, tx);
         }
 
-        // Send command
+        // Send command; on any write failure, drop the now-orphaned pending
+        // entry so the map doesn't leak one slot per failed request.
         {
             let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(&bytes)
-                .await
-                .context("Failed to write to playwright-bridge stdin")?;
-            stdin
-                .flush()
-                .await
-                .context("Failed to flush playwright-bridge stdin")?;
+            if let Err(e) = stdin.write_all(&bytes).await {
+                self.pending.lock().await.remove(&id);
+                return Err(e).context("Failed to write to playwright-bridge stdin");
+            }
+            if let Err(e) = stdin.flush().await {
+                self.pending.lock().await.remove(&id);
+                return Err(e).context("Failed to flush playwright-bridge stdin");
+            }
         }
 
         debug!("Sent bridge command id={}: {}", id, command);
 
         // Wait for response with timeout
         let timeout_dur = std::time::Duration::from_millis(timeout_ms + 5000);
-        let response = tokio::time::timeout(timeout_dur, rx)
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("Playwright-bridge command timed out after {}ms", timeout_ms)
-            })?
-            .map_err(|_| anyhow::anyhow!("Playwright-bridge response channel closed"))?;
+        let response = match tokio::time::timeout(timeout_dur, rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                // Sender dropped without replying: drop the pending entry.
+                self.pending.lock().await.remove(&id);
+                bail!("Playwright-bridge response channel closed");
+            }
+            Err(_) => {
+                // Timed out: drop the pending entry so it doesn't leak a slot.
+                self.pending.lock().await.remove(&id);
+                bail!("Playwright-bridge command timed out after {}ms", timeout_ms);
+            }
+        };
 
         if !response.success {
             let error_msg = response
