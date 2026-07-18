@@ -379,16 +379,34 @@ impl Tool for GitDiff {
             .get("staged")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let base = args.get("base").and_then(|v| v.as_str());
 
         validate_git_path(repo_path, self.safety_config.as_ref())?;
+
+        // `base` is passed as a single argv entry; reject leading dashes so it
+        // can't smuggle in a flag (e.g. `--output=/path`).
+        if let Some(base) = base {
+            if base.starts_with('-') {
+                anyhow::bail!("Invalid base for git diff: {}", base);
+            }
+        }
 
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("-C").arg(repo_path).arg("diff");
         if staged {
             cmd.arg("--cached");
         }
+        if let Some(base) = base {
+            cmd.arg(base);
+        }
 
         let output = cmd.output().await?;
+        // A non-zero exit (bad revision, not a repo, ...) used to be reported
+        // as `has_changes: false` with the error text silently dropped.
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git diff failed: {}", stderr.trim());
+        }
         let diff = String::from_utf8_lossy(&output.stdout);
 
         Ok(serde_json::json!({
@@ -452,20 +470,25 @@ impl Tool for GitCommit {
             // to be untracked in the tree — a stray .env, a build artifact, a
             // spilled secret — and (with push allowed by default) publish it.
             // To commit a NEW file, pass it explicitly in `files`.
-            tokio::process::Command::new("git")
+            let add_output = tokio::process::Command::new("git")
                 .arg("-C")
                 .arg(repo_path)
                 .arg("add")
                 .arg("-u")
                 .output()
                 .await?;
+            // A failed add must not silently become a partial commit below.
+            if !add_output.status.success() {
+                let stderr = String::from_utf8_lossy(&add_output.stderr);
+                anyhow::bail!("git add -u failed: {}", stderr.trim());
+            }
         } else {
             for file in files {
                 if let Some(f) = file.as_str() {
                     if f.contains("..") || f.starts_with('/') {
                         anyhow::bail!("Invalid file path for git commit: {}", f);
                     }
-                    tokio::process::Command::new("git")
+                    let add_output = tokio::process::Command::new("git")
                         .arg("-C")
                         .arg(repo_path)
                         .arg("add")
@@ -473,6 +496,13 @@ impl Tool for GitCommit {
                         .arg(f)
                         .output()
                         .await?;
+                    // A typo'd/unmatched path makes `git add` exit non-zero;
+                    // ignoring it would produce a partial commit reported as
+                    // success. Surface the real error instead.
+                    if !add_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&add_output.stderr);
+                        anyhow::bail!("git add failed for '{}': {}", f, stderr.trim());
+                    }
                 }
             }
         }
@@ -505,10 +535,18 @@ impl Tool for GitCommit {
 
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // On failure git explains itself on stderr (hooks, identity, empty
+        // staging area) — surface it instead of reporting a bare failure.
+        let combined = if success {
+            stdout.to_string()
+        } else {
+            format!("{}{}", stdout, stderr)
+        };
 
         Ok(serde_json::json!({
             "success": success,
-            "output": stdout.to_string()
+            "output": combined
         }))
     }
 
@@ -600,6 +638,10 @@ impl Tool for GitPush {
 
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("push").arg("--").arg(remote).arg(&branch);
+        // Kill the child if the timeout below drops the output future —
+        // a "timed-out" push must not keep running and still land on the
+        // remote after we've reported the timeout.
+        cmd.kill_on_drop(true);
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -608,7 +650,7 @@ impl Tool for GitPush {
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
                 .await
-                .context("git push timed out (network hang?)")?
+                .context("git push timed out (network hang?) — the push process was killed")?
                 .context("Failed to execute git push")?;
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -959,10 +1001,79 @@ mod tests {
             "files": ["nonexistent_file_12345.txt"]  // File doesn't exist
         });
 
-        // Should handle gracefully - git add will just not add anything
+        // `git add` exits non-zero for an unmatched pathspec; the tool must
+        // surface that error instead of silently committing a partial stage.
         let result = tool.execute(args).await;
-        // Result depends on whether there's anything to commit
-        assert!(result.is_ok() || result.is_err());
+        let err = result.expect_err("add of a nonexistent path must fail the commit");
+        assert!(
+            err.to_string().contains("git add failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_commit_surfaces_add_u_failure() {
+        // `git add -u` outside a work tree fails; the error must be surfaced
+        // rather than proceeding to a bogus commit.
+        let dir = tempfile::TempDir::new().unwrap();
+        let _guard = crate::test_support::CwdGuard::enter(dir.path());
+        let tool = GitCommit::new();
+        let result = tool
+            .execute(serde_json::json!({ "message": "x", "files": [] }))
+            .await;
+        let err = result.expect_err("add -u outside a repo must fail");
+        assert!(
+            err.to_string().contains("git add"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_diff_honors_base_param() {
+        let (_guard, dir) = isolated_git_repo();
+        // Modify the tracked file; diff against HEAD must show it.
+        std::fs::write(dir.path().join("f.txt"), "changed content").unwrap();
+
+        let tool = GitDiff::new();
+        let result = tool
+            .execute(serde_json::json!({ "base": "HEAD" }))
+            .await
+            .expect("diff against HEAD");
+        assert_eq!(result["has_changes"], true);
+        assert!(
+            result["diff"].as_str().unwrap().contains("changed content"),
+            "diff against base must include the modification: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_diff_bad_base_reports_error_not_empty_diff() {
+        let _iso = isolated_git_repo();
+        let tool = GitDiff::new();
+        // A bogus revision used to be reported as has_changes:false with the
+        // error silently dropped.
+        let result = tool
+            .execute(serde_json::json!({ "base": "nonexistent-revision-xyz" }))
+            .await;
+        let err = result.expect_err("bad base must error, not fake an empty diff");
+        assert!(
+            err.to_string().contains("git diff failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_git_diff_rejects_flag_like_base() {
+        let _iso = isolated_git_repo();
+        let tool = GitDiff::new();
+        let result = tool
+            .execute(serde_json::json!({ "base": "--output=/tmp/injected" }))
+            .await;
+        let err = result.expect_err("flag-like base must be rejected");
+        assert!(
+            err.to_string().contains("Invalid base"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

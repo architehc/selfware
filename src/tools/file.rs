@@ -332,12 +332,14 @@ impl Tool for FileRead {
         // A line_range lets us stream ONLY the requested slice, so a large file
         // can be sliced without loading it whole or tripping the size limit.
         if let Some((start, end)) = args.line_range {
-            let (selected_content, lines_scanned) = read_line_slice(&path, start, end).await?;
+            let (selected_content, lines_scanned, lossy) =
+                read_line_slice(&path, start, end).await?;
             return Ok(serde_json::json!({
                 "content": selected_content,
                 "total_lines": lines_scanned,
                 "truncated": true,
-                "encoding": "utf-8"
+                "encoding": if lossy { "utf-8-lossy" } else { "utf-8" },
+                "valid_utf8": !lossy
             }));
         }
 
@@ -352,7 +354,8 @@ impl Tool for FileRead {
             }
         }
 
-        let (content, _bytes) = read_file_with_encoding(&path).await?;
+        let (content, bytes) = read_file_with_encoding(&path).await?;
+        let valid_utf8 = std::str::from_utf8(&bytes).is_ok();
 
         // Record snapshot for stale-guard detection
         record_file_snapshot(&args.path, &content);
@@ -363,7 +366,8 @@ impl Tool for FileRead {
             "content": content,
             "total_lines": total_lines,
             "truncated": false,
-            "encoding": "utf-8"
+            "encoding": if valid_utf8 { "utf-8" } else { "utf-8-lossy" },
+            "valid_utf8": valid_utf8
         }))
     }
 
@@ -429,7 +433,11 @@ impl Tool for FileWrite {
 
         // Detect existing line endings and preserve them
         let content_to_write = if path.exists() {
-            let (existing, _) = read_file_with_encoding(&path).await?;
+            let (existing, existing_bytes) = read_file_with_encoding(&path).await?;
+            // Overwriting is a full replace, but refuse to touch a non-UTF-8
+            // file: the caller likely believes it is text, and the lossy read
+            // above hides what is actually on disk.
+            ensure_valid_utf8(&existing_bytes, &args.path, "file_write")?;
             let line_ending = detect_line_ending(&existing);
             preserve_line_endings(&args.content, line_ending)
         } else {
@@ -510,7 +518,8 @@ impl Tool for FileEdit {
             .into());
         }
 
-        let (content, _) = read_file_with_encoding(Path::new(&args.path)).await?;
+        let (content, original_bytes) = read_file_with_encoding(Path::new(&args.path)).await?;
+        ensure_valid_utf8(&original_bytes, &args.path, "file_edit")?;
         let line_ending = detect_line_ending(&content);
 
         // Check for exactly one match
@@ -718,7 +727,8 @@ impl Tool for FileMultiEdit {
         let mut file_line_endings: HashMap<String, &'static str> = HashMap::new();
 
         for (path, edits) in &edits_by_file {
-            let (content, _) = read_file_with_encoding(Path::new(path)).await?;
+            let (content, original_bytes) = read_file_with_encoding(Path::new(path)).await?;
+            ensure_valid_utf8(&original_bytes, path, "file_multi_edit")?;
             file_line_endings.insert(path.clone(), detect_line_ending(&content));
 
             // Validate each edit: exactly one match
@@ -791,8 +801,18 @@ impl Tool for FileMultiEdit {
             file_contents.insert(path.clone(), content);
         }
 
-        // Phase 2: apply all edits atomically (from end to start per file to avoid shifts)
-        for (path, edits) in &edits_by_file {
+        // Phase 2: compute every file's final content up front (including Rust
+        // syntax validation), THEN write them all in one batch. If any write
+        // fails, `write_all_atomic` rolls back the files already persisted from
+        // their pre-images — a failed batch never leaves 1..N-1 files modified.
+        // Paths are processed in sorted order so the batch is deterministic
+        // (HashMap iteration order is not).
+        let mut sorted_paths: Vec<&String> = edits_by_file.keys().collect();
+        sorted_paths.sort();
+
+        let mut finals: Vec<(PathBuf, String)> = Vec::with_capacity(sorted_paths.len());
+        for path in sorted_paths {
+            let edits = &edits_by_file[path];
             let content = file_contents.get_mut(path).unwrap();
             let line_ending = file_line_endings.get(path).copied().unwrap_or("\n");
 
@@ -813,11 +833,18 @@ impl Tool for FileMultiEdit {
 
             let final_content = preserve_line_endings(content, line_ending);
             validate_rust_source_if_needed(Path::new(path), &final_content)?;
-            write_atomic(Path::new(path), &final_content).await?;
-            clear_file_snapshot(path);
+            finals.push((PathBuf::from(path), final_content));
         }
 
-        let files_changed: Vec<String> = edits_by_file.keys().cloned().collect();
+        write_all_atomic(&finals).await?;
+        for (path, _) in &finals {
+            clear_file_snapshot(&path.to_string_lossy());
+        }
+
+        let files_changed: Vec<String> = finals
+            .iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect();
         Ok(serde_json::json!({
             "success": true,
             "edits_applied": args.edits.len(),
@@ -1120,9 +1147,10 @@ fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
 /// Read only lines `start..=end` (1-based, inclusive) by streaming the file, so
 /// a large file can be sliced without loading it all into memory. Bytes are
 /// decoded as UTF-8 lossily (adequate for a line slice of source/text files).
-/// Returns the joined slice and the number of lines scanned (== the true total
-/// only when the scan reached EOF).
-async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(String, usize)> {
+/// Returns the joined slice, the number of lines scanned (== the true total
+/// only when the scan reached EOF), and whether any returned line contained
+/// invalid UTF-8 (i.e. the returned text is lossy rather than exact).
+async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(String, usize, bool)> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     // Preserve the legacy contract that an inverted range (end < start) yields
     // the single line at `start`.
@@ -1131,6 +1159,7 @@ async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(Strin
     let mut reader = BufReader::new(file);
     let mut selected: Vec<String> = Vec::new();
     let mut lineno = 0usize;
+    let mut lossy = false;
     let mut buf: Vec<u8> = Vec::new();
     loop {
         buf.clear();
@@ -1140,6 +1169,9 @@ async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(Strin
         }
         lineno += 1;
         if lineno >= start && lineno <= effective_end {
+            if std::str::from_utf8(&buf).is_err() {
+                lossy = true;
+            }
             let mut line = String::from_utf8_lossy(&buf).into_owned();
             if line.ends_with('\n') {
                 line.pop();
@@ -1153,29 +1185,107 @@ async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(Strin
             break; // stop early — don't read the rest of a huge file
         }
     }
-    Ok((selected.join("\n"), lineno))
+    Ok((selected.join("\n"), lineno, lossy))
 }
 
 /// Write content to a file atomically using a temporary file and rename.
+///
+/// The existing file's permission mode is carried over to the replacement —
+/// `NamedTempFile` is created `0600`, so without this an executable would
+/// silently lose `+x` and a shared config would become owner-only on every
+/// edit. New files keep the temp-file default.
 pub(crate) async fn write_atomic(path: &Path, content: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid file path (no parent)"))?;
-    tokio::fs::create_dir_all(parent).await?;
+    write_all_atomic(&[(path.to_path_buf(), content.to_string())]).await
+}
+
+/// Capture the unix permission mode of an existing file, if it exists.
+#[cfg(unix)]
+fn existing_file_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).ok().map(|m| m.permissions().mode())
+}
+
+/// Atomically write several files at once: stage every replacement in a temp
+/// file first, then persist them all. If any persist fails, files already
+/// persisted are rolled back from their captured pre-images so a multi-file
+/// batch never commits half-way. Each replacement inherits the target's
+/// existing permission mode (see [`write_atomic`]).
+pub(crate) async fn write_all_atomic(files: &[(PathBuf, String)]) -> Result<()> {
+    // Capture pre-images up front so a mid-batch persist failure can roll back.
+    let mut pre_images: Vec<(PathBuf, Option<Vec<u8>>)> = Vec::with_capacity(files.len());
+    for (path, _) in files {
+        pre_images.push((path.clone(), tokio::fs::read(path).await.ok()));
+    }
 
     // NamedTempFile and Write::write_all are sync APIs; offload to a blocking
     // thread so we don't block the async executor.
-    let parent_owned = parent.to_path_buf();
-    let path_owned = path.to_path_buf();
-    let content_owned = content.to_string();
+    let files_owned: Vec<(PathBuf, String)> = files.to_vec();
     tokio::task::spawn_blocking(move || {
-        let mut temp = NamedTempFile::new_in(&parent_owned)?;
-        temp.write_all(content_owned.as_bytes())?;
-        temp.persist(&path_owned)
-            .map_err(|e| anyhow::anyhow!("Failed to persist atomic write: {}", e))?;
+        // Phase 1: stage every replacement in a temp file in the target dir.
+        let mut staged: Vec<(NamedTempFile, PathBuf)> = Vec::with_capacity(files_owned.len());
+        for (path, content) in &files_owned {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid file path (no parent)"))?;
+            std::fs::create_dir_all(parent)?;
+            let mut temp = NamedTempFile::new_in(parent)?;
+            temp.write_all(content.as_bytes())?;
+            #[cfg(unix)]
+            if let Some(mode) = existing_file_mode(path) {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    temp.path(),
+                    std::fs::Permissions::from_mode(mode & 0o7777),
+                )?;
+            }
+            staged.push((temp, path.clone()));
+        }
+
+        // Phase 2: persist them all; roll back earlier persists on failure.
+        for (idx, (temp, path)) in staged.into_iter().enumerate() {
+            if let Err(e) = temp.persist(&path) {
+                for (rb_path, pre_image) in pre_images.iter().take(idx) {
+                    match pre_image {
+                        Some(bytes) => {
+                            let _ = std::fs::write(rb_path, bytes);
+                        }
+                        None => {
+                            let _ = std::fs::remove_file(rb_path);
+                        }
+                    }
+                }
+                return Err(anyhow::anyhow!(
+                    "Failed to persist atomic write to {}: {} (rolled back {} earlier file(s))",
+                    path.display(),
+                    e,
+                    idx
+                ));
+            }
+        }
         Ok(())
     })
     .await?
+}
+
+/// Refuse to rewrite a file whose bytes are not valid UTF-8.
+///
+/// The edit pipeline decodes via `String::from_utf8_lossy`; writing the lossy
+/// view back would replace every invalid byte with U+FFFD and silently corrupt
+/// binary (or otherwise-encoded) files. Better to fail loudly.
+fn ensure_valid_utf8(bytes: &[u8], path: &str, tool: &str) -> Result<()> {
+    if std::str::from_utf8(bytes).is_err() {
+        return Err(ToolError::Execution {
+            name: tool.to_string(),
+            message: format!(
+                "Refusing to modify {}: the file is not valid UTF-8 (binary or another \
+                 encoding). Editing it through a lossy decode would corrupt its contents. \
+                 If a full overwrite of a non-text file is truly intended, delete it first.",
+                path
+            ),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2219,5 +2329,285 @@ mod tests {
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("ALPHA\r\n"));
         assert!(text.contains("beta\r\n"));
+    }
+
+    // --- Permission preservation across atomic writes ---
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_file_edit_preserves_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let script = temp_dir.path().join("run.sh");
+        fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        tool.execute(serde_json::json!({
+            "path": script.to_str().unwrap(),
+            "old_str": "echo old",
+            "new_str": "echo new"
+        }))
+        .await
+        .unwrap();
+
+        let mode = fs::metadata(&script).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "edit must not strip the executable bit");
+        assert!(fs::read_to_string(&script).unwrap().contains("echo new"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_file_write_preserves_mode_on_overwrite() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let script = temp_dir.path().join("tool.sh");
+        fs::write(&script, "#!/bin/sh\necho v1\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o750)).unwrap();
+
+        let tool = FileWrite::with_safety_config(permissive_safety_config());
+        tool.execute(serde_json::json!({
+            "path": script.to_str().unwrap(),
+            "content": "#!/bin/sh\necho v2\n",
+            "backup": false
+        }))
+        .await
+        .unwrap();
+
+        let mode = fs::metadata(&script).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o750, "overwrite must preserve the original mode");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_file_multi_edit_preserves_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp_dir = TempDir::new().unwrap();
+        let script = temp_dir.path().join("multi.sh");
+        fs::write(&script, "#!/bin/sh\necho a\necho b\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        tool.execute(serde_json::json!({
+            "edits": [
+                {"path": script.to_str().unwrap(), "old_str": "echo a", "new_str": "echo A"},
+                {"path": script.to_str().unwrap(), "old_str": "echo b", "new_str": "echo B"}
+            ]
+        }))
+        .await
+        .unwrap();
+
+        let mode = fs::metadata(&script).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "multi_edit must not strip the executable bit");
+    }
+
+    // --- Non-UTF8 honesty ---
+
+    #[tokio::test]
+    async fn test_file_edit_refuses_non_utf8_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("binary.bin");
+        let original: &[u8] = &[0x66, 0x80, 0x67, 0xFF, 0x00, 0x61];
+        fs::write(&file_path, original).unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "old_str": "f",
+                "new_str": "x"
+            }))
+            .await;
+        let err = result.expect_err("editing a non-UTF-8 file must fail loudly");
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "unexpected error: {err}"
+        );
+        // The file must be byte-identical — no U+FFFD corruption.
+        assert_eq!(fs::read(&file_path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn test_file_multi_edit_refuses_non_utf8_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let good = temp_dir.path().join("good.txt");
+        fs::write(&good, "alpha\n").unwrap();
+        let binary = temp_dir.path().join("binary.bin");
+        let original: &[u8] = &[0xDE, 0xAD, 0x80, 0xFF];
+        fs::write(&binary, original).unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        let result = tool
+            .execute(serde_json::json!({
+                "edits": [
+                    {"path": good.to_str().unwrap(), "old_str": "alpha", "new_str": "ALPHA"},
+                    {"path": binary.to_str().unwrap(), "old_str": "x", "new_str": "y"}
+                ]
+            }))
+            .await;
+        let err = result.expect_err("multi_edit touching a non-UTF-8 file must fail");
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "unexpected error: {err}"
+        );
+        // Atomic batch: the GOOD file must not have been modified either.
+        assert_eq!(fs::read_to_string(&good).unwrap(), "alpha\n");
+        assert_eq!(fs::read(&binary).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn test_file_write_refuses_overwriting_non_utf8_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("data.dat");
+        let original: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0xFF];
+        fs::write(&file_path, original).unwrap();
+
+        let tool = FileWrite::with_safety_config(permissive_safety_config());
+        let result = tool
+            .execute(serde_json::json!({
+                "path": file_path.to_str().unwrap(),
+                "content": "replacement text"
+            }))
+            .await;
+        let err = result.expect_err("overwriting a non-UTF-8 file must fail loudly");
+        assert!(
+            err.to_string().contains("not valid UTF-8"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(fs::read(&file_path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn test_file_read_reports_lossy_encoding_honestly() {
+        let temp_dir = TempDir::new().unwrap();
+        let binary = temp_dir.path().join("binary.bin");
+        fs::write(&binary, [0x61, 0x0A, 0x80, 0xFF, 0x0A, 0x62]).unwrap();
+
+        let tool = FileRead::with_safety_config(permissive_safety_config());
+        let result = tool
+            .execute(serde_json::json!({"path": binary.to_str().unwrap()}))
+            .await
+            .unwrap();
+        assert_eq!(result["encoding"], "utf-8-lossy");
+        assert_eq!(result["valid_utf8"], false);
+
+        // The line-range path reports lossiness of the returned slice too.
+        let result = tool
+            .execute(serde_json::json!({
+                "path": binary.to_str().unwrap(),
+                "line_range": [2, 2]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(result["encoding"], "utf-8-lossy");
+        assert_eq!(result["valid_utf8"], false);
+
+        // A plain UTF-8 file still reports exact utf-8.
+        let text = temp_dir.path().join("text.txt");
+        fs::write(&text, "plain text\n").unwrap();
+        let result = tool
+            .execute(serde_json::json!({"path": text.to_str().unwrap()}))
+            .await
+            .unwrap();
+        assert_eq!(result["encoding"], "utf-8");
+        assert_eq!(result["valid_utf8"], true);
+    }
+
+    // --- Multi-edit batch atomicity / determinism ---
+
+    #[tokio::test]
+    async fn test_file_multi_edit_validation_failure_touches_no_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let f1 = temp_dir.path().join("one.txt");
+        let f2 = temp_dir.path().join("two.txt");
+        fs::write(&f1, "one\n").unwrap();
+        fs::write(&f2, "two\n").unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        let result = tool
+            .execute(serde_json::json!({
+                "edits": [
+                    {"path": f1.to_str().unwrap(), "old_str": "one", "new_str": "ONE"},
+                    {"path": f2.to_str().unwrap(), "old_str": "MISSING", "new_str": "X"}
+                ]
+            }))
+            .await;
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&f1).unwrap(), "one\n");
+        assert_eq!(fs::read_to_string(&f2).unwrap(), "two\n");
+    }
+
+    #[tokio::test]
+    async fn test_file_multi_edit_reports_files_in_deterministic_order() {
+        let temp_dir = TempDir::new().unwrap();
+        // Deliberately non-alphabetical creation/argument order.
+        let zb = temp_dir.path().join("zb.txt");
+        let ab = temp_dir.path().join("ab.txt");
+        fs::write(&zb, "z\n").unwrap();
+        fs::write(&ab, "a\n").unwrap();
+
+        let tool = FileMultiEdit::with_safety_config(permissive_safety_config());
+        let result = tool
+            .execute(serde_json::json!({
+                "edits": [
+                    {"path": zb.to_str().unwrap(), "old_str": "z", "new_str": "Z"},
+                    {"path": ab.to_str().unwrap(), "old_str": "a", "new_str": "A"}
+                ]
+            }))
+            .await
+            .unwrap();
+
+        let files: Vec<String> = serde_json::from_value(result["files"].clone()).unwrap();
+        let mut sorted = files.clone();
+        sorted.sort();
+        assert_eq!(files, sorted, "files list must be deterministically sorted");
+    }
+
+    #[tokio::test]
+    async fn test_write_all_atomic_rolls_back_on_persist_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let good = temp_dir.path().join("good.txt");
+        fs::write(&good, "original\n").unwrap();
+        // The second target is an existing DIRECTORY: staging succeeds, but
+        // the persist (rename over a dir) fails — forcing a rollback of the
+        // first file.
+        let dir_target = temp_dir.path().join("a_directory");
+        fs::create_dir(&dir_target).unwrap();
+
+        let files = vec![
+            (good.clone(), "modified\n".to_string()),
+            (dir_target.clone(), "whatever".to_string()),
+        ];
+        let result = write_all_atomic(&files).await;
+        let err = result.expect_err("persist over a directory must fail");
+        assert!(
+            err.to_string().contains("rolled back"),
+            "error should mention rollback: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&good).unwrap(),
+            "original\n",
+            "the already-persisted file must be rolled back to its pre-image"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_all_atomic_staging_failure_touches_nothing() {
+        let temp_dir = TempDir::new().unwrap();
+        let good = temp_dir.path().join("good.txt");
+        fs::write(&good, "original\n").unwrap();
+        // Second target's parent component is a regular FILE, so staging its
+        // temp file fails before anything is persisted.
+        let blocker = temp_dir.path().join("blocker");
+        fs::write(&blocker, "not a dir").unwrap();
+        let impossible = blocker.join("child.txt");
+
+        let files = vec![
+            (good.clone(), "modified\n".to_string()),
+            (impossible, "nope".to_string()),
+        ];
+        let result = write_all_atomic(&files).await;
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&good).unwrap(), "original\n");
     }
 }

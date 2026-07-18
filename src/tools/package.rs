@@ -99,6 +99,9 @@ impl Tool for NpmInstall {
         cmd.current_dir(path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Kill the child if the timeout drops the output future — a timed-out
+        // install must not keep mutating node_modules after we report failure.
+        cmd.kill_on_drop(true);
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -107,7 +110,7 @@ impl Tool for NpmInstall {
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
                 .await
-                .context("npm install timed out")?
+                .context("npm install timed out (the npm process was killed)")?
                 .context("Failed to run npm install")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -201,11 +204,14 @@ impl Tool for NpmRun {
         cmd.current_dir(path);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Kill the child if the timeout drops the output future, so a timed-out
+        // script doesn't keep running detached after we report the timeout.
+        cmd.kill_on_drop(true);
 
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
                 .await
-                .context("npm run timed out")?
+                .context("npm run timed out (the npm process was killed)")?
                 .context("Failed to run npm script")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -377,6 +383,9 @@ impl Tool for PipInstall {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
+        // Kill the child if the timeout drops the output future — a timed-out
+        // pip install must not keep writing into site-packages afterwards.
+        cmd.kill_on_drop(true);
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -385,7 +394,7 @@ impl Tool for PipInstall {
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output())
                 .await
-                .context("pip install timed out")?
+                .context("pip install timed out (the pip process was killed)")?
                 .context("Failed to run pip install")?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -825,5 +834,61 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("must be specified"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn npm_install_timeout_kills_child_process() {
+        // Regression: `Command::output()` timeouts used to leave the child
+        // running — a "timed-out" install kept mutating the tree afterwards.
+        // The child must be killed (kill_on_drop) when the timeout fires.
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("npm.pid");
+        let stub = dir.path().join("npm");
+        std::fs::write(
+            &stub,
+            format!("#!/bin/sh\necho $$ > {}\nsleep 60\n", pidfile.display()),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Prepend the stub dir to PATH so `npm` resolves to our hanging stub;
+        // restore PATH immediately after the call, before any assertions.
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), old_path));
+        let tool = NpmInstall;
+        let start = std::time::Instant::now();
+        let result = tool
+            .execute(json!({"packages": ["express"], "timeout_secs": 1}))
+            .await;
+        std::env::set_var("PATH", &old_path);
+
+        assert!(start.elapsed().as_secs() < 15, "must return at the timeout");
+        let err = result.expect_err("a hung install must time out");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+
+        let child_pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("stub wrote its pid")
+            .trim()
+            .parse()
+            .expect("valid pid");
+        // Give kill_on_drop a moment to deliver SIGKILL and the runtime to reap
+        // the child, then verify it is really gone instead of still sleeping
+        // for the next minute.
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        let mut alive = true;
+        for _ in 0..20 {
+            if kill(Pid::from_raw(child_pid), None).is_err() {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(!alive, "timed-out npm child pid {child_pid} must be killed");
     }
 }

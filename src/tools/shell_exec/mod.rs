@@ -12,77 +12,172 @@ use std::time::Duration;
 
 pub mod prompt;
 
+/// A `sed -i 's/old/new/[g]' file` invocation simple enough to intercept.
+struct SedSubstitution {
+    file: String,
+    old_str: String,
+    new_str: String,
+    global: bool,
+    /// `-i.bak` / `--in-place=.bak` backup suffix, if any.
+    backup_suffix: Option<String>,
+}
+
 /// Attempt to parse a straightforward `sed -i 's/old/new/g' file` substitution.
-/// Returns `(file, old_str, new_str, global)` if the pattern is simple enough
-/// to intercept, or `None` for complex cases that should run raw.
-fn try_parse_sed_substitution(command: &str) -> Option<(String, String, String, bool)> {
+/// Returns the parsed substitution if it is in the safe literal subset we can
+/// faithfully reproduce, or `None` for anything that must run through the real
+/// sed binary: empty patterns, regex metacharacters in the pattern, `&`/`\`
+/// escapes in the replacement, flags other than ``/`g`, multiple files, extra
+/// sed flags, or unquoted scripts.
+fn try_parse_sed_substitution(command: &str) -> Option<SedSubstitution> {
     let trimmed = command.trim();
 
-    // Must start with sed and contain -i or --in-place
-    if !trimmed.starts_with("sed") {
-        return None;
-    }
-    if !trimmed.contains("-i") && !trimmed.contains("--in-place") {
+    // First token must be exactly `sed`.
+    let after_sed = trimmed.strip_prefix("sed")?;
+    if !after_sed.is_empty() && !after_sed.starts_with(char::is_whitespace) {
         return None;
     }
 
     // Find the quoted substitution expression: look for 's... or "s...
-    let (quote_start, quote_char) = trimmed
+    let (quote_idx, quote_char) = trimmed
         .char_indices()
-        .find(|(_, c)| *c == '\'' || *c == '"')
-        .and_then(|(i, c)| trimmed.get(i + 1..)?.starts_with('s').then_some((i, c)))?;
+        .find(|(_, c)| *c == '\'' || *c == '"')?;
 
-    let after_quote = &trimmed[quote_start + 1..];
+    // Between `sed` and the opening quote only in-place flags may appear;
+    // anything else (addresses, -e, -n, -r, unquoted script, ...) → real sed.
+    let mut saw_in_place = false;
+    let mut backup_suffix: Option<String> = None;
+    for token in trimmed["sed".len()..quote_idx].split_whitespace() {
+        if token == "-i" || token == "--in-place" {
+            saw_in_place = true;
+        } else if token.starts_with("-i") && token.len() > 2 {
+            // GNU attached-suffix form: -i.bak
+            saw_in_place = true;
+            backup_suffix = Some(token[2..].to_string());
+        } else if let Some(suffix) = token.strip_prefix("--in-place=") {
+            saw_in_place = true;
+            backup_suffix = Some(suffix.to_string());
+        } else {
+            return None;
+        }
+    }
+    if !saw_in_place {
+        return None;
+    }
+    // A backup suffix using shell globbing is beyond the safe subset.
+    if backup_suffix
+        .as_deref()
+        .is_some_and(|s| s.contains('*') || s.is_empty())
+    {
+        return None;
+    }
+
+    let after_quote = &trimmed[quote_idx + 1..];
     let sub_end = after_quote.find(quote_char)?;
     let sub_expr = &after_quote[..sub_end]; // e.g. "s/old/new/g"
 
-    if sub_expr.len() < 5 {
-        return None;
+    if !sub_expr.starts_with('s') {
+        return None; // y///, d, etc. → real sed
     }
-
     let delimiter = sub_expr.chars().nth(1)?;
-    let rest = &sub_expr[2..];
-    let parts: Vec<&str> = rest.split(delimiter).collect();
-    if parts.len() < 2 {
+    // sed forbids alphanumeric, backslash and whitespace delimiters.
+    if delimiter.is_alphanumeric() || delimiter == '\\' || delimiter.is_whitespace() {
         return None;
     }
+    let rest = &sub_expr[1 + delimiter.len_utf8()..];
+    let mut parts = rest.split(delimiter);
+    let old_str = parts.next()?;
+    let new_str = parts.next()?;
+    // Unterminated `s` command (no flags segment) — real sed errors on it;
+    // don't improvise.
+    let flags = parts.next()?;
+    if parts.next().is_some() {
+        return None; // extra unescaped delimiters → real sed's error
+    }
+    if !flags.is_empty() && flags != "g" {
+        return None; // numeric / p / w / i flags → real sed
+    }
+    let global = flags == "g";
 
-    let old_str = parts[0].to_string();
-    let new_str = parts[1].to_string();
-    let flags = if parts.len() > 2 { parts[2] } else { "" };
-    let global = flags.contains('g') || flags.contains('G');
-
-    // Only intercept simple literal patterns (no regex metacharacters)
+    // Empty pattern: sed reuses the previous regex (none exists here, so real
+    // sed errors). Outside the safe subset — let real sed report it.
+    if old_str.is_empty() {
+        return None;
+    }
+    // Only intercept literal patterns (no regex metacharacters).
     if old_str.contains([
         '.', '*', '+', '?', '^', '$', '[', ']', '(', ')', '{', '}', '|', '\\',
     ]) {
         return None;
     }
+    // Only intercept literal replacements (no `&` expansion or `\` escapes).
+    if new_str.contains(['&', '\\']) {
+        return None;
+    }
 
     // Extract filename: text after the closing quote, trimmed
-    let after_sub = &after_quote[sub_end + 1..].trim();
+    let after_sub = after_quote[sub_end + 1..].trim();
     if after_sub.is_empty() {
         return None;
     }
     let file_tokens: Vec<&str> = after_sub.split_whitespace().collect();
     if file_tokens.len() != 1 {
-        return None; // Multiple files or extra flags — too complex
+        return None; // Multiple files or extra args — too complex
     }
-    let file = file_tokens[0].to_string();
+    let file = file_tokens[0];
     if file.starts_with('-') {
         return None;
     }
 
-    Some((file, old_str, new_str, global))
+    Some(SedSubstitution {
+        file: file.to_string(),
+        old_str: old_str.to_string(),
+        new_str: new_str.to_string(),
+        global,
+        backup_suffix,
+    })
 }
 
-/// Apply a sed-like literal substitution with stale-guard protection.
-async fn apply_sed_substitution(
-    file: &str,
-    old_str: &str,
-    new_str: &str,
-    global: bool,
-) -> anyhow::Result<Value> {
+/// Resolve the sed target path the way the real command would: a relative path
+/// is interpreted against the call's `cwd`, not the agent's process cwd.
+fn resolve_sed_path(file: &str, cwd: Option<&str>) -> String {
+    if Path::new(file).is_absolute() {
+        return file.to_string();
+    }
+    match cwd {
+        Some(dir) => Path::new(dir).join(file).to_string_lossy().into_owned(),
+        None => file.to_string(),
+    }
+}
+
+/// Replace the first occurrence of `old` on EACH line — real sed's non-`g`
+/// `s///` semantics operate per line, not on the whole file at once.
+/// Returns the new content and the number of lines changed.
+fn replace_first_per_line(content: &str, old: &str, new: &str) -> (String, usize) {
+    let mut changed = 0usize;
+    let out = content
+        .split_inclusive('\n')
+        .map(|segment| {
+            let (body, newline) = match segment.strip_suffix('\n') {
+                Some(body) => (body, "\n"),
+                None => (segment, ""),
+            };
+            if body.contains(old) {
+                changed += 1;
+                format!("{}{}", body.replacen(old, new, 1), newline)
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect();
+    (out, changed)
+}
+
+/// Apply a parsed sed substitution with stale-guard protection, mirroring real
+/// GNU sed semantics for the intercepted literal subset: without `g` the first
+/// match ON EACH LINE is replaced, `-i<suffix>` keeps a backup of the original
+/// at `<file><suffix>`, and a no-match substitution exits 0 without touching
+/// the file.
+async fn apply_sed_substitution(file: &str, sub: &SedSubstitution) -> anyhow::Result<Value> {
     // Path validation
     let safety = crate::tools::file::resolve_safety_config(None);
     crate::tools::file::validate_tool_path(file, &safety)
@@ -97,20 +192,24 @@ async fn apply_sed_substitution(
     }
 
     let content = tokio::fs::read_to_string(file).await?;
-    let new_content = if global {
-        content.replace(old_str, new_str)
+
+    let (new_content, replacements) = if sub.global {
+        let count = content.matches(&sub.old_str).count();
+        (content.replace(&sub.old_str, &sub.new_str), count)
     } else {
-        content.replacen(old_str, new_str, 1)
+        replace_first_per_line(&content, &sub.old_str, &sub.new_str)
     };
 
-    if new_content == content {
-        anyhow::bail!(
-            "sed substitution had no effect — old_str not found in {}",
-            file
-        );
+    if replacements > 0 {
+        // Honor `-i<suffix>`: keep a backup of the original, like real sed.
+        if let Some(suffix) = &sub.backup_suffix {
+            tokio::fs::copy(file, format!("{}{}", file, suffix)).await?;
+        }
+        write_atomic(Path::new(file), &new_content).await?;
     }
-
-    write_atomic(Path::new(file), &new_content).await?;
+    // A no-match substitution is NOT an error: real sed exits 0 and leaves the
+    // file untouched. Report the zero replacements honestly instead of either
+    // corrupting the file or inventing a failure.
 
     Ok(serde_json::json!({
         "exit_code": 0,
@@ -121,6 +220,7 @@ async fn apply_sed_substitution(
         "duration_ms": 0,
         "timed_out": false,
         "intercepted": true,
+        "replacements": replacements,
         "tool": "file_edit"
     }))
 }
@@ -308,9 +408,19 @@ impl Tool for ShellExec {
         }
 
         // Intercept simple sed -i substitutions and route through file tools
-        // for stale-guard protection
-        if let Some((file, old_str, new_str, global)) = try_parse_sed_substitution(&args.command) {
-            return apply_sed_substitution(&file, &old_str, &new_str, global).await;
+        // for stale-guard protection. Only the safe literal subset parses;
+        // anything more complex (real regexes, empty patterns, unusual flags)
+        // falls through to the real sed binary with real sed semantics.
+        if let Some(sub) = try_parse_sed_substitution(&args.command) {
+            // Real sed resolves relative paths against the command's cwd; the
+            // interception must do the same or it would edit the wrong file.
+            let resolved = resolve_sed_path(&sub.file, args.cwd.as_deref());
+            // Intercept only when the resolved path passes validation;
+            // otherwise let the real sed run under the shell like any command.
+            let safety = crate::tools::file::resolve_safety_config(None);
+            if crate::tools::file::validate_tool_path(&resolved, &safety).is_ok() {
+                return apply_sed_substitution(&resolved, &sub).await;
+            }
         }
 
         let (shell, flag) = default_shell();
@@ -644,29 +754,55 @@ mod tests {
     fn test_parse_sed_substitution_simple() {
         let result = try_parse_sed_substitution("sed -i 's/old/new/g' file.txt");
         assert!(result.is_some());
-        let (file, old, new, global) = result.unwrap();
-        assert_eq!(file, "file.txt");
-        assert_eq!(old, "old");
-        assert_eq!(new, "new");
-        assert!(global);
+        let sub = result.unwrap();
+        assert_eq!(sub.file, "file.txt");
+        assert_eq!(sub.old_str, "old");
+        assert_eq!(sub.new_str, "new");
+        assert!(sub.global);
+        assert_eq!(sub.backup_suffix, None);
     }
 
     #[test]
     fn test_parse_sed_substitution_no_global() {
         let result = try_parse_sed_substitution("sed -i 's/old/new/' file.txt");
         assert!(result.is_some());
-        let (_, _, _, global) = result.unwrap();
-        assert!(!global);
+        assert!(!result.unwrap().global);
+    }
+
+    #[test]
+    fn test_parse_sed_substitution_backup_suffix() {
+        let sub = try_parse_sed_substitution("sed -i.bak 's/a/b/' f.txt").unwrap();
+        assert_eq!(sub.backup_suffix.as_deref(), Some(".bak"));
+        let sub = try_parse_sed_substitution("sed --in-place=.orig 's/a/b/' f.txt").unwrap();
+        assert_eq!(sub.backup_suffix.as_deref(), Some(".orig"));
     }
 
     #[test]
     fn test_parse_sed_substitution_falls_back_for_complex() {
         // Regex metacharacters in pattern
         assert!(try_parse_sed_substitution("sed -i 's/foo.bar/baz/g' file.txt").is_none());
+        // Empty pattern (sed's "repeat last regex" semantics — real sed errors here)
+        assert!(try_parse_sed_substitution("sed -i 's//x/g' file.txt").is_none());
+        // Replacement escapes (& expands to the match, \1 is a backreference)
+        assert!(try_parse_sed_substitution("sed -i 's/foo/[&]/' file.txt").is_none());
+        assert!(try_parse_sed_substitution("sed -i 's/foo/\\\\1/' file.txt").is_none());
+        // Unterminated s command — real sed must report the error
+        assert!(try_parse_sed_substitution("sed -i 's/foo/bar' file.txt").is_none());
+        // Non-g flags have their own semantics (numeric, p, w, i)
+        assert!(try_parse_sed_substitution("sed -i 's/a/b/2' file.txt").is_none());
+        assert!(try_parse_sed_substitution("sed -i 's/a/b/gp' file.txt").is_none());
+        // Extra delimiters — real sed errors ("unknown option to `s'")
+        assert!(try_parse_sed_substitution("sed -i 's/a/b/c/d' file.txt").is_none());
+        // Extra sed flags beyond -i
+        assert!(try_parse_sed_substitution("sed -n -i 's/a/b/' file.txt").is_none());
+        assert!(try_parse_sed_substitution("sed -i -e 's/a/b/' file.txt").is_none());
+        // No -i at all
+        assert!(try_parse_sed_substitution("sed 's/a/b/' file.txt").is_none());
         // Multiple files
         assert!(try_parse_sed_substitution("sed -i 's/a/b/g' f1 f2").is_none());
         // Not sed
         assert!(try_parse_sed_substitution("echo hello").is_none());
+        assert!(try_parse_sed_substitution("sediment -i 's/a/b/' f").is_none());
     }
 
     #[tokio::test]
@@ -692,10 +828,196 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["exit_code"], 0);
         assert_eq!(result["intercepted"], true);
+        assert_eq!(result["replacements"], 1);
 
         let content = tokio::fs::read_to_string(&file_path).await.unwrap();
         assert!(content.contains("FOO bar"));
         assert!(!content.contains("foo bar"));
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn sed_interception_no_g_replaces_first_match_per_line() {
+        // Real sed without `g` replaces the first match ON EACH LINE, not the
+        // first match in the whole file — the old interception got this wrong.
+        let tool = ShellExec;
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-lines-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("lines.txt");
+        tokio::fs::write(&file_path, "foo one\nnope\nfoo two foo two\n")
+            .await
+            .unwrap();
+
+        let args = serde_json::json!({
+            "command": format!("sed -i 's/foo/bar/' {}", file_path.display()),
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["intercepted"], true);
+        assert_eq!(result["replacements"], 2);
+
+        let content = tokio::fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "bar one\nnope\nbar two foo two\n");
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn sed_interception_honors_backup_suffix() {
+        // `sed -i.bak` must leave the original at <file>.bak like real sed.
+        let tool = ShellExec;
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-bak-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("bak.txt");
+        tokio::fs::write(&file_path, "alpha\n").await.unwrap();
+
+        let args = serde_json::json!({
+            "command": format!("sed -i.bak 's/alpha/BETA/' {}", file_path.display()),
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["intercepted"], true);
+
+        let backup = temp_dir.join("bak.txt.bak");
+        assert!(backup.exists(), "-i.bak must create a backup file");
+        assert_eq!(tokio::fs::read_to_string(&backup).await.unwrap(), "alpha\n");
+        assert_eq!(
+            tokio::fs::read_to_string(&file_path).await.unwrap(),
+            "BETA\n"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn sed_interception_resolves_relative_path_against_cwd() {
+        // The interception must resolve a relative target against the call's
+        // cwd, exactly like the real sed subprocess would.
+        let tool = ShellExec;
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-cwd-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        tokio::fs::write(temp_dir.join("rel.txt"), "foo\n")
+            .await
+            .unwrap();
+
+        let args = serde_json::json!({
+            "command": "sed -i 's/foo/bar/' rel.txt",
+            "cwd": temp_dir.to_str().unwrap(),
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["intercepted"], true);
+        assert_eq!(
+            tokio::fs::read_to_string(temp_dir.join("rel.txt"))
+                .await
+                .unwrap(),
+            "bar\n"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn sed_no_match_exits_zero_and_leaves_file_untouched() {
+        // Real sed with no match exits 0 and does not modify the file; the
+        // interception must not invent a failure.
+        let tool = ShellExec;
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-nomatch-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("nomatch.txt");
+        tokio::fs::write(&file_path, "untouched\n").await.unwrap();
+
+        let args = serde_json::json!({
+            "command": format!("sed -i 's/zzz/yyy/' {}", file_path.display()),
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["intercepted"], true);
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(result["replacements"], 0);
+        assert_eq!(
+            tokio::fs::read_to_string(&file_path).await.unwrap(),
+            "untouched\n"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn sed_empty_pattern_passes_through_to_real_sed_error() {
+        let _g = crate::test_support::CwdGuard::hold();
+        // Empty pattern is outside the safe subset: the real sed binary runs
+        // and reports its own error instead of the interception corrupting the
+        // file by inserting the replacement at every position.
+        let tool = ShellExec;
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-empty-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("empty.txt");
+        tokio::fs::write(&file_path, "abc\n").await.unwrap();
+
+        let args = serde_json::json!({
+            "command": format!("sed -i 's//x/g' {}", file_path.display()),
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert!(
+            result.get("intercepted").is_none(),
+            "empty pattern must fall through to the real sed: {result}"
+        );
+        assert_ne!(result["exit_code"], 0, "real sed errors on empty pattern");
+        // File content is unchanged.
+        assert_eq!(
+            tokio::fs::read_to_string(&file_path).await.unwrap(),
+            "abc\n"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn sed_replacement_metachars_pass_through_to_real_sed() {
+        let _g = crate::test_support::CwdGuard::hold();
+        // `&` in the replacement expands to the matched text in real sed; the
+        // interception must not treat it literally.
+        let tool = ShellExec;
+        let temp_dir = std::env::current_dir()
+            .unwrap()
+            .join(format!("selfware-sed-test-amp-{}", std::process::id()));
+        tokio::fs::create_dir_all(&temp_dir).await.unwrap();
+        let file_path = temp_dir.join("amp.txt");
+        tokio::fs::write(&file_path, "foo\n").await.unwrap();
+
+        let args = serde_json::json!({
+            "command": format!("sed -i 's/foo/[&]/' {}", file_path.display()),
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert!(
+            result.get("intercepted").is_none(),
+            "& replacement must fall through to real sed: {result}"
+        );
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(
+            tokio::fs::read_to_string(&file_path).await.unwrap(),
+            "[foo]\n"
+        );
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }

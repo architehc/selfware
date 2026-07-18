@@ -192,10 +192,13 @@ pub fn invalidates_cache(tool_name: &str) -> bool {
         "file_write"
             | "file_edit"
             | "file_delete"
+            | "file_multi_edit"
             | "git_commit"
             | "git_checkout"
             | "git_reset"
             | "shell_exec"
+            | "pty_shell"
+            | "patch_apply"
             | "write_file"
             | "edit_file"
     )
@@ -521,6 +524,11 @@ mod tests {
     fn test_invalidates_cache() {
         assert!(invalidates_cache("file_write"));
         assert!(invalidates_cache("git_commit"));
+        // These mutating tools previously invalidated NOTHING, so the agent
+        // was served pre-edit git_status/git_diff/grep results after edits.
+        assert!(invalidates_cache("file_multi_edit"));
+        assert!(invalidates_cache("patch_apply"));
+        assert!(invalidates_cache("pty_shell"));
         assert!(!invalidates_cache("file_read"));
     }
 

@@ -955,6 +955,28 @@ pub(super) fn shell_command_is_observational(command: &str) -> bool {
     }) || shell_command_runs_test_script(&normalized)
 }
 
+/// Extract the target file paths from a unified diff (the `+++ b/path` lines)
+/// so `patch_apply`'s pre-edit state can be snapshotted for `/undo`.
+/// Mirrors the parsing in `tools::patch_apply`, kept private here because the
+/// dispatch layer only needs the path list.
+fn patch_target_paths(diff: &str) -> Vec<std::path::PathBuf> {
+    let mut targets = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
+            let path = line
+                .strip_prefix("+++ b/")
+                .or_else(|| line.strip_prefix("+++ "))
+                .unwrap_or("");
+            // Strip a possible trailing timestamp (GNU diff format).
+            let path = path.split('\t').next().unwrap_or("").trim();
+            if !path.is_empty() {
+                targets.push(std::path::PathBuf::from(path));
+            }
+        }
+    }
+    targets
+}
+
 /// Canonical predicate: does a SUCCESSFUL call to this tool mutate the
 /// workspace? Single source of truth for mutation accounting so the progress
 /// guard, the completion gate, and FailureMode all agree what "a real edit" is.
@@ -3472,6 +3494,37 @@ impl Agent {
         }
     }
 
+    /// Snapshot every file a multi-file mutating tool is about to touch so
+    /// `/undo` can restore ALL of them, not none. Creates one `MultiFileEdit`
+    /// checkpoint; if no target could be read the checkpoint is left empty and
+    /// `/undo` honestly reports "no files to restore" instead of silently
+    /// reverting an older, unrelated checkpoint while claiming success.
+    ///
+    /// Free function (not a method) so it can borrow `self.edit_history`
+    /// disjointly from the immutable `self.tools` borrow held at the call site.
+    pub(super) async fn snapshot_files_for_undo(
+        history: &mut crate::session::edit_history::EditHistory,
+        mut paths: Vec<std::path::PathBuf>,
+        tool: &str,
+    ) {
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            return;
+        }
+        use crate::session::edit_history::{EditAction, FileSnapshot};
+        let action = EditAction::MultiFileEdit {
+            paths: paths.clone(),
+            tool: tool.to_string(),
+        };
+        history.create_checkpoint(action);
+        for path in &paths {
+            if let Ok(content) = tokio::fs::read_to_string(path).await {
+                history.add_file_to_current(FileSnapshot::new(path.clone(), content));
+            }
+        }
+    }
+
     pub(super) async fn execute_single_tool(
         &mut self,
         name: &str,
@@ -3561,8 +3614,21 @@ impl Agent {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                 self.cache_manager.invalidate_path(path).await;
             }
-            // shell_exec and git operations can affect any file — clear all read caches
-            if matches!(name, "shell_exec" | "git_commit" | "git_checkout") {
+            // Mutations that can't be reduced to one `path` arg — shells run
+            // arbitrary commands, file_multi_edit carries an `edits` array,
+            // patch_apply a diff — can affect anything, and cached
+            // git_status/git_diff/grep results don't contain the edited path
+            // in their key anyway. Clear all read caches so the agent never
+            // sees pre-edit output and concludes its edit vanished.
+            if matches!(
+                name,
+                "shell_exec"
+                    | "pty_shell"
+                    | "git_commit"
+                    | "git_checkout"
+                    | "file_multi_edit"
+                    | "patch_apply"
+            ) {
                 self.cache_manager.tool_cache.clear().await;
             }
         }
@@ -3589,6 +3655,31 @@ impl Agent {
                 } else {
                     None
                 }
+            } else if name == "file_multi_edit" {
+                // Snapshot EVERY targeted file so `/undo` restores the whole
+                // batch — previously no checkpoint was captured at all and
+                // `/undo` silently reverted an older, unrelated checkpoint.
+                let paths: Vec<std::path::PathBuf> = args
+                    .get("edits")
+                    .and_then(|v| v.as_array())
+                    .map(|edits| {
+                        edits
+                            .iter()
+                            .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
+                            .map(std::path::PathBuf::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Self::snapshot_files_for_undo(&mut self.edit_history, paths, name).await;
+                None
+            } else if name == "patch_apply" {
+                let paths = args
+                    .get("diff")
+                    .and_then(|v| v.as_str())
+                    .map(patch_target_paths)
+                    .unwrap_or_default();
+                Self::snapshot_files_for_undo(&mut self.edit_history, paths, name).await;
+                None
             } else {
                 None
             };
@@ -4132,6 +4223,136 @@ mod tests {
             .clone()
             .expect("a failing verification run must be recorded");
         assert!(summary.contains("shell_exec failed"), "{summary}");
+    }
+
+    #[test]
+    fn patch_target_paths_extracts_targets() {
+        let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n\
+                    --- a/b.txt\n+++ b/b.txt\n@@ -0,0 +1,1 @@\n+z\n";
+        let paths = patch_target_paths(diff);
+        assert_eq!(
+            paths,
+            vec![
+                std::path::PathBuf::from("src/a.rs"),
+                std::path::PathBuf::from("b.txt")
+            ]
+        );
+        // Deleted files (+++ /dev/null) have no pre-edit content to snapshot.
+        let deleted = "--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+        assert!(patch_target_paths(deleted).is_empty());
+    }
+
+    #[tokio::test]
+    async fn multi_file_snapshot_captures_every_target_for_undo() {
+        let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .expect("agent should build");
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "alpha\n").unwrap();
+        std::fs::write(&f2, "beta\n").unwrap();
+
+        Agent::snapshot_files_for_undo(
+            &mut agent.edit_history,
+            vec![f1.clone(), f2.clone()],
+            "patch_apply",
+        )
+        .await;
+
+        let checkpoint = agent
+            .edit_history
+            .current_checkpoint()
+            .expect("snapshot must create a checkpoint");
+        match &checkpoint.action {
+            crate::session::edit_history::EditAction::MultiFileEdit { paths, tool } => {
+                assert_eq!(tool, "patch_apply");
+                assert_eq!(paths.len(), 2);
+            }
+            other => panic!("expected MultiFileEdit, got {other:?}"),
+        }
+        assert_eq!(
+            checkpoint.files[&f1].content, "alpha\n",
+            "pre-edit content must be captured for /undo"
+        );
+        assert_eq!(checkpoint.files[&f2].content, "beta\n");
+
+        // Simulate /undo: restoring from the checkpoint must bring back the
+        // pre-edit contents.
+        std::fs::write(&f1, "EDITED\n").unwrap();
+        for (path, snap) in &checkpoint.files {
+            std::fs::write(path, &snap.content).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&f1).unwrap(), "alpha\n");
+    }
+
+    #[tokio::test]
+    async fn file_multi_edit_dispatch_snapshots_undo_and_clears_cache() {
+        let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .expect("agent should build");
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("m1.txt");
+        let f2 = dir.path().join("m2.txt");
+        std::fs::write(&f1, "one\n").unwrap();
+        std::fs::write(&f2, "two\n").unwrap();
+
+        // Seed a stale cached read result that must not survive the mutation.
+        let status_args = serde_json::json!({"repo_path": "."});
+        agent
+            .cache_manager
+            .tool_cache
+            .set(
+                "git_status",
+                &status_args,
+                serde_json::json!({"branch": "old"}),
+            )
+            .await;
+
+        let args = serde_json::json!({
+            "edits": [
+                {"path": f1.to_str().unwrap(), "old_str": "one", "new_str": "ONE"},
+                {"path": f2.to_str().unwrap(), "old_str": "two", "new_str": "TWO"}
+            ]
+        });
+        let args_str = args.to_string();
+        let (ok, result, _) = agent
+            .execute_single_tool(
+                "file_multi_edit",
+                &args_str,
+                &args,
+                std::time::Instant::now(),
+            )
+            .await
+            .expect("dispatch should run");
+        assert!(ok, "multi_edit should succeed: {result}");
+
+        // /undo snapshot: ONE checkpoint holding BOTH pre-edit files —
+        // previously nothing was captured and /undo reverted an unrelated
+        // older checkpoint while claiming success.
+        let checkpoint = agent
+            .edit_history
+            .current_checkpoint()
+            .expect("file_multi_edit must capture a pre-edit checkpoint");
+        assert!(
+            matches!(
+                checkpoint.action,
+                crate::session::edit_history::EditAction::MultiFileEdit { .. }
+            ),
+            "expected a MultiFileEdit checkpoint, got {:?}",
+            checkpoint.action
+        );
+        assert_eq!(checkpoint.files[&f1].content, "one\n");
+        assert_eq!(checkpoint.files[&f2].content, "two\n");
+
+        // The tool-result cache must be cleared so a follow-up git_status does
+        // not serve the pre-edit result.
+        assert!(agent
+            .cache_manager
+            .tool_cache
+            .get("git_status", &status_args)
+            .await
+            .is_none());
     }
 
     fn test_config(endpoint: String) -> Config {
