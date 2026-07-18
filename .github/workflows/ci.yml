@@ -313,11 +313,10 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      # Provisional floor for the tarpaulin->llvm-cov migration: llvm-cov's
-      # line metric differs from tarpaulin's ~62.6%, so start below it and
-      # ratchet up once the summary above establishes the real baseline.
+      # llvm-cov measures 79.31% line coverage (vs tarpaulin's ~62.6%). Gate a
+      # few points below the baseline; ratchet up as coverage improves.
       - name: Enforce coverage floor
-        run: cargo llvm-cov report --summary-only --fail-under-lines 50
+        run: cargo llvm-cov report --summary-only --fail-under-lines 75
 
   # Dependency policy (advisories, licenses, bans) — configured in deny.toml
   deny:
