@@ -55,10 +55,6 @@ pub enum MultiAgentEvent {
         name: String,
         task: String,
     },
-    AgentProgress {
-        agent_id: usize,
-        content: String,
-    },
     AgentCompleted {
         agent_id: usize,
         result: AgentResult,

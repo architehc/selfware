@@ -266,7 +266,11 @@ impl DreamIntegratedMemorySystem {
         Self {
             project_key,
             dream_config: crate::cognitive::dream::DreamConfig::new(),
-            auto_dream_config: crate::cognitive::dream_subprocess::AutoDreamConfig::new(),
+            // Use the user's OWN configured backend for consolidation — the
+            // hardcoded default endpoint/model made `/dream force` 404 against
+            // localhost:8000 while reporting success.
+            auto_dream_config:
+                crate::cognitive::dream_subprocess::AutoDreamConfig::from_user_config(),
         }
     }
 
@@ -306,9 +310,9 @@ impl DreamIntegratedMemorySystem {
         }
     }
 
-    /// Check dream gates and potentially spawn autoDream subprocess.
+    /// Check dream gates and potentially spawn the autoDream background task.
     ///
-    /// Call this after a session ends. Returns the subprocess handle if spawned.
+    /// Call this after a session ends. Returns the task handle if spawned.
     pub async fn check_and_spawn_dream(
         &self,
         project_path: &Path,

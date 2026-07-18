@@ -429,7 +429,7 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         // ─── Step 4: Evaluate each hypothesis (apply → check → test) ───
         let sab_available =
             sab_config.runner_script.exists() && std::env::var("SELFWARE_EVOLVE_SAB").is_ok();
-        let mut generation_winner: Option<(Hypothesis, FitnessMetrics)> = None;
+        let mut generation_winner: Option<(Hypothesis, FitnessMetrics, String)> = None;
 
         for hypothesis in &valid {
             log_phase(&format!(
@@ -437,7 +437,11 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 hypothesis.description, hypothesis.id
             ));
 
-            // Create worktree
+            // Create worktree. The guard removes it on EVERY exit path from
+            // this iteration — success, early `continue`, and panic unwind —
+            // where the old manual `cleanup_worktree` calls leaked worktrees
+            // under `.worktrees/` whenever a panic (e.g. the UTF-8 byte-slice
+            // panics) aborted the iteration.
             let worktree = match ast_tools::create_shadow_worktree(repo_root) {
                 Ok(w) => w,
                 Err(e) => {
@@ -445,14 +449,14 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     continue;
                 }
             };
+            let _worktree_guard = WorktreeGuard::new(repo_root, worktree.clone());
 
             // Apply edits (search-and-replace or unified diff)
             if !apply_patch_to_worktree(&worktree, &hypothesis.patch) {
                 log_frost(generation, &format!("Patch failed: {}", hypothesis.id));
                 // Log the first 500 chars of the edit data for debugging
-                let preview = &hypothesis.patch[..hypothesis.patch.len().min(500)];
+                let preview = truncate_char_boundary(&hypothesis.patch, 500);
                 log_warning(&format!("  Edit preview:\n{}", preview));
-                let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                 continue;
             }
 
@@ -467,7 +471,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             if check.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Compile failed: {}", hypothesis.id));
-                let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                 continue;
             }
 
@@ -485,7 +488,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 Ok(o) => o,
                 Err(e) => {
                     log_warning(&format!("  Test execution failed: {}", e));
-                    let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                     continue;
                 }
             };
@@ -503,7 +505,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     generation,
                     &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
                 );
-                let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                 continue;
             }
 
@@ -537,7 +538,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             if clippy.map(|o| !o.status.success()).unwrap_or(true) {
                 log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
-                let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                 continue;
             }
 
@@ -554,7 +554,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                         generation,
                         &format!("Release build failed: {}", hypothesis.id),
                     );
-                    let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                     continue;
                 }
 
@@ -567,7 +566,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     ),
                     Err(e) => {
                         log_warning(&format!("  SAB failed: {}", e));
-                        let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                         continue;
                     }
                 }
@@ -585,13 +583,27 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                             generation,
                             &format!("Release build failed: {}", hypothesis.id),
                         );
-                        let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                         continue;
                     }
                 }
             };
 
-            let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
+            // Capture the EXACT tested state as a diff against HEAD before the
+            // worktree guard cleans up. This includes the `cargo fmt` auto-fix
+            // above, which the raw LLM patch lacks — committing this diff (not
+            // the raw patch) is what makes the committed state match the
+            // tested state, and strict-applying it later avoids `patch -F3`
+            // fuzz landing hunks somewhere other than where they were tested.
+            let tested_diff = match capture_tested_diff(&worktree) {
+                Some(d) if !d.trim().is_empty() => d,
+                _ => {
+                    log_frost(
+                        generation,
+                        &format!("No effective diff after evaluation: {}", hypothesis.id),
+                    );
+                    continue;
+                }
+            };
 
             log_phase(&format!(
                 "  ✓ '{}' passed (score: {:.0}, {:.1}s)",
@@ -600,12 +612,12 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
 
             // Keep the first passing hypothesis as winner
             if generation_winner.is_none() {
-                generation_winner = Some((hypothesis.clone(), winner_metrics));
+                generation_winner = Some((hypothesis.clone(), winner_metrics, tested_diff));
             }
         }
 
         // ─── Step 5: EMERGE OR DIE ───
-        let (winner, winner_metrics) = match generation_winner {
+        let (winner, winner_metrics, tested_diff) = match generation_winner {
             Some(w) => w,
             None => {
                 log_frost(generation, "No hypotheses survived evaluation");
@@ -635,23 +647,18 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 winner_metrics.sab_score,
             );
 
-            if apply_patch_to_repo(repo_root, &winner.patch) {
-                let commit_msg = format!(
-                    "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
-                    generation,
-                    current_baseline_metrics.sab_score,
-                    winner_metrics.sab_score,
-                    winner.description
-                );
-                let _ = Command::new("git")
-                    .args(["add", "-A"])
-                    .current_dir(repo_root)
-                    .output();
-                let _ = Command::new("git")
-                    .args(["commit", "-m", &commit_msg])
-                    .current_dir(repo_root)
-                    .output();
-
+            let commit_msg = format!(
+                "🧬 Gen {} BLOOM: {:.0} → {:.0} | {}",
+                generation,
+                current_baseline_metrics.sab_score,
+                winner_metrics.sab_score,
+                winner.description
+            );
+            // Apply the EXACT tested diff (not the raw LLM patch) and commit
+            // ONLY the paths it edits — never `git add -A`, which swept every
+            // dirty edit and untracked file (.env, scratch, credentials) into
+            // the BLOOM commit on whatever branch was checked out.
+            if commit_winner_to_repo(repo_root, &tested_diff, &commit_msg) {
                 let git_tag = if generation.is_multiple_of(config.checkpoint_interval) {
                     let tag = format!("evolve-gen-{}", generation);
                     let _ = Command::new("git")
@@ -670,7 +677,9 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     sab_delta: winner_metrics.sab_score - current_baseline_metrics.sab_score,
                     token_delta: winner_metrics.tokens_used as f64
                         - current_baseline_metrics.tokens_used as f64,
-                    patch: winner.patch.clone(),
+                    // The tested diff actually committed (incl. fmt fixes),
+                    // not the raw LLM patch.
+                    patch: tested_diff.clone(),
                     git_tag,
                 });
 
@@ -770,7 +779,7 @@ async fn generate_standard_hypotheses(
             log_phase(&format!(
                 "LLM response ({} chars): {}",
                 response.len(),
-                &response[..response.len().min(200)]
+                truncate_char_boundary(&response, 200)
             ));
             parse_hypotheses_response(&response)
         }
@@ -1087,11 +1096,31 @@ fn truncate_to_line_boundary(s: &str, max_chars: usize) -> &str {
     if s.len() <= max_chars {
         return s;
     }
-    // Find the last newline before max_chars
-    match s[..max_chars].rfind('\n') {
+    // Back off to a UTF-8 char boundary FIRST: a raw `&s[..max_chars]` slice
+    // panics when max_chars lands mid-codepoint (multibyte source), which used
+    // to abort the whole evolve run before any LLM call was even made.
+    let s = truncate_char_boundary(s, max_chars);
+    // Find the last newline before the limit
+    match s.rfind('\n') {
         Some(pos) => &s[..pos],
-        None => &s[..max_chars],
+        None => s,
     }
+}
+
+/// Byte-truncate `s` to at most `max_bytes`, backing off to a UTF-8 char
+/// boundary. A raw `&s[..n]` byte slice PANICS when `n` lands mid-codepoint —
+/// the same class of bug fixed in `agent/checkpointing.rs`
+/// (`truncate_bytes_char_boundary`); duplicated here because that helper is
+/// feature-gated and private to the checkpointing module.
+fn truncate_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 pub fn build_system_prompt(population_size: usize) -> String {
@@ -1511,7 +1540,7 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
                         "  Ambiguous search string in {} ({} matches): {:?}...",
                         file,
                         count,
-                        &search[..search.len().min(80)]
+                        truncate_char_boundary(search, 80)
                     ));
                     return false;
                 }
@@ -1529,7 +1558,7 @@ fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
                     log_warning(&format!(
                         "  Search string not found in {}: {:?}...",
                         file,
-                        &search[..search.len().min(80)]
+                        truncate_char_boundary(search, 80)
                     ));
                     return false;
                 }
@@ -1725,6 +1754,211 @@ fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
         return false;
     }
     apply_edits(repo_root, patch)
+}
+
+/// RAII guard that removes a shadow worktree when the evaluation iteration
+/// ends — on success, on early `continue`, AND on panic unwind. The old flow
+/// called `cleanup_worktree` manually at each exit, so a panic anywhere in
+/// the iteration leaked worktrees under `.worktrees/`.
+struct WorktreeGuard<'a> {
+    repo_root: &'a Path,
+    path: PathBuf,
+}
+
+impl<'a> WorktreeGuard<'a> {
+    fn new(repo_root: &'a Path, path: PathBuf) -> Self {
+        Self { repo_root, path }
+    }
+}
+
+impl Drop for WorktreeGuard<'_> {
+    fn drop(&mut self) {
+        let _ = ast_tools::cleanup_worktree(self.repo_root, &self.path);
+    }
+}
+
+/// Capture the exact tested worktree state as a unified diff against HEAD.
+///
+/// Runs inside the throwaway shadow worktree, so `git add -A` stages into the
+/// worktree's OWN index — never the user's. The captured diff includes the
+/// `cargo fmt` auto-fix applied during evaluation, which the raw LLM patch
+/// lacks. Applying THIS diff to the repo is what makes the committed state
+/// byte-identical to the state that passed the gates.
+fn capture_tested_diff(worktree: &Path) -> Option<String> {
+    let add = Command::new("git")
+        .args(["add", "-A"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !add.status.success() {
+        return None;
+    }
+    let diff = Command::new("git")
+        .args(["diff", "--cached", "HEAD"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !diff.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&diff.stdout).into_owned())
+}
+
+/// Apply the tested diff to the repo and commit ONLY the paths it edits.
+/// On commit failure the apply is reverted so the user's worktree returns to
+/// its pre-apply state instead of being left half-winner'd. Returns true only
+/// when the winner is fully applied AND committed.
+fn commit_winner_to_repo(repo_root: &Path, tested_diff: &str, commit_msg: &str) -> bool {
+    if !apply_tested_diff_to_repo(repo_root, tested_diff) {
+        return false;
+    }
+    let edited = patch_edited_paths(tested_diff);
+    warn_unrelated_dirty_paths(repo_root, &edited);
+    if commit_scoped_paths(repo_root, &edited, commit_msg) {
+        return true;
+    }
+    log_error("Winner commit failed — reverting the applied diff to keep the worktree clean");
+    revert_applied_diff(repo_root, tested_diff);
+    false
+}
+
+/// Apply the tested diff to the real repository with STRICT `git apply` — no
+/// fuzzy `patch -F3` fallback. Fuzz is what let the old flow land hunks in
+/// different spots than the tested worktree; a strict apply either reproduces
+/// the tested byte content exactly or fails (and failure skips the commit).
+/// The protected-path gate runs on the tested diff itself.
+fn apply_tested_diff_to_repo(repo_root: &Path, tested_diff: &str) -> bool {
+    let edited = patch_edited_paths(tested_diff);
+    if let Some(p) = edited.iter().find(|f| is_protected(f)) {
+        log_error(&format!(
+            "Refusing to apply tested diff to repo: edits protected path {}",
+            p.display()
+        ));
+        return false;
+    }
+    let patch_file = repo_root.join(".evolution-tested.patch");
+    if std::fs::write(&patch_file, tested_diff).is_err() {
+        return false;
+    }
+    let applied = Command::new("git")
+        .args(["apply", ".evolution-tested.patch"])
+        .current_dir(repo_root)
+        .output();
+    let _ = std::fs::remove_file(&patch_file);
+    match applied {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            log_warning(&format!(
+                "  Tested diff does not apply cleanly to the repo (worktree drift?): {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+            false
+        }
+        Err(e) => {
+            log_warning(&format!("  Failed to run git apply: {}", e));
+            false
+        }
+    }
+}
+
+/// Reverse-apply a previously applied tested diff — used when the scoped
+/// commit fails — so the user's worktree returns to its pre-apply state.
+fn revert_applied_diff(repo_root: &Path, tested_diff: &str) {
+    let patch_file = repo_root.join(".evolution-tested.patch");
+    if std::fs::write(&patch_file, tested_diff).is_err() {
+        return;
+    }
+    let _ = Command::new("git")
+        .args(["apply", "-R", ".evolution-tested.patch"])
+        .current_dir(repo_root)
+        .output();
+    let _ = std::fs::remove_file(&patch_file);
+}
+
+/// Warn loudly about dirty/untracked paths in the user's worktree that are
+/// UNRELATED to the winner patch. They are left uncommitted — the evolution
+/// commit only ever stages the paths the tested diff edits.
+fn warn_unrelated_dirty_paths(repo_root: &Path, edited: &[PathBuf]) {
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(repo_root)
+        .output();
+    let Ok(status) = status else { return };
+    if !status.status.success() {
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&status.stdout);
+    let unrelated: Vec<&str> = stdout
+        .lines()
+        // Porcelain lines are `XY <path>` (path starts at byte 3); renames
+        // show `orig -> new` — good enough for a warning list.
+        .filter_map(|line| line.get(3..))
+        .filter(|p| !p.is_empty())
+        .filter(|p| !edited.iter().any(|e| e == Path::new(p)))
+        .collect();
+    if !unrelated.is_empty() {
+        log_warning(&format!(
+            "  {} unrelated dirty/untracked path(s) NOT included in the evolution commit: {}",
+            unrelated.len(),
+            unrelated
+                .iter()
+                .take(5)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
+/// Stage and commit ONLY the given paths — never `git add -A`, which used to
+/// sweep every dirty edit and untracked file (scratch, `.env`, credentials)
+/// into the "🧬 Gen N BLOOM" commit on the user's current branch. The
+/// pathspec form of `git commit` also keeps previously-staged unrelated
+/// changes out of the commit.
+fn commit_scoped_paths(repo_root: &Path, paths: &[PathBuf], commit_msg: &str) -> bool {
+    if paths.is_empty() {
+        log_warning("  Winner patch edits no paths — nothing to commit");
+        return false;
+    }
+    let mut add = Command::new("git");
+    add.arg("add").arg("--");
+    for p in paths {
+        add.arg(p);
+    }
+    match add.current_dir(repo_root).output() {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            log_warning(&format!(
+                "  git add of winner paths failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+            return false;
+        }
+        Err(e) => {
+            log_warning(&format!("  Failed to run git add: {}", e));
+            return false;
+        }
+    }
+
+    let mut commit = Command::new("git");
+    commit.arg("commit").arg("-m").arg(commit_msg).arg("--");
+    for p in paths {
+        commit.arg(p);
+    }
+    match commit.current_dir(repo_root).output() {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            log_warning(&format!(
+                "  git commit of winner paths failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ));
+            false
+        }
+        Err(e) => {
+            log_warning(&format!("  Failed to run git commit: {}", e));
+            false
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -2719,7 +2953,7 @@ These changes should improve performance."#;
         assert!(
             context.contains("1| fn main()"),
             "Should contain line numbers: {}",
-            &context[..context.len().min(200)]
+            truncate_char_boundary(&context, 200)
         );
         assert!(context.contains("2|     println!"));
 
@@ -2894,5 +3128,221 @@ These changes should improve performance."#;
         assert_eq!(parts.len(), 2);
         assert!(parts[0].parse::<u64>().is_ok());
         assert!(parts[1].parse::<u64>().is_ok());
+    }
+
+    // ── UTF-8 char-boundary truncation (whole-repo review, Evolution P1) ──
+
+    #[test]
+    fn test_truncate_char_boundary_never_splits_multibyte() {
+        // 199 ASCII bytes + a 3-byte char (€) straddling byte 200.
+        let mut s = "a".repeat(199);
+        s.push('€'); // bytes 199..202
+        s.push_str("tail");
+        let out = truncate_char_boundary(&s, 200);
+        assert_eq!(out.len(), 199, "must back off to the char boundary");
+
+        // Exactly at a boundary: no backoff.
+        let s2 = format!("{}€", "b".repeat(197)); // 197 + 3 = exactly 200
+        assert_eq!(truncate_char_boundary(&s2, 200).len(), 200);
+
+        // Shorter than the limit: untouched.
+        assert_eq!(truncate_char_boundary("short", 200), "short");
+    }
+
+    #[test]
+    fn test_truncate_to_line_boundary_multibyte_does_not_panic() {
+        // Regression: `s[..max_chars]` panicked when max_chars landed inside
+        // a multibyte char, aborting the whole evolve run before any LLM call.
+        // CJK chars are 3 bytes; byte 20 lands mid-char (18 is the boundary).
+        let text = format!("{}\nsecond line\n", "日".repeat(10));
+        let trunc = truncate_to_line_boundary(&text, 20);
+        assert_eq!(trunc, "日".repeat(6), "backs off to the char boundary");
+
+        // Newline right after a multibyte run: cut lands on the newline.
+        let text2 = format!("{}\nsecond line\n", "日".repeat(6)); // 18 bytes + \n
+        let trunc2 = truncate_to_line_boundary(&text2, 20);
+        assert_eq!(trunc2, "日".repeat(6));
+    }
+
+    // ── Winner-commit helpers (whole-repo review, Evolution P1) ──
+
+    /// Run git in `dir`, asserting success.
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// A throwaway repo with one committed source file, an unrelated dirty
+    /// edit, and an untracked `.env` — the exact cocktail `git add -A` used
+    /// to sweep into the BLOOM commit.
+    fn setup_winner_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn f() -> usize { 1 }\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "clean notes\n").unwrap();
+        git_ok(root, &["init"]);
+        git_ok(root, &["config", "user.email", "evo@test"]);
+        git_ok(root, &["config", "user.name", "Evo Test"]);
+        git_ok(root, &["add", "."]);
+        git_ok(root, &["commit", "-m", "initial"]);
+        // Unrelated dirty edit + untracked secret — must NEVER be committed
+        // by the evolution daemon.
+        std::fs::write(root.join("notes.txt"), "user work in progress\n").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=hunter2\n").unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_capture_tested_diff_includes_new_files_and_edits() {
+        let dir = setup_winner_repo();
+        let root = dir.path();
+        let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+        // Simulate the winner patch + a cargo-fmt auto-fix in the worktree.
+        std::fs::write(worktree.join("src/lib.rs"), "pub fn f() -> usize { 2 }\n").unwrap();
+        std::fs::write(worktree.join("src/new.rs"), "pub fn g() {}\n").unwrap();
+
+        let diff = capture_tested_diff(&worktree).expect("diff should capture");
+        assert!(diff.contains("src/lib.rs"), "edit captured: {}", diff);
+        assert!(diff.contains("pub fn f() -> usize { 2 }"));
+        assert!(diff.contains("src/new.rs"), "new file captured: {}", diff);
+        assert_eq!(patch_edited_paths(&diff).len(), 2);
+
+        ast_tools::cleanup_worktree(root, &worktree).unwrap();
+    }
+
+    #[test]
+    fn test_worktree_guard_cleans_up_on_drop() {
+        let dir = setup_winner_repo();
+        let root = dir.path();
+        let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+        assert!(worktree.exists());
+        {
+            let _guard = WorktreeGuard::new(root, worktree.clone());
+        } // guard dropped here — including on the panic path
+        assert!(
+            !worktree.exists(),
+            "guard drop must remove the shadow worktree"
+        );
+    }
+
+    #[test]
+    fn test_commit_scoped_paths_excludes_unrelated_dirty_and_env() {
+        let dir = setup_winner_repo();
+        let root = dir.path();
+        // Winner change to src/lib.rs (as if applied from the tested diff).
+        std::fs::write(root.join("src/lib.rs"), "pub fn f() -> usize { 2 }\n").unwrap();
+
+        let paths = vec![PathBuf::from("src/lib.rs")];
+        assert!(commit_scoped_paths(
+            root,
+            &paths,
+            "🧬 Gen 1 BLOOM: 50 → 60 | test"
+        ));
+
+        // The commit contains ONLY src/lib.rs.
+        let names = git_stdout(root, &["show", "--name-only", "--format=", "HEAD"]);
+        assert!(names.contains("src/lib.rs"));
+        assert!(!names.contains("notes.txt"), "unrelated edit not committed");
+        assert!(!names.contains(".env"), "secret not committed");
+
+        // Unrelated dirty edit and .env are still there, uncommitted.
+        let status = git_stdout(root, &["status", "--porcelain"]);
+        assert!(
+            status.contains("?? .env"),
+            "env stays untracked: {}",
+            status
+        );
+        assert!(
+            status.contains(" M notes.txt"),
+            "unrelated edit stays dirty: {}",
+            status
+        );
+        let notes = std::fs::read_to_string(root.join("notes.txt")).unwrap();
+        assert_eq!(notes, "user work in progress\n");
+    }
+
+    #[test]
+    fn test_commit_scoped_paths_handles_new_and_deleted_files() {
+        let dir = setup_winner_repo();
+        let root = dir.path();
+        std::fs::write(root.join("src/new.rs"), "pub fn g() {}\n").unwrap();
+        std::fs::remove_file(root.join("notes.txt")).unwrap();
+        // notes.txt is BOTH the deleted winner path and was dirty — reset it
+        // to committed state first so the deletion is the only change.
+        git_ok(root, &["checkout", "--", "notes.txt"]);
+        std::fs::remove_file(root.join("notes.txt")).unwrap();
+
+        let paths = vec![PathBuf::from("src/new.rs"), PathBuf::from("notes.txt")];
+        assert!(commit_scoped_paths(root, &paths, "🧬 Gen 2 BLOOM"));
+
+        let names = git_stdout(root, &["show", "--name-status", "--format=", "HEAD"]);
+        assert!(names.contains("A\tsrc/new.rs"), "new file added: {}", names);
+        assert!(
+            names.contains("D\tnotes.txt"),
+            "deletion committed: {}",
+            names
+        );
+        assert!(!names.contains(".env"));
+    }
+
+    #[test]
+    fn test_commit_winner_to_repo_applies_tested_diff_exactly() {
+        let dir = setup_winner_repo();
+        let root = dir.path();
+
+        // Build a tested diff in a shadow worktree (patch + "fmt fix").
+        let worktree = ast_tools::create_shadow_worktree(root).unwrap();
+        std::fs::write(
+            worktree.join("src/lib.rs"),
+            "pub fn f() -> usize {\n    2 // fmt: reformatted\n}\n",
+        )
+        .unwrap();
+        let tested_diff = capture_tested_diff(&worktree).unwrap();
+        ast_tools::cleanup_worktree(root, &worktree).unwrap();
+
+        assert!(commit_winner_to_repo(root, &tested_diff, "🧬 Gen 3 BLOOM"));
+        // The committed content is byte-identical to the TESTED worktree
+        // content (fmt fix included), not the raw LLM patch.
+        let content = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert_eq!(
+            content,
+            "pub fn f() -> usize {\n    2 // fmt: reformatted\n}\n"
+        );
+        let committed = git_stdout(root, &["show", "HEAD:src/lib.rs"]);
+        assert_eq!(committed, content);
+
+        // Unrelated files untouched and uncommitted.
+        let status = git_stdout(root, &["status", "--porcelain"]);
+        assert!(status.contains("?? .env"));
+        assert!(status.contains(" M notes.txt"));
+    }
+
+    #[test]
+    fn test_apply_tested_diff_refuses_protected_paths() {
+        let dir = setup_winner_repo();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src/evolution")).unwrap();
+        let diff = "--- a/src/evolution/daemon.rs\n+++ b/src/evolution/daemon.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        assert!(!apply_tested_diff_to_repo(root, diff));
+        assert!(!root.join("src/evolution/daemon.rs").exists());
     }
 }

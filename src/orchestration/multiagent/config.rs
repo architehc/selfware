@@ -23,8 +23,6 @@ pub struct MultiAgentConfig {
     pub max_concurrency: usize,
     /// Agent roles to spawn
     pub roles: Vec<AgentRole>,
-    /// Whether to use streaming responses
-    pub streaming: bool,
     /// Timeout per agent request. `None` (default) inherits
     /// `agent.step_timeout_secs` from the loaded [`Config`](crate::config::Config).
     ///
@@ -56,7 +54,6 @@ impl Default for MultiAgentConfig {
                 AgentRole::Tester,
                 AgentRole::Reviewer,
             ],
-            streaming: true,
             // `None` = inherit the user's loaded Config (temperature,
             // max_tokens, agent.step_timeout_secs) instead of clobbering it.
             timeout_secs: None,

@@ -1045,8 +1045,8 @@ fn build_session_result(
 
 /// Launch the live agent-driven TUI dashboard.
 ///
-/// This is the single entry point used by the default no-subcommand path,
-/// `selfware dashboard`, and `selfware command-center`. It builds an
+/// This is the single entry point used by the default no-subcommand path and
+/// `selfware dashboard`. It builds an
 /// `Agent` with an event sender, spawns the TUI in a blocking thread,
 /// processes user input, and cleans up on exit.
 #[cfg(feature = "tui")]
@@ -1697,16 +1697,6 @@ async fn handle_command(
             return run_live_agent_tui(config).await;
         }
 
-        #[cfg(feature = "tui")]
-        Commands::CommandCenter {
-            mode: _,
-            refresh: _,
-        } => {
-            // Command Center now launches the same live agent-driven TUI
-            // as the default no-subcommand path — no dead stub.
-            return run_live_agent_tui(config).await;
-        }
-
         Commands::Resume { task_id } => {
             if !quiet {
                 println!("{}", render_header(ctx));
@@ -2193,7 +2183,33 @@ async fn handle_command(
                     return Ok(());
                 }
 
-                let result = daemon::evolve(evo_config, &repo_root).await;
+                // Catch panics from the daemon so an evolve bug (e.g. a
+                // string-slice panic) surfaces as a clean error instead of
+                // unwinding through the whole CLI. Worktree cleanup itself is
+                // handled inside the daemon by drop guards, so no shadow
+                // worktrees leak even when this fires.
+                let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+                    daemon::evolve(evo_config, &repo_root),
+                ))
+                .await;
+                let result = match result {
+                    Ok(r) => r,
+                    Err(payload) => {
+                        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                            (*s).to_string()
+                        } else if let Some(s) = payload.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic payload".to_string()
+                        };
+                        eprintln!(
+                            "\n   {} Evolution daemon panicked: {}",
+                            Glyphs::frost(),
+                            msg
+                        );
+                        anyhow::bail!("Evolution daemon panicked: {}", msg);
+                    }
+                };
 
                 println!(
                     "\n   {} Evolution complete: {} generations, {} improvements",

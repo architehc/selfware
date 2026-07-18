@@ -164,6 +164,7 @@ impl TokenTracker {
             total_tokens: self.total_tokens(),
             api_calls: self.api_call_count(),
             estimated_cost: self.estimate_cost(),
+            cost_basis: self.cost_basis_label(),
             duration: self.session_duration(),
             drift: self.drift_stats(),
         }
@@ -186,20 +187,32 @@ impl TokenTracker {
     fn get_model_pricing(&self) -> ModelPricing {
         if let Ok(model_id_guard) = self.model_id.read() {
             if let Some(ref model_id) = *model_id_guard {
-                let lower = model_id.to_lowercase();
-                // Match model_id to known presets
-                if lower.contains("haiku") {
-                    return ModelPricing::claude_haiku();
-                } else if lower.contains("opus") {
-                    return ModelPricing::claude_opus();
-                } else if lower.contains("sonnet") {
-                    return ModelPricing::claude_sonnet();
+                if let Some(pricing) = known_pricing_for_model(model_id) {
+                    return pricing;
                 }
-                // For unknown models, fall through to default
+                // Unknown model: fall through to the labelled default.
             }
         }
-        // Default fallback to sonnet pricing (matches original hardcoded values)
+        // Default fallback to sonnet pricing (matches original hardcoded
+        // values). Callers can see this is a fallback via `cost_basis_label`.
         ModelPricing::claude_sonnet()
+    }
+
+    /// Describe the rate card behind [`Self::estimate_cost`]: the preset whose
+    /// rates are actually used when the configured model has known pricing, or
+    /// an explicit note that the figure is a sonnet-based guess. Surfaced in
+    /// the summary so a cost number is never presented as exact when the
+    /// model's real rates are unknown.
+    pub fn cost_basis_label(&self) -> String {
+        if let Ok(model_id_guard) = self.model_id.read() {
+            if let Some(ref model_id) = *model_id_guard {
+                if let Some(pricing) = known_pricing_for_model(model_id) {
+                    return format!("rates for {}", pricing.model_id);
+                }
+                return format!("unknown rates for '{model_id}' — claude-3-5-sonnet estimate");
+            }
+        }
+        "no model set — claude-3-5-sonnet estimate".to_string()
     }
 
     /// Estimate cost based on model-specific pricing
@@ -278,6 +291,11 @@ pub struct TokenSummary {
     pub total_tokens: usize,
     pub api_calls: usize,
     pub estimated_cost: f64,
+    /// Which rate card `estimated_cost` was computed with — e.g. "rates for
+    /// z-ai/glm-5.2", or a fallback note when the model's rates are unknown.
+    /// Keeps the estimate honest instead of silently applying one model's
+    /// pricing to every model.
+    pub cost_basis: String,
     pub duration: Option<std::time::Duration>,
     pub drift: DriftStats,
 }
@@ -286,12 +304,13 @@ impl std::fmt::Display for TokenSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Tokens: {} (prompt: {}, completion: {}) | API calls: {} | Est. cost: ${:.4}",
+            "Tokens: {} (prompt: {}, completion: {}) | API calls: {} | Est. cost: ${:.4} ({})",
             self.total_tokens,
             self.prompt_tokens,
             self.completion_tokens,
             self.api_calls,
-            self.estimated_cost
+            self.estimated_cost,
+            self.cost_basis
         )?;
 
         if let Some(duration) = self.duration {
@@ -487,6 +506,39 @@ impl ModelPricing {
             capability_tier: 3,
             speed_tier: 1,
         }
+    }
+
+    /// GLM-5.2 via OpenRouter (`z-ai/glm-5.2`) — the shipped default model.
+    /// Rates from the z.ai list price carried by OpenRouter: $1.40 / 1M input
+    /// tokens, $4.40 / 1M output tokens.
+    pub fn glm_5_2() -> Self {
+        Self {
+            model_id: "z-ai/glm-5.2".to_string(),
+            input_cost_per_1k: 0.0014,
+            output_cost_per_1k: 0.0044,
+            max_context: 1_000_000,
+            capability_tier: 2,
+            speed_tier: 2,
+        }
+    }
+}
+
+/// Look up the known rate card for a model id (case-insensitive substring
+/// match against the small built-in map). Returns `None` when the model's
+/// real rates are unknown — callers must not silently bill it at another
+/// model's rates without saying so.
+fn known_pricing_for_model(model_id: &str) -> Option<ModelPricing> {
+    let lower = model_id.to_lowercase();
+    if lower.contains("haiku") {
+        Some(ModelPricing::claude_haiku())
+    } else if lower.contains("opus") {
+        Some(ModelPricing::claude_opus())
+    } else if lower.contains("sonnet") {
+        Some(ModelPricing::claude_sonnet())
+    } else if lower.contains("glm-5.2") {
+        Some(ModelPricing::glm_5_2())
+    } else {
+        None
     }
 }
 
@@ -1505,6 +1557,68 @@ mod tests {
         let cost = tracker.estimate_cost();
         // Should use sonnet pricing as fallback
         assert!((cost - 4.5).abs() < 0.01);
+        // ...but the fallback must be LABELLED, not silent: the summary
+        // shows whose rates were actually applied.
+        let basis = tracker.cost_basis_label();
+        assert!(
+            basis.contains("unknown rates for 'unknown-model-v1'"),
+            "fallback must be labelled, got: {}",
+            basis
+        );
+        let display = format!("{}", tracker.summary());
+        assert!(
+            display.contains("claude-3-5-sonnet estimate"),
+            "summary display must carry the honest basis: {}",
+            display
+        );
+    }
+
+    #[test]
+    fn test_estimate_cost_with_glm_5_2_model() {
+        let tracker = TokenTracker::new();
+        // The shipped default: z-ai/glm-5.2 via OpenRouter.
+        tracker.set_model_id("z-ai/glm-5.2");
+        tracker.record_usage(1_000_000, 100_000);
+
+        let cost = tracker.estimate_cost();
+        // GLM-5.2 pricing: $0.0014/1K input, $0.0044/1K output
+        // = 1000 * 0.0014 + 100 * 0.0044 = $1.4 + $0.44 = $1.84
+        assert!(
+            (cost - 1.84).abs() < 0.01,
+            "GLM-5.2 should use its own rates, not sonnet's; got {}",
+            cost
+        );
+        assert_eq!(tracker.cost_basis_label(), "rates for z-ai/glm-5.2");
+    }
+
+    #[test]
+    fn test_known_pricing_for_model_map() {
+        // Substring, case-insensitive matching over the small built-in map.
+        assert_eq!(
+            known_pricing_for_model("z-ai/glm-5.2").map(|p| p.model_id),
+            Some("z-ai/glm-5.2".to_string())
+        );
+        assert_eq!(
+            known_pricing_for_model("z-ai/glm-5.2-20260616").map(|p| p.model_id),
+            Some("z-ai/glm-5.2".to_string())
+        );
+        assert_eq!(
+            known_pricing_for_model("Claude-3-5-Sonnet").map(|p| p.model_id),
+            Some("claude-3-5-sonnet".to_string())
+        );
+        // Unknown models get NO rate card — never silently sonnet.
+        assert!(known_pricing_for_model("glm-4.6").is_none());
+        assert!(known_pricing_for_model("gpt-whatever").is_none());
+        assert!(known_pricing_for_model("qwen3.6-27b").is_none());
+    }
+
+    #[test]
+    fn test_cost_basis_label_unset_model_is_honest() {
+        let tracker = TokenTracker::new();
+        assert_eq!(
+            tracker.cost_basis_label(),
+            "no model set — claude-3-5-sonnet estimate"
+        );
     }
 
     #[test]
@@ -2118,6 +2232,7 @@ mod cost_optimizer_tests {
             total_tokens: 700,
             api_calls: 3,
             estimated_cost: 0.0045,
+            cost_basis: "rates for claude-3-5-sonnet".to_string(),
             duration: None,
             drift: DriftStats::default(),
         };
@@ -2139,6 +2254,7 @@ mod cost_optimizer_tests {
             total_tokens: 1500,
             api_calls: 2,
             estimated_cost: 0.01,
+            cost_basis: "rates for claude-3-5-sonnet".to_string(),
             duration: Some(std::time::Duration::from_secs_f64(5.3)),
             drift: DriftStats::default(),
         };
@@ -2156,6 +2272,7 @@ mod cost_optimizer_tests {
             total_tokens: 1500,
             api_calls: 2,
             estimated_cost: 0.01,
+            cost_basis: "rates for claude-3-5-sonnet".to_string(),
             duration: None,
             drift: DriftStats {
                 samples: 4,
@@ -2179,6 +2296,7 @@ mod cost_optimizer_tests {
             total_tokens: 1500,
             api_calls: 2,
             estimated_cost: 0.01,
+            cost_basis: "rates for claude-3-5-sonnet".to_string(),
             duration: Some(std::time::Duration::from_secs(10)),
             drift: DriftStats {
                 samples: 2,

@@ -64,3 +64,12 @@ the dead lib.rs shims container/sandbox/threat_modeling.
   `src/agent/interactive.rs` (3.9k), `src/analysis/vector_store.rs` (3.4k),
   `src/devops/process_manager.rs` (3.3k), `src/tokens.rs` (3.1k).
 - Split by responsibility when next touched for a feature; no bulk rewrite.
+
+## Open items carried over from the 2026-07-16 cleanup plan
+
+The 2026-07-16 repo-cleanup program (plan/spec under `docs/superpowers/`) is
+executed and its plan documents are retired. Still unresolved:
+- The merge work behind decision records 1, 3, 4, 5, 6, and 7 above remains
+  follow-up; record 2 is only partially executed (see status note at top).
+- Local disk reclaim (`target/` ~78G, `scripts/node_modules/` ~18M) was
+  deliberately left to the user, per the design's "Out of scope" section.

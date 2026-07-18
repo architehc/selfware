@@ -421,19 +421,6 @@ pub(crate) enum Commands {
     #[command(display_order = 10)]
     Dashboard,
 
-    /// Launch Command Center for SWL workflow monitoring
-    #[cfg(feature = "tui")]
-    #[command(alias = "cc", hide = true)]
-    CommandCenter {
-        /// Update mode: poll or stream
-        #[arg(short = 'u', long = "update-mode", default_value = "poll")]
-        mode: String,
-
-        /// Auto-refresh interval in milliseconds
-        #[arg(short, long, default_value = "100")]
-        refresh: u64,
-    },
-
     /// List journal entries from past tasks
     #[command(alias = "j", display_order = 10)]
     Journal,

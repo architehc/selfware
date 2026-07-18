@@ -489,9 +489,10 @@ fn test_var_value_number_as_bool_negative() {
 
 #[test]
 fn test_yaml_parsing_step_types_without_name_collision() {
-    // Note: set_var and tool step types have a `name` field that collides with
-    // WorkflowStep.name due to #[serde(flatten)], so we test the types that
-    // parse cleanly via YAML and build the rest programmatically.
+    // The set_var, tool, and guardrail step types carry a `name` field that
+    // used to collide with `WorkflowStep.name` under #[serde(flatten)],
+    // making them unparseable from YAML. Their YAML keys are now `var`,
+    // `tool`, and `guardrail` respectively, so every step type parses.
     let yaml = r#"
 name: yaml_types
 description: Tests YAML-safe step types
@@ -543,11 +544,31 @@ steps:
     workflow: other
     inputs:
       param: "value"
+  - id: s9
+    name: Tool
+    type: tool
+    tool: file_read
+    args:
+      path: "src/main.rs"
+  - id: s10
+    name: SetVar
+    type: set_var
+    var: x
+    value: "1"
+  - id: s11
+    name: Guardrail
+    type: guardrail
+    guardrail: policy
+    condition: "true"
+    on_violation: warn
 "#;
     let mut executor = WorkflowExecutor::new();
     executor.load_yaml(yaml).unwrap();
     let wf = executor.get("yaml_types").unwrap();
-    assert_eq!(wf.steps.len(), 8);
+    assert_eq!(wf.steps.len(), 11);
+    assert!(matches!(wf.steps[8].step_type, StepType::Tool { .. }));
+    assert!(matches!(wf.steps[9].step_type, StepType::SetVar { .. }));
+    assert!(matches!(wf.steps[10].step_type, StepType::Guardrail { .. }));
 }
 
 #[test]

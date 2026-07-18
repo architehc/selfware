@@ -13,6 +13,41 @@ fn is_exit_command(input: &str) -> bool {
     matches!(input, "exit" | "quit" | "/exit" | "/quit" | "/q")
 }
 
+/// True when REPL input looks like a slash command (`/word` optionally
+/// followed by arguments) rather than plain chat or an absolute path.
+/// `/mode yolo` and `/analyze` are commands; `/tmp/foo.rs` and `/` are not
+/// (a second `/` before any whitespace means it's a path).
+fn looks_like_slash_command(input: &str) -> bool {
+    let Some(rest) = input.strip_prefix('/') else {
+        return false;
+    };
+    let head = rest.split_whitespace().next().unwrap_or("");
+    !head.is_empty()
+        && !head.contains('/')
+        && head.chars().any(|c| c.is_alphanumeric())
+        && head
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// Reject a slash-prefixed input that matched no built-in command and no
+/// registered skill, instead of forwarding it to the LLM as a paid chat
+/// message. Commands advertised by the registry but with no REPL handler
+/// (`/mode yolo`, `/analyze`, `/garden`, `/journal`, `/palette`) otherwise
+/// burn tokens doing nothing.
+fn reject_unknown_slash_command(input: &str) {
+    let head = input
+        .strip_prefix('/')
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or(input);
+    println!(
+        "{} Unknown command '{}'. Type {} to list available commands.",
+        "✗".bright_red(),
+        format!("/{}", head).bright_white(),
+        "/help".bright_cyan()
+    );
+}
+
 /// Truncate a string at a char boundary, avoiding panics on multi-byte UTF-8.
 fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -2074,6 +2109,14 @@ impl Agent {
                 }
             }
 
+            // Unknown slash command — reject with a pointer to the command
+            // list instead of forwarding it to the LLM as a paid chat
+            // message. Absolute paths (/tmp/foo.rs) fall through to chat.
+            if looks_like_slash_command(input) {
+                reject_unknown_slash_command(input);
+                continue;
+            }
+
             // Expand @file references in input (Qwen Code style)
             let (expanded_input, included_files) = self.expand_file_references(input).await;
             if !included_files.is_empty() {
@@ -3334,6 +3377,14 @@ impl Agent {
                 }
             }
 
+            // Unknown slash command — reject with a pointer to the command
+            // list instead of forwarding it to the LLM as a paid chat
+            // message. Absolute paths (/tmp/foo.rs) fall through to chat.
+            if looks_like_slash_command(input) {
+                reject_unknown_slash_command(input);
+                continue;
+            }
+
             // Display truncated preview and confirm for large pastes (interactive only)
             const LARGE_PASTE_THRESHOLD: usize = 3000;
             const PREVIEW_CHARS: usize = 200;
@@ -3591,6 +3642,48 @@ mod tests {
             assert!(
                 !input.starts_with('/'),
                 "'{}' should not be treated as a slash command",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_slash_command_matches_unhandled_commands() {
+        // Registry-advertised commands with no REPL handler must be caught
+        // by the unknown-slash guard instead of burning a paid chat message.
+        for input in [
+            "/mode yolo",
+            "/analyze",
+            "/analyze ./src",
+            "/garden",
+            "/journal",
+            "/palette",
+            "/totally-made-up",
+            "/help extra args",
+        ] {
+            assert!(
+                looks_like_slash_command(input),
+                "'{}' should be treated as a slash command",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn looks_like_slash_command_passes_paths_and_chat() {
+        // Absolute paths and ordinary chat must still reach the LLM.
+        for input in [
+            "/tmp/foo.rs",
+            "/home/rig/selfware/src/main.rs",
+            "/",
+            "/..",
+            "hello",
+            "fix the /bug in /src/main.rs",
+            "",
+        ] {
+            assert!(
+                !looks_like_slash_command(input),
+                "'{}' should NOT be treated as a slash command",
                 input
             );
         }

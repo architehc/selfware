@@ -1666,3 +1666,84 @@ steps:
             || result.step_results["inner"].status != StepStatus::Completed
     );
 }
+
+// ─── Prefix-overlapping variable substitution ──────────────────────────────
+//
+// Regression: substitution iterated a HashMap doing naive `replace("$name",
+// value)`, so with both `$item` and `$item_count` defined the result depended
+// on iteration order — whenever `item` came first, `$item_count` was
+// corrupted into `<item value>_count` and then shell-executed. Substitution
+// is now a single left-to-right pass with longest-name-first matching.
+
+#[test]
+fn test_substitute_prefix_overlapping_variables() {
+    // Fresh context per round so HashMap iteration order varies; the result
+    // must be stable regardless.
+    for _ in 0..50 {
+        let mut ctx = WorkflowContext::new("/tmp");
+        ctx.set_var("item", "apple");
+        ctx.set_var("item_count", 3);
+
+        assert_eq!(
+            ctx.substitute("$item_count crates of $item"),
+            "3 crates of apple"
+        );
+        assert_eq!(
+            ctx.substitute("${item_count} crates of ${item}"),
+            "3 crates of apple"
+        );
+    }
+}
+
+#[test]
+fn test_substitute_shell_safe_prefix_overlapping_variables() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("item", "apple");
+    ctx.set_var("item_count", 3);
+
+    assert_eq!(
+        ctx.substitute_shell_safe("echo $item_count and $item"),
+        "echo '3' and 'apple'"
+    );
+}
+
+#[test]
+fn test_substitute_does_not_rescan_substituted_values() {
+    // A value that itself looks like a placeholder must be inserted
+    // literally, not re-substituted in a later pass.
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("a", "$b");
+    ctx.set_var("b", "SECRET");
+
+    assert_eq!(ctx.substitute("$a"), "$b");
+    assert_eq!(ctx.substitute("${a}"), "$b");
+}
+
+// ─── Condition evaluation fails closed on malformed expressions ────────────
+//
+// Regression: `defined(flag` (missing paren) or `a == b == c` fell through
+// to the non-empty truthiness check and evaluated to TRUE — conditions the
+// author never validated silently took the then-branch. Malformed
+// expressions now evaluate to false.
+
+#[test]
+fn test_evaluate_condition_fails_closed_on_malformed_expressions() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("flag", true);
+
+    // Malformed expressions fail closed.
+    assert!(!ctx.evaluate_condition("defined(flag"));
+    assert!(!ctx.evaluate_condition("success(step"));
+    assert!(!ctx.evaluate_condition("failed(step"));
+    assert!(!ctx.evaluate_condition("a == b == c"));
+
+    // Well-formed expressions still evaluate correctly.
+    assert!(ctx.evaluate_condition("defined(flag)"));
+    assert!(ctx.evaluate_condition("a == a"));
+    assert!(!ctx.evaluate_condition("a == b"));
+
+    // Plain truthiness for non-expression strings is preserved.
+    assert!(ctx.evaluate_condition("non_empty"));
+    assert!(!ctx.evaluate_condition("0"));
+    assert!(!ctx.evaluate_condition(""));
+}

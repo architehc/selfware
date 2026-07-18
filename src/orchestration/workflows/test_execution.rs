@@ -1926,3 +1926,404 @@ async fn test_mixed_required_optional_steps() {
     assert_eq!(result.step_results["s4"].status, StepStatus::Failed);
     assert_eq!(result.step_results["s5"].status, StepStatus::Completed);
 }
+
+// ─── YAML parsing for tool / set_var / guardrail steps ─────────────────────
+//
+// Regression: `StepType` is flattened into `WorkflowStep`, and the `Tool`,
+// `SetVar`, and `Guardrail` variants each had a `name` field that collided
+// with `WorkflowStep.name`, so serde always failed with "missing field
+// `name`". The YAML keys are now `tool` / `var` / `guardrail`.
+
+#[test]
+fn test_parse_tool_step_yaml() {
+    let yaml = r#"
+name: tool_wf
+description: Workflow with a tool step
+steps:
+  - id: read
+    name: Read a file
+    type: tool
+    tool: file_read
+    args:
+      path: Cargo.toml
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(yaml)
+        .expect("workflow with a tool step must parse");
+
+    let wf = executor.get("tool_wf").unwrap();
+    assert_eq!(wf.steps[0].name, "Read a file");
+    match &wf.steps[0].step_type {
+        StepType::Tool { name, args } => {
+            assert_eq!(name, "file_read");
+            assert_eq!(args.get("path").map(String::as_str), Some("Cargo.toml"));
+        }
+        other => panic!("expected tool step, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_set_var_step_yaml() {
+    let yaml = r#"
+name: set_var_wf
+description: Workflow with a set_var step
+steps:
+  - id: set_greeting
+    name: Set greeting
+    type: set_var
+    var: greeting
+    value: hello
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(yaml)
+        .expect("workflow with a set_var step must parse");
+
+    let wf = executor.get("set_var_wf").unwrap();
+    assert_eq!(wf.steps[0].name, "Set greeting");
+    match &wf.steps[0].step_type {
+        StepType::SetVar { name, value } => {
+            assert_eq!(name, "greeting");
+            assert_eq!(value, "hello");
+        }
+        other => panic!("expected set_var step, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_parse_guardrail_step_yaml() {
+    let yaml = r#"
+name: guardrail_wf
+description: Workflow with a guardrail step
+steps:
+  - id: check
+    name: Secret check
+    description: Step-level description
+    type: guardrail
+    guardrail: no_secrets
+    condition: "true"
+    on_violation: block
+    severity: high
+    guardrail_description: Blocks on leaked secrets
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(yaml)
+        .expect("workflow with a guardrail step must parse");
+
+    let wf = executor.get("guardrail_wf").unwrap();
+    assert_eq!(wf.steps[0].name, "Secret check");
+    assert_eq!(wf.steps[0].description, "Step-level description");
+    match &wf.steps[0].step_type {
+        StepType::Guardrail {
+            name,
+            condition,
+            on_violation,
+            severity,
+            description,
+        } => {
+            assert_eq!(name, "no_secrets");
+            assert_eq!(condition, "true");
+            assert_eq!(on_violation, "block");
+            assert_eq!(severity, "high");
+            assert_eq!(description, "Blocks on leaked secrets");
+        }
+        other => panic!("expected guardrail step, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_repo_workflow_yaml_fixtures_parse() {
+    // Every workflow YAML shipped in the repo's workflows/ directory must parse.
+    let fixtures = [
+        (
+            "product_build.yml",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/workflows/product_build.yml"
+            )),
+        ),
+        (
+            "product_delivery.yml",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/workflows/product_delivery.yml"
+            )),
+        ),
+        (
+            "product_discovery.yml",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/workflows/product_discovery.yml"
+            )),
+        ),
+        (
+            "product_release.yml",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/workflows/product_release.yml"
+            )),
+        ),
+    ];
+
+    for (file, yaml) in fixtures {
+        let mut executor = WorkflowExecutor::new();
+        executor
+            .load_yaml(yaml)
+            .unwrap_or_else(|e| panic!("workflows/{} must parse: {}", file, e));
+    }
+}
+
+// ─── Exactly-once execution for steps referenced by control flow ───────────
+//
+// Regression: a step referenced by a LATER Condition/Loop executed twice —
+// once in the top-level pass (the control-flow-managed marking only happened
+// when the Condition/Loop itself ran) and once inline. Referenced steps are
+// now pre-marked before the top-level pass, so each step executes exactly
+// once, owned by its control-flow construct.
+
+#[tokio::test]
+async fn test_condition_referenced_step_executes_exactly_once() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+
+    let yaml = r#"
+name: condition_double_exec
+description: Step referenced by a later condition
+steps:
+  - id: billable
+    name: Billable LLM step
+    type: llm
+    prompt: "do work"
+  - id: gate
+    name: Gate
+    type: condition
+    if: "true"
+    then:
+      - billable
+"#;
+    let mut executor = WorkflowExecutor::new().with_llm_handler(move |_, _| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("done")
+    });
+    executor.load_yaml(yaml).unwrap();
+
+    let result = executor
+        .execute(
+            "condition_double_exec",
+            HashMap::new(),
+            PathBuf::from("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a step referenced by a condition must execute exactly once"
+    );
+    assert_eq!(
+        result.step_results["billable"].status,
+        StepStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn test_loop_referenced_step_executes_only_per_iteration() {
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&calls);
+
+    let yaml = r#"
+name: loop_double_exec
+description: Step referenced by a later loop
+steps:
+  - id: work
+    name: Per-item work
+    type: llm
+    prompt: "process ${item}"
+  - id: loop
+    name: Loop
+    type: loop
+    for: item
+    in: "a, b, c"
+    do:
+      - work
+"#;
+    let mut executor = WorkflowExecutor::new().with_llm_handler(move |_, _| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok("done")
+    });
+    executor.load_yaml(yaml).unwrap();
+
+    let result = executor
+        .execute("loop_double_exec", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "a loop body step must run once per iteration, not per iteration plus a top-level pass"
+    );
+}
+
+#[tokio::test]
+async fn test_condition_shell_side_effect_runs_once() {
+    // Shell side effects must not re-run: the marker file gets exactly one
+    // line even though `mark` is referenced by the later condition.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker.txt");
+
+    let yaml = r#"
+name: condition_shell_once
+description: Shell step referenced by a later condition
+steps:
+  - id: mark
+    name: Marker
+    type: shell
+    command: "echo run >> marker.txt"
+  - id: gate
+    name: Gate
+    type: condition
+    if: "true"
+    then:
+      - mark
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(yaml).unwrap();
+
+    let result = executor
+        .execute(
+            "condition_shell_once",
+            HashMap::new(),
+            dir.path().to_path_buf(),
+        )
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    let contents = std::fs::read_to_string(&marker).unwrap();
+    assert_eq!(
+        contents.lines().count(),
+        1,
+        "shell side effect must run exactly once, got: {:?}",
+        contents
+    );
+}
+
+// ─── Guardrail steps: fail-closed violation handling ───────────────────────
+//
+// Regression: a violated guardrail only failed the workflow for
+// `on_violation: block`; any other string — including typos of "block" —
+// was silently downgraded to a log line. Now only the explicitly
+// non-blocking actions (warn/log/alert) allow continuation, and evaluation
+// errors already failed closed.
+
+fn guardrail_workflow_yaml(on_violation: &str, condition: &str) -> String {
+    format!(
+        r#"
+name: guardrail_exec
+description: Guardrail execution semantics
+steps:
+  - id: guard
+    name: Guard
+    type: guardrail
+    guardrail: policy
+    condition: "{condition}"
+    on_violation: {on_violation}
+  - id: after
+    name: After
+    type: log
+    message: "reached"
+"#
+    )
+}
+
+#[tokio::test]
+async fn test_guardrail_step_block_action_fails_workflow() {
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(&guardrail_workflow_yaml("block", "false"))
+        .unwrap();
+
+    let result = executor
+        .execute("guardrail_exec", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, WorkflowStatus::Failed);
+    assert_eq!(result.step_results["guard"].status, StepStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_guardrail_step_warn_action_continues() {
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(&guardrail_workflow_yaml("warn", "false"))
+        .unwrap();
+
+    let result = executor
+        .execute("guardrail_exec", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    assert_eq!(result.step_results["guard"].status, StepStatus::Completed);
+    assert_eq!(result.step_results["after"].status, StepStatus::Completed);
+}
+
+#[tokio::test]
+async fn test_guardrail_step_unknown_action_fails_closed() {
+    // A typo'd action ("blok") must block, not be downgraded to a log line.
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(&guardrail_workflow_yaml("blok", "false"))
+        .unwrap();
+
+    let result = executor
+        .execute("guardrail_exec", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, WorkflowStatus::Failed);
+    assert_eq!(result.step_results["guard"].status, StepStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_guardrail_step_eval_error_fails_closed() {
+    // An unevaluatable condition must fail the step, not pass silently.
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(&guardrail_workflow_yaml(
+            "warn",
+            "totally unresolvable expression",
+        ))
+        .unwrap();
+
+    let result = executor
+        .execute("guardrail_exec", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert_eq!(result.status, WorkflowStatus::Failed);
+    assert_eq!(result.step_results["guard"].status, StepStatus::Failed);
+}
+
+#[tokio::test]
+async fn test_guardrail_step_passing_condition_continues() {
+    let mut executor = WorkflowExecutor::new();
+    executor
+        .load_yaml(&guardrail_workflow_yaml("block", "true"))
+        .unwrap();
+
+    let result = executor
+        .execute("guardrail_exec", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    assert_eq!(result.step_results["guard"].status, StepStatus::Completed);
+}

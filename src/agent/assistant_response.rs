@@ -35,6 +35,23 @@ pub(super) struct AssistantStepResponse {
 }
 
 impl Agent {
+    /// Accumulate a NON-streaming response's token usage into the session-wide
+    /// counters and display, mirroring what the streaming path does on its
+    /// `StreamChunk::Usage` arm (see `agent/streaming.rs`). Without this, runs
+    /// with `agent.streaming = false` — and streaming-failure fallback calls —
+    /// never fed `output::get_total_tokens()`, so `/cost` and the session
+    /// stats showed 0 tokens for the entire run.
+    fn record_nonstreaming_usage(&self, usage: &crate::api::types::Usage) {
+        let prompt = usage.prompt_tokens as u64;
+        let completion = usage.completion_tokens as u64;
+        output::record_tokens(prompt, completion);
+        output::print_token_usage(prompt, completion);
+        self.emit_event(AgentEvent::TokenUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+        });
+    }
+
     pub(super) async fn get_assistant_step_response(
         &mut self,
         use_last_message: bool,
@@ -373,6 +390,10 @@ impl Agent {
                         }
                     };
 
+                    // The fallback is a NON-streaming response: its usage never
+                    // passes through the SSE usage arm, so record it here.
+                    self.record_nonstreaming_usage(&response.usage);
+
                     let choice = response
                         .choices
                         .into_iter()
@@ -439,6 +460,10 @@ impl Agent {
                     return Err(e);
                 }
             };
+
+            // A non-streaming response never produces a `StreamChunk::Usage`
+            // event, so accumulate its usage into the session totals here.
+            self.record_nonstreaming_usage(&response.usage);
 
             let choice = response
                 .choices
@@ -946,6 +971,92 @@ mod terminal_error_tests {
             2,
             "expected one streaming attempt plus one fallback request, got {}",
             requests.len()
+        );
+        server.stop().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-streaming usage accumulation (session token totals)
+    // -----------------------------------------------------------------------
+
+    /// Non-streaming configs must feed the session-wide token counters too:
+    /// previously the totals stayed 0 for the whole run because only the
+    /// streaming path's SSE usage arm recorded them.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+    )]
+    async fn non_streaming_step_accumulates_session_token_totals() {
+        let server = MockLlmServer::builder()
+            .with_response("sync answer")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.messages.push(Message::user("Hello"));
+
+        let (before_prompt, before_completion) = crate::output::get_total_tokens();
+        let result = agent.get_assistant_step_response(false).await;
+        assert!(
+            result.is_ok(),
+            "non-streaming step should succeed: {:?}",
+            result.err()
+        );
+
+        // The mock reports usage of 10 prompt / 5 completion per response.
+        // Concurrent tests can only ADD to these process-global counters,
+        // never subtract, so a >= assertion on the delta is race-safe.
+        let (after_prompt, after_completion) = crate::output::get_total_tokens();
+        assert!(
+            after_prompt.saturating_sub(before_prompt) >= 10,
+            "non-streaming usage must accumulate prompt tokens (before={before_prompt}, after={after_prompt})"
+        );
+        assert!(
+            after_completion.saturating_sub(before_completion) >= 5,
+            "non-streaming usage must accumulate completion tokens (before={before_completion}, after={after_completion})"
+        );
+        server.stop().await;
+    }
+
+    /// The streaming→non-streaming fallback is also a non-streaming response:
+    /// its usage must land in the session totals as well.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+    )]
+    async fn streaming_fallback_accumulates_session_token_totals() {
+        let server = MockLlmServer::builder()
+            .with_error(500, r#"{"error":"internal server error"}"#)
+            .with_response("fallback answer")
+            .build()
+            .await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), true);
+        config.retry = crate::config::RetrySettings {
+            max_retries: 0,
+            base_delay_ms: 1,
+            max_delay_ms: 1,
+        };
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.messages.push(Message::user("Hello"));
+
+        let (before_prompt, before_completion) = crate::output::get_total_tokens();
+        let result = agent.get_assistant_step_response(false).await;
+        assert!(
+            result.is_ok(),
+            "fallback step should succeed: {:?}",
+            result.err()
+        );
+
+        let (after_prompt, after_completion) = crate::output::get_total_tokens();
+        assert!(
+            after_prompt.saturating_sub(before_prompt) >= 10,
+            "fallback usage must accumulate prompt tokens (before={before_prompt}, after={after_prompt})"
+        );
+        assert!(
+            after_completion.saturating_sub(before_completion) >= 5,
+            "fallback usage must accumulate completion tokens (before={before_completion}, after={after_completion})"
         );
         server.stop().await;
     }

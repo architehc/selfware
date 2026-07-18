@@ -4,7 +4,6 @@
 //!
 //! Features:
 //! - Concurrent agent execution with configurable parallelism
-//! - Streaming responses from all agents
 //! - Task distribution and coordination
 //! - Shared context and results aggregation
 

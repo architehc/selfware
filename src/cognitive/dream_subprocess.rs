@@ -1,17 +1,17 @@
-//! AutoDream Subprocess - Background Memory Consolidation Runner
+//! AutoDream Background Task - Memory Consolidation Runner
 //!
-//! This module handles spawning the autoDream subprocess which runs independently
-//! of the main Selfware process. The subprocess:
+//! This module handles running the autoDream consolidation as an in-process
+//! background tokio task, independently of the main agent loop. The task:
 //!
-//! - Gets READ-ONLY access to the project (no modifications allowed)
-//! - Uses the cheapest available model for summarization
+//! - Only reads session files and writes MEMORY.md (no project modifications)
+//! - Uses the user's own configured endpoint/model for summarization
 //! - Runs in the background, non-blocking the main process
 //! - Consolidates memories and writes to MEMORY.md
 //!
 //! # Architecture
 //!
 //! ```text
-//! Main Process                    AutoDream Subprocess
+//! Main Process                    AutoDream Background Task
 //! ┌─────────────┐                ┌─────────────────────┐
 //! │ Session ends│───spawn───────►│ 1. Orient           │
 //! │ Check gates │                │ 2. Gather Signal    │
@@ -22,10 +22,8 @@
 
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 use crate::cognitive::dream::{
@@ -91,12 +89,35 @@ impl AutoDreamConfig {
         self.api_key = Some(key.into());
         self
     }
+
+    /// Build from the user's loaded selfware config (endpoint, model, API
+    /// key) so dream consolidation talks to the SAME backend as the rest of
+    /// the agent — not the hardcoded `localhost:8000`/`qwen3.5-9b` default
+    /// that made `/dream force` ignore the configured backend. Falls back to
+    /// the built-in defaults (with a warning) when no config can be loaded.
+    pub fn from_user_config() -> Self {
+        match crate::config::Config::load(None) {
+            Ok(cfg) => Self {
+                model: cfg.model,
+                endpoint: cfg.endpoint,
+                api_key: cfg.api_key.as_ref().map(|k| k.expose().to_string()),
+                ..Self::default()
+            },
+            Err(e) => {
+                warn!(
+                    "autoDream: could not load user config ({}); using built-in defaults",
+                    e
+                );
+                Self::default()
+            }
+        }
+    }
 }
 
-/// AutoDream subprocess handle
+/// AutoDream background-task handle
 pub struct AutoDreamHandle {
-    /// The spawned process
-    process: tokio::process::Child,
+    /// The spawned background consolidation task
+    task: tokio::task::JoinHandle<Result<DreamResult>>,
     /// Project key for this dream
     project_key: String,
     /// Start time
@@ -104,71 +125,62 @@ pub struct AutoDreamHandle {
 }
 
 impl AutoDreamHandle {
-    /// Check if the dream process is still running
+    /// Check if the dream task is still running
     pub async fn is_running(&mut self) -> bool {
-        match self.process.try_wait() {
-            Ok(None) => true,
-            Ok(Some(_)) => false,
-            Err(_) => false,
-        }
+        !self.task.is_finished()
     }
 
     /// Wait for the dream to complete with timeout
     pub async fn wait_with_timeout(&mut self, timeout: Duration) -> Result<DreamResult> {
-        let wait_result = tokio::time::timeout(timeout, self.process.wait()).await;
-
-        match wait_result {
-            Ok(Ok(exit_status)) => {
+        match tokio::time::timeout(timeout, &mut self.task).await {
+            Ok(Ok(Ok(result))) => {
                 let duration = self.start_time.elapsed().as_secs();
-
-                if exit_status.success() {
+                if result.success {
                     info!(
                         "AutoDream completed successfully for {} in {}s",
                         self.project_key, duration
                     );
-                    Ok(DreamResult::success(vec![
-                        DreamPhase::Orient,
-                        DreamPhase::Gather,
-                        DreamPhase::Consolidate,
-                        DreamPhase::PruneAndIndex,
-                    ])
-                    .with_consolidated(0)) // Count would come from output parsing
                 } else {
-                    let code = exit_status.code().unwrap_or(-1);
                     warn!(
-                        "AutoDream failed with exit code {} for {}",
-                        code, self.project_key
+                        "AutoDream completed with errors for {}: {:?}",
+                        self.project_key, result.errors
                     );
-                    Ok(DreamResult::failure(format!(
-                        "Process exited with code {}",
-                        code
-                    )))
                 }
+                Ok(result)
             }
-            Ok(Err(e)) => {
-                error!("Failed to wait for autoDream: {}", e);
-                Err(anyhow!("Process wait error: {}", e))
+            Ok(Ok(Err(e))) => {
+                error!("AutoDream failed for {}: {}", self.project_key, e);
+                Ok(DreamResult::failure(format!("{}", e)))
+            }
+            Ok(Err(join_err)) => {
+                error!(
+                    "AutoDream task join error for {}: {}",
+                    self.project_key, join_err
+                );
+                Err(anyhow!("Dream task join error: {}", join_err))
             }
             Err(_) => {
                 warn!("AutoDream timed out for {}", self.project_key);
-                let _ = self.process.start_kill();
+                self.task.abort();
                 Ok(DreamResult::failure("Dream process timed out"))
             }
         }
     }
 
-    /// Kill the dream process
+    /// Kill the dream task
     pub async fn kill(&mut self) -> Result<()> {
-        info!("Killing autoDream process for {}", self.project_key);
-        self.process.start_kill()?;
+        info!("Killing autoDream task for {}", self.project_key);
+        self.task.abort();
         Ok(())
     }
 }
 
-/// Spawn an autoDream subprocess for the given project
+/// Spawn an autoDream background task for the given project
 ///
-/// This spawns a separate process that runs the dream consolidation.
-/// The subprocess has read-only access to project files.
+/// Runs the dream consolidation as an in-process background tokio task. (The
+/// previous implementation spawned a `selfware` subprocess with a
+/// `--dream-consolidate` CLI flag that never existed, so every auto-dream
+/// child died instantly on the argument parser's unknown-flag error.)
 pub async fn spawn_autodream(
     project_path: &Path,
     project_key: &str,
@@ -176,56 +188,30 @@ pub async fn spawn_autodream(
     dream_config: &DreamConfig,
 ) -> Result<AutoDreamHandle> {
     info!(
-        "Spawning autoDream subprocess for {} at {:?}",
+        "Spawning autoDream background task for {} at {:?}",
         project_key, project_path
     );
 
-    // Get the path to the current executable
-    let current_exe = std::env::current_exe()?;
+    let project_path = project_path.to_path_buf();
+    let project_key_owned = project_key.to_string();
+    let config = config.clone();
+    let dream_config = dream_config.clone();
 
-    // Build command arguments for the subprocess mode
-    let memory_file = dream_config.memory_file_path(project_key);
-
-    // Create the command with read-only file access
-    // Note: We use --dream-mode flag to indicate this is a dream subprocess
-    let mut cmd = Command::new(&current_exe);
-    cmd.arg("--dream-consolidate")
-        .arg("--project-path")
-        .arg(project_path)
-        .arg("--project-key")
-        .arg(project_key)
-        .arg("--memory-file")
-        .arg(&memory_file)
-        .arg("--model")
-        .arg(&config.model)
-        .arg("--endpoint")
-        .arg(&config.endpoint)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null()); // No stdin for safety
-
-    // Set environment variables for the subprocess
-    // Mark as read-only mode - subprocess should not modify project files
-    cmd.env("SELFWARE_DREAM_MODE", "1");
-    cmd.env("SELFWARE_READONLY", "1");
-
-    // Spawn the process
-    let process = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Failed to spawn autoDream subprocess: {}", e))?;
-
-    info!("AutoDream subprocess spawned with PID: {:?}", process.id());
+    let task = tokio::spawn(async move {
+        run_dream_consolidation(&project_path, &project_key_owned, &config, &dream_config).await
+    });
 
     Ok(AutoDreamHandle {
-        process,
+        task,
         project_key: project_key.to_string(),
         start_time: std::time::Instant::now(),
     })
 }
 
-/// Run the dream consolidation in-process (for testing or when subprocess is disabled)
+/// Run the dream consolidation in-process
 ///
-/// This is the actual implementation of the four-phase dream process.
+/// This is the actual implementation of the four-phase dream process. It is
+/// used directly by `/dream force` and by the auto-dream background task.
 pub async fn run_dream_consolidation(
     project_path: &Path,
     project_key: &str,
@@ -271,25 +257,29 @@ pub async fn run_dream_consolidation(
         }
     };
 
-    // Phase 3: Consolidate - Merge similar memories
+    // Phase 3: Consolidate - Merge similar memories via the configured LLM
     info!("Dream Phase 3: Consolidate");
-    let consolidated_count = match consolidate_phase(&memories, config).await {
-        Ok(count) => {
-            debug!("Consolidated {} memories", count);
+    let consolidation = match consolidate_phase(&memories, config).await {
+        Ok(content) => {
+            debug!("Consolidated {} memories", memories.len());
             phases_completed.push(DreamPhase::Consolidate);
-            count
+            Some(content)
         }
         Err(e) => {
             error!("Consolidate phase failed: {}", e);
             errors.push(format!("Consolidate: {}", e));
-            0
+            None
         }
     };
+    let consolidated_count = consolidation
+        .as_deref()
+        .map(count_consolidated_entries)
+        .unwrap_or(0);
 
-    // Phase 4: Prune & Index - Cap size, remove stale, re-index
+    // Phase 4: Prune & Index - merge consolidated output, cap size, re-index
     info!("Dream Phase 4: Prune & Index");
     let pruned_count =
-        match prune_and_index_phase(project_key, dream_config, consolidated_count).await {
+        match prune_and_index_phase(project_key, dream_config, consolidation.as_deref()).await {
             Ok(count) => {
                 debug!("Pruned {} memories", count);
                 phases_completed.push(DreamPhase::PruneAndIndex);
@@ -303,7 +293,12 @@ pub async fn run_dream_consolidation(
         };
 
     let duration = start_time.elapsed().as_secs();
-    let success = errors.is_empty() || phases_completed.len() >= 3; // Allow 1 phase to fail
+    // Honest success: when the gather phase found memories but the
+    // consolidation LLM call FAILED, the dream did not do its job — report
+    // failure instead of the old "success with a discarded LLM response".
+    // With nothing to consolidate, the housekeeping phases alone suffice.
+    let consolidate_failed = !memories.is_empty() && consolidation.is_none();
+    let success = !consolidate_failed && (errors.is_empty() || phases_completed.len() >= 3);
 
     info!(
         "Dream consolidation completed for {}: {} phases, {} consolidated, {} pruned, {}s",
@@ -391,64 +386,78 @@ async fn gather_phase(session_files: &[PathBuf], max_sessions: usize) -> Result<
     Ok(all_memories)
 }
 
-/// Phase 3: Consolidate - Run LLM to merge similar memories (STUB)
+/// Phase 3: Consolidate - Run LLM to merge similar memories
 ///
-/// ⚠️ WARNING: This is a STUB implementation. It does NOT actually call an LLM
-/// to consolidate memories. It simply returns the input count without any
-/// deduplication or merging.
-/// TODO: Implement actual LLM call for memory consolidation
-async fn consolidate_phase(memories: &[MemoryEntry], config: &AutoDreamConfig) -> Result<usize> {
+/// Uses the standard [`crate::api::ApiClient`] path (correct
+/// `/chat/completions` URL, auth, retries, credential-endpoint safety) with
+/// the endpoint/model from [`AutoDreamConfig`] — which
+/// [`AutoDreamConfig::from_user_config`] populates from the user's own
+/// config, not a hardcoded localhost default. The consolidated markdown is
+/// RETURNED and merged into MEMORY.md by phase 4 — the old implementation
+/// POSTed to the bare endpoint (404), discarded the body, and still reported
+/// success.
+async fn consolidate_phase(memories: &[MemoryEntry], config: &AutoDreamConfig) -> Result<String> {
     if memories.is_empty() {
-        return Ok(0);
+        return Ok(String::new());
     }
 
     let prompt = crate::cognitive::dream::generate_consolidation_prompt(memories);
-    let api_key = config
-        .api_key
-        .clone()
-        .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-        .or_else(|| std::env::var("LLM_API_KEY").ok())
+
+    // Build a Config view of the AutoDream settings and go through the
+    // standard API client. `ApiClient::new` enforces credential-endpoint
+    // safety (no API key over plaintext remote HTTP).
+    let agent = crate::config::AgentConfig {
+        step_timeout_secs: config.llm_timeout_secs.max(60),
+        ..Default::default()
+    };
+    let client_config = crate::config::Config {
+        endpoint: config.endpoint.clone(),
+        model: config.model.clone(),
+        api_key: config
+            .api_key
+            .clone()
+            .filter(|k| !k.is_empty())
+            .map(crate::config::RedactedString::new),
+        temperature: 0.3,
+        max_tokens: 2048,
+        agent,
+        ..Default::default()
+    };
+
+    let client = crate::api::ApiClient::new(&client_config)?;
+    let response = client
+        .chat(
+            vec![crate::api::Message::user(prompt)],
+            None,
+            crate::api::ThinkingMode::Disabled,
+        )
+        .await?;
+
+    let content = response
+        .choices
+        .first()
+        .map(|c| c.message.content.text().to_string())
         .unwrap_or_default();
 
-    crate::config::api_key::assert_credential_endpoint_safe(&config.endpoint, !api_key.is_empty())?;
-
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": config.model,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3,
-        "max_tokens": 2048,
-    });
-
-    let mut request = client
-        .post(&config.endpoint)
-        .header("Content-Type", "application/json")
-        .timeout(Duration::from_secs(config.llm_timeout_secs))
-        .json(&body);
-    if !api_key.is_empty() {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
+    if content.trim().is_empty() {
+        return Err(anyhow!(
+            "consolidation LLM ({}) returned empty content",
+            config.model
+        ));
     }
 
-    let response = request.send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(anyhow!("consolidation LLM request failed: {status} {text}"));
-    }
+    info!(
+        "consolidated {} memories via {} ({})",
+        memories.len(),
+        config.model,
+        config.endpoint
+    );
+    Ok(content)
+}
 
-    let json: serde_json::Value = response.json().await?;
-    let content = json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("");
-
-    if content.is_empty() {
-        warn!("consolidation LLM returned empty content");
-        return Ok(memories.len());
-    }
-
-    // Count consolidated bullets under each section.
+/// Count the consolidated bullet entries under `## ` sections in the LLM's
+/// consolidation output (used for honest reporting).
+fn count_consolidated_entries(content: &str) -> usize {
     let mut in_section = false;
     let mut count = 0usize;
     for line in content.lines() {
@@ -461,21 +470,19 @@ async fn consolidate_phase(memories: &[MemoryEntry], config: &AutoDreamConfig) -
             count += 1;
         }
     }
-
-    info!(
-        "consolidated {} memories into {} entries via {}",
-        memories.len(),
-        count,
-        config.model
-    );
-    Ok(count.max(1))
+    count
 }
 
 /// Phase 4: Prune & Index - Cap size and remove stale memories
+///
+/// `consolidated` is the LLM's consolidation output from phase 3 (when it
+/// succeeded): its entries are MERGED into the store before pruning, so the
+/// consolidation call is not discarded. Entries identical to an existing
+/// memory line are de-duplicated.
 async fn prune_and_index_phase(
     project_key: &str,
     dream_config: &DreamConfig,
-    _new_memories_count: usize,
+    consolidated: Option<&str>,
 ) -> Result<usize> {
     let memory_path = dream_config.memory_file_path(project_key);
 
@@ -489,6 +496,26 @@ async fn prune_and_index_phase(
             sections: std::collections::HashMap::new(),
         }
     };
+
+    // Merge the phase-3 consolidation output into the store.
+    if let Some(content) = consolidated {
+        let incoming = MemoryStore::parse(content);
+        let mut added = 0usize;
+        for entry in incoming.entries {
+            let is_dup = store.entries.iter().any(|e| e.content == entry.content);
+            if !is_dup {
+                let idx = store.entries.len();
+                store
+                    .sections
+                    .entry(entry.section.clone())
+                    .or_default()
+                    .push(idx);
+                store.entries.push(entry);
+                added += 1;
+            }
+        }
+        debug!("Merged {} consolidated memories into MEMORY.md", added);
+    }
 
     // Remove stale memories
     let pruned_stale = store.prune_stale(dream_config.stale_memory_days);
@@ -521,7 +548,7 @@ async fn prune_and_index_phase(
 /// Check if autoDream should run after a session ends
 ///
 /// This is called by the main process after a session ends.
-/// It checks the three gates and spawns the subprocess if appropriate.
+/// It checks the three gates and spawns the background task if appropriate.
 pub async fn check_and_spawn_autodream(
     project_path: &Path,
     project_key: &str,
@@ -555,7 +582,7 @@ pub async fn check_and_spawn_autodream(
         return Ok(None);
     }
 
-    // Spawn the autoDream subprocess
+    // Spawn the autoDream background task
     let handle = spawn_autodream(project_path, project_key, auto_config, dream_config).await?;
 
     // Save state (with lock held)
@@ -628,7 +655,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let dream_config = DreamConfig::new().with_base_dir(dir.path());
 
-        let count = prune_and_index_phase("test_project", &dream_config, 0)
+        let count = prune_and_index_phase("test_project", &dream_config, None)
             .await
             .unwrap();
         assert_eq!(count, 0);
@@ -649,5 +676,162 @@ mod tests {
         assert_eq!(result.phases_completed.len(), 2);
         assert_eq!(result.memories_consolidated, 10);
         assert_eq!(result.memories_pruned, 5);
+    }
+
+    // ── /dream force backend fixes (whole-repo review, P2) ──
+
+    #[test]
+    fn test_from_user_config_picks_up_user_backend() {
+        let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_CONFIG"]);
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("selfware.toml");
+        std::fs::write(
+            &config_path,
+            "endpoint = \"http://127.0.0.1:9999/v1\"\nmodel = \"dream-test-model\"\n",
+        )
+        .unwrap();
+        _env.set("SELFWARE_CONFIG", &config_path);
+
+        let config = AutoDreamConfig::from_user_config();
+        assert_eq!(config.endpoint, "http://127.0.0.1:9999/v1");
+        assert_eq!(config.model, "dream-test-model");
+    }
+
+    #[test]
+    fn test_count_consolidated_entries() {
+        let content = "# Project Memory\n\n## Facts (consolidated)\n- fact A\n- fact B\n\n## Preferences (user-defined)\n- pref C\n";
+        assert_eq!(count_consolidated_entries(content), 3);
+        assert_eq!(count_consolidated_entries(""), 0);
+        assert_eq!(count_consolidated_entries("no sections\n- orphan\n"), 0);
+    }
+
+    /// A dream fixture: project with a parseable session log + a mock LLM
+    /// serving the consolidation response.
+    async fn dream_fixture(
+        response: &str,
+    ) -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        AutoDreamConfig,
+        DreamConfig,
+        crate::testing::mock_api::MockLlmServer,
+    ) {
+        let project = tempdir().unwrap();
+        let memory_dir = tempdir().unwrap();
+        tokio::fs::create_dir(project.path().join(".selfware"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            project.path().join(".selfware").join("session_1.json"),
+            "- [2026-07-01] Project uses Rust\n- [2026-07-02] Tests are thorough\n",
+        )
+        .await
+        .unwrap();
+
+        let server = crate::testing::mock_api::MockLlmServer::builder()
+            .with_response(response)
+            .build()
+            .await;
+        let auto_config = AutoDreamConfig::default()
+            .with_endpoint(format!("{}/v1", server.url()))
+            .with_model("mock-dream-model");
+        let dream_config = DreamConfig::new().with_base_dir(memory_dir.path());
+        (project, memory_dir, auto_config, dream_config, server)
+    }
+
+    #[tokio::test]
+    async fn test_run_dream_consolidation_uses_configured_backend_and_keeps_content() {
+        let (project, memory_dir, auto_config, dream_config, server) =
+            dream_fixture("## Facts (consolidated)\n- Project uses Rust\n- Tests are thorough\n")
+                .await;
+
+        let result =
+            run_dream_consolidation(project.path(), "test_project", &auto_config, &dream_config)
+                .await
+                .unwrap();
+
+        assert!(
+            result.success,
+            "dream should succeed against the mock backend: {:?}",
+            result.errors
+        );
+        assert_eq!(result.memories_consolidated, 2);
+        // The mock only answers /v1/chat/completions — a hit proves the
+        // correct URL was used (the old code POSTed to the bare endpoint).
+        assert_eq!(server.captured_request_bodies().await.len(), 1);
+
+        // The consolidation content is NOT discarded: it lands in MEMORY.md.
+        let memory_path = dream_config.memory_file_path("test_project");
+        let memory = std::fs::read_to_string(&memory_path).unwrap();
+        assert!(
+            memory.contains("Project uses Rust"),
+            "consolidated content persisted: {}",
+            memory
+        );
+        let _ = memory_dir;
+    }
+
+    #[tokio::test]
+    async fn test_run_dream_consolidation_backend_error_reports_failure() {
+        let project = tempdir().unwrap();
+        let memory_dir = tempdir().unwrap();
+        tokio::fs::create_dir(project.path().join(".selfware"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            project.path().join(".selfware").join("session_1.json"),
+            "- [2026-07-01] Project uses Rust\n",
+        )
+        .await
+        .unwrap();
+
+        // 400 is terminal (no retry backoff) — the point is that ANY backend
+        // error must surface as an honest failure, not a discarded-call
+        // "success".
+        let server = crate::testing::mock_api::MockLlmServer::builder()
+            .with_error(400, "bad request")
+            .build()
+            .await;
+        let auto_config = AutoDreamConfig::default()
+            .with_endpoint(format!("{}/v1", server.url()))
+            .with_model("mock-dream-model");
+        let dream_config = DreamConfig::new().with_base_dir(memory_dir.path());
+
+        let result =
+            run_dream_consolidation(project.path(), "test_project", &auto_config, &dream_config)
+                .await
+                .unwrap();
+
+        assert!(
+            !result.success,
+            "backend failure must be reported as failure, not success"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.contains("Consolidate")),
+            "consolidation error recorded: {:?}",
+            result.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spawn_autodream_runs_in_process_and_returns_real_result() {
+        let (project, memory_dir, auto_config, dream_config, server) =
+            dream_fixture("## Facts (consolidated)\n- Project uses Rust\n").await;
+
+        let mut handle =
+            spawn_autodream(project.path(), "test_project", &auto_config, &dream_config)
+                .await
+                .unwrap();
+        let result = handle
+            .wait_with_timeout(Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        // The handle returns the REAL DreamResult — not a fabricated
+        // all-phases success with a hardcoded 0 consolidation count.
+        assert!(result.success, "spawn result: {:?}", result.errors);
+        assert_eq!(result.memories_consolidated, 1);
+        assert!(!handle.is_running().await);
+        let _ = (memory_dir, server);
     }
 }

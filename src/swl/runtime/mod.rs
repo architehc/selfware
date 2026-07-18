@@ -1047,6 +1047,32 @@ pub struct ExecutionResult {
     pub duration_ms: u64,
 }
 
+impl Clone for SwlRuntime {
+    /// Faithful clone: shares the API client, tool registry, and execution
+    /// context (so trace events and state written by the clone are visible to
+    /// the original), and preserves `dry_run` / `max_tool_iterations` /
+    /// `workflow_name`. The safety checker is rebuilt from the same config.
+    ///
+    /// `GuardedSwlRuntime` relies on this when spawning parallel agent tasks —
+    /// cloning used to substitute a fresh dry-run runtime, so guarded parallel
+    /// and map-reduce workflows returned `[DRY-RUN]` placeholder strings while
+    /// reporting `Completed`.
+    fn clone(&self) -> Self {
+        Self {
+            client: Arc::clone(&self.client),
+            tool_registry: Arc::clone(&self.tool_registry),
+            context: Arc::clone(&self.context),
+            dry_run: self.dry_run,
+            last_workflow_duration_ms: AtomicU64::new(
+                self.last_workflow_duration_ms.load(Ordering::Relaxed),
+            ),
+            max_tool_iterations: self.max_tool_iterations,
+            workflow_name: self.workflow_name.clone(),
+            safety: crate::safety::SafetyChecker::new(&self.safety.config),
+        }
+    }
+}
+
 /// Execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionStatus {

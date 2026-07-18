@@ -139,6 +139,10 @@ impl From<i32> for VarValue {
 pub enum StepType {
     /// Execute a tool
     Tool {
+        /// Tool to execute. Serialized as `tool` because the flattened
+        /// `WorkflowStep.name` already claims the `name` key — without the
+        /// rename the two collide and the step can never deserialize.
+        #[serde(rename = "tool")]
         name: String,
         #[serde(default)]
         args: HashMap<String, String>,
@@ -182,7 +186,12 @@ pub enum StepType {
         do_steps: Vec<String>,
     },
     /// Set a variable
-    SetVar { name: String, value: String },
+    SetVar {
+        /// Variable to set. Serialized as `var` (see `Tool` above).
+        #[serde(rename = "var")]
+        name: String,
+        value: String,
+    },
     /// Log a message
     Log {
         message: String,
@@ -201,7 +210,8 @@ pub enum StepType {
     },
     /// Guardrail enforcement step
     Guardrail {
-        /// Guardrail name
+        /// Guardrail name. Serialized as `guardrail` (see `Tool` above).
+        #[serde(rename = "guardrail")]
         name: String,
         /// Condition expression to evaluate
         condition: String,
@@ -210,8 +220,10 @@ pub enum StepType {
         /// Severity level: "info", "low", "medium", "high", "critical"
         #[serde(default)]
         severity: String,
-        /// Description of what this guardrail checks
-        #[serde(default)]
+        /// Description of what this guardrail checks. Serialized as
+        /// `guardrail_description` because the flattened
+        /// `WorkflowStep.description` already claims the `description` key.
+        #[serde(default, rename = "guardrail_description")]
         description: String,
     },
 }
@@ -630,34 +642,82 @@ impl WorkflowContext {
         variables: &HashMap<String, VarValue>,
         shell_quote: bool,
     ) -> String {
-        let mut result = template.to_string();
+        // Single left-to-right scan. Two properties the old replace-in-a-loop
+        // approach lacked:
+        //
+        // 1. Deterministic longest match: with both `$item` and `$item_count`
+        //    defined, `$item_count` always resolves to `item_count` — the old
+        //    code iterated a HashMap and, whenever `item` came first, rewrote
+        //    `$item_count` to `<item value>_count` (which then shell-executed).
+        // 2. Substituted values are never re-scanned, so a value containing
+        //    `$other` is inserted literally instead of being re-substituted
+        //    in a later, order-dependent pass.
+        let mut result = String::with_capacity(template.len());
+        let mut rest = template;
 
-        for (name, value) in variables {
-            let placeholder = format!("${{{}}}", name);
-            if let Some(s) = value.as_string() {
-                let safe = if shell_quote {
-                    Self::shell_quote(&s)
-                } else {
-                    s
-                };
-                result = result.replace(&placeholder, &safe);
+        while let Some(pos) = rest.find('$') {
+            result.push_str(&rest[..pos]);
+            rest = &rest[pos..];
+
+            // ${name} form
+            if let Some(after_open) = rest.strip_prefix("${") {
+                match after_open.find('}') {
+                    Some(end) => {
+                        let name = &after_open[..end];
+                        match variables.get(name).and_then(|v| v.as_string()) {
+                            Some(value) => {
+                                result.push_str(&Self::maybe_shell_quote(&value, shell_quote))
+                            }
+                            // Unknown variable: keep the placeholder verbatim
+                            None => result.push_str(&rest[..end + 3]),
+                        }
+                        rest = &after_open[end + 1..];
+                    }
+                    // Unclosed placeholder: emit verbatim and keep scanning
+                    None => {
+                        result.push_str("${");
+                        rest = after_open;
+                    }
+                }
+                continue;
+            }
+
+            // $name form: the longest variable name matching at this position
+            // wins, regardless of HashMap iteration order.
+            let best = variables
+                .iter()
+                .filter(|(name, value)| {
+                    !name.is_empty()
+                        && value.as_string().is_some()
+                        && rest[1..].starts_with(name.as_str())
+                })
+                .max_by_key(|(name, _)| name.len());
+
+            match best {
+                Some((name, value)) => {
+                    let value = value.as_string().unwrap_or_default();
+                    result.push_str(&Self::maybe_shell_quote(&value, shell_quote));
+                    rest = &rest[1 + name.len()..];
+                }
+                // Lone '$' (no variable matches here): emit verbatim
+                None => {
+                    result.push('$');
+                    rest = &rest[1..];
+                }
             }
         }
 
-        // Also support $name syntax
-        for (name, value) in variables {
-            let placeholder = format!("${}", name);
-            if let Some(s) = value.as_string() {
-                let safe = if shell_quote {
-                    Self::shell_quote(&s)
-                } else {
-                    s
-                };
-                result = result.replace(&placeholder, &safe);
-            }
-        }
-
+        result.push_str(rest);
         result
+    }
+
+    /// Apply POSIX shell quoting when the substitution target is a shell command.
+    fn maybe_shell_quote(value: &str, shell_quote: bool) -> String {
+        if shell_quote {
+            Self::shell_quote(value)
+        } else {
+            value.to_string()
+        }
     }
 
     /// POSIX shell quoting: wrap in single quotes, escape internal single quotes.
@@ -680,38 +740,46 @@ impl WorkflowContext {
             return false;
         }
 
-        // Check for variable existence
-        if condition.starts_with("defined(") && condition.ends_with(")") {
-            let var_name = &condition[8..condition.len() - 1];
-            return self.variables.contains_key(var_name);
+        // Check for variable existence. A malformed expression (missing the
+        // closing paren) fails CLOSED instead of falling through to the
+        // truthiness check below, which would report it as true.
+        if let Some(inner) = condition.strip_prefix("defined(") {
+            return match inner.strip_suffix(')') {
+                Some(var_name) => self.variables.contains_key(var_name),
+                None => false,
+            };
         }
 
-        // Check for step success
-        if condition.starts_with("success(") && condition.ends_with(")") {
-            let step_id = &condition[8..condition.len() - 1];
-            return self
-                .step_results
-                .get(step_id)
-                .map(|r| r.status == StepStatus::Completed)
-                .unwrap_or(false);
+        // Check for step success (same fail-closed policy on malformed input)
+        if let Some(inner) = condition.strip_prefix("success(") {
+            return match inner.strip_suffix(')') {
+                Some(step_id) => self
+                    .step_results
+                    .get(step_id)
+                    .map(|r| r.status == StepStatus::Completed)
+                    .unwrap_or(false),
+                None => false,
+            };
         }
 
-        // Check for step failure
-        if condition.starts_with("failed(") && condition.ends_with(")") {
-            let step_id = &condition[7..condition.len() - 1];
-            return self
-                .step_results
-                .get(step_id)
-                .map(|r| r.status == StepStatus::Failed)
-                .unwrap_or(false);
+        // Check for step failure (same fail-closed policy on malformed input)
+        if let Some(inner) = condition.strip_prefix("failed(") {
+            return match inner.strip_suffix(')') {
+                Some(step_id) => self
+                    .step_results
+                    .get(step_id)
+                    .map(|r| r.status == StepStatus::Failed)
+                    .unwrap_or(false),
+                None => false,
+            };
         }
 
-        // Simple equality check
+        // Simple equality check. Malformed equality (anything other than
+        // exactly two operands) fails closed rather than falling through to
+        // the truthiness check.
         if condition.contains("==") {
             let parts: Vec<&str> = condition.split("==").collect();
-            if parts.len() == 2 {
-                return parts[0].trim() == parts[1].trim();
-            }
+            return parts.len() == 2 && parts[0].trim() == parts[1].trim();
         }
 
         // Non-empty check
@@ -990,6 +1058,37 @@ impl WorkflowExecutor {
         // Build set of all step IDs for dependency validation (unified with inline paths)
         let all_step_ids: std::collections::HashSet<String> =
             workflow.steps.iter().map(|s| s.id.clone()).collect();
+
+        // Pre-mark every step referenced by a Condition or Loop as
+        // control-flow-managed, regardless of document order. Marking used to
+        // happen only when the Condition/Loop executed, so a referenced step
+        // declared EARLIER in the document ran once in the top-level pass and
+        // then again inline — double-executing shell side effects and
+        // double-billing LLM steps.
+        for step in &workflow.steps {
+            match &step.step_type {
+                StepType::Condition {
+                    then_steps,
+                    else_steps,
+                    ..
+                } => {
+                    for step_id in then_steps {
+                        context.control_flow_managed_steps.insert(step_id.clone());
+                    }
+                    if let Some(else_ids) = else_steps {
+                        for step_id in else_ids {
+                            context.control_flow_managed_steps.insert(step_id.clone());
+                        }
+                    }
+                }
+                StepType::Loop { do_steps, .. } => {
+                    for step_id in do_steps {
+                        context.control_flow_managed_steps.insert(step_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
 
         // Execute steps
         'step_loop: for (idx, step) in workflow.steps.iter().enumerate() {
@@ -1953,7 +2052,10 @@ impl WorkflowExecutor {
                             "block" => LogLevel::Error,
                             "alert" => LogLevel::Warn,
                             "warn" => LogLevel::Warn,
-                            _ => LogLevel::Info,
+                            "log" => LogLevel::Info,
+                            // Unrecognized action: logged as an error and
+                            // treated as `block` below (fail closed)
+                            _ => LogLevel::Error,
                         };
 
                         context.log(
@@ -1965,20 +2067,23 @@ impl WorkflowExecutor {
                             None,
                         );
 
-                        // Only block causes failure - other actions are warnings
-                        if action == "block" {
-                            Err(anyhow!(
-                                "Guardrail '{}' blocked execution: {} (severity: {})",
-                                name,
-                                reason,
-                                severity
-                            ))
-                        } else {
-                            // For warn/log/alert, return success but with violation noted
-                            Ok(VarValue::String(format!(
+                        // Only the explicitly non-blocking actions allow the
+                        // workflow to continue. "block" — and any
+                        // unrecognized action, e.g. a typo like "blok" that
+                        // used to be silently downgraded to a log line —
+                        // fails the step (fail closed).
+                        match action {
+                            "warn" | "log" | "alert" => Ok(VarValue::String(format!(
                                 "guardrail '{}' violated but action='{}' allows continuation: {}",
                                 name, on_violation, reason
-                            )))
+                            ))),
+                            _ => Err(anyhow!(
+                                "Guardrail '{}' blocked execution: {} (action: {}, severity: {})",
+                                name,
+                                reason,
+                                on_violation,
+                                severity
+                            )),
                         }
                     }
                     EvaluationResult::Error { message } => {

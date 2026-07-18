@@ -348,7 +348,6 @@ impl MultiAgentChat {
                             );
                             break;
                         }
-                        _ => {}
                     }
                 }
             });
@@ -629,7 +628,6 @@ impl MultiAgentChat {
                             );
                             break;
                         }
-                        _ => {}
                     }
                 }
             });

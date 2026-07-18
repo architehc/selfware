@@ -39,8 +39,35 @@ pub struct RSIOrchestrator {
     consecutive_failures: usize,
     /// Circuit-breaker threshold: if this many consecutive failures occur, the loop aborts.
     max_consecutive_failures: usize,
+    /// Per-run ceiling on improvement iterations. Each iteration runs TWO paid
+    /// e2e benchmark suites (baseline + sandbox), so an unbounded run burns
+    /// unbounded money — the old default allowed 100 iterations (200 suites)
+    /// per run. Override with `SELFWARE_RSI_MAX_ITERATIONS_PER_RUN`.
+    max_iterations_per_run: usize,
     /// Path to the persisted RSI state file.
     state_path: PathBuf,
+}
+
+/// Default per-run iteration ceiling (10 iterations = 20 paid e2e suites).
+const DEFAULT_MAX_ITERATIONS_PER_RUN: usize = 10;
+
+/// Env var overriding the per-run iteration ceiling.
+const MAX_ITERATIONS_PER_RUN_ENV: &str = "SELFWARE_RSI_MAX_ITERATIONS_PER_RUN";
+
+/// Read the per-run iteration ceiling from the environment, falling back to
+/// the default when unset or unparseable.
+fn max_iterations_per_run_from_env() -> usize {
+    parse_max_iterations_per_run(std::env::var(MAX_ITERATIONS_PER_RUN_ENV).ok().as_deref())
+}
+
+/// Pure parsing core of [`max_iterations_per_run_from_env`]: a positive
+/// integer wins; anything else falls back to the default. Kept separate so it
+/// is deterministically unit-testable without touching process environment.
+fn parse_max_iterations_per_run(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_ITERATIONS_PER_RUN)
 }
 
 impl RSIOrchestrator {
@@ -56,6 +83,7 @@ impl RSIOrchestrator {
             total_iterations: 0,
             consecutive_failures: 0,
             max_consecutive_failures: 5,
+            max_iterations_per_run: max_iterations_per_run_from_env(),
             state_path,
         };
         // Restore previous state if available.
@@ -72,6 +100,14 @@ impl RSIOrchestrator {
 
     fn default_state_path(project_root: &Path) -> PathBuf {
         project_root.join(".selfware").join("rsi_state.json")
+    }
+
+    /// Override the per-run iteration ceiling (see
+    /// [`DEFAULT_MAX_ITERATIONS_PER_RUN`]). Each iteration runs two paid e2e
+    /// benchmark suites, so this is effectively the run's cost ceiling.
+    pub fn with_max_iterations_per_run(mut self, max: usize) -> Self {
+        self.max_iterations_per_run = max.max(1);
+        self
     }
 
     /// Save the current loop state to disk so it can be resumed.
@@ -99,7 +135,9 @@ impl RSIOrchestrator {
     /// Run the RSI outer loop with safety guardrails.
     ///
     /// The loop will terminate if any of the following conditions are met:
-    /// - `max_iterations` cycles have been executed.
+    /// - `max_iterations` cycles have been executed (lifetime, persisted).
+    /// - `max_iterations_per_run` cycles have been executed in THIS invocation
+    ///   (per-run cost ceiling — each iteration runs two paid e2e suites).
     /// - `max_consecutive_failures` failures occur in a row (circuit breaker).
     /// - `stop()` is called externally.
     pub async fn run_loop(&mut self) -> Result<()> {
@@ -109,11 +147,14 @@ impl RSIOrchestrator {
         let mut iteration: usize = 0;
 
         info!(
-            "Starting outer RSI loop (max_iterations={}, total_completed={}, max_consecutive_failures={})...",
-            self.max_iterations, self.total_iterations, self.max_consecutive_failures
+            "Starting outer RSI loop (max_iterations={}, total_completed={}, max_consecutive_failures={}, max_iterations_per_run={})...",
+            self.max_iterations, self.total_iterations, self.max_consecutive_failures, self.max_iterations_per_run
         );
 
-        while self.is_running && (self.total_iterations + iteration) < self.max_iterations {
+        while self.is_running
+            && (self.total_iterations + iteration) < self.max_iterations
+            && iteration < self.max_iterations_per_run
+        {
             iteration += 1;
             let global_iter = self.total_iterations + iteration;
             info!("RSI iteration {}/{}", global_iter, self.max_iterations);
@@ -195,6 +236,17 @@ impl RSIOrchestrator {
                 "RSI loop terminated: reached maximum iteration limit of {}",
                 self.max_iterations
             );
+        } else if iteration >= self.max_iterations_per_run && self.is_running {
+            // Honest cost-ceiling stop: each iteration runs TWO paid e2e
+            // benchmark suites (baseline + sandbox), so this caps the spend
+            // of a single `run_loop` invocation.
+            warn!(
+                "RSI run stopped: per-run cost ceiling reached ({} iterations = {} paid e2e suites this run). \
+                 Rerun to continue from persisted state, or raise the ceiling via {}.",
+                iteration,
+                iteration.saturating_mul(2),
+                MAX_ITERATIONS_PER_RUN_ENV
+            );
         }
 
         // Persist state on clean exit so it survives process restarts.
@@ -217,11 +269,13 @@ impl RSIOrchestrator {
     async fn execute_improvement_cycle(&mut self) -> Result<bool> {
         info!("Beginning new improvement cycle");
 
-        // 1. Measure Baseline Fitness
-        let baseline_score = self.measure_fitness().await?;
-        debug!("Baseline fitness score: {}", baseline_score);
+        // NOTE on cost: each cycle that reaches fitness evaluation runs TWO
+        // paid e2e benchmark suites (baseline + sandbox). Cheap local gates
+        // (target selection, trivial-mutation detection, compilation/tests)
+        // therefore run FIRST so mutations that cannot matter never burn a
+        // paid suite.
 
-        // 2. Consult meta-learner for strategy priorities
+        // 1. Consult meta-learner for strategy priorities
         let strategy_rankings = self.meta_learner.analyze_strategies();
         if !strategy_rankings.is_empty() {
             info!(
@@ -230,7 +284,7 @@ impl RSIOrchestrator {
             );
         }
 
-        // 3. Identify Target (Introspect)
+        // 2. Identify Target (Introspect)
         let mut targets = self.edit_orchestrator.analyze_self();
         if targets.is_empty() {
             info!("No improvement targets found in this cycle.");
@@ -267,17 +321,44 @@ impl RSIOrchestrator {
             .apply_target_in_sandbox(&target, &sandbox)?;
         info!("Applied mutation: {}", applied.summary);
 
-        // 5. Verify compilation and tests in sandbox
-        info!("Verifying compilation in sandbox...");
-        if !sandbox.verify()? {
-            warn!("Compilation or tests failed in sandbox. Rejecting mutation.");
-            self.record_improvement(&target, None, baseline_score, false, true)
+        // 4b. Trivial-mutation gate (free): if the diff only rewrites comment
+        // or documentation lines, the mutation cannot change benchmark
+        // behaviour — skip the paid evaluation entirely instead of burning
+        // two e2e suites to confirm a no-op.
+        if mutation_is_trivial(
+            &self.project_root,
+            sandbox.work_dir(),
+            &applied.edited_files,
+        ) {
+            info!(
+                "Mutation for '{}' only touches comment/doc lines — skipping paid e2e evaluation.",
+                target.description
+            );
+            self.record_improvement(&target, None, 0.0, false, true)
                 .await?;
             sandbox.cleanup()?;
             return Ok(false);
         }
 
-        // 6. Measure New Fitness in Sandbox
+        // 5. Verify compilation and tests in sandbox (local, no paid suites)
+        info!("Verifying compilation in sandbox...");
+        if !sandbox.verify()? {
+            warn!("Compilation or tests failed in sandbox. Rejecting mutation.");
+            // Baseline was not measured yet (see note above) — record a 0.0
+            // baseline; the record's `verified=false` marks this as rejected
+            // before evaluation, so the exact baseline is not meaningful.
+            self.record_improvement(&target, None, 0.0, false, true)
+                .await?;
+            sandbox.cleanup()?;
+            return Ok(false);
+        }
+
+        // 6. Measure Baseline Fitness (PAID suite #1) — deferred until the
+        // mutation is known to be non-trivial and compiling.
+        let baseline_score = self.measure_fitness().await?;
+        debug!("Baseline fitness score: {}", baseline_score);
+
+        // 7. Measure New Fitness in Sandbox (PAID suite #2)
         // Since we can't easily run the benchmark on the sandbox right now without changing paths,
         // we assume the sandbox passed tests and check its score.
         let new_score = self.measure_sandbox_fitness(&sandbox).await?;
@@ -447,9 +528,62 @@ impl RSIOrchestrator {
             total_iterations: 0,
             consecutive_failures: 0,
             max_consecutive_failures: 5,
+            max_iterations_per_run: DEFAULT_MAX_ITERATIONS_PER_RUN,
             state_path,
         }
     }
+}
+
+/// Whether the mutation applied to the sandbox only rewrites comment or
+/// documentation lines. Such a mutation cannot change benchmark behaviour, so
+/// the paid e2e evaluation is skipped for it.
+///
+/// Heuristic (deliberately conservative): compare each edited file's content
+/// in the project root vs the sandbox after dropping blank lines and lines
+/// that consist ENTIRELY of a comment/doc marker (`//…`, `///…`, `//!…`,
+/// `/*…`, `*…`, `--…`, plus `#…` only in file types where `#` is a comment —
+/// in Rust, `#` starts an attribute and counts as code). Inline trailing
+/// comments are NOT stripped, so a line mixing code and comment still counts
+/// as code — when in doubt we evaluate (false "non-trivial" only costs one
+/// cycle's evaluation; a false "trivial" would silently skip a real change).
+fn mutation_is_trivial(project_root: &Path, sandbox_dir: &Path, edited_files: &[String]) -> bool {
+    if edited_files.is_empty() {
+        return true;
+    }
+    edited_files.iter().all(|rel| {
+        let old = std::fs::read_to_string(project_root.join(rel)).unwrap_or_default();
+        let new = std::fs::read_to_string(sandbox_dir.join(rel)).unwrap_or_default();
+        // `#` is a comment marker in shell/TOML/YAML/Python/Markdown but an
+        // ATTRIBUTE in Rust (`#[derive(...)]`) — stripping it there would
+        // call attribute-only changes "trivial", so keep it for .rs files.
+        let strip_hash = Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| {
+                matches!(
+                    ext,
+                    "toml" | "sh" | "bash" | "yaml" | "yml" | "py" | "md" | "cfg" | "ini" | "txt"
+                )
+            });
+        code_lines(&old, strip_hash) == code_lines(&new, strip_hash)
+    })
+}
+
+/// The content lines of `content` with blank lines and whole-line comments
+/// removed — see [`mutation_is_trivial`] for the exact stripping rules.
+fn code_lines(content: &str, strip_hash: bool) -> Vec<&str> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !(line.is_empty()
+                || line.starts_with("//")
+                || (strip_hash && line.starts_with('#'))
+                || line.starts_with("/*")
+                || line.starts_with('*')
+                || line.starts_with("--"))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -460,12 +594,137 @@ mod tests {
 
     #[test]
     fn test_rsi_orchestrator_new_defaults() {
+        let _env = crate::test_support::EnvGuard::capture(&[MAX_ITERATIONS_PER_RUN_ENV]);
+        std::env::remove_var(MAX_ITERATIONS_PER_RUN_ENV);
         let orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
         assert_eq!(orch.project_root, PathBuf::from("/tmp/test_project"));
         assert!(!orch.is_running);
         assert_eq!(orch.max_iterations, 100);
         assert_eq!(orch.consecutive_failures, 0);
         assert_eq!(orch.max_consecutive_failures, 5);
+        // Per-run cost ceiling defaults to 10 iterations (20 paid e2e suites).
+        assert_eq!(orch.max_iterations_per_run, 10);
+    }
+
+    #[test]
+    fn test_parse_max_iterations_per_run() {
+        assert_eq!(parse_max_iterations_per_run(None), 10);
+        assert_eq!(parse_max_iterations_per_run(Some("5")), 5);
+        assert_eq!(parse_max_iterations_per_run(Some(" 7 ")), 7);
+        // Zero / garbage / negative all fall back to the default — a ceiling
+        // of 0 would silently disable the loop.
+        assert_eq!(parse_max_iterations_per_run(Some("0")), 10);
+        assert_eq!(parse_max_iterations_per_run(Some("abc")), 10);
+        assert_eq!(parse_max_iterations_per_run(Some("-3")), 10);
+        assert_eq!(parse_max_iterations_per_run(Some("")), 10);
+    }
+
+    #[test]
+    fn test_with_max_iterations_per_run_builder() {
+        let orch =
+            RSIOrchestrator::new(PathBuf::from("/tmp/test_project")).with_max_iterations_per_run(3);
+        assert_eq!(orch.max_iterations_per_run, 3);
+        // Clamped to at least 1 so the loop always does SOMETHING per run.
+        let orch =
+            RSIOrchestrator::new(PathBuf::from("/tmp/test_project")).with_max_iterations_per_run(0);
+        assert_eq!(orch.max_iterations_per_run, 1);
+    }
+
+    // ── Trivial-mutation gate (whole-repo review, RSI P1) ──
+
+    fn write_pair(root: &Path, sandbox: &Path, rel: &str, old: &str, new: &str) {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(sandbox.join("src")).unwrap();
+        std::fs::write(root.join(rel), old).unwrap();
+        std::fs::write(sandbox.join(rel), new).unwrap();
+    }
+
+    #[test]
+    fn test_mutation_is_trivial_comment_only_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let sandbox = dir.path().join("sandbox");
+        write_pair(
+            &root,
+            &sandbox,
+            "src/lib.rs",
+            "pub fn f() -> usize {\n    // TODO: remove this marker\n    42\n}\n",
+            "pub fn f() -> usize {\n    // Resolved: remove this marker\n    42\n}\n",
+        );
+        let edited = vec!["src/lib.rs".to_string()];
+        assert!(mutation_is_trivial(&root, &sandbox, &edited));
+    }
+
+    #[test]
+    fn test_mutation_is_trivial_real_code_change_not_trivial() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let sandbox = dir.path().join("sandbox");
+        write_pair(
+            &root,
+            &sandbox,
+            "src/lib.rs",
+            "pub fn f() -> usize {\n    // compute\n    42\n}\n",
+            "pub fn f() -> usize {\n    // compute\n    43\n}\n",
+        );
+        let edited = vec!["src/lib.rs".to_string()];
+        assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+    }
+
+    #[test]
+    fn test_mutation_is_trivial_rust_attribute_change_not_trivial() {
+        // `#[...]` lines are attributes (code), NOT comments: a mutation that
+        // only changes an attribute must still be evaluated.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let sandbox = dir.path().join("sandbox");
+        write_pair(
+            &root,
+            &sandbox,
+            "src/lib.rs",
+            "#[derive(Debug)]\npub struct S;\n",
+            "#[derive(Debug, Clone)]\npub struct S;\n",
+        );
+        let edited = vec!["src/lib.rs".to_string()];
+        assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+    }
+
+    #[test]
+    fn test_mutation_is_trivial_hash_comment_in_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let sandbox = dir.path().join("sandbox");
+        write_pair(
+            &root,
+            &sandbox,
+            "src/config.toml",
+            "# old comment\n[package]\nname = \"x\"\n",
+            "# new comment\n[package]\nname = \"x\"\n",
+        );
+        let edited = vec!["src/config.toml".to_string()];
+        assert!(mutation_is_trivial(&root, &sandbox, &edited));
+    }
+
+    #[test]
+    fn test_mutation_is_trivial_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let sandbox = dir.path().join("sandbox");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(sandbox.join("src")).unwrap();
+        // New file containing only comments → trivial.
+        std::fs::write(sandbox.join("src/notes.rs"), "// just a note\n").unwrap();
+        let edited = vec!["src/notes.rs".to_string()];
+        assert!(mutation_is_trivial(&root, &sandbox, &edited));
+        // New file containing code → NOT trivial.
+        std::fs::write(sandbox.join("src/notes.rs"), "pub fn new() {}\n").unwrap();
+        assert!(!mutation_is_trivial(&root, &sandbox, &edited));
+    }
+
+    #[test]
+    fn test_mutation_is_trivial_empty_edit_list() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(mutation_is_trivial(dir.path(), dir.path(), &[]));
     }
 
     #[test]
@@ -668,6 +927,55 @@ mod tests {
         assert!(history[0].effectiveness_score > 0.0);
     }
 
+    /// A whole-line TODO comment rewrite is a TRIVIAL mutation: the cycle
+    /// must skip the paid e2e evaluation entirely (no results.tsv produced),
+    /// return Ok(false), and record the attempt as rolled-back/unverified.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_execute_improvement_cycle_skips_trivial_comment_mutation() {
+        let _state = crate::test_support::CwdGuard::hold();
+        let dir = create_rsi_fixture_project_with_lib(
+            r#"pub fn demo() -> usize {
+    // TODO: remove this marker
+    42
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn demo_returns_answer() {
+        assert_eq!(super::demo(), 42);
+    }
+}
+"#,
+        );
+        let project_root = dir.path().to_path_buf();
+        let state_path = project_root.join(".selfware/rsi_state.json");
+        let history_path = project_root.join(".selfware/history.json");
+        let mut orch = RSIOrchestrator::with_paths(project_root.clone(), state_path, history_path);
+
+        let improved = orch.execute_improvement_cycle().await.unwrap();
+        assert!(!improved, "trivial comment mutation must not be merged");
+
+        // The TODO rewrite happened only in the (now cleaned) sandbox.
+        let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
+        assert!(content.contains("// TODO: remove this marker"));
+
+        // No paid e2e suite ran: the benchmark script never produced a TSV.
+        assert!(
+            !project_root
+                .join("system_tests/projecte2e/reports/latest/results.tsv")
+                .exists(),
+            "trivial mutation must not burn a paid e2e suite"
+        );
+
+        let history = orch.edit_orchestrator.history();
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].verified);
+        assert!(history[0].rolled_back);
+    }
+
     /// Helper: replicates the TSV score-parsing logic from run_benchmark_and_get_score.
     fn parse_tsv_scores(tsv_content: &str) -> (f64, usize) {
         let mut total_score = 0.0;
@@ -690,6 +998,23 @@ mod tests {
     }
 
     fn create_rsi_fixture_project() -> tempfile::TempDir {
+        create_rsi_fixture_project_with_lib(
+            r#"pub fn demo() -> usize {
+    42 // TODO: remove this marker
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn demo_returns_answer() {
+        assert_eq!(super::demo(), 42);
+    }
+}
+"#,
+        )
+    }
+
+    fn create_rsi_fixture_project_with_lib(lib_src: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
 
@@ -709,23 +1034,7 @@ path = "src/lib.rs"
         )
         .unwrap();
 
-        fs::write(
-            root.join("src/lib.rs"),
-            r#"pub fn demo() -> usize {
-    // TODO: remove this marker
-    42
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn demo_returns_answer() {
-        assert_eq!(super::demo(), 42);
-    }
-}
-"#,
-        )
-        .unwrap();
+        fs::write(root.join("src/lib.rs"), lib_src).unwrap();
 
         fs::write(
             root.join("system_tests/projecte2e/run_projecte2e.sh"),

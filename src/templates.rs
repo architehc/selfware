@@ -326,6 +326,10 @@ impl TemplateEngine {
     /// Scaffold a new project from templates.
     ///
     /// Returns the list of files created (relative to `project_dir`).
+    ///
+    /// Refuses to overwrite: if any target file already exists, the whole
+    /// scaffold is rejected (nothing is written) and the error lists the
+    /// conflicting files. Use [`Self::scaffold_project_force`] to clobber.
     pub fn scaffold_project(
         &self,
         language: &str,
@@ -333,12 +337,39 @@ impl TemplateEngine {
         project_dir: &Path,
         options: &ScaffoldOptions,
     ) -> Result<Vec<String>> {
+        self.scaffold_project_inner(language, project_name, project_dir, options, false)
+    }
+
+    /// Like [`Self::scaffold_project`], but overwrites existing files.
+    ///
+    /// This is the explicit opt-in intended for `selfware init --scaffold
+    /// --force`: the default path refuses to clobber existing project files
+    /// because silently overwriting a user's `Cargo.toml` / `src/main.rs`
+    /// is data loss.
+    pub fn scaffold_project_force(
+        &self,
+        language: &str,
+        project_name: &str,
+        project_dir: &Path,
+        options: &ScaffoldOptions,
+    ) -> Result<Vec<String>> {
+        self.scaffold_project_inner(language, project_name, project_dir, options, true)
+    }
+
+    fn scaffold_project_inner(
+        &self,
+        language: &str,
+        project_name: &str,
+        project_dir: &Path,
+        options: &ScaffoldOptions,
+        force: bool,
+    ) -> Result<Vec<String>> {
         let lang = language.to_lowercase();
         match lang.as_str() {
-            "rust" => self.scaffold_rust(project_name, project_dir, options),
-            "python" => self.scaffold_python(project_name, project_dir, options),
+            "rust" => self.scaffold_rust(project_name, project_dir, options, force),
+            "python" => self.scaffold_python(project_name, project_dir, options, force),
             "nodejs" | "node" | "typescript" | "node.js" | "ts" => {
-                self.scaffold_nodejs(project_name, project_dir, options)
+                self.scaffold_nodejs(project_name, project_dir, options, force)
             }
             other => bail!(
                 "Unsupported language '{}'. Supported: rust, python, nodejs",
@@ -379,6 +410,41 @@ impl TemplateEngine {
         Ok(())
     }
 
+    /// Write a whole scaffold's `(relative path, content)` pairs, with an
+    /// overwrite preflight: unless `force` is set, ANY existing target file
+    /// rejects the ENTIRE scaffold before anything is written — a partially
+    /// overlapping project must never produce a half-written scaffold, and
+    /// silently clobbering an existing `Cargo.toml` or `src/main.rs` is
+    /// silent data loss.
+    fn write_files(
+        project_dir: &Path,
+        files: &[(String, String)],
+        force: bool,
+    ) -> Result<Vec<String>> {
+        if !force {
+            let existing: Vec<&str> = files
+                .iter()
+                .map(|(rel, _)| rel.as_str())
+                .filter(|rel| project_dir.join(rel).exists())
+                .collect();
+            if !existing.is_empty() {
+                bail!(
+                    "refusing to scaffold into '{}': {} file(s) already exist: {}. \
+                     Remove them, choose an empty output directory, or re-run with \
+                     --force to overwrite.",
+                    project_dir.display(),
+                    existing.len(),
+                    existing.join(", ")
+                );
+            }
+        }
+        let mut created = Vec::with_capacity(files.len());
+        for (rel, content) in files {
+            Self::write_file(project_dir, rel, content, &mut created)?;
+        }
+        Ok(created)
+    }
+
     // -- Rust ---------------------------------------------------------------
 
     fn scaffold_rust(
@@ -386,14 +452,15 @@ impl TemplateEngine {
         project_name: &str,
         project_dir: &Path,
         options: &ScaffoldOptions,
+        force: bool,
     ) -> Result<Vec<String>> {
         let vars = self.build_vars(project_name, options);
-        let mut created = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
 
         // Cargo.toml
         let cargo_tmpl = self.load_template("rust/Cargo.toml", RUST_CARGO_TOML);
         let cargo_content = Self::render_template(&cargo_tmpl, &vars);
-        Self::write_file(project_dir, "Cargo.toml", &cargo_content, &mut created)?;
+        files.push(("Cargo.toml".into(), cargo_content));
 
         // src/main.rs
         let main_rs = format!(
@@ -406,7 +473,7 @@ fn main() -> Result<()> {{
 "#,
             project_name
         );
-        Self::write_file(project_dir, "src/main.rs", &main_rs, &mut created)?;
+        files.push(("src/main.rs".into(), main_rs));
 
         // src/lib.rs
         let lib_rs = format!(
@@ -418,7 +485,7 @@ pub fn greet() -> &'static str {{
 "#,
             project_name, options.description, project_name
         );
-        Self::write_file(project_dir, "src/lib.rs", &lib_rs, &mut created)?;
+        files.push(("src/lib.rs".into(), lib_rs));
 
         // tests/
         if options.with_tests {
@@ -433,26 +500,16 @@ fn test_greet() {{
                 project_name.replace('-', "_"),
                 project_name,
             );
-            Self::write_file(
-                project_dir,
-                "tests/integration_test.rs",
-                &test_rs,
-                &mut created,
-            )?;
+            files.push(("tests/integration_test.rs".into(), test_rs));
         }
 
         // CI workflow
         if options.with_ci {
             let wf = self.load_template("workflows/rust-qa.yml", WORKFLOW_RUST_QA);
-            Self::write_file(
-                project_dir,
-                ".github/workflows/rust-qa.yml",
-                &wf,
-                &mut created,
-            )?;
+            files.push((".github/workflows/rust-qa.yml".into(), wf));
         }
 
-        Ok(created)
+        Self::write_files(project_dir, &files, force)
     }
 
     // -- Python -------------------------------------------------------------
@@ -462,20 +519,16 @@ fn test_greet() {{
         project_name: &str,
         project_dir: &Path,
         options: &ScaffoldOptions,
+        force: bool,
     ) -> Result<Vec<String>> {
         let vars = self.build_vars(project_name, options);
         let module_name = project_name.replace('-', "_");
-        let mut created = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
 
         // pyproject.toml
         let pyproject_tmpl = self.load_template("python/pyproject.toml", PYTHON_PYPROJECT_TOML);
         let pyproject_content = Self::render_template(&pyproject_tmpl, &vars);
-        Self::write_file(
-            project_dir,
-            "pyproject.toml",
-            &pyproject_content,
-            &mut created,
-        )?;
+        files.push(("pyproject.toml".into(), pyproject_content));
 
         // src/<module>/__init__.py
         let init_py = format!(
@@ -490,12 +543,7 @@ def main() -> None:
 "#,
             module_name, options.description, project_name
         );
-        Self::write_file(
-            project_dir,
-            &format!("src/{}/__init__.py", module_name),
-            &init_py,
-            &mut created,
-        )?;
+        files.push((format!("src/{}/__init__.py", module_name), init_py));
 
         // src/<module>/cli.py
         let cli_py = format!(
@@ -518,16 +566,11 @@ if __name__ == "__main__":
 "#,
             project_name, options.description
         );
-        Self::write_file(
-            project_dir,
-            &format!("src/{}/cli.py", module_name),
-            &cli_py,
-            &mut created,
-        )?;
+        files.push((format!("src/{}/cli.py", module_name), cli_py));
 
         // tests/
         if options.with_tests {
-            Self::write_file(project_dir, "tests/__init__.py", "", &mut created)?;
+            files.push(("tests/__init__.py".into(), String::new()));
 
             let test_py = format!(
                 r#"""Tests for {}.""
@@ -543,21 +586,16 @@ def test_main(capsys):
 "#,
                 project_name, module_name, project_name
             );
-            Self::write_file(project_dir, "tests/test_main.py", &test_py, &mut created)?;
+            files.push(("tests/test_main.py".into(), test_py));
         }
 
         // CI workflow
         if options.with_ci {
             let wf = self.load_template("workflows/python-qa.yml", WORKFLOW_PYTHON_QA);
-            Self::write_file(
-                project_dir,
-                ".github/workflows/python-qa.yml",
-                &wf,
-                &mut created,
-            )?;
+            files.push((".github/workflows/python-qa.yml".into(), wf));
         }
 
-        Ok(created)
+        Self::write_files(project_dir, &files, force)
     }
 
     // -- Node.js / TypeScript -----------------------------------------------
@@ -567,30 +605,31 @@ def test_main(capsys):
         project_name: &str,
         project_dir: &Path,
         options: &ScaffoldOptions,
+        force: bool,
     ) -> Result<Vec<String>> {
         let vars = self.build_vars(project_name, options);
-        let mut created = Vec::new();
+        let mut files: Vec<(String, String)> = Vec::new();
 
         // package.json
         let pkg_tmpl = self.load_template("nodejs/package.json", NODEJS_PACKAGE_JSON);
         let pkg_content = Self::render_template(&pkg_tmpl, &vars);
-        Self::write_file(project_dir, "package.json", &pkg_content, &mut created)?;
+        files.push(("package.json".into(), pkg_content));
 
         // tsconfig.json
         let tsconfig = self.load_template("nodejs/tsconfig.json", NODEJS_TSCONFIG_JSON);
-        Self::write_file(project_dir, "tsconfig.json", &tsconfig, &mut created)?;
+        files.push(("tsconfig.json".into(), tsconfig));
 
         // eslint.config.mjs
         let eslint = self.load_template("nodejs/eslint.config.mjs", NODEJS_ESLINT_CONFIG);
-        Self::write_file(project_dir, "eslint.config.mjs", &eslint, &mut created)?;
+        files.push(("eslint.config.mjs".into(), eslint));
 
         // .prettierrc
         let prettier = self.load_template("nodejs/.prettierrc", NODEJS_PRETTIERRC);
-        Self::write_file(project_dir, ".prettierrc", &prettier, &mut created)?;
+        files.push((".prettierrc".into(), prettier));
 
         // vitest.config.ts
         let vitest = self.load_template("nodejs/vitest.config.ts", NODEJS_VITEST_CONFIG);
-        Self::write_file(project_dir, "vitest.config.ts", &vitest, &mut created)?;
+        files.push(("vitest.config.ts".into(), vitest));
 
         // src/index.ts
         let index_ts = format!(
@@ -606,7 +645,7 @@ console.log(greet());
 "#,
             project_name, options.description, project_name
         );
-        Self::write_file(project_dir, "src/index.ts", &index_ts, &mut created)?;
+        files.push(("src/index.ts".into(), index_ts));
 
         // tests/
         if options.with_tests {
@@ -623,21 +662,16 @@ describe("{}", () => {{
 "#,
                 project_name, project_name,
             );
-            Self::write_file(project_dir, "tests/index.test.ts", &test_ts, &mut created)?;
+            files.push(("tests/index.test.ts".into(), test_ts));
         }
 
         // CI workflow
         if options.with_ci {
             let wf = self.load_template("workflows/nodejs-qa.yml", WORKFLOW_NODEJS_QA);
-            Self::write_file(
-                project_dir,
-                ".github/workflows/nodejs-qa.yml",
-                &wf,
-                &mut created,
-            )?;
+            files.push((".github/workflows/nodejs-qa.yml".into(), wf));
         }
 
-        Ok(created)
+        Self::write_files(project_dir, &files, force)
     }
 }
 
@@ -712,7 +746,9 @@ pub fn qa_schema_to_weights(schema: &QaSchemaConfig) -> crate::testing::qa_profi
 /// Scaffold a project based on answers collected during an interview session.
 ///
 /// Maps [`InterviewContext`] fields to [`ScaffoldOptions`] and invokes the
-/// template engine.
+/// template engine. Honors the interview's output-dir answer (previously
+/// silently ignored — everything landed in the caller's cwd). Refuses to
+/// overwrite existing files (see [`TemplateEngine::scaffold_project`]).
 pub fn scaffold_from_context(ctx: &InterviewContext, project_dir: &Path) -> Result<Vec<String>> {
     let language = ctx.language.as_deref().unwrap_or("rust").to_lowercase();
 
@@ -727,6 +763,8 @@ pub fn scaffold_from_context(ctx: &InterviewContext, project_dir: &Path) -> Resu
         // Best-effort: try as-is (will fail gracefully for unsupported langs).
         &language
     };
+
+    let project_dir = resolve_output_dir(ctx, project_dir)?;
 
     // Derive a project name from the output directory or task.
     let project_name = project_dir
@@ -762,7 +800,42 @@ pub fn scaffold_from_context(ctx: &InterviewContext, project_dir: &Path) -> Resu
     };
 
     let engine = TemplateEngine::new();
-    engine.scaffold_project(lang_key, &project_name, project_dir, &options)
+    engine.scaffold_project(lang_key, &project_name, &project_dir, &options)
+}
+
+/// Resolve the directory to scaffold into from the interview's output-dir
+/// answer. `None` / `"."` means the directory the caller passed; `"<temp>"`
+/// means a fresh throwaway directory under the system temp dir; anything
+/// else is a NEW subdirectory of `project_dir` with the given name. The
+/// answer is a directory NAME, not a path — separators and `..` are
+/// rejected so a freeform answer can't escape the chosen root.
+fn resolve_output_dir(ctx: &InterviewContext, project_dir: &Path) -> Result<PathBuf> {
+    let Some(answer) = ctx.output_dir.as_deref().map(str::trim) else {
+        return Ok(project_dir.to_path_buf());
+    };
+    match answer {
+        "" | "." => Ok(project_dir.to_path_buf()),
+        "<temp>" => {
+            let unique = format!(
+                "selfware-scaffold-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0)
+            );
+            Ok(std::env::temp_dir().join(unique))
+        }
+        name => {
+            if name.contains(['/', '\\']) || name.contains("..") {
+                bail!(
+                    "invalid output directory name '{}': expected a plain directory name, not a path",
+                    name
+                );
+            }
+            Ok(project_dir.join(name))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,6 +1355,126 @@ mod tests {
         let files = scaffold_from_context(&ctx, dir.path()).unwrap();
         assert!(!files.is_empty());
         assert!(files.iter().any(|f| f.ends_with("Cargo.toml")));
+    }
+
+    // -- Overwrite refusal ---------------------------------------------------
+
+    #[test]
+    fn test_scaffold_refuses_to_overwrite_existing_files() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = dir.path().join("app");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // Pre-existing user file that a scaffold would silently clobber.
+        std::fs::write(project_dir.join("Cargo.toml"), "[package]\nname = \"mine\"\n").unwrap();
+
+        let engine = TemplateEngine::new();
+        let opts = ScaffoldOptions::default();
+        let result = engine.scaffold_project("rust", "app", &project_dir, &opts);
+
+        let err = result
+            .err()
+            .expect("scaffolding over existing files must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Cargo.toml"),
+            "error must list the conflicting file(s): {}",
+            msg
+        );
+        assert!(
+            msg.contains("already exist") || msg.contains("refusing"),
+            "error must explain the refusal: {}",
+            msg
+        );
+        // Nothing else may be written: no half-scaffold left behind.
+        assert!(
+            !project_dir.join("src/main.rs").exists(),
+            "no files should be written when the scaffold is refused"
+        );
+        // The existing file must be untouched.
+        let content = std::fs::read_to_string(project_dir.join("Cargo.toml")).unwrap();
+        assert!(content.contains("name = \"mine\""));
+    }
+
+    #[test]
+    fn test_scaffold_force_overwrites_existing_files() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = dir.path().join("app");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("Cargo.toml"), "[package]\nname = \"mine\"\n").unwrap();
+
+        let engine = TemplateEngine::new();
+        let opts = ScaffoldOptions::default();
+        let files = engine
+            .scaffold_project_force("rust", "app", &project_dir, &opts)
+            .expect("force scaffold should succeed");
+        assert!(files.contains(&"Cargo.toml".to_string()));
+        // The forced scaffold actually replaced the file.
+        let content = std::fs::read_to_string(project_dir.join("Cargo.toml")).unwrap();
+        assert!(
+            content.contains("name = \"app\""),
+            "force should clobber, got: {}",
+            content
+        );
+    }
+
+    #[test]
+    fn test_scaffold_from_context_honors_output_dir_subdirectory() {
+        use crate::interview::InterviewContext;
+
+        let dir = TempDir::new().unwrap();
+        let ctx = InterviewContext {
+            language: Some("Rust".into()),
+            framework: None,
+            project_type: None,
+            testing_preference: None,
+            output_dir: Some("my-new-app".into()),
+            scope: None,
+            extra_notes: vec![],
+            task: "test scaffold".into(),
+        };
+
+        let files = scaffold_from_context(&ctx, dir.path()).unwrap();
+        assert!(files.contains(&"Cargo.toml".to_string()));
+        // Files must land in the chosen subdirectory, NOT the caller's dir.
+        assert!(
+            dir.path().join("my-new-app/Cargo.toml").exists(),
+            "scaffold should honor the interview's output-dir answer"
+        );
+        assert!(
+            !dir.path().join("Cargo.toml").exists(),
+            "nothing should be written into the caller's directory"
+        );
+    }
+
+    #[test]
+    fn test_resolve_output_dir_rejects_path_traversal() {
+        use crate::interview::InterviewContext;
+
+        let base = std::path::Path::new("/tmp/scaffold-root");
+        let ctx = |dir: &str| InterviewContext {
+            language: None,
+            framework: None,
+            project_type: None,
+            testing_preference: None,
+            output_dir: Some(dir.to_string()),
+            scope: None,
+            extra_notes: vec![],
+            task: String::new(),
+        };
+
+        for bad in ["../escape", "/abs/path", "a/b", "..", "x\\y"] {
+            assert!(
+                resolve_output_dir(&ctx(bad), base).is_err(),
+                "'{}' must be rejected as an output-dir answer",
+                bad
+            );
+        }
+        // Plain names and the current-dir answers are accepted.
+        assert_eq!(
+            resolve_output_dir(&ctx("my-app"), base).unwrap(),
+            base.join("my-app")
+        );
+        assert_eq!(resolve_output_dir(&ctx("."), base).unwrap(), base);
     }
 
     // -- Available templates ------------------------------------------------

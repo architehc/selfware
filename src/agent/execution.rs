@@ -218,16 +218,19 @@ impl Agent {
         Ok(())
     }
 
-    /// P2.1 FILES: checklist guard. Returns true when a write tool should be
-    /// blocked because no files checklist has been seen and no prior write has
-    /// succeeded. When force-mutation recovery is pending, the guard is bypassed
-    /// once and the pending flag is consumed.
-    fn check_files_guard(&mut self, has_write_tool: bool) -> bool {
-        let blocked = has_write_tool
+    /// P2.1 FILES: checklist guard. Returns true when a file-write tool call
+    /// should be blocked because no files checklist has been seen and no prior
+    /// write has succeeded. `has_file_write_intent` must only count calls that
+    /// write file content (see `tool_call_is_file_write_intent`) — mutating
+    /// shell commands like mkdir/npm install must not trip this guard. When
+    /// force-mutation recovery is pending, the guard is bypassed once and the
+    /// pending flag is consumed.
+    fn check_files_guard(&mut self, has_file_write_intent: bool) -> bool {
+        let blocked = has_file_write_intent
             && !self.has_written_any_file
             && !self.files_checklist_seen
             && !self.force_mutation_pending;
-        if !blocked && has_write_tool && self.force_mutation_pending {
+        if !blocked && has_file_write_intent && self.force_mutation_pending {
             self.force_mutation_pending = false;
         }
         blocked
@@ -241,7 +244,7 @@ impl Agent {
     fn writes_target_only_read_files(&self, tool_calls: &[CollectedToolCall]) -> bool {
         let mut saw_write = false;
         for (name, args_str, _) in tool_calls {
-            if !super::tool_dispatch::tool_call_counts_as_state_change(name, args_str) {
+            if !tool_call_is_file_write_intent(name, args_str) {
                 continue;
             }
             saw_write = true;
@@ -1144,13 +1147,22 @@ impl Agent {
         });
         self.update_read_only_step_tracking(&tool_calls, has_write_tool);
 
+        // The FILES: checklist guard exists to stop blind FILE EDITS. A shell
+        // command can mutate plenty (mkdir, npm/pip installs, git ops, builds)
+        // without writing file content — classifying those as "writes" made
+        // the guard silently discard legitimate setup commands and burn turns
+        // re-issuing them. Track file-write intent separately for the guard.
+        let has_file_write_intent = tool_calls
+            .iter()
+            .any(|(name, args_str, _)| tool_call_is_file_write_intent(name, args_str));
+
         // A write to a file the agent has ALREADY READ is not a blind edit — the
         // read already established which file changes, so the FILES: checklist
         // ceremony is redundant. Treat such a write as satisfying the checklist.
         // Without this, the guard silently discarded a capable model's first
         // (correct) edit; the model then believed it had already edited and
         // stalled to FAKE_COMPLETE with 0 files changed (the "doable task" bug).
-        if has_write_tool
+        if has_file_write_intent
             && !self.files_checklist_seen
             && self.writes_target_only_read_files(&tool_calls)
         {
@@ -1164,7 +1176,7 @@ impl Agent {
         // Force-mutation recovery bypasses this once: after the progress guard
         // has explicitly demanded an immediate edit, do not block the edit for
         // lacking a FILES: line.
-        if self.check_files_guard(has_write_tool) {
+        if self.check_files_guard(has_file_write_intent) {
             info!("Blocked premature edit: no FILES: checklist yet");
             // Correct the turn artifact: this edit was blocked and never dispatched,
             // so it must not stay recorded as ExecutedTools (ART-EXEC-MISLABEL).
@@ -1182,9 +1194,9 @@ impl Agent {
             self.messages.push(crate::api::types::Message::user(
                 "Your edit was NOT applied and has been discarded — no FILES: checklist was \
                  provided yet. First output a line `FILES: <path>` naming the file(s) you will \
-                 change, then RE-ISSUE the file_edit/file_write tool call (send it again — the \
-                 previous one did not run). Do not claim the edit is done until a tool result \
-                 confirms it."
+                 change, then RE-ISSUE the file_edit/file_write (or file-writing shell) tool \
+                 call (send it again — the previous one did not run). Do not claim the edit is \
+                 done until a tool result confirms it."
                     .to_string(),
             ));
             return Ok(false);
@@ -1623,6 +1635,108 @@ fn is_observational_shell_batch(tool_calls: &[CollectedToolCall]) -> bool {
                 .unwrap_or_default();
             super::tool_dispatch::shell_command_is_observational(&command)
         })
+}
+
+/// True when a tool call is a file-WRITE intent for the FILES: checklist
+/// guard — i.e. it can change the CONTENT of a file the way `file_edit` /
+/// `file_write` would. Non-shell tools keep the existing state-change
+/// classification (file_edit/file_write/patch_apply all count; read-only
+/// tools don't). `shell_exec` is classified by command: only commands that
+/// write file content (redirects, tee, in-place sed/perl, cp/mv/rsync,
+/// patch/git apply, cargo fmt/fix) count. Mutating-but-not-file-writing
+/// commands — mkdir, touch, rm, chmod, npm/pip installs, git add/commit,
+/// builds — deliberately do NOT: the guard's job is to stop blind edits,
+/// and dropping an `npm install` batch for lacking a FILES: line just burns
+/// turns while the model re-issues the identical command.
+fn tool_call_is_file_write_intent(name: &str, args_str: &str) -> bool {
+    if name != "shell_exec" {
+        return super::tool_dispatch::tool_call_counts_as_state_change(name, args_str);
+    }
+    let command = serde_json::from_str::<serde_json::Value>(args_str)
+        .ok()
+        .and_then(|v| {
+            v.get("command")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    shell_command_is_file_write_intent(&command)
+}
+
+/// Classify a shell command by whether it writes file CONTENT. Defaults to
+/// false (unlike `shell_command_is_observational`'s mutating markers, which
+/// cover filesystem mutations like mkdir/rm that don't author file content).
+fn shell_command_is_file_write_intent(command: &str) -> bool {
+    let normalized = command.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    // A redirect writes a file even without surrounding spaces (echo x>y).
+    if shell_redirect_writes_file(&normalized) {
+        return true;
+    }
+
+    let content_write_markers = [
+        "| tee",
+        " tee ",
+        "sed -i",
+        "sed --in-place",
+        "perl -pi",
+        "cp ",
+        "mv ",
+        "rsync ",
+        "patch ",
+        "git apply",
+        "cargo fmt",
+        "cargo fix",
+    ];
+    content_write_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+/// Detect an output redirect to a FILE (`>`, `>>`, `cat>file`, `echo x>y`)
+/// while ignoring (a) descriptor duplication that writes no file (`2>&1`,
+/// `>&2`) and (b) any `>` inside single/double quotes (`grep "->" f`).
+/// Mirrors `tool_dispatch::has_file_redirect` (private there); keep the
+/// two implementations in sync.
+fn shell_redirect_writes_file(command: &str) -> bool {
+    let chars: Vec<char> = command.chars().collect();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        match c {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '>' if !in_single && !in_double => {
+                // Skip a second '>' (append), then any spaces.
+                let mut j = i + 1;
+                if chars.get(j) == Some(&'>') {
+                    j += 1;
+                }
+                while chars.get(j) == Some(&' ') {
+                    j += 1;
+                }
+                // '>&' duplicates a descriptor (e.g. 2>&1) — no file is written.
+                if chars.get(j) != Some(&'&') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2268,6 +2382,150 @@ mod tests {
         agent.files_checklist_seen = false;
         agent.has_written_any_file = true;
         assert!(!agent.check_files_guard(true));
+
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // FILES: guard — shell command file-write classification
+    // =========================================================================
+
+    #[test]
+    fn test_shell_command_file_write_intent_classification() {
+        // Mutating but NOT file-writing: must not trip the FILES guard
+        // (regression: these used to be discarded as "writes").
+        for cmd in [
+            "mkdir -p src/components",
+            "npm install",
+            "npm install && npm run build",
+            "pip install -r requirements.txt",
+            "pnpm install",
+            "git add -A && git commit -m init",
+            "git checkout -b feature",
+            "cargo build --release",
+            "cargo test",
+            "touch src/new.rs",
+            "rm -rf target/tmp",
+            "chmod +x run.sh",
+            "mktemp -d",
+            "cat file.rs",
+            "ls -la",
+        ] {
+            assert!(
+                !shell_command_is_file_write_intent(cmd),
+                "'{}' must NOT be classified as a file-write intent",
+                cmd
+            );
+        }
+
+        // Actual file-write intents: the guard keeps covering these.
+        for cmd in [
+            "echo 'fn main() {}' > src/main.rs",
+            "cat <<EOF > src/lib.rs",
+            "echo x>>log.txt",
+            "echo hi | tee out.txt",
+            "sed -i 's/foo/bar/' src/main.rs",
+            "sed --in-place 's/a/b/' f.rs",
+            "perl -pi -e 's/a/b/' f.rs",
+            "cp src/a.rs src/b.rs",
+            "mv old.rs new.rs",
+            "rsync -a a/ b/",
+            "patch -p1 < fix.diff",
+            "git apply fix.diff",
+            "cargo fmt",
+            "cargo fix --allow-dirty",
+        ] {
+            assert!(
+                shell_command_is_file_write_intent(cmd),
+                "'{}' should be classified as a file-write intent",
+                cmd
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_redirect_detection_ignores_fd_dup_and_quotes() {
+        // Descriptor duplication writes no file.
+        assert!(!shell_command_is_file_write_intent("cargo test 2>&1"));
+        assert!(!shell_command_is_file_write_intent("make >&2"));
+        // Quoted '>' is data, not a redirect.
+        assert!(!shell_command_is_file_write_intent(
+            "grep \"->\" src/main.rs"
+        ));
+        assert!(!shell_command_is_file_write_intent("echo 'a > b'"));
+        // Redirect without spaces still counts.
+        assert!(shell_command_is_file_write_intent("echo x>y"));
+    }
+
+    #[test]
+    fn test_tool_call_file_write_intent_shell_vs_file_tools() {
+        // shell_exec is classified by command content.
+        assert!(!tool_call_is_file_write_intent(
+            "shell_exec",
+            r#"{"command":"mkdir foo && npm install"}"#
+        ));
+        assert!(tool_call_is_file_write_intent(
+            "shell_exec",
+            r#"{"command":"echo x > foo.txt"}"#
+        ));
+        // File tools count as file-write intents.
+        assert!(tool_call_is_file_write_intent(
+            "file_write",
+            r#"{"path":"a.rs","content":"x"}"#
+        ));
+        assert!(tool_call_is_file_write_intent(
+            "file_edit",
+            r#"{"path":"a.rs","old":"x","new":"y"}"#
+        ));
+        // Read-only tools do not.
+        assert!(!tool_call_is_file_write_intent(
+            "file_read",
+            r#"{"path":"a.rs"}"#
+        ));
+        // Unparseable shell args are not treated as writes.
+        assert!(!tool_call_is_file_write_intent("shell_exec", "not json"));
+    }
+
+    #[tokio::test]
+    async fn test_writes_target_only_read_files_ignores_non_file_shell() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent.file_tracker.read_state.insert(
+            "src/main.rs".to_string(),
+            super::super::FileReadState::default(),
+        );
+
+        // A batch mixing an edit to a read file with a non-file shell command
+        // (mkdir) is still exempt: the shell call is not a file write, so it
+        // must not disqualify the batch the way the old state-change
+        // classification did.
+        let batch = vec![
+            (
+                "file_edit".to_string(),
+                r#"{"path":"src/main.rs","old":"a","new":"b"}"#.to_string(),
+                None,
+            ),
+            (
+                "shell_exec".to_string(),
+                r#"{"command":"mkdir -p src/generated"}"#.to_string(),
+                None,
+            ),
+        ];
+        assert!(
+            agent.writes_target_only_read_files(&batch),
+            "mkdir in the batch must not make a read-file edit 'blind'"
+        );
+
+        // A shell command that WRITES a file has no tracked read state (no
+        // `path` arg), so it is treated as a blind write.
+        let shell_write = vec![(
+            "shell_exec".to_string(),
+            r#"{"command":"echo x > src/main.rs"}"#.to_string(),
+            None,
+        )];
+        assert!(!agent.writes_target_only_read_files(&shell_write));
 
         server.stop().await;
     }

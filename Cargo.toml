@@ -17,28 +17,8 @@ exclude = [
     "experiments/",
     "k8s/",
     "docs/",
-    "screenshots/",
-    "sab_results/",
-    "kimi_docs/",
-    "demos/",
     "selfware.toml",
-    "selfware-eval.toml",
-    "selfware-longrun.toml",
     "*.zip",
-    "*.profraw",
-    "*.html",
-    "*.info",
-    "*.bak",
-    ".evolution-log.jsonl",
-    "COMPREHENSIVE_PRODUCTION_READINESS_REVIEW.md",
-    "PRODUCTION_READINESS_REVIEW.md",
-    "SECOND_OPINION_REVIEW.md",
-    "EVAL_REPORT.md",
-    "COMPREHENSIVE_PROJECT_REVIEW.md",
-    "PROJECT_REVIEW_2026_03_06.md",
-    "GEMINI_RECOMMENDATIONS.md",
-    "QUICK_FIXES.md",
-    "ARCHITECTURE_SUMMARY.md",
     "Dockerfile",
     ".dockerignore",
     ".tarpaulin.toml",
@@ -46,17 +26,11 @@ exclude = [
     ".pre-commit-config.yaml",
     ".github/",
     # Non-source residue that shouldn't ship in the crate (verified none is
-    # include_str!'d or used by build.rs): review artifacts, dev scripts,
-    # editor/IDE sources, benchmark output, and review/plan markdown.
-    "artifacts/",
-    "benchmark_results/",
+    # include_str!'d or used by build.rs): editor/IDE sources.
     # NB: do NOT exclude scripts/ wholesale — scripts/playwright-bridge.js is a
     # runtime dependency of the page_control tool (src/tools/page_controller.rs).
     "editors/",
     "vscode-selfware/",
-    "IMPROVE_*.md",
-    "REVIEW_*.md",
-    "SELFWARE_REVIEW_*.md",
     "selfware-27b-concurrency16.toml",
 ]
 

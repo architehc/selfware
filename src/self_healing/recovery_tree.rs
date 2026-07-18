@@ -258,24 +258,66 @@ pub trait Resolution: Send + Sync {
 /// Flagship offline resolver: when the configured LLM endpoint is unreachable
 /// **and** the current endpoint is remote, switch to a local endpoint.
 ///
+/// **OPT-IN ONLY.** Rerouting the agent to a different endpoint is a
+/// high-surprise action: the old default resolved this on ANY "unreachable"
+/// classification and the agent then silently ran against `localhost:11434`
+/// for the rest of the session (whole-repo review, self-healing P2). The
+/// resolver now stays inert (`Escalate`) unless the operator explicitly
+/// opts in for the process/session via `SELFWARE_ENDPOINT_FALLBACK=1`
+/// (or constructs it with [`LocalEndpointFallback::opt_in`]). When it does
+/// fire, it logs a loud warning that the switch is session-scoped and how to
+/// make it permanent — never a silent permanent reroute.
+///
 /// Resolution logic:
-/// 1. If `config.endpoint` is **already** local → `Escalate` (nothing to
+/// 1. If not opted in → `Escalate`.
+/// 2. If `config.endpoint` is **already** local → `Escalate` (nothing to
 ///    fall back *to*).
-/// 2. Otherwise prefer a local endpoint that may already be present in
+/// 3. Otherwise prefer a local endpoint that may already be present in
 ///    config metadata.  Since the current `Config` struct only exposes a
 ///    single `endpoint`, we fall back to a well-known local default:
 ///    `http://localhost:11434/v1` (Ollama's OpenAI-compatible server).
-/// 3. Return `Resolved(Fallback { target })`.
+/// 4. Return `Resolved(Fallback { target })`.
 ///
 /// This resolver is fully offline: it only inspects config strings and returns
 /// an action.  The agent loop (or a future increment) is responsible for
 /// actually switching the endpoint and retrying.
-pub struct LocalEndpointFallback;
+pub struct LocalEndpointFallback {
+    /// Whether the operator explicitly opted in to endpoint rerouting.
+    enabled: bool,
+}
 
 /// Well-known local endpoint for Ollama's OpenAI-compatible API.
 const OLLAMA_LOCAL_ENDPOINT: &str = "http://localhost:11434/v1";
 
+/// Env var that opts the process into local-endpoint fallback rerouting.
+const ENDPOINT_FALLBACK_ENV: &str = "SELFWARE_ENDPOINT_FALLBACK";
+
 impl LocalEndpointFallback {
+    /// A resolver that WILL emit fallback directives. Use only when the
+    /// operator has explicitly asked for endpoint rerouting.
+    pub fn opt_in() -> Self {
+        Self { enabled: true }
+    }
+
+    /// A resolver gated on the `SELFWARE_ENDPOINT_FALLBACK` environment
+    /// variable — this is what [`RecoveryTree::with_defaults`] registers, so
+    /// the default auto-recovery path never reroutes endpoints silently.
+    pub fn from_env() -> Self {
+        Self {
+            enabled: Self::env_opted_in(std::env::var(ENDPOINT_FALLBACK_ENV).ok().as_deref()),
+        }
+    }
+
+    /// Pure opt-in check: truthy values are `1/true/yes/on` (case-insensitive).
+    /// Kept separate so it is deterministically unit-testable without touching
+    /// the process environment.
+    fn env_opted_in(value: Option<&str>) -> bool {
+        matches!(
+            value.map(|v| v.trim().to_ascii_lowercase()),
+            Some(ref v) if v == "1" || v == "true" || v == "yes" || v == "on"
+        )
+    }
+
     /// Determine the best local endpoint to fall back to.
     ///
     /// An explicit `SELFWARE_LOCAL_ENDPOINT` override wins, so operators running
@@ -317,6 +359,17 @@ impl Resolution for LocalEndpointFallback {
             return ResolutionOutcome::Escalate;
         }
 
+        // Rerouting the agent's endpoint is opt-in only — never silently
+        // switch the session to a local server on a bare "unreachable".
+        if !self.enabled {
+            tracing::debug!(
+                "LocalEndpointFallback: endpoint rerouting not enabled \
+                 (set {}=1 to opt in) — escalating",
+                ENDPOINT_FALLBACK_ENV
+            );
+            return ResolutionOutcome::Escalate;
+        }
+
         let current = &ctx.config.endpoint;
 
         // If we're already on a local endpoint, there's nowhere to fall back.
@@ -326,6 +379,19 @@ impl Resolution for LocalEndpointFallback {
 
         // Choose a local endpoint and emit a Fallback directive.
         let target = Self::pick_local_endpoint(ctx.config);
+        // Loud notice: the switch applies for the REST OF THIS SESSION (the
+        // agent mutates its in-memory config) and is NOT persisted. Tell the
+        // operator exactly what happened and how to make it permanent.
+        tracing::warn!(
+            "⚠️  Self-healing is switching the LLM endpoint from '{}' to '{}' \
+             for the rest of this session because the configured endpoint was \
+             classified as unreachable. This change is session-scoped and NOT \
+             saved; update the `endpoint` in selfware.toml to make it \
+             permanent, or unset {} to disable automatic fallback.",
+            current,
+            target,
+            ENDPOINT_FALLBACK_ENV
+        );
         ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback {
             target,
         }))
@@ -491,14 +557,19 @@ impl RecoveryTree {
     /// Create a tree pre-populated with the default set of resolvers.
     ///
     /// Currently registers:
-    /// - [`LocalEndpointFallback`] under [`FailureKind::LlmUnreachable`].
+    /// - [`LocalEndpointFallback`] under [`FailureKind::LlmUnreachable`] —
+    ///   gated on `SELFWARE_ENDPOINT_FALLBACK` so the default tree NEVER
+    ///   reroutes the agent's endpoint unless the operator opted in.
     ///
     /// Resolvers are ordered offline-first.
     pub fn with_defaults() -> Self {
         let mut tree = Self::new();
 
-        // LlmUnreachable → LocalEndpointFallback (offline)
-        tree.register(FailureKind::LlmUnreachable, Box::new(LocalEndpointFallback));
+        // LlmUnreachable → LocalEndpointFallback (offline, opt-in gated)
+        tree.register(
+            FailureKind::LlmUnreachable,
+            Box::new(LocalEndpointFallback::from_env()),
+        );
 
         // RateLimited → RateLimitBackoff (offline)
         tree.register(
@@ -796,7 +867,8 @@ mod tests {
             config: &config,
             message: "connection refused",
         };
-        let resolver = LocalEndpointFallback;
+        // Opted-in resolver: the ONLY way a fallback may be emitted.
+        let resolver = LocalEndpointFallback::opt_in();
         let outcome = resolver.resolve(&ctx);
         match outcome {
             ResolutionOutcome::Resolved(RecoveryDirective::Action(RecoveryAction::Fallback {
@@ -813,13 +885,64 @@ mod tests {
     }
 
     #[test]
+    fn test_local_endpoint_fallback_not_opted_in_escalates() {
+        // The self-healing P2 fix: without an explicit opt-in the resolver
+        // must NOT reroute the agent to localhost on a bare "unreachable".
+        let config = make_config("https://openrouter.ai/api/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "connection refused",
+        };
+        let resolver = LocalEndpointFallback { enabled: false };
+        match resolver.resolve(&ctx) {
+            ResolutionOutcome::Escalate => {}
+            other => panic!("expected Escalate without opt-in, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_local_endpoint_fallback_env_opted_in_table() {
+        for v in ["1", "true", "TRUE", "yes", "on", " On ", "YES"] {
+            assert!(
+                LocalEndpointFallback::env_opted_in(Some(v)),
+                "{:?} should opt in",
+                v
+            );
+        }
+        for v in ["0", "false", "no", "off", "", "2", "enabled"] {
+            assert!(
+                !LocalEndpointFallback::env_opted_in(Some(v)),
+                "{:?} should NOT opt in",
+                v
+            );
+        }
+        assert!(!LocalEndpointFallback::env_opted_in(None));
+    }
+
+    #[test]
+    fn test_local_endpoint_fallback_from_env_respects_opt_in() {
+        let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_ENDPOINT_FALLBACK"]);
+        _env.set("SELFWARE_ENDPOINT_FALLBACK", "1");
+        let resolver = LocalEndpointFallback::from_env();
+        let config = make_config("https://openrouter.ai/api/v1");
+        let ctx = RecoveryContext {
+            config: &config,
+            message: "connection refused",
+        };
+        match resolver.resolve(&ctx) {
+            ResolutionOutcome::Resolved(_) => {}
+            other => panic!("expected Resolved with env opt-in, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_local_endpoint_fallback_local_config_escalates() {
         let config = make_config("http://localhost:11434/v1");
         let ctx = RecoveryContext {
             config: &config,
             message: "connection refused",
         };
-        let resolver = LocalEndpointFallback;
+        let resolver = LocalEndpointFallback::opt_in();
         let outcome = resolver.resolve(&ctx);
         match outcome {
             ResolutionOutcome::Escalate => {}
@@ -834,7 +957,7 @@ mod tests {
             config: &config,
             message: "rate limit exceeded",
         };
-        let resolver = LocalEndpointFallback;
+        let resolver = LocalEndpointFallback::opt_in();
         // Non-LlmUnreachable should escalate
         match resolver.resolve(&ctx) {
             ResolutionOutcome::Escalate => {}
@@ -844,7 +967,7 @@ mod tests {
 
     #[test]
     fn test_local_endpoint_fallback_offline_capable() {
-        let resolver = LocalEndpointFallback;
+        let resolver = LocalEndpointFallback::opt_in();
         assert!(resolver.offline_capable());
         assert_eq!(resolver.name(), "LocalEndpointFallback");
     }
@@ -854,7 +977,31 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_recovery_tree_with_defaults_resolves_llm_unreachable() {
+    fn test_recovery_tree_with_defaults_escalates_llm_unreachable_without_opt_in() {
+        // Default tree must NOT reroute endpoints silently (self-healing P2):
+        // with SELFWARE_ENDPOINT_FALLBACK unset, LlmUnreachable escalates.
+        let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_ENDPOINT_FALLBACK"]);
+        std::env::remove_var("SELFWARE_ENDPOINT_FALLBACK");
+        let tree = RecoveryTree::with_defaults();
+        let config = make_config("https://openrouter.ai/api/v1");
+        let signal = FailureSignal {
+            kind: FailureKind::LlmUnreachable,
+            message: "connection refused".to_string(),
+        };
+        let ctx = RecoveryContext {
+            config: &config,
+            message: &signal.message,
+        };
+        match tree.resolve(&signal, &ctx) {
+            ResolutionOutcome::Escalate => {}
+            other => panic!("expected Escalate without opt-in, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_recovery_tree_with_opted_in_fallback_resolves_llm_unreachable() {
+        let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_ENDPOINT_FALLBACK"]);
+        _env.set("SELFWARE_ENDPOINT_FALLBACK", "1");
         let tree = RecoveryTree::with_defaults();
         let config = make_config("https://openrouter.ai/api/v1");
         let signal = FailureSignal {
@@ -961,7 +1108,10 @@ mod tests {
 
     #[test]
     fn test_recovery_tree_default_impl() {
-        // Default::default() should equal with_defaults()
+        // Default::default() should equal with_defaults(): without the env
+        // opt-in, LlmUnreachable escalates (no silent endpoint reroute).
+        let _env = crate::test_support::EnvGuard::capture(&["SELFWARE_ENDPOINT_FALLBACK"]);
+        std::env::remove_var("SELFWARE_ENDPOINT_FALLBACK");
         let tree = RecoveryTree::default();
         let config = make_config("https://openrouter.ai/api/v1");
         let signal = FailureSignal {
@@ -972,11 +1122,9 @@ mod tests {
             config: &config,
             message: &signal.message,
         };
-        // Should resolve (not Unresolvable or Escalate)
-        let outcome = tree.resolve(&signal, &ctx);
-        match outcome {
-            ResolutionOutcome::Resolved(_) => {}
-            other => panic!("expected Resolved, got {:?}", other),
+        match tree.resolve(&signal, &ctx) {
+            ResolutionOutcome::Escalate => {}
+            other => panic!("expected Escalate without opt-in, got {:?}", other),
         }
     }
 

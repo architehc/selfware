@@ -434,8 +434,10 @@ impl Tool for LspDiagnosticsTool {
 
     fn description(&self) -> &str {
         "Get diagnostics (errors, warnings, infos, hints) for a source file. \
-         Returns a list of diagnostic messages with severity and line numbers. \
-         Requires a language server to be installed."
+         Opens the file in the language server and waits briefly for it to publish diagnostics, \
+         then returns them with severity and line numbers. When the server publishes nothing \
+         within the wait window, reports 'unavailable' (no server data) instead of confirming \
+         the file is clean. Requires a language server to be installed."
     }
 
     fn schema(&self) -> Value {
@@ -460,19 +462,68 @@ impl Tool for LspDiagnosticsTool {
         validate_lsp_file(&args.file, self.handle.safety_config.as_ref())?;
         let client = self.handle.get().await?;
 
-        let diags = client.diagnostics(&args.file).await?;
+        // Diagnostics are push-based: the server only sends them as
+        // `textDocument/publishDiagnostics` notifications AFTER a `didOpen`.
+        // Previously this read the (usually empty) passive store without
+        // opening the file, so it reported `status: ok, 0 errors` for files
+        // the server had never analyzed — a false "clean" signal.
+        let content = tokio::fs::read_to_string(&args.file)
+            .await
+            .unwrap_or_default();
+        client.did_open(&args.file, &content).await?;
 
-        let errors = diags.iter().filter(|d| d.severity == "error").count();
-        let warnings = diags.iter().filter(|d| d.severity == "warning").count();
+        // Wait for the server to publish, polling the store. A background
+        // reader task dispatches notifications, so no request needs to be in
+        // flight for the store to fill.
+        const DIAG_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+        const DIAG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        let deadline = std::time::Instant::now() + DIAG_WAIT_TIMEOUT;
+        let diags = loop {
+            let diags = client.diagnostics(&args.file).await?;
+            if !diags.is_empty() || std::time::Instant::now() >= deadline {
+                break diags;
+            }
+            tokio::time::sleep(DIAG_POLL_INTERVAL).await;
+        };
+        let _ = client.did_close(&args.file).await;
 
-        Ok(json!({
-            "status": "ok",
-            "count": diags.len(),
-            "errors": errors,
-            "warnings": warnings,
-            "diagnostics": diags
-        }))
+        Ok(diagnostics_response(&args.file, &diags, DIAG_WAIT_TIMEOUT))
     }
+}
+
+/// Build the `lsp_diagnostics` response from the diagnostics collected after
+/// the didOpen wait window. An empty store after the window means "no server
+/// data" — NOT "file is clean": through the client API an empty publish is
+/// indistinguishable from no publish at all, so report `unavailable`
+/// honestly instead of a false `ok`.
+fn diagnostics_response(
+    file: &str,
+    diags: &[crate::lsp::client::Diagnostic],
+    wait_timeout: std::time::Duration,
+) -> Value {
+    if diags.is_empty() {
+        return json!({
+            "status": "unavailable",
+            "message": format!(
+                "diagnostics unavailable: the language server published no diagnostics for '{}' within {}s of opening it. \
+                 The file may be clean, or the server may still be initializing or may not support diagnostics for it — \
+                 do NOT treat this as confirmation that the file is error-free.",
+                file,
+                wait_timeout.as_secs()
+            )
+        });
+    }
+
+    let errors = diags.iter().filter(|d| d.severity == "error").count();
+    let warnings = diags.iter().filter(|d| d.severity == "warning").count();
+
+    json!({
+        "status": "ok",
+        "count": diags.len(),
+        "errors": errors,
+        "warnings": warnings,
+        "diagnostics": diags
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -801,5 +852,52 @@ mod tests {
             result.is_err(),
             "goto_implementation should reject /etc/passwd"
         );
+    }
+
+    // -- diagnostics_response honesty ----------------------------------------
+
+    #[test]
+    fn test_diagnostics_response_empty_is_unavailable_not_ok() {
+        // An empty store after the didOpen wait window must NOT be reported
+        // as `status: ok, 0 errors` — that falsely confirms a possibly
+        // error-filled file as clean.
+        let result = diagnostics_response("src/main.rs", &[], std::time::Duration::from_secs(5));
+        assert_eq!(result["status"], "unavailable");
+        let message = result["message"].as_str().unwrap();
+        assert!(
+            message.contains("do NOT treat this as confirmation"),
+            "message must warn against reading it as a clean bill: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_response_counts_severities() {
+        let diags = vec![
+            crate::lsp::client::Diagnostic {
+                message: "mismatched types".into(),
+                severity: "error".into(),
+                line: 3,
+                column: 5,
+            },
+            crate::lsp::client::Diagnostic {
+                message: "unused variable".into(),
+                severity: "warning".into(),
+                line: 7,
+                column: 9,
+            },
+            crate::lsp::client::Diagnostic {
+                message: "missing docs".into(),
+                severity: "info".into(),
+                line: 1,
+                column: 1,
+            },
+        ];
+        let result = diagnostics_response("src/main.rs", &diags, std::time::Duration::from_secs(5));
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["count"], 3);
+        assert_eq!(result["errors"], 1);
+        assert_eq!(result["warnings"], 1);
+        assert_eq!(result["diagnostics"].as_array().unwrap().len(), 3);
     }
 }

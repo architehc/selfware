@@ -20,7 +20,6 @@ fn test_multiagent_config_default() {
     let config = MultiAgentConfig::default();
     assert_eq!(config.max_concurrency, 4);
     assert_eq!(config.roles.len(), 4);
-    assert!(config.streaming);
 }
 
 #[test]
@@ -238,18 +237,6 @@ fn test_multiagent_event_started() {
         assert_eq!(agent_id, 0);
         assert_eq!(name, "Test");
         assert_eq!(task, "Do something");
-    }
-}
-
-#[test]
-fn test_multiagent_event_progress() {
-    let event = MultiAgentEvent::AgentProgress {
-        agent_id: 1,
-        content: "Working...".to_string(),
-    };
-    if let MultiAgentEvent::AgentProgress { agent_id, content } = event {
-        assert_eq!(agent_id, 1);
-        assert_eq!(content, "Working...");
     }
 }
 

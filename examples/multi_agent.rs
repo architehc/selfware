@@ -56,9 +56,6 @@ async fn main() -> Result<()> {
             AgentRole::Reviewer,  // Reviews for quality
         ],
 
-        // Enable streaming for real-time output
-        streaming: true,
-
         // Timeout per agent (2 minutes)
         timeout_secs: Some(120),
 
@@ -147,7 +144,6 @@ async fn main() -> Result<()> {
                     );
                     break;
                 }
-                _ => {}
             }
         }
     });

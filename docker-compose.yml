@@ -5,7 +5,7 @@ services:
   selfware:
     build:
       context: .
-      dockerfile: Dockerfile.selfware
+      dockerfile: Dockerfile
     image: selfware:latest
     container_name: selfware
     working_dir: /workspace
