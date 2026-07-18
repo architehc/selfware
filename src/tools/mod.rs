@@ -147,8 +147,47 @@ pub(crate) fn find_dangerous_shell_pattern(command: &str) -> Option<&'static str
         .join(" ");
     DANGEROUS_SHELL_PATTERNS
         .iter()
-        .find(|pattern| normalized.contains(**pattern))
+        .find(|pattern| {
+            if pattern.contains("sh") {
+                // Patterns containing "sh"/"bash" as a command word require
+                // word-boundary checking to avoid false positives on commands
+                // like "shellcheck", "sha256sum", or "shuf".
+                pattern_matches_sh_word(&normalized, pattern)
+            } else {
+                normalized.contains(**pattern)
+            }
+        })
         .copied()
+}
+
+/// Check if a sh/bash pattern matches with word-boundary awareness.
+///
+/// The "sh" or "bash" token must be followed by end-of-string or a shell
+/// delimiter character (whitespace, ; & | < > ( )) to count as a match.
+/// This prevents false positives where "sh" is merely a prefix of a longer
+/// word like "shellcheck", "sha256sum", or "shuf".
+fn pattern_matches_sh_word(normalized: &str, pattern: &str) -> bool {
+    // Find the offset and length of "bash" or "sh" within the pattern.
+    // Check "bash" first since "bash" contains "sh" as a substring.
+    let (sh_offset, sh_len) = pattern
+        .find("bash")
+        .map(|p| (p, 4))
+        .or_else(|| pattern.find("sh").map(|p| (p, 2)))
+        .expect("sh/bash pattern must contain 'sh' or 'bash'");
+
+    let mut search_from = 0;
+    while let Some(pos) = normalized[search_from..].find(pattern) {
+        let abs_pos = search_from + pos;
+        let after_sh = abs_pos + sh_offset + sh_len;
+        let is_boundary = after_sh >= normalized.len()
+            || normalized[after_sh..]
+                .starts_with(|c: char| c.is_whitespace() || ";&|<>()".contains(c));
+        if is_boundary {
+            return true;
+        }
+        search_from = abs_pos + 1;
+    }
+    false
 }
 
 pub(crate) fn truncate_output(output: &str, max_len: usize) -> String {
@@ -1351,6 +1390,14 @@ mod tests {
         assert!(find_dangerous_shell_pattern("dd if=/dev/zero of=/dev/sda").is_some());
         assert!(find_dangerous_shell_pattern("echo hello").is_none());
         assert!(find_dangerous_shell_pattern("cargo test").is_none());
+        // False positives: piping into a longer word starting with "sh"/"bash"
+        assert!(find_dangerous_shell_pattern("cat x | shellcheck -").is_none());
+        assert!(find_dangerous_shell_pattern("echo hi | sha256sum").is_none());
+        assert!(find_dangerous_shell_pattern("ls | shuf").is_none());
+        // Real dangerous cases must still be flagged
+        assert!(find_dangerous_shell_pattern("x | bash").is_some());
+        assert!(find_dangerous_shell_pattern("foo | sh -i").is_some());
+        assert!(find_dangerous_shell_pattern("exec bash -i").is_some());
     }
     #[test]
     fn every_registered_tool_has_explicit_safety_metadata() {

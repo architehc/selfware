@@ -332,15 +332,33 @@ impl Tool for FileRead {
         // A line_range lets us stream ONLY the requested slice, so a large file
         // can be sliced without loading it whole or tripping the size limit.
         if let Some((start, end)) = args.line_range {
-            let (selected_content, lines_scanned, lossy) =
+            let (selected_content, lines_scanned, lossy, reached_eof) =
                 read_line_slice(&path, start, end).await?;
-            return Ok(serde_json::json!({
-                "content": selected_content,
-                "total_lines": lines_scanned,
-                "truncated": true,
-                "encoding": if lossy { "utf-8-lossy" } else { "utf-8" },
-                "valid_utf8": !lossy
-            }));
+            let lines_returned = selected_content.lines().count();
+            if reached_eof {
+                // The scan consumed the whole file, so lines_scanned is the
+                // true total line count — safe to report honestly.
+                return Ok(serde_json::json!({
+                    "content": selected_content,
+                    "lines_returned": lines_returned,
+                    "total_lines": lines_scanned,
+                    "truncated": false,
+                    "encoding": if lossy { "utf-8-lossy" } else { "utf-8" },
+                    "valid_utf8": !lossy
+                }));
+            } else {
+                // The slice ended before EOF — we do NOT know the true total.
+                // Report has_more instead of a misleading total_lines.
+                return Ok(serde_json::json!({
+                    "content": selected_content,
+                    "lines_returned": lines_returned,
+                    "total_lines": null,
+                    "has_more": true,
+                    "truncated": true,
+                    "encoding": if lossy { "utf-8-lossy" } else { "utf-8" },
+                    "valid_utf8": !lossy
+                }));
+            }
         }
 
         // Whole-file read: guard against OOM on huge files.
@@ -1150,7 +1168,7 @@ fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
 /// Returns the joined slice, the number of lines scanned (== the true total
 /// only when the scan reached EOF), and whether any returned line contained
 /// invalid UTF-8 (i.e. the returned text is lossy rather than exact).
-async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(String, usize, bool)> {
+async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(String, usize, bool, bool)> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     // Preserve the legacy contract that an inverted range (end < start) yields
     // the single line at `start`.
@@ -1160,11 +1178,13 @@ async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(Strin
     let mut selected: Vec<String> = Vec::new();
     let mut lineno = 0usize;
     let mut lossy = false;
+    let mut reached_eof = false;
     let mut buf: Vec<u8> = Vec::new();
     loop {
         buf.clear();
         let n = reader.read_until(b'\n', &mut buf).await?;
         if n == 0 {
+            reached_eof = true;
             break;
         }
         lineno += 1;
@@ -1185,7 +1205,7 @@ async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(Strin
             break; // stop early — don't read the rest of a huge file
         }
     }
-    Ok((selected.join("\n"), lineno, lossy))
+    Ok((selected.join("\n"), lineno, lossy, reached_eof))
 }
 
 /// Write content to a file atomically using a temporary file and rename.
@@ -1407,8 +1427,11 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["content"].as_str().unwrap(), "line3\nline4\nline5");
         assert_eq!(result["truncated"], true);
-        // Scanned only up to `end` (5), proving it stopped early.
-        assert_eq!(result["total_lines"], 5);
+        // The slice ended before EOF, so total_lines must NOT be reported as
+        // the range end — it should be null and has_more should be true.
+        assert_eq!(result["total_lines"], serde_json::Value::Null);
+        assert_eq!(result["has_more"], true);
+        assert_eq!(result["lines_returned"], 3);
 
         // A CRLF file slices cleanly (carriage returns stripped).
         let crlf = temp_dir.path().join("crlf.txt");
@@ -1419,6 +1442,55 @@ mod tests {
         });
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["content"].as_str().unwrap(), "b");
+    }
+
+    #[tokio::test]
+    async fn file_read_line_range_subset_does_not_claim_total() {
+        // A 10-line file read with line_range [2,4] must report lines_returned
+        // = 3 and must NOT claim total_lines = 4 (EOF was not reached).
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("ten.txt");
+        let body: String = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file_path, &body).unwrap();
+
+        let tool = FileRead::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "line_range": [2, 4]
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["lines_returned"], 3);
+        assert_eq!(result["content"].as_str().unwrap(), "line2\nline3\nline4");
+        // EOF not reached → total_lines must be null, has_more must be true.
+        assert_eq!(result["total_lines"], serde_json::Value::Null);
+        assert_eq!(result["has_more"], true);
+    }
+
+    #[tokio::test]
+    async fn file_read_line_range_beyond_eof_reports_true_total() {
+        // Reading line_range [1,100] of a 10-line file reaches EOF, so
+        // total_lines must be the true count (10), not the requested end.
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("ten.txt");
+        let body: String = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&file_path, &body).unwrap();
+
+        let tool = FileRead::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "line_range": [1, 100]
+        });
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["total_lines"], 10);
+        assert_eq!(result["lines_returned"], 10);
+        // reached_eof → no has_more field (or it's absent/false).
+        assert!(result.get("has_more").is_none() || result["has_more"] == false);
     }
 
     #[tokio::test]
