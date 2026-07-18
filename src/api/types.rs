@@ -620,6 +620,7 @@ pub struct ChatResponse {
     /// List of completion choices (usually one, but can be multiple with `n > 1`).
     pub choices: Vec<Choice>,
     /// Token usage statistics for this request.
+    #[serde(default)]
     pub usage: Usage,
 }
 
@@ -657,7 +658,7 @@ pub struct Choice {
 ///     cost: None,
 /// };
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     /// Number of tokens in the prompt (including system message and context).
     pub prompt_tokens: usize,
@@ -984,6 +985,30 @@ mod tests {
         assert_eq!(response.id, "resp_123");
         assert_eq!(response.choices.len(), 1);
         assert_eq!(response.usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn test_chat_response_missing_usage_defaults_to_zero() {
+        // Some OpenAI-compatible providers omit the top-level `usage` object.
+        // Deserialization must still succeed with all usage fields defaulting to 0.
+        let json = r#"{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#;
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.id, "x");
+        assert_eq!(response.choices.len(), 1);
+        assert_eq!(response.choices[0].message.content, "hi");
+        assert_eq!(response.usage.prompt_tokens, 0);
+        assert_eq!(response.usage.completion_tokens, 0);
+        assert_eq!(response.usage.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_chat_response_with_usage_round_trips() {
+        // A response that includes a usage object must still deserialize correctly.
+        let json = r#"{"id":"y","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}"#;
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.usage.prompt_tokens, 7);
+        assert_eq!(response.usage.completion_tokens, 3);
+        assert_eq!(response.usage.total_tokens, 10);
     }
 
     #[test]
