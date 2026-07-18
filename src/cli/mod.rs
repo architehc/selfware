@@ -3640,28 +3640,18 @@ max_recovery_attempts = 3
                     }
                     println!("started {}", composite);
 
-                    if let Some(mut rx) = supervisor.attach(&id).await {
-                        loop {
-                            if let Some(st) = supervisor.status(&id).await {
-                                if matches!(
-                                    st,
-                                    RunStatus::Completed | RunStatus::Failed | RunStatus::Aborted
-                                ) {
-                                    break;
+                    if let Some(rx) = supervisor.attach(&id).await {
+                        // P0-3: wait via status polling + event draining —
+                        // the broadcast channel is never closed, so a bare
+                        // `recv().await` loop would hang here forever once
+                        // the agent stops emitting events.
+                        supervisor
+                            .wait_for_terminal(&id, rx, |ev| {
+                                if !quiet {
+                                    println!("  [{composite}] {ev:?}");
                                 }
-                            }
-                            match rx.recv().await {
-                                Ok(ev) => {
-                                    if !quiet {
-                                        println!("  [{composite}] {ev:?}");
-                                    }
-                                }
-                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue;
-                                }
-                            }
-                        }
+                            })
+                            .await;
                     }
 
                     let status_str = match supervisor.status(&id).await {

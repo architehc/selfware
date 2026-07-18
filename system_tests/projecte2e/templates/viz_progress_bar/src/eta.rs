@@ -18,7 +18,9 @@ impl EtaCalculator {
             start_time: Instant::now(),
             last_update: Instant::now(),
             smoothed_rate: 0.0,
-            // Alpha close to 1.0 weights recent measurements more heavily
+            // BUG 1: Alpha is inverted — should weight RECENT measurements more
+            // heavily (alpha close to 1.0), but uses 0.1 which weights old
+            // measurements more. This makes ETA very slow to respond to speed changes.
             alpha: 0.1,
             last_position: 0,
             total: 0,
@@ -54,7 +56,10 @@ impl EtaCalculator {
             return 0.0;
         }
 
-        // Calculate remaining time based on items left and current rate
+        // BUG 2: Uses elapsed time since start instead of remaining items / rate.
+        // Should be: (total - last_position) / smoothed_rate
+        // But this calculates: elapsed_total * (remaining_ratio / done_ratio)
+        // which gives a different (wrong) result when rate varies.
         let remaining = self.total - self.last_position;
         remaining as f64 / self.smoothed_rate
     }

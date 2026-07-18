@@ -1,5 +1,6 @@
 use viz_progress_bar::bar::ProgressBar;
 use viz_progress_bar::style::BarStyle;
+use viz_progress_bar::eta::EtaCalculator;
 use viz_progress_bar::multi::MultiProgress;
 
 // ─── BarStyle rendering ───

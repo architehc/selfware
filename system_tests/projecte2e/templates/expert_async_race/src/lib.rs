@@ -29,9 +29,18 @@ impl TaskPool {
     }
 
     /// Try to acquire a slot in the pool. Returns true if a slot was acquired.
+    ///
+    /// BUG: TOCTOU race - checks capacity under one lock, then increments
+    /// under a separate lock. Another task can slip in between.
     pub async fn acquire(&self) -> bool {
-        let mut state = self.state.lock().await;
-        if state.running < self.max_concurrent {
+        let has_capacity = {
+            let state = self.state.lock().await;
+            state.running < self.max_concurrent
+        };
+        // ^^^ Lock is dropped here. Another task can acquire between
+        // the check above and the increment below.
+        if has_capacity {
+            let mut state = self.state.lock().await;
             state.running += 1;
             true
         } else {
@@ -40,23 +49,39 @@ impl TaskPool {
     }
 
     /// Mark the current task as completed.
+    ///
+    /// BUG: Decrements running but forgets to increment completed.
     pub async fn complete(&self) {
         let mut state = self.state.lock().await;
         state.running -= 1;
-        state.completed += 1;
+        // BUG: missing `state.completed += 1;`
     }
 
     /// Mark the current task as failed.
+    ///
+    /// BUG: Increments failed but forgets to decrement running.
     pub async fn fail(&self) {
         let mut state = self.state.lock().await;
-        state.running -= 1;
+        // BUG: missing `state.running -= 1;`
         state.failed += 1;
     }
 
     /// Return a snapshot of (running, completed, failed).
+    ///
+    /// BUG: Split lock - reads running under one lock acquisition,
+    /// then reads completed and failed under another. The state can
+    /// change between the two reads, giving an inconsistent view.
     pub async fn snapshot(&self) -> (u32, u32, u32) {
-        let state = self.state.lock().await;
-        (state.running, state.completed, state.failed)
+        let running = {
+            let state = self.state.lock().await;
+            state.running
+        };
+        // ^^^ Lock dropped. State can mutate here.
+        let (completed, failed) = {
+            let state = self.state.lock().await;
+            (state.completed, state.failed)
+        };
+        (running, completed, failed)
     }
 }
 

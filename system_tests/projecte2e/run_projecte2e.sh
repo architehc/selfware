@@ -100,6 +100,18 @@ run_coding_scenario() {
   set -e
   echo "  Baseline: exit=${baseline_status}"
 
+  # Baseline sanity check (P0-4): every coding scenario seeds a deliberate
+  # bug, so the baseline MUST be red. A green baseline means the seeded bug
+  # is gone — e.g. the agent under test committed its fix back into the
+  # template (the [AGENT CHECKPOINT] corruption) — and the scenario can
+  # prove nothing about the agent. Fail loudly and force score 0 / FAIL
+  # below; never award the 70/100 "pass" for a green baseline.
+  local baseline_green=0
+  if [[ ${baseline_status} -eq 0 ]]; then
+    baseline_green=1
+    echo "  *** BASELINE SANITY FAILURE: ${name} baseline is already GREEN — seeded bug missing (template corruption). Scenario INVALID: forced score 0 / FAIL regardless of agent outcome. ***" >&2
+  fi
+
   # Run agent with terminal capture via `script`
   local start_ts
   start_ts="$(date +%s)"
@@ -141,28 +153,30 @@ run_coding_scenario() {
 
   grep -Ein "error|failed|panic|timed out|safety check failed|invalid|unknown tool" "${log_dir}/agent.log" | head -n 80 > "${log_dir}/error_highlights.log" || true
 
-  # Scoring: 70 for passing tests, 20 bonus for fixing broken tests, 10 for clean exit
+  # Scoring: 70 for passing tests, 20 bonus for fixing broken tests, 10 for
+  # clean exit. A green-baseline scenario is INVALID (see sanity check
+  # above) and scores 0 no matter what the agent did.
   local score=0
-  if [[ ${post_status} -eq 0 ]]; then
+  if [[ ${post_status} -eq 0 && ${baseline_green} -eq 0 ]]; then
     score=$((score + 70))
   fi
   if [[ ${baseline_status} -ne 0 && ${post_status} -eq 0 ]]; then
     score=$((score + 20))
   fi
-  if [[ ${agent_status} -eq 0 && ${timed_out} -eq 0 ]]; then
+  if [[ ${agent_status} -eq 0 && ${timed_out} -eq 0 && ${baseline_green} -eq 0 ]]; then
     score=$((score + 10))
   fi
 
   local notes=""
-  if [[ ${baseline_status} -eq 0 ]]; then
-    notes="baseline_already_green"
+  if [[ ${baseline_green} -eq 1 ]]; then
+    notes="baseline_green_INVALID_template_corruption"
   fi
   if [[ ${timed_out} -eq 1 ]]; then
     notes="${notes:+${notes},}agent_timeout"
   fi
 
   local result_icon="FAIL"
-  [[ ${post_status} -eq 0 ]] && result_icon="PASS"
+  [[ ${post_status} -eq 0 && ${baseline_green} -eq 0 ]] && result_icon="PASS"
   echo "  Result: ${result_icon} (score=${score}/100)"
 
   echo "${name}|coding|${difficulty}|${baseline_status}|${post_status}|${agent_status}|${timed_out}|${duration_secs}|${score}|${changed_files}|${error_hits}|${notes}" >> "${RESULTS_TSV}"
@@ -179,6 +193,20 @@ run_swarm_scenario() {
   echo "  [SWARM] multi-chat session"
   echo "──────────────────────────────────────────"
 
+  # Headless one-shot (P0-4): piping stdin into `multi-chat` fast-fails on
+  # non-TTY — the interactive REPL requires a terminal, so this scenario
+  # could never pass. Use the headless one-shot mode
+  # (`selfware multi-chat "task"`) instead. The prompt file is written for
+  # the interactive REPL (slash-commands and `exit` lines), so derive the
+  # one-shot task from its natural-language lines only.
+  local swarm_task
+  swarm_task="$(grep -vE '^[[:space:]]*(/|exit[[:space:]]*$)' "${THIS_DIR}/prompts/swarm_session.txt" | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g;s/^ //;s/ $//')"
+  if [[ -z "${swarm_task}" ]]; then
+    echo "ERROR: could not derive a one-shot task from prompts/swarm_session.txt" >&2
+    exit 1
+  fi
+  echo "  Task: ${swarm_task}"
+
   local start_ts
   start_ts="$(date +%s)"
   set +e
@@ -187,7 +215,7 @@ run_swarm_scenario() {
     --config "${CONFIG_FILE}" \
     -C "${REPO_ROOT}" \
     -y \
-    multi-chat -n 4 < "${THIS_DIR}/prompts/swarm_session.txt" > "${log_dir}/agent.log" 2>&1
+    multi-chat -n 4 "${swarm_task}" > "${log_dir}/agent.log" 2>&1
   local agent_status=$?
   set -e
   local end_ts
@@ -197,10 +225,15 @@ run_swarm_scenario() {
   local timed_out=0
   [[ ${agent_status} -eq 124 ]] && timed_out=1
 
+  # One-shot output markers: each completed agent prints a result line like
+  #   "  ✓ Agent-0-Coder (Coder) — 1.23s"
+  # under an "Agent Results:" header, and a successful fan-out ends with an
+  # "Aggregated Result:" section (the one-shot analogue of the old
+  # interactive-mode "Added Agent-"/"Status:" markers).
   local spawned_count
-  spawned_count="$(grep -c "Added Agent-" "${log_dir}/agent.log" || true)"
-  local status_mentions
-  status_mentions="$(grep -c "Status:" "${log_dir}/agent.log" || true)"
+  spawned_count="$(grep -Ec "Agent-[0-9]+-" "${log_dir}/agent.log" || true)"
+  local aggregated
+  aggregated="$(grep -c "Aggregated Result:" "${log_dir}/agent.log" || true)"
   local error_hits
   error_hits="$(grep -Eic "error|failed|panic|timed out|invalid" "${log_dir}/agent.log" || true)"
 
@@ -210,17 +243,17 @@ run_swarm_scenario() {
   if [[ ${spawned_count} -ge 2 ]]; then
     score=$((score + 40))
   fi
-  if [[ ${status_mentions} -ge 1 ]]; then
+  if [[ ${aggregated} -ge 1 ]]; then
     score=$((score + 30))
   fi
   if [[ ${agent_status} -eq 0 && ${timed_out} -eq 0 ]]; then
     score=$((score + 30))
   fi
 
-  echo "  Agent: exit=${agent_status} duration=${duration_secs}s spawned=${spawned_count}"
+  echo "  Agent: exit=${agent_status} duration=${duration_secs}s spawned=${spawned_count} aggregated=${aggregated}"
   echo "  Result: score=${score}/100"
 
-  local notes="spawned=${spawned_count},status_mentions=${status_mentions}"
+  local notes="spawned=${spawned_count},aggregated=${aggregated}"
   if [[ ${timed_out} -eq 1 ]]; then
     notes="${notes},agent_timeout"
   fi
@@ -239,8 +272,12 @@ run_swarm_scenario
 # ── Generate report ──────────────────────────────────────────────────
 coding_count="${#CODING_SCENARIOS[@]}"
 avg_score="$(awk -F'|' 'NR>1{sum+=$9;n++} END{if(n==0){print 0}else{printf "%.1f", sum/n}}' "${RESULTS_TSV}")"
-pass_count="$(awk -F'|' 'NR>1 && $5==0 {n++} END{print n+0}' "${RESULTS_TSV}")"
+# A pass requires a green post-validation AND a red baseline ($4): a
+# green-baseline scenario is invalid (template corruption) and never
+# counts as a pass (P0-4).
+pass_count="$(awk -F'|' 'NR>1 && $5==0 && $4+0!=0 {n++} END{print n+0}' "${RESULTS_TSV}")"
 scenario_count="$(awk -F'|' 'NR>1{n++} END{print n+0}' "${RESULTS_TSV}")"
+invalid_count="$(awk -F'|' 'NR>1 && $2=="coding" && $4+0==0 {n++} END{print n+0}' "${RESULTS_TSV}")"
 
 rating="Poor"
 awk -v s="${avg_score}" 'BEGIN{if(s>=85) print "Excellent"; else if(s>=70) print "Good"; else if(s>=50) print "Fair"; else print "Poor"}' > "${OUT_DIR}/rating.txt"
@@ -261,6 +298,9 @@ ALL_SCENARIOS+=("swarm_session")
   echo "- Model: ${MODEL_NAME}"
   echo "- Binary: \`target/release/selfware\` built with \`--all-features\`"
   echo "- Coding scenarios: ${pass_count}/${coding_count} passed"
+  if [[ ${invalid_count} -gt 0 ]]; then
+    echo "- ⚠ INVALID scenarios (baseline already GREEN — seeded bug missing, template corruption; forced to score 0): ${invalid_count}"
+  fi
   echo "- Total scenarios: ${scenario_count}"
   echo "- Overall score: ${avg_score}/100"
   echo "- Performance rating: **${rating}**"
@@ -312,6 +352,11 @@ echo ""
 echo "=============================================="
 echo "  E2E RUN COMPLETE"
 echo "  Coding pass: ${pass_count}/${coding_count}"
+if [[ ${invalid_count} -gt 0 ]]; then
+  echo "  ⚠ WARNING: ${invalid_count} coding scenario(s) had GREEN baselines and were"
+  echo "    INVALIDATED (template corruption — seeded bug missing). Their scores were"
+  echo "    forced to 0; restore the broken baselines before trusting this report." >&2
+fi
 echo "  Overall score: ${avg_score}/100"
 echo "  Rating: ${rating}"
 echo "  Report: ${SUMMARY_MD}"

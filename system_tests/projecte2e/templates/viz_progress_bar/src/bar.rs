@@ -49,8 +49,11 @@ impl ProgressBar {
 
     /// Advance position by `delta` and update ETA.
     pub fn tick(&mut self, delta: u64) {
-        self.position = (self.position + delta).min(self.total);
-        self.eta.update(self.position, self.total);
+        // BUG 1: position can exceed total — not clamped.
+        self.position += delta;
+
+        // BUG 2: ETA is not updated on tick.
+        // Should call self.eta.update(self.position, self.total) here.
     }
 
     /// Set position to a specific value.
@@ -61,8 +64,7 @@ impl ProgressBar {
 
     /// Mark the bar as finished (100%).
     pub fn finish(&mut self) {
-        self.position = self.total;
-        self.eta.update(self.position, self.total);
+        // BUG 3: Doesn't set position to total, so render shows incomplete.
         self.finished = true;
     }
 
@@ -71,7 +73,8 @@ impl ProgressBar {
         if self.total == 0 {
             return 1.0;
         }
-        (self.position as f64 / self.total as f64).min(1.0)
+        // BUG 4: Missing clamp — if position > total, ratio exceeds 1.0.
+        self.position as f64 / self.total as f64
     }
 
     /// Get the current position.
