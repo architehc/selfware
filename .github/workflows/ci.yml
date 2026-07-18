@@ -257,7 +257,10 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # tarpaulin does a full instrumented build + single-threaded test run over
+    # the whole crate (~25-30m); a 30m budget intermittently cancels the
+    # "Generate coverage" step mid-run. Give it headroom.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
