@@ -400,10 +400,13 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         }
 
         // ─── Step 3: Safety filter ───
+        // Gate on the paths the patch ACTUALLY edits, not the LLM-declared
+        // target_files metadata (free-form JSON, never cross-checked — an
+        // empty array passed trivially). See hypothesis_touches_protected.
         let valid: Vec<_> = hypotheses
             .into_iter()
             .filter(|h| {
-                if h.target_files.iter().any(|f| is_protected(f)) {
+                if hypothesis_touches_protected(h) {
                     log_warning(&format!(
                         "Hypothesis '{}' touches protected files, rejected",
                         h.id
@@ -1394,6 +1397,54 @@ fn sanitize_patch(patch: &str) -> String {
     out
 }
 
+/// Extract the paths a mutation payload ACTUALLY edits, for the
+/// protected-path gate. The hypothesis `target_files` field is LLM-declared
+/// metadata that is never cross-checked against the payload — an empty or
+/// benign list passes trivially while the patch edits anything (whole-repo
+/// review, Evolution P1). This parses the payload itself:
+/// 1. Search-and-replace JSON edits: every entry's `file` field.
+/// 2. Unified diffs: every `+++ b/<path>` header, plus `--- a/<path>` for
+///    pure deletions (whose `+++` target is `/dev/null`).
+fn patch_edited_paths(patch: &str) -> Vec<PathBuf> {
+    // Search-and-replace format (mirrors apply_edits' dispatch).
+    if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
+        if !edits.is_empty() && edits[0].get("search").is_some() {
+            return edits
+                .iter()
+                .filter_map(|e| e["file"].as_str().map(PathBuf::from))
+                .collect();
+        }
+    }
+
+    // Unified diff.
+    let mut paths = Vec::new();
+    for line in patch.lines() {
+        let (header, prefix) = if let Some(rest) = line.strip_prefix("+++ ") {
+            (rest, "b/")
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            (rest, "a/")
+        } else {
+            continue;
+        };
+        let p = header.trim().trim_start_matches(prefix);
+        if !p.is_empty() && p != "/dev/null" {
+            let path = PathBuf::from(p);
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// The protected-path gate for a hypothesis. Enforced on the paths the
+/// patch ACTUALLY edits (see [`patch_edited_paths`]); the LLM-declared
+/// `target_files` metadata is kept only as an additional signal.
+fn hypothesis_touches_protected(h: &Hypothesis) -> bool {
+    h.target_files.iter().any(|f| is_protected(f))
+        || patch_edited_paths(&h.patch).iter().any(|f| is_protected(f))
+}
+
 /// Apply edits to a directory. The `patch` field may be:
 /// 1. A JSON array of {file, search, replace} edits (new format)
 /// 2. A unified diff string (legacy format)
@@ -1662,6 +1713,17 @@ fn apply_patch_to_worktree(worktree: &Path, patch: &str) -> bool {
 }
 
 fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
+    // Final protected-path gate at the highest-blast-radius point: refuse
+    // to apply ANY patch that edits protected files to the real repo, even
+    // if a future caller bypasses the hypothesis safety filter.
+    let edited = patch_edited_paths(patch);
+    if let Some(p) = edited.iter().find(|f| is_protected(f)) {
+        log_error(&format!(
+            "Refusing to apply patch to repo: edits protected path {}",
+            p.display()
+        ));
+        return false;
+    }
     apply_edits(repo_root, patch)
 }
 
@@ -1902,6 +1964,120 @@ mod tests {
         let result = apply_patch_to_repo(&tmp, "this is not a valid patch format");
         assert!(!result, "Should fail gracefully for bad patch content");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── Protected-path gate on ACTUAL patch paths (Evolution P1) ───
+
+    fn make_hypothesis(patch: &str, target_files: &[&str]) -> Hypothesis {
+        Hypothesis {
+            id: "hyp-test".to_string(),
+            description: "test".to_string(),
+            patch: patch.to_string(),
+            target_files: target_files.iter().map(PathBuf::from).collect(),
+            property_test: None,
+        }
+    }
+
+    #[test]
+    fn test_patch_edited_paths_unified_diff() {
+        let diff = "diff --git a/src/tools/file.rs b/src/tools/file.rs\n\
+                    --- a/src/tools/file.rs\n\
+                    +++ b/src/tools/file.rs\n\
+                    @@ -1 +1 @@\n-old\n+new\n";
+        assert_eq!(
+            patch_edited_paths(diff),
+            vec![PathBuf::from("src/tools/file.rs")]
+        );
+        // New file (--- is /dev/null): only the +++ path is extracted.
+        let new_file = "--- /dev/null\n+++ b/src/new.rs\n@@ -0,0 +1 @@\n+x\n";
+        assert_eq!(
+            patch_edited_paths(new_file),
+            vec![PathBuf::from("src/new.rs")]
+        );
+        // Deletion (+++ is /dev/null): the --- path is still caught.
+        let deleted = "--- a/src/old.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+        assert_eq!(
+            patch_edited_paths(deleted),
+            vec![PathBuf::from("src/old.rs")]
+        );
+        // Garbage yields nothing.
+        assert!(patch_edited_paths("not a patch").is_empty());
+    }
+
+    #[test]
+    fn test_patch_edited_paths_search_replace_json() {
+        let edits = r#"[{"file":"src/a.rs","search":"x","replace":"y"},
+                        {"file":"src/b.rs","search":"p","replace":"q"}]"#;
+        assert_eq!(
+            patch_edited_paths(edits),
+            vec![PathBuf::from("src/a.rs"), PathBuf::from("src/b.rs")]
+        );
+    }
+
+    #[test]
+    fn test_hypothesis_gate_rejects_protected_diff_with_empty_targets() {
+        // The review's bypass: declared target_files is EMPTY, but the diff
+        // edits src/safety/ — must be refused.
+        let h = make_hypothesis(
+            "--- a/src/safety/checker.rs\n+++ b/src/safety/checker.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            &[],
+        );
+        assert!(hypothesis_touches_protected(&h));
+    }
+
+    #[test]
+    fn test_hypothesis_gate_rejects_protected_diff_with_benign_targets() {
+        // Declared metadata says src/tools/, the patch edits src/evolution/.
+        let h = make_hypothesis(
+            "--- a/src/evolution/daemon.rs\n+++ b/src/evolution/daemon.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            &["src/tools/file.rs"],
+        );
+        assert!(hypothesis_touches_protected(&h));
+    }
+
+    #[test]
+    fn test_hypothesis_gate_rejects_protected_search_replace_edits() {
+        let h = make_hypothesis(
+            r#"[{"file":"src/safety/mod.rs","search":"x","replace":"y"}]"#,
+            &[],
+        );
+        assert!(hypothesis_touches_protected(&h));
+    }
+
+    #[test]
+    fn test_hypothesis_gate_rejects_protected_deletion() {
+        let h = make_hypothesis(
+            "--- a/src/safety/old.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+            &[],
+        );
+        assert!(hypothesis_touches_protected(&h));
+    }
+
+    #[test]
+    fn test_hypothesis_gate_allows_benign_patch() {
+        let h = make_hypothesis(
+            "--- a/src/tools/file.rs\n+++ b/src/tools/file.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            &["src/tools/file.rs"],
+        );
+        assert!(!hypothesis_touches_protected(&h));
+        // Declared-metadata signal still works on its own.
+        let h2 = make_hypothesis(
+            "--- a/src/tools/file.rs\n+++ b/src/tools/file.rs\n@@ -1 +1 @@\n-a\n+b\n",
+            &["src/safety/checker.rs"],
+        );
+        assert!(hypothesis_touches_protected(&h2));
+    }
+
+    #[test]
+    fn test_apply_patch_to_repo_refuses_protected_patch() {
+        // Final gate at the highest-blast-radius point: a patch editing
+        // protected files is refused before touching the repo (no fs setup
+        // needed — the refusal happens before any apply attempt).
+        let diff =
+            "--- a/src/safety/checker.rs\n+++ b/src/safety/checker.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        assert!(!apply_patch_to_repo(Path::new("/nonexistent"), diff));
+        let edits = r#"[{"file":"src/evolution/daemon.rs","search":"x","replace":"y"}]"#;
+        assert!(!apply_patch_to_repo(Path::new("/nonexistent"), edits));
     }
 
     #[test]

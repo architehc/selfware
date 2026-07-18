@@ -420,6 +420,30 @@ impl SafetyChecker {
             }
         }
 
+        // `tee`/`sponge` writes bypass the redirect guard entirely — no `>`
+        // appears in the command, so `echo KEY | tee -a ~/.ssh/authorized_keys`
+        // sailed through BOTH write guards (whole-repo review, Safety P1).
+        // Extract their file targets from every pipeline segment and run
+        // them through the same denied-path matching as redirects.
+        for target in shell_tee_write_targets(cmd) {
+            if let Some(pattern) = redirect_target_matches_denied(
+                &target,
+                &self.working_dir,
+                &self.config.denied_paths,
+            ) {
+                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                    pattern,
+                }));
+            }
+        }
+
+        // The command BODY is also not covered by the allowed_paths
+        // allow-list: only file_* tool `path` args and shell_exec's `cwd`
+        // were validated, so `cat /etc/passwd` or `cp x ~/.ssh/y` succeeded
+        // where the equivalent file_read/file_write was blocked (Safety P1).
+        // Apply a conservative lexical check to file-targeting tokens.
+        self.check_shell_command_paths(cmd)?;
+
         // Check command chaining
         for part in split_shell_commands(&normalized) {
             let part_trimmed = part.trim();
@@ -465,6 +489,185 @@ impl SafetyChecker {
             }
         }
 
+        Ok(())
+    }
+
+    /// Conservative `allowed_paths`/`denied_paths` check for shell command
+    /// bodies (whole-repo review, Safety P1).
+    ///
+    /// `file_*` tools validate their `path` argument, but shell tools
+    /// (`shell_exec`, `pty_shell`, `container_exec`, `process_start`, npm/pip
+    /// scripts) used to check only the `cwd` argument — the command body
+    /// could read or write any path, asymmetric with the blocked
+    /// `file_read`/`file_write` of the very same path. This closes the gap
+    /// with a deliberately conservative heuristic (fail-open where unsure,
+    /// to keep everyday commands working):
+    ///
+    /// - Candidate paths are (a) the non-flag operands of common file verbs
+    ///   (see [`FILE_TARGET_VERBS`] — `dd` contributes its `if=`/`of=`
+    ///   values, `chmod` skips its mode operand) and (b) any token that
+    ///   *looks like an explicit path*: absolute (`/x`, `C:/x`),
+    ///   home-relative (`~/x`), or dot-relative (`./x`, `../x`). Bare words
+    ///   (`README.md`) are only candidates after a file verb, so strings,
+    ///   URLs, and parenthesized arguments are never treated as paths.
+    /// - The command word itself (running system binaries like
+    ///   `/usr/bin/python` stays allowed), redirect targets (`>`/`>>` —
+    ///   owned by the denied-path redirect guard above, which deliberately
+    ///   allows scratch writes like `2> /tmp/x.log`), and `tee`/`sponge`
+    ///   operands (owned by the tee guard above) are excluded.
+    /// - Each candidate is matched against `denied_paths` with the same
+    ///   matcher the redirect guard uses, and — only when `allowed_paths`
+    ///   is non-empty — must match the allow-list after lexical resolution
+    ///   against the working dir (with a leading `~` expanded). Failures
+    ///   return the same errors the file tools return
+    ///   (`PathDeniedPattern`/`PathNotAllowed`).
+    ///
+    /// Documented fail-open gaps: paths hidden in `--flag=VALUE` pairs,
+    /// command substitution `$(…)`, nested `sh -c '…'`, and remote
+    /// `host:path` operands are not extracted.
+    fn check_shell_command_paths(&self, cmd: &str) -> Result<()> {
+        for segment in split_shell_pipeline(cmd) {
+            let Some(tokens) = shlex::split(segment) else {
+                continue;
+            };
+            let Some(cmd_idx) = command_word_index(&tokens) else {
+                continue;
+            };
+            let verb = command_basename(&tokens[cmd_idx]);
+            // tee/sponge operands are write targets owned by the tee guard
+            // (denied-only semantics, same as redirects) — skip them here.
+            if verb == "tee" || verb == "sponge" {
+                continue;
+            }
+            let is_file_verb = FILE_TARGET_VERBS.contains(&verb);
+            let mut chmod_mode_seen = false;
+            let mut flags_done = false;
+            // What to do with the token after a redirect operator: `>`
+            // targets belong to the redirect guard (skip), `<` targets are
+            // reads we must check (take), `<<` heredoc delimiters are not
+            // paths (skip).
+            enum Redirect {
+                None,
+                Skip,
+                Take,
+            }
+            let mut pending = Redirect::None;
+            for (i, tok) in tokens.iter().enumerate() {
+                if i == cmd_idx {
+                    continue; // the program being run is not a path operand
+                }
+                match pending {
+                    Redirect::Skip => {
+                        pending = Redirect::None;
+                        continue;
+                    }
+                    Redirect::Take => {
+                        pending = Redirect::None;
+                        self.check_shell_path_candidate(tok)?;
+                        continue;
+                    }
+                    Redirect::None => {}
+                }
+                let stripped = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+                if let Some(rest) = stripped.strip_prefix("<<") {
+                    // Heredoc: `<<EOF` glues the delimiter word onto the
+                    // token; `<< EOF` takes the next one. Neither is a path.
+                    if rest.is_empty() {
+                        pending = Redirect::Skip;
+                    }
+                    continue;
+                }
+                if let Some(rest) = stripped.strip_prefix('<') {
+                    // Input redirect = a read target, glued (`</etc/passwd`)
+                    // or separate (`< /etc/passwd`).
+                    if rest.is_empty() {
+                        pending = Redirect::Take;
+                    } else {
+                        self.check_shell_path_candidate(rest)?;
+                    }
+                    continue;
+                }
+                if matches!(stripped, ">" | ">>" | ">|") {
+                    // A separated output-redirect target (`> file`) belongs
+                    // to the redirect guard — skip it here. Glued forms
+                    // (`>file`, `2>file`, `>&1`) keep no state: their
+                    // targets are extracted from the raw command by the
+                    // redirect guard.
+                    pending = Redirect::Skip;
+                    continue;
+                }
+                if stripped.starts_with('>') {
+                    continue;
+                }
+                if tok == "--" {
+                    flags_done = true;
+                    continue;
+                }
+                if !flags_done && tok.starts_with('-') && tok.len() > 1 {
+                    continue; // flag (possibly glued `-oFILE` — a documented gap)
+                }
+                if is_file_verb {
+                    if verb == "dd" {
+                        if let Some(v) = tok.strip_prefix("if=").or_else(|| tok.strip_prefix("of="))
+                        {
+                            self.check_shell_path_candidate(v)?;
+                        }
+                        continue; // bs=/count=/… operands are not paths
+                    }
+                    if verb == "chmod" && !chmod_mode_seen {
+                        chmod_mode_seen = true; // the mode operand is not a path
+                        continue;
+                    }
+                    self.check_shell_path_candidate(tok)?;
+                    continue;
+                }
+                if looks_like_explicit_path(tok) {
+                    self.check_shell_path_candidate(tok)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate one extracted shell-command path token against
+    /// `denied_paths` (same matcher as redirect targets) and, when
+    /// `allowed_paths` is non-empty, against the allow-list. A leading `~`
+    /// is expanded so home-relative tokens see the same absolute path the
+    /// shell would use.
+    fn check_shell_path_candidate(&self, candidate: &str) -> Result<()> {
+        let expanded = expand_home_token(candidate);
+        {
+            let forms: &[&str] = if expanded == candidate {
+                &[candidate]
+            } else {
+                &[candidate, expanded.as_str()]
+            };
+            for form in forms {
+                if let Some(pattern) = redirect_target_matches_denied(
+                    form,
+                    &self.working_dir,
+                    &self.config.denied_paths,
+                ) {
+                    return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                        pattern,
+                    }));
+                }
+            }
+        }
+        if self.config.allowed_paths.is_empty() {
+            return Ok(());
+        }
+        let resolved = resolve_redirect_target_lexical(&expanded, &self.working_dir);
+        use crate::safety::path_validator::PathValidator;
+        let validator = PathValidator::new(&self.config, self.working_dir.clone());
+        let allowed = validator
+            .is_path_in_allowed_list(&resolved, candidate)
+            .unwrap_or(false);
+        if !allowed {
+            return Err(SelfwareError::Safety(SafetyError::PathNotAllowed {
+                path: resolved,
+            }));
+        }
         Ok(())
     }
 
@@ -831,6 +1034,211 @@ pub fn split_shell_commands(cmd: &str) -> Vec<&str> {
     }
 
     parts
+}
+
+/// Split a shell command into pipeline segments: splits on `|`, `||`,
+/// `&&`, `;` and a backgrounding `&` appearing outside single/double
+/// quotes. Unlike [`split_shell_commands`] this also splits on a bare `|`
+/// so each stage of a pipeline can be inspected on its own (e.g. the `tee`
+/// in `echo x | tee file`).
+fn split_shell_pipeline(cmd: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut quote_char = b' ';
+    let bytes = cmd.as_bytes();
+
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+
+        if (c == b'"' || c == b'\'') && (i == 0 || bytes[i - 1] != b'\\') {
+            if !in_quotes {
+                in_quotes = true;
+                quote_char = c;
+            } else if c == quote_char {
+                in_quotes = false;
+            }
+        }
+
+        if !in_quotes && matches!(c, b';' | b'|' | b'&') {
+            // `||` and `&&` are two-byte operators (`;;` is not a thing).
+            let is_double = c != b';' && i + 1 < bytes.len() && bytes[i + 1] == c;
+            if start < i {
+                parts.push(&cmd[start..i]);
+            }
+            start = i + if is_double { 2 } else { 1 };
+            if is_double {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+
+    if start < cmd.len() {
+        parts.push(&cmd[start..]);
+    }
+
+    parts
+}
+
+/// Whether a token is a leading `VAR=value` environment assignment prefix
+/// (`FOO=bar cmd …`), which is not the command word.
+fn is_env_assignment(tok: &str) -> bool {
+    let Some(eq) = tok.find('=') else {
+        return false;
+    };
+    let name = &tok[..eq];
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The basename of a command word (`/usr/bin/tee` → `tee`).
+fn command_basename(word: &str) -> &str {
+    word.rsplit(['/', '\\']).next().unwrap_or(word)
+}
+
+/// Locate the command word of one pipeline segment: the first token after
+/// any `VAR=value` prefixes, looking through ONE leading `sudo`/`doas`
+/// wrapper (the canonical `… | sudo tee /root/file` form). Flags known to
+/// take a separate value (`sudo -u root …`) consume one extra token.
+fn command_word_index(tokens: &[String]) -> Option<usize> {
+    let mut idx = 0;
+    while tokens.get(idx).is_some_and(|t| is_env_assignment(t)) {
+        idx += 1;
+    }
+    if tokens
+        .get(idx)
+        .is_some_and(|t| matches!(command_basename(t), "sudo" | "doas"))
+    {
+        idx += 1;
+        while let Some(t) = tokens.get(idx) {
+            if !t.starts_with('-') || t.as_str() == "-" {
+                break;
+            }
+            idx += 1;
+            if matches!(
+                t.as_str(),
+                "-u" | "--user"
+                    | "-g"
+                    | "--group"
+                    | "-h"
+                    | "--host"
+                    | "-p"
+                    | "--prompt"
+                    | "-C"
+                    | "-D"
+                    | "--chdir"
+                    | "-R"
+                    | "-U"
+            ) {
+                idx += 1;
+            }
+        }
+    }
+    (idx < tokens.len()).then_some(idx)
+}
+
+/// Whether a token is shell plumbing rather than an operand: redirections
+/// (`>`, `2>`, `>>`, `<`, `<<`) or command separators that survived
+/// quoting.
+fn is_shell_metachar_token(tok: &str) -> bool {
+    let stripped = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    stripped.starts_with('>')
+        || stripped.starts_with('<')
+        || stripped.starts_with('|')
+        || stripped.starts_with('&')
+        || stripped.starts_with(';')
+}
+
+/// Extract the file targets of `tee` and `sponge` invocations anywhere in a
+/// shell command's pipeline. Both write (or append, `-a`) their stdin to
+/// the named files, so they are write primitives exactly like `>`/`>>` —
+/// but the redirect guard cannot see them because no `>` appears in the
+/// command. Quoting is handled via `shlex`; the command word is found per
+/// pipeline segment after `VAR=value` prefixes and one `sudo`/`doas`
+/// wrapper; flags (`-a`, `--append`) are skipped and collection stops at
+/// shell plumbing tokens. Everything else after the command word is a file
+/// by the tools' own syntax.
+pub fn shell_tee_write_targets(cmd: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for segment in split_shell_pipeline(cmd) {
+        let Some(tokens) = shlex::split(segment) else {
+            continue;
+        };
+        let Some(cmd_idx) = command_word_index(&tokens) else {
+            continue;
+        };
+        if !matches!(command_basename(&tokens[cmd_idx]), "tee" | "sponge") {
+            continue;
+        }
+        let mut flags_done = false;
+        for tok in &tokens[cmd_idx + 1..] {
+            if is_shell_metachar_token(tok) {
+                break;
+            }
+            if tok == "--" {
+                flags_done = true;
+                continue;
+            }
+            if !flags_done && tok.starts_with('-') && tok.len() > 1 {
+                continue; // -a, --append, …
+            }
+            targets.push(tok.clone());
+        }
+    }
+    targets
+}
+
+/// File verbs whose non-flag operands are file targets by their own
+/// syntax. `dd` is special-cased (`if=`/`of=` operands) and `chmod` skips
+/// its mode operand; see [`SafetyChecker::check_shell_command_paths`].
+const FILE_TARGET_VERBS: &[&str] = &[
+    "cat", "cp", "mv", "rm", "chmod", "ln", "mkdir", "touch", "head", "tail", "less", "more", "dd",
+    "install", "rsync", "scp",
+];
+
+/// Whether a shell token has the shape of an explicit filesystem path:
+/// absolute (`/x`, `C:/x`, `C:\x`), home-relative (`~/x`), or dot-relative
+/// (`./x`, `../x`). Tokens containing substitution characters (`$`,
+/// backtick, parentheses) are excluded — they are shell-expansion
+/// artifacts, not literal paths. Bare words (`README.md`) deliberately do
+/// not qualify: outside file-verb operands they are far more often strings
+/// than paths.
+fn looks_like_explicit_path(tok: &str) -> bool {
+    if tok.contains(['$', '`', '(', ')']) {
+        return false;
+    }
+    if tok.starts_with('/')
+        || tok.starts_with("~/")
+        || tok.starts_with("./")
+        || tok.starts_with("../")
+        || tok.starts_with(".\\")
+        || tok.starts_with("..\\")
+    {
+        return true;
+    }
+    // Windows drive-letter absolute path (both separator flavors).
+    let b = tok.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Expand a leading `~`/`~/` against the user's home directory so a
+/// home-relative shell token is validated against the same absolute path
+/// the shell would resolve it to. `~user/...` forms are left untouched.
+fn expand_home_token(tok: &str) -> String {
+    if tok == "~" || tok.starts_with("~/") {
+        let home =
+            std::env::var_os("HOME").or_else(|| dirs::home_dir().map(|p| p.into_os_string()));
+        if let Some(home) = home {
+            return format!("{}{}", home.to_string_lossy(), &tok[1..]);
+        }
+    }
+    tok.to_string()
 }
 
 /// Whether the platform's default shell treats `\` as an escape character

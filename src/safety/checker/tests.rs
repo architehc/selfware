@@ -1189,3 +1189,212 @@ fn test_redirect_matching_unix_behavior_unchanged() {
     assert!(matches_denied("build/results.log", wd, &denied).is_none());
     assert!(matches_denied("/tmp/out.txt", wd, &denied).is_none());
 }
+
+// ── tee/sponge write guard (P1: bypass of both write guards) ─────────────
+
+#[test]
+fn test_shell_tee_write_targets_extraction() {
+    use crate::safety::checker::validation::shell_tee_write_targets as targets;
+
+    // Basic forms, including -a/--append flags and pipelines.
+    assert_eq!(targets("echo x | tee file.txt"), ["file.txt"]);
+    assert_eq!(targets("echo x | tee -a file.txt"), ["file.txt"]);
+    assert_eq!(targets("echo x | tee --append file.txt"), ["file.txt"]);
+    assert_eq!(targets("echo x | sponge file.txt"), ["file.txt"]);
+    // Multiple file operands are all files by tee's syntax.
+    assert_eq!(targets("echo x | tee a.txt b.txt"), ["a.txt", "b.txt"]);
+    // Mid-pipeline tee, and several segments.
+    assert_eq!(
+        targets("cat f | grep x | tee -a out.txt | wc -l"),
+        ["out.txt"]
+    );
+    // Quoting is handled.
+    assert_eq!(targets("echo x | tee \"my file.txt\""), ["my file.txt"]);
+    // One leading sudo/doas wrapper is unwrapped (canonical root-tee form).
+    assert_eq!(targets("echo x | sudo tee /root/f"), ["/root/f"]);
+    assert_eq!(targets("echo x | sudo -u root tee /root/f"), ["/root/f"]);
+    // `--` ends flag parsing.
+    assert_eq!(targets("echo x | tee -- -a"), ["-a"]);
+    // Collection stops at shell plumbing (the redirect target is NOT a tee
+    // operand — it belongs to the redirect guard).
+    assert_eq!(targets("echo x | tee a.txt > b.txt"), ["a.txt"]);
+    // No tee/sponge command word → no targets. An operand that merely
+    // contains "tee" is data, not a command.
+    assert!(targets("echo tee file.txt").is_empty());
+    assert!(targets("ls -la").is_empty());
+    assert!(targets("echo x > file.txt").is_empty());
+}
+
+#[test]
+fn test_shell_exec_tee_to_denied_path_blocked() {
+    // The review's P1: `echo KEY | tee -a ~/.ssh/authorized_keys` fired no
+    // guard at all. Every form below must hit the denied-path matcher.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "echo KEY | tee -a ~/.ssh/authorized_keys",
+        "echo x | tee ~/.ssh/authorized_keys",
+        "echo x | tee .env",
+        "echo x | tee -a .env",
+        "echo x | tee ./.env",
+        "echo x | tee \".env\"",
+        "echo x | tee './.env'",
+        "echo x | tee config/.env",
+        "echo x | sponge .env",
+        "echo x | sponge -a .env.local",
+        "echo x | tee .git/hooks/pre-commit",
+        "echo x | tee .git/config",
+        "echo x | tee sub/secrets/api_key.txt",
+        "cat f | grep x | tee -a .env | wc -l",
+        "echo x | sudo tee .env",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        let result = checker.check_tool_call(&call);
+        assert!(
+            result.is_err(),
+            "tee/sponge to a denied path must be blocked: {cmd}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("denied pattern"),
+            "expected a denied-pattern error for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_tee_to_allowed_path_works() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "echo x | tee output.txt",
+        "echo x | tee -a build/results.log",
+        "echo x | sponge notes.md",
+        // Consistent with redirects: scratch writes outside the workdir are
+        // allowed by the denied-only tee guard (only denied_paths apply).
+        "echo x | tee /tmp/selfware-test-tee-out.txt",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        assert!(
+            checker.check_tool_call(&call).is_ok(),
+            "tee to an allowed path must pass: {cmd}"
+        );
+    }
+}
+
+// ── shell command body vs allowed_paths (P1) ─────────────────────────────
+
+#[test]
+fn test_shell_exec_body_absolute_read_blocked_by_allowlist() {
+    use crate::errors::{SafetyError, SelfwareError};
+
+    let config = SafetyConfig::default(); // allowed_paths = ["./**"]
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "cat /etc/passwd",
+        "head /etc/shadow",
+        "tail -n 5 /var/log/syslog",
+        "less /etc/ssh/sshd_config",
+        "grep root /etc/passwd", // absolute token anywhere, not only verbs
+        "cat < /etc/passwd",     // input redirect is a read
+        "cat </etc/passwd",      // glued input redirect form
+        "cp x ~/.ssh/y",
+        "ln -s /etc/passwd ./link",
+        "install x /usr/local/bin/x",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        let result = checker.check_tool_call(&call);
+        assert!(result.is_err(), "expected an error for: {cmd}");
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                SelfwareError::Safety(
+                    SafetyError::PathNotAllowed { .. } | SafetyError::PathDeniedPattern { .. }
+                )
+            ),
+            "expected the standard path safety error for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_body_denied_path_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "cat .env",
+        "head -c9 .env.local",
+        "cat app/secrets/db.key",
+        "cp ~/.ssh/id_rsa ./stolen",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        let result = checker.check_tool_call(&call);
+        assert!(result.is_err(), "expected an error for: {cmd}");
+        assert!(
+            result.unwrap_err().to_string().contains("denied pattern"),
+            "expected a denied-pattern error for: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_body_everyday_commands_pass() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    for cmd in [
+        "echo hello",
+        "grep foo ./src",
+        "cargo test",
+        "cargo build --release",
+        "ls -la",
+        "git status",
+        "cat README.md",
+        "cat src/main.rs",
+        "head -n 50 README.md",
+        "rm -rf ./target",
+        "mkdir -p ./checkpoints/x && touch ./checkpoints/x/.gitkeep",
+        "chmod 755 ./script.sh",
+        "chmod +x script.sh",
+        "cp src/a.rs src/b.rs",
+        "curl https://example.com/api",
+        // Parenthesized/quoted strings are not paths.
+        "echo \"(see docs/readme.md)\"",
+        "grep \"a > b\" src/main.rs",
+        // tee/redirect scratch targets keep their denied-only semantics.
+        "echo x | tee /tmp/selfware-test-body-tee.txt",
+        "echo x > /tmp/selfware-test-body-redirect.txt",
+    ] {
+        let args = serde_json::json!({"command": cmd}).to_string();
+        let call = create_test_call("shell_exec", &args);
+        assert!(
+            checker.check_tool_call(&call).is_ok(),
+            "everyday command must pass: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_body_allowcheck_skipped_without_allowlist() {
+    // With an empty allowed_paths the command-body allow-check is disabled
+    // (documented fail-open; the file tools restrict to the workdir in this
+    // config, the shell heuristic does not). denied_paths still apply.
+    let config = SafetyConfig {
+        allowed_paths: vec![],
+        ..SafetyConfig::default()
+    };
+    let checker = SafetyChecker::new(&config);
+
+    let call = create_test_call("shell_exec", r#"{"command": "cat /etc/hostname"}"#);
+    assert!(checker.check_tool_call(&call).is_ok());
+
+    let denied = create_test_call("shell_exec", r#"{"command": "cat .env"}"#);
+    assert!(checker.check_tool_call(&denied).is_err());
+}

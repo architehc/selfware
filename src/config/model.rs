@@ -77,6 +77,60 @@ impl From<&str> for RedactedString {
     }
 }
 
+/// Marker substituted for secrets in serialized views meant for untrusted
+/// consumers (e.g. the MCP `selfware://config` resource).
+pub const REDACTED_SECRET_MARKER: &str = "<redacted>";
+
+/// Redact secrets from a JSON view of the configuration, in place.
+///
+/// [`RedactedString`]'s `Serialize` impl intentionally emits the real value
+/// so config round-trips (TOML save/load) keep working — which means a
+/// plain `serde_json::to_string(&config)` leaks the raw API key to whatever
+/// consumes it. Views handed to third parties must pass through this
+/// instead:
+///
+/// - every string value under an `api_key` key (the top-level
+///   `Config.api_key` and each `[models.*]` profile key) is replaced with
+///   [`REDACTED_SECRET_MARKER`];
+/// - every string value inside an `env` object (per-MCP-server environment
+///   maps, e.g. `GITHUB_TOKEN = "…"`) is replaced as well.
+///
+/// Both recurse through arbitrary sub-objects/arrays, so secrets nested at
+/// any depth are covered. Deserialization is unaffected — this is a
+/// one-way view transformation.
+pub fn redact_config_secrets(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                if key == "api_key" {
+                    if val.is_string() {
+                        *val = serde_json::Value::String(REDACTED_SECRET_MARKER.to_string());
+                    }
+                    continue;
+                }
+                if key == "env" {
+                    if let serde_json::Value::Object(env_map) = val {
+                        for env_val in env_map.values_mut() {
+                            if env_val.is_string() {
+                                *env_val =
+                                    serde_json::Value::String(REDACTED_SECRET_MARKER.to_string());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                redact_config_secrets(val);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_config_secrets(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A named model profile, allowing multiple LLM backends (e.g. a text coder
 /// and a vision critic) to coexist in a single selfware config.
 ///
@@ -366,6 +420,87 @@ mod tests {
     fn test_default_modalities_returns_text() {
         let mods = default_modalities();
         assert_eq!(mods, vec!["text".to_string()]);
+    }
+
+    // =========================================================================
+    // redact_config_secrets tests
+    // =========================================================================
+
+    #[test]
+    fn test_redact_config_secrets_api_key_top_level_and_profiles() {
+        let mut value = serde_json::json!({
+            "endpoint": "https://openrouter.ai/api/v1",
+            "api_key": "sk-top-level-secret",
+            "models": {
+                "default": {
+                    "endpoint": "http://localhost:1234/v1",
+                    "api_key": "sk-profile-secret"
+                },
+                "vision": {
+                    "endpoint": "http://localhost:9999/v1",
+                    "api_key": null
+                }
+            }
+        });
+        redact_config_secrets(&mut value);
+        let s = value.to_string();
+        assert!(!s.contains("sk-top-level-secret"));
+        assert!(!s.contains("sk-profile-secret"));
+        assert_eq!(value["api_key"], REDACTED_SECRET_MARKER);
+        assert_eq!(
+            value["models"]["default"]["api_key"],
+            REDACTED_SECRET_MARKER
+        );
+        // A null api_key stays null (nothing to redact).
+        assert!(value["models"]["vision"]["api_key"].is_null());
+        // Non-secret fields are untouched.
+        assert_eq!(value["endpoint"], "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn test_redact_config_secrets_mcp_server_env() {
+        let mut value = serde_json::json!({
+            "mcp": {
+                "servers": [
+                    {
+                        "name": "github",
+                        "command": "npx",
+                        "env": { "GITHUB_TOKEN": "ghp-secret", "OTHER": "x" }
+                    }
+                ]
+            }
+        });
+        redact_config_secrets(&mut value);
+        let s = value.to_string();
+        assert!(!s.contains("ghp-secret"));
+        assert_eq!(
+            value["mcp"]["servers"][0]["env"]["GITHUB_TOKEN"],
+            REDACTED_SECRET_MARKER
+        );
+        assert_eq!(
+            value["mcp"]["servers"][0]["env"]["OTHER"],
+            REDACTED_SECRET_MARKER
+        );
+        assert_eq!(value["mcp"]["servers"][0]["command"], "npx");
+    }
+
+    #[test]
+    fn test_redact_config_secrets_recurses_arrays() {
+        let mut value = serde_json::json!({
+            "nested": [ {"api_key": "sk-deep"}, [ {"api_key": "sk-deeper"} ] ]
+        });
+        redact_config_secrets(&mut value);
+        let s = value.to_string();
+        assert!(!s.contains("sk-deep"));
+        assert!(!s.contains("sk-deeper"));
+    }
+
+    #[test]
+    fn test_redact_config_secrets_no_secrets_is_noop() {
+        let mut value = serde_json::json!({"endpoint": "http://x", "max_tokens": 4096});
+        let before = value.clone();
+        redact_config_secrets(&mut value);
+        assert_eq!(value, before);
     }
 
     #[test]

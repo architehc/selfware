@@ -294,6 +294,18 @@ fn load_mcp_safety_config(config_path: Option<&str>) -> crate::config::SafetyCon
     }
 }
 
+/// Whether destructive tools may execute over MCP. Off by default: the MCP
+/// channel has no confirmation prompt, so tools classified destructive
+/// (`Tool::is_destructive`) are refused unless the operator opts in by
+/// starting the server with `SELFWARE_MCP_ALLOW_DESTRUCTIVE=1` (also
+/// accepts "true"). Read per call so a long-running server picks up the
+/// value its spawning client injected without a code change.
+fn mcp_destructive_tools_allowed() -> bool {
+    std::env::var("SELFWARE_MCP_ALLOW_DESTRUCTIVE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 impl McpServer {
     /// Create a new MCP server with the default tool registry.
     pub fn new() -> Self {
@@ -584,6 +596,40 @@ impl McpServer {
             return (Some(response), None);
         }
 
+        // MCP has no interactive confirmation channel: a connected client
+        // can be ANY external AI tool, and the agent loop's destructive-op
+        // confirmation prompt (src/safety/confirm.rs) cannot run over
+        // stdio JSON-RPC. Refuse tools the registry classifies as
+        // destructive (the same Tool::is_destructive metadata the CLI
+        // confirmation gate uses) unless the operator explicitly opted in
+        // by starting the server with SELFWARE_MCP_ALLOW_DESTRUCTIVE=1.
+        // The refusal is a normal tool result (isError: true), not a
+        // protocol error, so the client can surface the reason to its user.
+        if !mcp_destructive_tools_allowed() {
+            let is_destructive = {
+                let registry = self.registry.read().await;
+                registry
+                    .get(tool_name)
+                    .is_some_and(|tool| tool.is_destructive())
+            };
+            if is_destructive {
+                let response = serde_json::json!({
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": format!(
+                                "Refused: tool '{}' is classified as destructive and MCP provides no confirmation channel. \
+                                 To allow destructive tools over MCP, restart the server with SELFWARE_MCP_ALLOW_DESTRUCTIVE=1.",
+                                tool_name
+                            )
+                        }
+                    ],
+                    "isError": true
+                });
+                return (Some(response), None);
+            }
+        }
+
         // If the tool exists but hasn't been activated yet, activate it on
         // demand so that every tool advertised in tools/list is actually
         // callable.  This mirrors how the agent's tool discovery activates
@@ -738,7 +784,18 @@ impl McpServer {
             }
             "selfware://config" => {
                 let config = match crate::config::Config::load(self.config_path.as_deref()) {
-                    Ok(cfg) => serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+                    Ok(cfg) => {
+                        // SECURITY: never hand secrets to MCP clients.
+                        // RedactedString's Serialize impl emits the REAL
+                        // value (so TOML config round-trips keep working),
+                        // which used to leak the raw
+                        // SELFWARE_API_KEY/OPENROUTER_API_KEY — and the
+                        // per-server MCP env maps (GITHUB_TOKEN etc.) — to
+                        // any connected client. Serialize a redacted view.
+                        let mut value = serde_json::to_value(&cfg).unwrap_or_default();
+                        crate::config::model::redact_config_secrets(&mut value);
+                        serde_json::to_string_pretty(&value).unwrap_or_default()
+                    }
                     Err(e) => format!("{{\"error\": \"{}\"}}", e),
                 };
                 (
@@ -1130,6 +1187,23 @@ mod tests {
         server.handle_request(&req).await;
     }
 
+    /// Serializes tests that mutate SELFWARE_MCP_ALLOW_DESTRUCTIVE
+    /// (process-wide env state) so they don't race each other.
+    static DESTRUCTIVE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Set or clear SELFWARE_MCP_ALLOW_DESTRUCTIVE. Callers must hold
+    /// DESTRUCTIVE_ENV_LOCK for the whole test.
+    fn set_destructive_opt_in(value: Option<&str>) {
+        // SAFETY: every test that touches this variable serializes on
+        // DESTRUCTIVE_ENV_LOCK; the code under test only reads it.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("SELFWARE_MCP_ALLOW_DESTRUCTIVE", v),
+                None => std::env::remove_var("SELFWARE_MCP_ALLOW_DESTRUCTIVE"),
+            }
+        }
+    }
+
     #[test]
     fn test_json_rpc_request_parsing() {
         let json = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
@@ -1349,6 +1423,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_tools_call_allows_safe_shell_command() {
+        // shell_exec is classified destructive, so over MCP it needs the
+        // operator opt-in (see mcp_destructive_tools_allowed).
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(Some("1"));
         let server = McpServer::new();
         initialize_server(&server).await;
 
@@ -1369,6 +1447,7 @@ mod tests {
             !text.contains("Blocked by safety checker"),
             "expected the safe command to run, got: {text}"
         );
+        set_destructive_opt_in(None);
     }
 
     #[tokio::test]
@@ -1704,6 +1783,9 @@ mod tests {
     /// exact scenario that previously got zero bytes back (P0-8).
     #[tokio::test]
     async fn test_serve_io_newline_delimited_session() {
+        // shell_exec is destructive-classified: opt in for this session.
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(Some("1"));
         let (client, server_task) = spawn_test_server();
         let (client_read, mut client_write) = tokio::io::split(client);
         let mut reader = BufReader::new(client_read);
@@ -1766,12 +1848,16 @@ mod tests {
             .expect("server must exit after shutdown")
             .unwrap()
             .unwrap();
+        set_destructive_opt_in(None);
     }
 
     /// Back-compat session: a legacy client speaking Content-Length framing
     /// must keep working, with Content-Length framed responses.
     #[tokio::test]
     async fn test_serve_io_content_length_session() {
+        // shell_exec is destructive-classified: opt in for this session.
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(Some("1"));
         let (client, server_task) = spawn_test_server();
         let (client_read, mut client_write) = tokio::io::split(client);
         let mut reader = BufReader::new(client_read);
@@ -1821,6 +1907,7 @@ mod tests {
             .expect("server must exit after shutdown")
             .unwrap()
             .unwrap();
+        set_destructive_opt_in(None);
     }
 
     /// Framing is detected per message, not per connection: a client may mix
@@ -2119,5 +2206,156 @@ mod tests {
             );
             assert!(response.result.is_some());
         }
+    }
+
+    // -- Secret redaction & destructive-tool gate (whole-repo review P1/P2) --
+
+    /// The MCP `selfware://config` resource must never hand a client the raw
+    /// API key or MCP server env secrets — RedactedString's Serialize impl
+    /// emits the real value, so the resource serializes a redacted view.
+    #[tokio::test]
+    async fn test_resources_read_config_redacts_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("selfware.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+api_key = "sk-live-test-secret-12345"
+
+[[mcp.servers]]
+name = "github"
+command = "npx"
+env = { GITHUB_TOKEN = "ghp-test-secret-67890" }
+"#,
+        )
+        .unwrap();
+
+        let server = McpServer::with_config(Some(config_path.to_string_lossy().to_string()));
+        initialize_server(&server).await;
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(31)),
+            method: "resources/read".to_string(),
+            params: Some(serde_json::json!({"uri": "selfware://config"})),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        let text = result["contents"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !text.contains("sk-live-test-secret-12345"),
+            "raw api_key must not leak to MCP clients: {text}"
+        );
+        assert!(
+            !text.contains("ghp-test-secret-67890"),
+            "MCP server env secrets must not leak to MCP clients: {text}"
+        );
+        assert!(
+            text.contains("<redacted>"),
+            "expected redaction markers in the config view: {text}"
+        );
+    }
+
+    /// Destructive tools are refused over MCP by default: the protocol has
+    /// no confirmation channel, so the refusal payload documents the opt-in.
+    #[tokio::test]
+    async fn test_tools_call_destructive_refused_without_opt_in() {
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(None);
+        let server = McpServer::new();
+        initialize_server(&server).await;
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(32)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "file_delete",
+                "arguments": {"path": "target/tmp-mcp-destructive-test"}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(true));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            text.contains("destructive"),
+            "refusal must say why, got: {text}"
+        );
+        assert!(
+            text.contains("SELFWARE_MCP_ALLOW_DESTRUCTIVE"),
+            "refusal must document the opt-in, got: {text}"
+        );
+    }
+
+    /// With the operator opt-in set, a destructive-classified tool executes.
+    #[tokio::test]
+    async fn test_tools_call_destructive_allowed_with_opt_in() {
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(Some("1"));
+        let server = McpServer::new();
+        initialize_server(&server).await;
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(33)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "shell_exec",
+                "arguments": {"command": "echo hello"}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(false));
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(text.contains("hello"), "expected echo output, got: {text}");
+        set_destructive_opt_in(None);
+    }
+
+    /// Read-only tools are not affected by the destructive gate.
+    #[tokio::test]
+    async fn test_tools_call_readonly_tool_not_gated() {
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(None);
+        let server = McpServer::new();
+        initialize_server(&server).await;
+
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::from(34)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": "file_read",
+                "arguments": {"path": "Cargo.toml"}
+            })),
+        };
+
+        let response = server.handle_request(&request).await.unwrap();
+        let result = response.result.unwrap();
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        assert!(
+            !text.contains("confirmation channel"),
+            "read-only tools must not hit the destructive gate, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_destructive_tools_allowed_parsing() {
+        let _guard = DESTRUCTIVE_ENV_LOCK.lock().await;
+        set_destructive_opt_in(None);
+        assert!(!mcp_destructive_tools_allowed());
+        set_destructive_opt_in(Some("1"));
+        assert!(mcp_destructive_tools_allowed());
+        set_destructive_opt_in(Some("true"));
+        assert!(mcp_destructive_tools_allowed());
+        set_destructive_opt_in(Some("0"));
+        assert!(!mcp_destructive_tools_allowed());
+        set_destructive_opt_in(None);
     }
 }
