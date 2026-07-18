@@ -450,6 +450,35 @@ pub fn parse_task_file(contents: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether the `-C/--workdir` "Entering garden" banner may be printed.
+///
+/// Suppressed in quiet mode and whenever a machine-readable output format is
+/// selected: with `--output-format json`/`stream-json`, a decorative banner on
+/// stdout precedes the JSON object and breaks `json.load(stdout)`.
+fn should_print_garden_banner(quiet: bool, output_format: HeadlessOutputFormat) -> bool {
+    if quiet {
+        return false;
+    }
+    !matches!(
+        output_format,
+        HeadlessOutputFormat::Json | HeadlessOutputFormat::StreamJson
+    )
+}
+
+/// Why the interactive TUI cannot launch, or `None` when it can.
+///
+/// The default no-subcommand launch opens the TUI dashboard, which needs a
+/// real terminal on both stdin (keys) and stdout (raw-mode drawing). On a
+/// pipe/CI run the previous behavior was to silently exit 0 having done
+/// nothing — indistinguishable from success in automation.
+fn tui_launch_block_reason(stdin_is_tty: bool, stdout_is_tty: bool) -> Option<&'static str> {
+    if stdin_is_tty && stdout_is_tty {
+        None
+    } else {
+        Some("interactive TUI requires a terminal; use -p/--prompt for headless")
+    }
+}
+
 pub async fn run() -> Result<()> {
     // Initialize telemetry
     init_tracing();
@@ -485,7 +514,10 @@ pub async fn run() -> Result<()> {
         std::env::set_current_dir(workdir)
             .map_err(|e| anyhow::anyhow!("Cannot enter garden '{}': {}", workdir, e))?;
 
-        if !cli.quiet {
+        // Machine-readable output (--output-format json/stream-json) must stay
+        // valid: the garden banner would precede the JSON object on stdout and
+        // break every json.load(stdout). Drop it like the other human headers.
+        if should_print_garden_banner(cli.quiet, cli.output_format) {
             println!(
                 "{} Entering garden: {}",
                 Glyphs::sprout(),
@@ -644,11 +676,11 @@ pub async fn run() -> Result<()> {
     // monitor loop, so the OOM circuit breaker, GPU overheat throttle, and
     // disk-full guard never actually run -- an operator configuring
     // conservative thresholds for a long autonomous run gets no protection
-    // at all. `_resource_monitor_shutdown_tx` must stay bound (not
-    // `_`-dropped) for the duration of `run()`: monitor_loop's select! loop
-    // busy-spins once every sender is dropped (tokio::watch::Receiver::changed()
-    // resolves immediately with an error, but the loop only checks the
-    // *value*, not sender liveness).
+    // at all. `_resource_monitor_shutdown_tx` is held until `run()` returns;
+    // dropping it then IS the shutdown signal — `monitor_loop` treats a
+    // dropped sender (not only an explicit `true`) as stop, so the monitor
+    // task exits promptly instead of busy-spinning /proc scans on every
+    // command exit.
     let _resource_monitor_shutdown_tx = {
         match crate::resource::ResourceManager::new(&config.resources).await {
             Ok(manager) => {
@@ -908,6 +940,17 @@ pub async fn run() -> Result<()> {
     {
         let should_use_tui = !cli.quiet && (cli.tui || (cli.command.is_none() && !cli.no_tui));
         if should_use_tui {
+            // Fail loudly on a non-terminal launch: the interactive TUI needs
+            // a TTY (crossterm raw mode), and previously a CI/pipe/script run
+            // silently exited 0 having done nothing — the worst possible CI
+            // signal. Headless automation belongs on -p/--prompt.
+            use std::io::IsTerminal;
+            if let Some(reason) = tui_launch_block_reason(
+                std::io::stdin().is_terminal(),
+                std::io::stdout().is_terminal(),
+            ) {
+                anyhow::bail!("{}", reason);
+            }
             return run_live_agent_tui(config).await;
         }
     }

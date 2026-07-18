@@ -1728,10 +1728,12 @@ To call a tool, use this EXACT XML structure:
         // Account the synthesis LLM call against the budget — this billable
         // call previously went uncounted, so a stuck-model synthesis could
         // spend tokens/cost that max_budget_tokens/max_cost_usd never saw.
+        // Delta-add (never total = input + output): after a resume, `total`
+        // carries the restored prior-run budget whose split was not persisted.
         self.cumulative_token_usage.input += response.usage.prompt_tokens;
         self.cumulative_token_usage.output += response.usage.completion_tokens;
-        self.cumulative_token_usage.total =
-            self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        self.cumulative_token_usage.total +=
+            response.usage.prompt_tokens + response.usage.completion_tokens;
         if let Some(cost) = response.usage.cost {
             self.cumulative_cost_usd += cost;
         }
@@ -2062,11 +2064,14 @@ To call a tool, use this EXACT XML structure:
     /// Account LLM summarizer token usage from a compression operation into the
     /// agent's cumulative budget. For the local Micro path the LLM token counts
     /// are 0, so this is harmless.
+    ///
+    /// Delta-adds (never `total = input + output`): after a resume, `total`
+    /// carries the restored prior-run budget whose input/output split was not
+    /// persisted, so a from-parts recompute would erase it.
     fn account_compression_tokens(&mut self, metrics: &compression::CompressionMetrics) {
         self.cumulative_token_usage.input += metrics.llm_input_tokens;
         self.cumulative_token_usage.output += metrics.llm_output_tokens;
-        self.cumulative_token_usage.total =
-            self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        self.cumulative_token_usage.total += metrics.llm_input_tokens + metrics.llm_output_tokens;
     }
 
     /// Run MicroCompact - fast local compression with no API call

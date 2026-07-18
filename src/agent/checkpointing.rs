@@ -102,6 +102,12 @@ impl Agent {
         // Restore the cumulative budget so the wall-clock / token caps continue
         // accumulating across resume instead of restarting from zero.
         agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
+        // Only the TOTAL is persisted (the checkpoint format has no
+        // input/output split), so `.input`/`.output` restart at 0 while
+        // `.total` carries the prior run. Every recompute site therefore
+        // DELTA-ADDS each new step's tokens to `.total` instead of
+        // recomputing `total = input + output`, which would silently erase
+        // this restored budget on the first step after resume.
         agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
         agent.cumulative_cost_usd = checkpoint.cumulative_cost_usd;
         // Restore anti-thrash guard counters so a crash-looping task can't reset
@@ -544,12 +550,7 @@ impl Agent {
                 CollectedItem {
                     source_id: format!("tc-{}-{}", checkpoint.task_id, tc.timestamp.timestamp()),
                     source_type: SourceType::ToolResult,
-                    content: format!(
-                        "Tool: {} | Args: {} | Success: {}",
-                        tc.tool_name,
-                        &tc.arguments[..tc.arguments.len().min(200)],
-                        tc.success,
-                    ),
+                    content: tool_call_content_preview(&tc.tool_name, &tc.arguments, tc.success),
                     timestamp: tc.timestamp,
                     importance: if tc.success { 2 } else { 3 }, // Normal / High
                     tags: vec![tc.tool_name.clone(), checkpoint.task_id.clone()],
@@ -580,7 +581,7 @@ impl Agent {
         let now = chrono::Utc::now();
         let records: Vec<crate::consolidation::TemporalRecord> =
             vec![crate::consolidation::TemporalRecord {
-                id: format!("session-{}", &task_id[..task_id.len().min(16)]),
+                id: format!("session-{}", truncate_bytes_char_boundary(&task_id, 16)),
                 created_at: now,
                 source_timestamps: items.iter().map(|i| i.timestamp).collect(),
                 sequence_order: now.timestamp() as u64,
@@ -759,6 +760,34 @@ fn restore_budget_caps_from_checkpoint(
     if config.agent.max_cost_usd.is_none() {
         config.agent.max_cost_usd = checkpoint.max_cost_usd;
     }
+}
+
+/// Byte-truncate `s` to at most `max_bytes`, backing off to a UTF-8 char
+/// boundary. A raw `&s[..n]` byte slice PANICS when `n` lands mid-codepoint
+/// — which is exactly what happened to `consolidate_session_memory` on every
+/// successful task whose logged tool-call args straddled byte 200.
+#[cfg(feature = "consolidation")]
+fn truncate_bytes_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// One-line consolidation preview of a logged tool call, with the args
+/// truncated char-boundary-safely (multibyte args must never panic).
+#[cfg(feature = "consolidation")]
+fn tool_call_content_preview(tool_name: &str, arguments: &str, success: bool) -> String {
+    format!(
+        "Tool: {} | Args: {} | Success: {}",
+        tool_name,
+        truncate_bytes_char_boundary(arguments, 200),
+        success,
+    )
 }
 
 #[cfg(test)]
@@ -2265,5 +2294,115 @@ mod tests {
         let mut cp2 = cp;
         cp2.set_step(1);
         assert!(cp2.updated_at >= created);
+    }
+}
+
+#[cfg(test)]
+mod resume_budget_tests {
+    //! Regression: `max_budget_tokens` silently reset across resume. The
+    //! checkpoint persists only the cumulative TOTAL (the format has no
+    //! input/output split), so `.input`/`.output` restart at 0 on resume;
+    //! the first `total = input + output` recompute then erased the restored
+    //! total and the run kept spending past its cap. All recompute sites now
+    //! delta-add each step's tokens onto the restored total.
+
+    use crate::agent::compression::{CompressionMethod, CompressionMetrics};
+    use crate::agent::Agent;
+    use crate::config::Config;
+
+    #[tokio::test]
+    async fn budget_total_survives_resume_and_next_recompute() {
+        // Prior run: 10_000 tokens billed, then checkpointed.
+        let mut prior = Agent::new(Config::default()).await.unwrap();
+        prior.cumulative_token_usage.input = 7_000;
+        prior.cumulative_token_usage.output = 3_000;
+        prior.cumulative_token_usage.total = 10_000;
+        let checkpoint = prior.to_checkpoint("budget-resume", "desc");
+        assert_eq!(checkpoint.cumulative_tokens, 10_000);
+
+        // Resume restores the total alone (no persisted split), exactly like
+        // `Agent::resume` does at checkpointing.rs:105.
+        let mut agent = Agent::new(Config::default()).await.unwrap();
+        agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
+        assert_eq!(agent.cumulative_token_usage.input, 0);
+        assert_eq!(agent.cumulative_token_usage.output, 0);
+
+        // The first billable accounting after resume must ADD to the restored
+        // budget — pre-fix this recompute reset total to 150.
+        let metrics = CompressionMetrics::new(CompressionMethod::Auto, 0, 0, 0, 0, 0)
+            .with_llm_tokens(100, 50);
+        agent.account_compression_tokens(&metrics);
+
+        assert_eq!(
+            agent.cumulative_token_usage.total, 10_150,
+            "restored budget total must survive the next recompute"
+        );
+        assert_eq!(agent.cumulative_token_usage.input, 100);
+        assert_eq!(agent.cumulative_token_usage.output, 50);
+    }
+
+    #[tokio::test]
+    async fn fresh_run_total_still_equals_input_plus_output() {
+        // The delta-add change must not regress the normal (non-resume)
+        // invariant: total == input + output.
+        let mut agent = Agent::new(Config::default()).await.unwrap();
+        let metrics =
+            CompressionMetrics::new(CompressionMethod::Auto, 0, 0, 0, 0, 0).with_llm_tokens(42, 58);
+        agent.account_compression_tokens(&metrics);
+        let usage = agent.cumulative_token_usage();
+        assert_eq!(usage.input, 42);
+        assert_eq!(usage.output, 58);
+        assert_eq!(usage.total, 100);
+        assert_eq!(usage.total, usage.input + usage.output);
+    }
+}
+
+#[cfg(all(test, feature = "consolidation"))]
+mod consolidate_utf8_tests {
+    //! Regression: `consolidate_session_memory` byte-sliced logged tool-call
+    //! args at `&args[..args.len().min(200)]`, panicking whenever byte 200
+    //! fell inside a multibyte char — after task success, before the
+    //! checkpoint could be marked Completed (consolidation is a default
+    //! feature, so this hit every successful task with multibyte args).
+
+    use super::{tool_call_content_preview, truncate_bytes_char_boundary};
+
+    #[test]
+    fn truncate_never_splits_a_multibyte_char() {
+        // 199 ASCII bytes + a 3-byte char (€) straddling byte 200.
+        let mut s = "a".repeat(199);
+        s.push('€'); // bytes 199..202
+        s.push_str("tail");
+        let out = truncate_bytes_char_boundary(&s, 200);
+        assert_eq!(out.len(), 199, "must back off to the char boundary");
+        assert!(out.ends_with('a'));
+
+        // Exactly at a boundary: no backoff.
+        let s2 = format!("{}€", "b".repeat(197)); // 197 + 3 = exactly 200
+        let out2 = truncate_bytes_char_boundary(&s2, 200);
+        assert_eq!(out2.len(), 200);
+        assert!(out2.ends_with('€'));
+
+        // Shorter than the limit: untouched.
+        assert_eq!(truncate_bytes_char_boundary("short", 200), "short");
+    }
+
+    #[test]
+    fn tool_call_preview_handles_multibyte_args_straddling_byte_200() {
+        // CJK chars are 3 bytes; 100 of them = 300 bytes, so byte 200 lands
+        // mid-char — the exact input class that panicked before.
+        let args: String = "界".repeat(100);
+        let preview = tool_call_content_preview("shell_exec", &args, true);
+        assert!(preview.starts_with("Tool: shell_exec | Args: "));
+        assert!(preview.ends_with("| Success: true"));
+        // 66 chars * 3 = 198 bytes of args survive (never a panic, never a
+        // split codepoint).
+        let args_part = preview
+            .strip_prefix("Tool: shell_exec | Args: ")
+            .unwrap()
+            .strip_suffix(" | Success: true")
+            .unwrap();
+        assert_eq!(args_part.len(), 198);
+        assert_eq!(args_part.chars().count(), 66);
     }
 }

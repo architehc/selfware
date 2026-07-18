@@ -474,10 +474,12 @@ impl Agent {
             .await?;
         self.messages = compressed;
         // Account the summarizer LLM call against the budget.
+        // Delta-add (never total = input + output): after a resume, `total`
+        // carries the restored prior-run budget whose input/output split was
+        // not persisted.
         self.cumulative_token_usage.input += usage.prompt_tokens;
         self.cumulative_token_usage.output += usage.completion_tokens;
-        self.cumulative_token_usage.total =
-            self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+        self.cumulative_token_usage.total += usage.prompt_tokens + usage.completion_tokens;
         if let Some(cost) = usage.cost {
             self.cumulative_cost_usd += cost;
         }

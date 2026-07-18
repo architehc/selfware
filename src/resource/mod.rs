@@ -99,8 +99,15 @@ impl ResourceManager {
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
+                changed = shutdown.changed() => {
+                    // `Err` means EVERY sender was dropped — the normal
+                    // process-exit path drops the shutdown handle without
+                    // ever sending `true`. Treat it as shutdown: previously
+                    // only the *value* was checked, so `changed()` re-resolved
+                    // instantly forever and the loop busy-spun full
+                    // `System::new_all()` /proc scans (~0.7s each) on every
+                    // command exit until tokio coop forced a yield.
+                    if changed.is_err() || *shutdown.borrow() {
                         info!("Resource monitor loop shutting down");
                         return;
                     }
@@ -335,6 +342,38 @@ mod tests {
         let manager = ResourceManager::new(&config).await.unwrap();
         let handle = manager.shared_pressure();
         assert_eq!(*handle.read().unwrap(), ResourcePressure::None);
+    }
+
+    // ---- monitor_loop shutdown tests ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_monitor_loop_exits_when_sender_dropped_without_sending() {
+        // The normal process-exit path drops the shutdown handle WITHOUT
+        // ever sending `true`. Previously the loop only checked the *value*,
+        // so `changed()` re-resolved instantly forever and the monitor
+        // busy-spun full System::new_all() /proc scans (~12s per command
+        // exit) until tokio coop forced a yield. The loop must instead treat
+        // sender-drop as shutdown and return promptly.
+        let config = ResourcesConfig::default();
+        let manager = ResourceManager::new(&config).await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        drop(shutdown_tx); // drop WITHOUT sending true — the exact exit path
+
+        tokio::time::timeout(Duration::from_secs(2), manager.monitor_loop(shutdown_rx))
+            .await
+            .expect("monitor_loop must exit promptly when the shutdown sender is dropped");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_monitor_loop_exits_on_explicit_shutdown_signal() {
+        let config = ResourcesConfig::default();
+        let manager = ResourceManager::new(&config).await.unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        shutdown_tx.send(true).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), manager.monitor_loop(shutdown_rx))
+            .await
+            .expect("monitor_loop must exit promptly on an explicit shutdown signal");
     }
 
     // ---- ResourcePressure tests ----

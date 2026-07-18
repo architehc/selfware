@@ -976,3 +976,55 @@ fn multi_agent_result_json_shape() {
     assert_eq!(v["usage"]["cost"], 0.001);
     assert!(v["error"].is_null());
 }
+
+// ── garden banner / structured output tests ──
+
+#[test]
+fn garden_banner_printed_for_text_output_when_not_quiet() {
+    assert!(should_print_garden_banner(
+        false,
+        HeadlessOutputFormat::Text
+    ));
+}
+
+#[test]
+fn garden_banner_suppressed_for_machine_readable_output() {
+    // A banner preceding the JSON object on stdout breaks json.load(stdout).
+    assert!(!should_print_garden_banner(
+        false,
+        HeadlessOutputFormat::Json
+    ));
+    assert!(!should_print_garden_banner(
+        false,
+        HeadlessOutputFormat::StreamJson
+    ));
+}
+
+#[test]
+fn garden_banner_suppressed_when_quiet() {
+    assert!(!should_print_garden_banner(
+        true,
+        HeadlessOutputFormat::Text
+    ));
+}
+
+// ── TUI launch guard tests ──
+
+#[test]
+fn tui_launch_allowed_with_both_ttys() {
+    assert!(tui_launch_block_reason(true, true).is_none());
+}
+
+#[test]
+fn tui_launch_blocked_without_a_terminal() {
+    // CI/pipe/script launches must fail loudly (non-zero) instead of
+    // silently exiting 0 having done nothing.
+    for (stdin_tty, stdout_tty) in [(false, true), (true, false), (false, false)] {
+        let reason =
+            tui_launch_block_reason(stdin_tty, stdout_tty).expect("non-TTY launch must be blocked");
+        assert!(
+            reason.contains("requires a terminal") && reason.contains("-p"),
+            "reason must name the headless alternative: {reason}"
+        );
+    }
+}

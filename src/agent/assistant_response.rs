@@ -112,10 +112,13 @@ impl Agent {
                 Ok((compressed, usage)) => {
                     self.messages = compressed;
                     // Account the summarizer LLM call against the budget.
+                    // Delta-add (never total = input + output): after a resume,
+                    // `total` carries the restored prior-run budget whose
+                    // input/output split was not persisted.
                     self.cumulative_token_usage.input += usage.prompt_tokens;
                     self.cumulative_token_usage.output += usage.completion_tokens;
-                    self.cumulative_token_usage.total =
-                        self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+                    self.cumulative_token_usage.total +=
+                        usage.prompt_tokens + usage.completion_tokens;
                     if let Some(cost) = usage.cost {
                         self.cumulative_cost_usd += cost;
                     }
@@ -558,19 +561,16 @@ impl Agent {
         self.cumulative_token_usage.input += input_tokens;
         self.cumulative_token_usage.output += output_tokens;
         // Trust a provider-reported total only when it also reported both
-        // components; otherwise derive it from the (possibly estimated)
-        // running input/output so the total can't disagree with the parts.
-        if reported_prompt.is_some() && reported_completion.is_some() {
-            if let Some(total) = reported_total {
-                self.cumulative_token_usage.total += total as usize;
-            } else {
-                self.cumulative_token_usage.total =
-                    self.cumulative_token_usage.input + self.cumulative_token_usage.output;
-            }
-        } else {
-            self.cumulative_token_usage.total =
-                self.cumulative_token_usage.input + self.cumulative_token_usage.output;
-        }
+        // components; otherwise account the step's (possibly estimated)
+        // tokens. Always DELTA-ADD — never `total = input + output`: after a
+        // resume, `total` carries the restored prior-run budget whose
+        // input/output split was not persisted, so a from-parts recompute
+        // would silently erase it (the budget-reset bug).
+        let step_total = match (reported_prompt, reported_completion, reported_total) {
+            (Some(_), Some(_), Some(total)) => total as usize,
+            _ => input_tokens + output_tokens,
+        };
+        self.cumulative_token_usage.total += step_total;
         if let Some(cost) = chat_metadata.as_ref().and_then(|m| m.cost) {
             self.cumulative_cost_usd += cost;
         }
@@ -608,8 +608,20 @@ impl Agent {
 /// planning level or via the streaming→non-streaming fallback — only
 /// duplicates a call that can never succeed and delays the remediation hint
 /// the client attached. 5xx / 429 / network errors remain retryable.
+///
+/// Also terminal: [`WallClockBudgetExceeded`](crate::api::client::WallClockBudgetExceeded).
+/// The run-level wall budget is already exhausted, so a planning-level retry
+/// would only burn backoff sleeps (the client blocks the actual billable
+/// request) and — worse — risk the stop being misfiled as a transient
+/// network failure instead of a budget stop.
 pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
+        if cause
+            .downcast_ref::<crate::api::client::WallClockBudgetExceeded>()
+            .is_some()
+        {
+            return true;
+        }
         matches!(
             cause.downcast_ref::<crate::errors::ApiError>(),
             Some(crate::errors::ApiError::HttpStatus { status, .. })
@@ -804,6 +816,24 @@ mod terminal_error_tests {
 
         let plain = anyhow::anyhow!("some other failure");
         assert!(!is_terminal_api_client_error(&plain));
+    }
+
+    #[test]
+    fn wall_clock_budget_exceeded_is_classified_terminal() {
+        // The run-level wall budget is already exhausted: a planning-level
+        // retry would only burn backoff sleeps (the client blocks the actual
+        // billable request), so the stop must be terminal — and stay
+        // classified as a budget stop rather than a transient network error.
+        let err: anyhow::Error = crate::api::client::WallClockBudgetExceeded {
+            elapsed_secs: 51,
+            limit_secs: 8,
+        }
+        .into();
+        assert!(is_terminal_api_client_error(&err));
+
+        // Through anyhow context wrapping too.
+        let wrapped = err.context("planning failed");
+        assert!(is_terminal_api_client_error(&wrapped));
     }
 
     // -----------------------------------------------------------------------

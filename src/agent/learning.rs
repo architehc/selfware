@@ -240,10 +240,13 @@ impl Agent {
                 .await
             {
                 // Account the reflection call's token usage against the budget.
+                // Delta-add (never total = input + output): after a resume,
+                // `total` carries the restored prior-run budget whose
+                // input/output split was not persisted.
                 self.cumulative_token_usage.input += response.usage.prompt_tokens;
                 self.cumulative_token_usage.output += response.usage.completion_tokens;
-                self.cumulative_token_usage.total =
-                    self.cumulative_token_usage.input + self.cumulative_token_usage.output;
+                self.cumulative_token_usage.total +=
+                    response.usage.prompt_tokens + response.usage.completion_tokens;
                 if let Some(cost) = response.usage.cost {
                     self.cumulative_cost_usd += cost;
                 }

@@ -571,6 +571,22 @@ pub fn run_tui_dashboard_with_events(
     let mut needs_redraw = true;
 
     loop {
+        // SIGINT/SIGTERM: the installed handler latched SIGNAL_RECEIVED
+        // (Ctrl+C also already restored the terminal). Without this check the
+        // loop ran on forever — orphaned dashboards kept drawing raw ANSI
+        // into a restored terminal and burned >1 day of CPU each on the host.
+        // Latch the agent cancel token too so an in-flight task stops billing.
+        if signal_received() {
+            cancel_token.store(true, Ordering::Relaxed);
+            with_dashboard_state(&shared_state, |state| {
+                state.log(
+                    LogLevel::Warning,
+                    "Termination signal received — shutting down",
+                );
+            });
+            break;
+        }
+
         // Drain background git command results (non-blocking)
         while let Ok(msg) = git_cmd_rx.try_recv() {
             app.add_system_message(&msg);
@@ -713,6 +729,11 @@ pub fn run_tui_dashboard_with_events(
 
             match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
                 QuitDecision::Quit => {
+                    // Latch the agent cancel token so an in-flight task is
+                    // actually cancelled — previously quit restored the
+                    // terminal while LLM calls kept running (and billing)
+                    // in the background.
+                    cancel_token.store(true, Ordering::Relaxed);
                     with_dashboard_state(&shared_state, |state| {
                         state.log(LogLevel::Info, "Shutting down...");
                     });
@@ -876,6 +897,10 @@ pub fn run_tui_dashboard_with_events(
                                     });
                                 }
                                 "/quit" | "/exit" => {
+                                    // Same as the q-key quit: cancel the
+                                    // in-flight agent task before leaving so
+                                    // it cannot keep billing after exit.
+                                    cancel_token.store(true, Ordering::Relaxed);
                                     with_dashboard_state(&shared_state, |state| {
                                         state.log(LogLevel::Info, "Quit requested via command");
                                     });
@@ -1810,10 +1835,19 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
     use ratatui::text::Span;
     use ratatui::widgets::{Block, Paragraph};
 
-    let width = 20;
-    let height = 3;
-    let x = (area.width - width) / 2;
-    let y = area.height - height - 2;
+    // Tiny terminals (< 20 wide / < 5 tall) previously panicked here on u16
+    // subtract-overflow (`area.width - width`, `area.height - height - 2`),
+    // killing the whole TUI mid-session. Clamp to the available area with
+    // saturating arithmetic instead.
+    let width = 20u16.min(area.width);
+    let height = 3u16.min(area.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area
+        .y
+        .saturating_add(area.height.saturating_sub(height).saturating_sub(2));
 
     let indicator_area = Rect::new(x, y, width, height);
 
@@ -1821,13 +1855,17 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
 
     frame.render_widget(block, indicator_area);
 
-    let text = Paragraph::new(Span::styled(
-        " ⏸ DISPLAY PAUSED ",
-        Style::default()
-            .fg(TuiPalette::PARCHMENT)
-            .add_modifier(Modifier::BOLD),
-    ));
-    frame.render_widget(text, Rect::new(x, y + 1, width, 1));
+    // The label needs a second row; on a 1-row sliver the block alone is
+    // the best we can do.
+    if height >= 2 {
+        let text = Paragraph::new(Span::styled(
+            " ⏸ DISPLAY PAUSED ",
+            Style::default()
+                .fg(TuiPalette::PARCHMENT)
+                .add_modifier(Modifier::BOLD),
+        ));
+        frame.render_widget(text, Rect::new(x, y + 1, width, 1));
+    }
 }
 
 #[allow(clippy::items_after_test_module)]
@@ -1867,6 +1905,59 @@ mod tests {
         assert!(lines.len() > 1, "long line should wrap: {:?}", lines);
         assert_eq!(lines[0], "> abcd"); // width 6, prefix 2 -> 4 chars
         assert!(lines[1].starts_with("  ")); // continuation indented
+    }
+
+    #[test]
+    fn render_pause_indicator_does_not_panic_on_tiny_terminals() {
+        use ratatui::backend::TestBackend;
+
+        // Regression: terminals < 20 wide / < 5 tall used to panic on u16
+        // subtract-overflow inside render_pause_indicator, killing the
+        // default no-subcommand TUI mid-session.
+        for (w, h) in [
+            (0u16, 0u16),
+            (1, 1),
+            (10, 4),
+            (19, 3),
+            (5, 2),
+            (20, 5),
+            (3, 10),
+        ] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render_pause_indicator(frame, area);
+                })
+                .unwrap_or_else(|e| panic!("render failed on {}x{}: {}", w, h, e));
+        }
+    }
+
+    #[test]
+    fn render_pause_indicator_stays_in_bounds_on_normal_terminal() {
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                render_pause_indicator(frame, area);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+        }
+        assert!(
+            text.contains("DISPLAY PAUSED"),
+            "pause label should render on a normal terminal:\n{}",
+            text
+        );
     }
 
     #[test]
