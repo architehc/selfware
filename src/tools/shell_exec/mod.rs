@@ -53,11 +53,10 @@ fn try_parse_sed_substitution(command: &str) -> Option<SedSubstitution> {
             // GNU attached-suffix form: -i.bak
             saw_in_place = true;
             backup_suffix = Some(token[2..].to_string());
-        } else if let Some(suffix) = token.strip_prefix("--in-place=") {
+        } else {
+            let suffix = token.strip_prefix("--in-place=")?;
             saw_in_place = true;
             backup_suffix = Some(suffix.to_string());
-        } else {
-            return None;
         }
     }
     if !saw_in_place {
@@ -1013,11 +1012,18 @@ mod tests {
             result.get("intercepted").is_none(),
             "& replacement must fall through to real sed: {result}"
         );
-        assert_eq!(result["exit_code"], 0);
-        assert_eq!(
-            tokio::fs::read_to_string(&file_path).await.unwrap(),
-            "[foo]\n"
-        );
+        // The remaining assertions exercise the *real* sed binary, whose `-i`
+        // semantics are GNU-specific: BSD sed (macOS) requires an explicit
+        // backup suffix, so `sed -i 's/…' file` errors there. The portable
+        // subject of this test is the interception decision asserted above.
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(result["exit_code"], 0);
+            assert_eq!(
+                tokio::fs::read_to_string(&file_path).await.unwrap(),
+                "[foo]\n"
+            );
+        }
 
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
     }
