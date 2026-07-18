@@ -406,16 +406,30 @@ impl Transport for StdioTransport {
         // the MCP stdio spec unless overridden via `with_framing`).
         {
             let mut stdin = self.stdin.lock().await;
-            write_framed_message(&mut *stdin, &body, self.framing).await?;
+            // On a write failure, drop the now-orphaned pending entry so the map
+            // doesn't leak one slot per failed request.
+            if let Err(e) = write_framed_message(&mut *stdin, &body, self.framing).await {
+                self.pending.lock().await.remove(&id);
+                return Err(e);
+            }
         }
 
         debug!("Sent JSON-RPC request: {} (id={})", method, id);
 
         // Wait for response with timeout
-        let response = tokio::time::timeout(std::time::Duration::from_secs(60), rx)
-            .await
-            .map_err(|_| anyhow::anyhow!("MCP request '{}' timed out after 60s", method))?
-            .map_err(|_| anyhow::anyhow!("MCP response channel closed for '{}'", method))?;
+        let response = match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(_)) => {
+                // Sender dropped without replying: drop the pending entry.
+                self.pending.lock().await.remove(&id);
+                bail!("MCP response channel closed for '{}'", method);
+            }
+            Err(_) => {
+                // Timed out: drop the pending entry so it doesn't leak a slot.
+                self.pending.lock().await.remove(&id);
+                bail!("MCP request '{}' timed out after 60s", method);
+            }
+        };
 
         if let Some(error) = response.error {
             bail!("MCP error for '{}': {}", method, error);
