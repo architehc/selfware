@@ -952,7 +952,7 @@ pub(super) fn shell_command_is_observational(command: &str) -> bool {
             || (normalized.starts_with(prefix)
                 && (normalized[prefix.len()..].starts_with(' ')
                     || normalized[prefix.len()..].starts_with("--")))
-    })
+    }) || shell_command_runs_test_script(&normalized)
 }
 
 /// Canonical predicate: does a SUCCESSFUL call to this tool mutate the
@@ -1058,6 +1058,83 @@ pub(super) fn shell_command_is_verification(command: &str) -> bool {
     verification_prefixes
         .iter()
         .any(|prefix| command_contains_at_boundary(&normalized, prefix))
+        || shell_command_runs_test_script(&normalized)
+}
+
+/// True when the command runs a test-looking script directly — through an
+/// interpreter (`python3 test_calc.py`, `node tests/smoke.test.js`,
+/// `ruby test_foo.rb`, `bash tests/run.sh`), as an assertion-framed inline
+/// snippet (`python3 -c "assert add(2, 2) == 4"`), or by executing the
+/// script itself (`./test_x.py`). This is the non-Rust counterpart of
+/// crediting `cargo test` / `pytest`: running the project's own test or
+/// check script directly must count as verification, otherwise a correct
+/// fix on a non-Rust project is never credited, each passing run is instead
+/// counted as a mutation that re-stales the gate, and the run livelocks on
+/// StaleVerification (P0-2).
+fn shell_command_runs_test_script(command: &str) -> bool {
+    const SCRIPT_EXTENSIONS: &[&str] = &[
+        "py", "pyw", "js", "mjs", "cjs", "ts", "rb", "pl", "pm", "php", "sh",
+    ];
+    let tokens: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || matches!(c, '&' | ';' | '|' | '(' | ')'))
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    for (index, token) in tokens.iter().enumerate() {
+        let basename = token.rsplit('/').next().unwrap_or(token);
+        let is_interpreter = basename.starts_with("python")
+            || basename.starts_with("pypy")
+            || matches!(
+                basename,
+                "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php" | "bash" | "sh"
+            );
+
+        if is_interpreter {
+            // Inspect the interpreter's own arguments: the first non-flag
+            // argument is the script (or inline snippet) being run.
+            for arg in &tokens[index + 1..] {
+                if matches!(*arg, "-c" | "-e" | "--eval") {
+                    // Inline snippet: credit it when the snippet text after
+                    // the flag is framed as a check (`-c "assert …"`). The
+                    // remainder is a superset of the snippet (quotes are not
+                    // tracked), which only ever errs toward crediting.
+                    if command
+                        .find(*arg)
+                        .map(|at| command[at + arg.len()..].contains("assert"))
+                        .unwrap_or(false)
+                    {
+                        return true;
+                    }
+                    break;
+                }
+                if arg.starts_with('-') {
+                    // Interpreter flags (`-O`, `-W`, …). Module runs such as
+                    // `python3 -m pytest` / `-m unittest` are already covered
+                    // by the runner-prefix list above.
+                    continue;
+                }
+                // Only credit real script paths — a bare word like
+                // `test_utils` may be a script argument, not the script.
+                let looks_like_path = arg.contains('/')
+                    || arg
+                        .rsplit_once('.')
+                        .map(|(_, ext)| SCRIPT_EXTENSIONS.contains(&ext))
+                        .unwrap_or(false);
+                if looks_like_path && Agent::gate_path_is_test(arg) {
+                    return true;
+                }
+                // The script is not test-looking; later tokens are its
+                // arguments, not scripts.
+                break;
+            }
+        } else if (token.starts_with("./") || token.starts_with('/'))
+            && Agent::gate_path_is_test(token)
+        {
+            // Direct execution of a test script: `./test_x.py`, `./tests/run.sh`.
+            return true;
+        }
+    }
+    false
 }
 
 /// True if `prefix` occurs in `command` starting at a shell command boundary
@@ -1106,7 +1183,7 @@ pub(super) fn command_is_noop_verification(text: &str) -> bool {
 pub(super) fn tool_call_is_verification(name: &str, args_str: &str) -> bool {
     match name {
         "cargo_check" | "cargo_test" | "cargo_clippy" => !command_is_noop_verification(args_str),
-        "shell_exec" => serde_json::from_str::<Value>(args_str)
+        "shell_exec" | "pty_shell" => serde_json::from_str::<Value>(args_str)
             .ok()
             .and_then(|args| {
                 args.get("command")
@@ -1274,6 +1351,30 @@ pub(super) fn inject_runtime_tool_defaults(
 }
 
 impl Agent {
+    /// Credit (or record the failure of) a verification tool call for the
+    /// completion gate's StaleVerification check. Single accounting path for
+    /// both dispatch sites: a SUCCESSFUL recognized verification call marks
+    /// the current mutation sequence as verified; a FAILED one records the
+    /// summary so the gate can reject with FailingTestsAccepted. Callers run
+    /// this AFTER the mutating-call accounting, so a command that is both
+    /// mutating and verifying (e.g. an inline `python3 -c` check) still ends
+    /// the turn credited rather than stale.
+    pub(super) fn note_verification_outcome(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        success: bool,
+        result_str: &str,
+    ) {
+        if success && tool_call_is_verification(name, args_str) && self.mutation_sequence > 0 {
+            self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+            self.last_failed_verification_summary = None;
+        } else if !success && tool_call_is_verification(name, args_str) {
+            let preview: String = result_str.chars().take(300).collect();
+            self.last_failed_verification_summary = Some(format!("{} failed: {}", name, preview));
+        }
+    }
+
     fn current_task_tool_policy_violation(&self, tool_name: &str) -> Option<String> {
         let task = self.learning_context();
         if task.trim().is_empty() || task == "general" {
@@ -2458,17 +2559,7 @@ impl Agent {
                 }
             }
 
-            if success
-                && tool_call_is_verification(&vt.name, &vt.args_str)
-                && self.mutation_sequence > 0
-            {
-                self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                self.last_failed_verification_summary = None;
-            } else if !success && tool_call_is_verification(&vt.name, &vt.args_str) {
-                let preview: String = result_str.chars().take(300).collect();
-                self.last_failed_verification_summary =
-                    Some(format!("{} failed: {}", vt.name, preview));
-            }
+            self.note_verification_outcome(&vt.name, &vt.args_str, success, &result_str);
 
             // Track file operations for context management
             if success {
@@ -3611,18 +3702,7 @@ impl Agent {
                     self.note_mutating_tool_call();
                 }
 
-                if tool_success
-                    && tool_call_is_verification(name, args_str)
-                    && self.mutation_sequence > 0
-                {
-                    self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                    self.last_failed_verification_summary = None;
-                } else if !tool_success && tool_call_is_verification(name, args_str) {
-                    self.last_failed_verification_summary = Some({
-                        let preview: String = result_str.chars().take(300).collect();
-                        format!("{} failed: {}", name, preview)
-                    });
-                }
+                self.note_verification_outcome(name, args_str, tool_success, &result_str);
 
                 // Record successful tool usage for learning
                 self.self_improvement.record_tool(
@@ -3926,6 +4006,132 @@ mod tests {
         assert!(!shell_command_is_verification("cargo add serde"));
         assert!(!shell_command_is_verification("echo cargo checkers"));
         assert!(!shell_command_is_verification("ls -la"));
+    }
+
+    #[test]
+    fn test_shell_verification_credits_direct_test_script_runs() {
+        // P0-2 regression: on a non-Rust project the model verifies by running
+        // the project's own test/check script directly. Those runs must count
+        // as verification or a correct fix livelocks on StaleVerification.
+        assert!(shell_command_is_verification("python3 test_calc.py"));
+        assert!(shell_command_is_verification("python test_calc.py"));
+        assert!(shell_command_is_verification("python3 tests/test_calc.py"));
+        assert!(shell_command_is_verification(
+            "python3 -c \"assert add(2, 2) == 4\""
+        ));
+        assert!(shell_command_is_verification("node tests/smoke.test.js"));
+        assert!(shell_command_is_verification("node test_smoke.js"));
+        assert!(shell_command_is_verification("ruby test_foo.rb"));
+        assert!(shell_command_is_verification("bash tests/run.sh"));
+        // Executing the test script itself, full-path interpreters, and
+        // cd-prefixed forms count too.
+        assert!(shell_command_is_verification("./test_x.py"));
+        assert!(shell_command_is_verification("/usr/bin/python3 test_x.py"));
+        assert!(shell_command_is_verification("cd sub && python3 test_x.py"));
+        assert!(shell_command_is_verification("python3 -u test_x.py"));
+        // NOT verification: running the app, arbitrary inline code, or a
+        // non-test script that merely takes a test-named data file.
+        assert!(!shell_command_is_verification("python3 app.py"));
+        assert!(!shell_command_is_verification("python3 -c \"print('hi')\""));
+        assert!(!shell_command_is_verification(
+            "python3 process.py test_data.csv"
+        ));
+        assert!(!shell_command_is_verification("node server.js"));
+        assert!(!shell_command_is_verification("bash deploy.sh"));
+    }
+
+    #[test]
+    fn test_observational_includes_direct_test_script_runs() {
+        // P0-2 regression (b): a passing verification run must not re-stale
+        // the gate, so a direct test-script run is observational (no mutation
+        // bump) — exactly like `pytest` / `cargo test` already were.
+        assert!(shell_command_is_observational("python3 test_calc.py"));
+        assert!(shell_command_is_observational(
+            "python3 -c \"assert x == 1\""
+        ));
+        assert!(!tool_call_is_mutating(
+            "shell_exec",
+            &serde_json::json!({"command": "python3 test_calc.py"})
+        ));
+        // Inline snippets NOT framed as checks stay mutating, a redirect
+        // still writes a file, and running the app is not observational.
+        assert!(!shell_command_is_observational(
+            "python3 -c \"open('f','w').write('x')\""
+        ));
+        assert!(!shell_command_is_observational(
+            "python3 test_calc.py > out.txt"
+        ));
+        assert!(!shell_command_is_observational("python3 app.py"));
+    }
+
+    #[test]
+    fn test_pty_shell_verification_credited_like_shell_exec() {
+        // Mutation accounting already covered pty_shell; verification credit
+        // must be symmetric or PTY-run tests never satisfy the gate.
+        let verification = r#"{"command":"python3 test_calc.py"}"#;
+        assert!(tool_call_is_verification("shell_exec", verification));
+        assert!(tool_call_is_verification("pty_shell", verification));
+        assert!(!tool_call_is_verification(
+            "pty_shell",
+            r#"{"command":"python3 app.py"}"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn passing_direct_python_test_run_is_credited_without_re_staling() {
+        // P0-2 regression: simulate the dispatch accounting path exactly —
+        // a real edit, then the project's own passing test run.
+        let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .expect("agent should build");
+
+        // The edit bumps the mutation sequence.
+        agent.note_mutating_tool_call();
+        assert_eq!(agent.mutation_sequence, 1);
+
+        // The model runs the project's own check directly; it exits 0. Apply
+        // the same accounting the dispatch loop applies, in the same order.
+        let args = serde_json::json!({"command": "python3 test_calc.py"});
+        if tool_call_is_mutating("shell_exec", &args) {
+            agent.note_mutating_tool_call();
+        }
+        agent.note_verification_outcome("shell_exec", &args.to_string(), true, "1 passed");
+
+        assert_eq!(
+            agent.mutation_sequence, 1,
+            "a passing verification run must not bump the mutation sequence (re-stale the gate)"
+        );
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 1,
+            "the passing direct test run must be credited as verification"
+        );
+        assert!(agent.last_failed_verification_summary.is_none());
+    }
+
+    #[tokio::test]
+    async fn failing_direct_python_test_run_records_failure_summary() {
+        let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .expect("agent should build");
+        agent.note_mutating_tool_call();
+
+        let args = serde_json::json!({"command": "python3 test_calc.py"});
+        agent.note_verification_outcome(
+            "shell_exec",
+            &args.to_string(),
+            false,
+            "FAILED test_calc.py::test_div",
+        );
+
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 0,
+            "a failing verification run must not be credited"
+        );
+        let summary = agent
+            .last_failed_verification_summary
+            .clone()
+            .expect("a failing verification run must be recorded");
+        assert!(summary.contains("shell_exec failed"), "{summary}");
     }
 
     fn test_config(endpoint: String) -> Config {

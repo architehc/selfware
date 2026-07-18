@@ -594,7 +594,7 @@ impl Agent {
         // so a blocking std::process::Command would stall a tokio worker thread.
         let output = tokio::process::Command::new("git")
             .args(["diff", "--name-only", "HEAD", "--"])
-            .current_dir(root)
+            .current_dir(&root)
             .output()
             .await
             .ok()?;
@@ -602,12 +602,33 @@ impl Agent {
             return None;
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let all_paths: Vec<String> = stdout
+        let mut all_paths: Vec<String> = stdout
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
             .map(ToOwned::to_owned)
             .collect();
+
+        // `git diff HEAD` never lists untracked files, so a task whose
+        // deliverable is a brand-new file ("create hello.py") looked like an
+        // empty diff and the gate churned to MAX_ITERATIONS unless the model
+        // spontaneously `git add`ed. Union in untracked, non-ignored paths so
+        // files created during the run count as changes.
+        if let Ok(untracked) = tokio::process::Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .current_dir(&root)
+            .output()
+            .await
+        {
+            if untracked.status.success() {
+                for line in String::from_utf8_lossy(&untracked.stdout).lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && !all_paths.iter().any(|p| p == line) {
+                        all_paths.push(line.to_string());
+                    }
+                }
+            }
+        }
 
         // Subtract paths that were already dirty before the task started so
         // pre-existing uncommitted changes are not counted as the agent's edits.
@@ -622,7 +643,7 @@ impl Agent {
         }
     }
 
-    fn gate_path_is_test(path: &str) -> bool {
+    pub(crate) fn gate_path_is_test(path: &str) -> bool {
         let lower = path.trim_matches('"').to_ascii_lowercase();
         let parts: Vec<&str> = lower.split('/').filter(|part| !part.is_empty()).collect();
         if parts
@@ -2046,6 +2067,19 @@ mod tests {
             );
         }
 
+        // P0-2 regression: the model verifying a non-Rust fix by running the
+        // project's own test script directly (`python3 test_calc.py`) must be
+        // credited exactly like a recognized runner — previously only the
+        // hardcoded runner-prefix list counted, and the run livelocked.
+        #[tokio::test]
+        async fn accepts_completion_after_successful_direct_python_test_run() {
+            let agent = agent_with_checkpoint(vec![shell_exec("python3 test_calc.py", true)]).await;
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "completion should be accepted after a successful direct python test run"
+            );
+        }
+
         #[tokio::test]
         async fn rejects_completion_when_no_verification_tool_call_succeeded() {
             let agent = agent_with_checkpoint(vec![]).await;
@@ -2272,6 +2306,74 @@ mod tests {
                 message.contains("EmptyDiff"),
                 "expected EmptyDiff, got: {}",
                 message
+            );
+        }
+
+        // P1 regression: `git diff --name-only HEAD` never lists untracked
+        // files, so "create hello.py" succeeded on disk but the gate refused
+        // completion as EmptyDiff and churned to MAX_ITERATIONS. A newly
+        // created, still-untracked deliverable must satisfy the gate.
+        #[tokio::test]
+        async fn untracked_file_creation_satisfies_empty_diff_gate() {
+            let (_dir, _cwd) = git_repo(&[("README.md", "base\n")]);
+            let agent = mutation_task_agent("Create hello.py that prints hello").await;
+
+            // The agent creates the deliverable; it is never `git add`ed or
+            // committed, so only the untracked-files union can see it.
+            std::fs::write("hello.py", "print('hello')\n").unwrap();
+
+            assert!(
+                agent.mutation_completion_gate().await.is_none(),
+                "a newly created untracked source file must satisfy the EmptyDiff gate"
+            );
+        }
+
+        // The untracked-files union must respect .gitignore: an ignored
+        // scratch file is not the agent's deliverable.
+        #[tokio::test]
+        async fn gitignored_untracked_file_does_not_satisfy_empty_diff_gate() {
+            let (_dir, _cwd) = git_repo(&[("README.md", "base\n"), (".gitignore", "scratch.py\n")]);
+            let agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+
+            // Only an ignored untracked file exists — no real change.
+            std::fs::write("scratch.py", "x = 1\n").unwrap();
+
+            let message = agent
+                .mutation_completion_gate()
+                .await
+                .expect("an ignored untracked file must not count as a change");
+            assert!(
+                message.contains("EmptyDiff"),
+                "expected EmptyDiff, got: {}",
+                message
+            );
+        }
+
+        // P0-2 regression: a correct fix on a non-Rust project, verified by
+        // directly running the project's own test script, must satisfy the
+        // StaleVerification gate. Previously the run was never credited
+        // (hardcoded runner-prefix list) and each passing run was instead
+        // counted as a mutation that re-staled the gate.
+        #[tokio::test]
+        async fn non_rust_direct_test_run_satisfies_stale_verification_gate() {
+            let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a // b\n")]);
+            let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+
+            // The model fixes the source file on disk…
+            std::fs::write("calc.py", "def div(a, b):\n    return a / b\n").unwrap();
+            agent.note_mutating_tool_call();
+            // …then runs the project's own test command directly and it
+            // passes. Apply the same accounting the dispatch loop applies,
+            // in the same order.
+            let args = serde_json::json!({"command": "python3 test_calc.py"});
+            if crate::agent::tool_dispatch::tool_call_is_mutating("shell_exec", &args) {
+                agent.note_mutating_tool_call();
+            }
+            agent.note_verification_outcome("shell_exec", &args.to_string(), true, "1 passed");
+
+            assert!(
+                agent.mutation_completion_gate().await.is_none(),
+                "a direct run of the project's own passing test must satisfy the gate"
             );
         }
 

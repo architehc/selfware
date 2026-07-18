@@ -454,6 +454,47 @@ impl Agent {
         }
     }
 
+    /// Pick the verification command to auto-run when the model keeps
+    /// answering without re-verifying (the StaleVerification churn breaker).
+    /// Rust projects keep the original `cargo_check` rescue; for any other
+    /// project the language-agnostic signal is the project's own test/check
+    /// command — the most recent verification-framed shell command the model
+    /// itself already ran this run is re-executed so the gate gains fresh
+    /// evidence and the run converges (P0-2). Returns `None` when there is
+    /// no honest command to run.
+    /// The tuple is `(tool_name, tool_args_json, display_command)`.
+    fn stale_verification_rescue_call(&self) -> Option<(String, String, String)> {
+        let is_rust = super::current_project_root().join("Cargo.toml").exists();
+        if is_rust && self.tools.get("cargo_check").is_some() {
+            return Some((
+                "cargo_check".to_string(),
+                "{}".to_string(),
+                "cargo_check".to_string(),
+            ));
+        }
+        let command = self
+            .current_checkpoint
+            .as_ref()?
+            .tool_calls
+            .iter()
+            .rev()
+            .filter(|tc| matches!(tc.tool_name.as_str(), "shell_exec" | "pty_shell"))
+            .filter_map(|tc| {
+                serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                    .ok()?
+                    .get("command")?
+                    .as_str()
+                    .map(str::to_string)
+            })
+            .find(|cmd| super::tool_dispatch::shell_command_is_verification(cmd))?;
+        self.tools.get("shell_exec")?;
+        Some((
+            "shell_exec".to_string(),
+            serde_json::json!({"command": command}).to_string(),
+            command,
+        ))
+    }
+
     async fn execute_step_internal_inner(&mut self, use_last_message: bool) -> Result<bool> {
         // Emit a structured progress event at the top of every loop iteration.
         // Step is 1-based; tool count is the registry's current size.
@@ -919,25 +960,26 @@ impl Agent {
                         || gate_msg.contains("FailingTestsAccepted"));
                 if is_stale_verification {
                     self.consecutive_stale_verification += 1;
-                    let is_rust = super::current_project_root().join("Cargo.toml").exists();
-                    if self.consecutive_stale_verification >= 2
-                        && is_rust
-                        && self.tools.get("cargo_check").is_some()
-                    {
-                        info!("Auto-running cargo_check to break StaleVerification churn");
-                        self.consecutive_stale_verification = 0;
-                        self.tools.activate("cargo_check");
-                        let batch: Vec<CollectedToolCall> =
-                            vec![("cargo_check".to_string(), "{}".to_string(), None)];
-                        self.execute_tool_batch(batch).await?;
-                        self.messages.push(crate::api::types::Message::user(
-                            "<selfware_system_directive>\n\
-                             cargo_check was run automatically. If it passed, give your final \
-                             answer now; if it reported errors, fix them and re-verify.\n\
-                             </selfware_system_directive>"
-                                .to_string(),
-                        ));
-                        return Ok(false);
+                    if self.consecutive_stale_verification >= 2 {
+                        if let Some((tool_name, tool_args, display_cmd)) =
+                            self.stale_verification_rescue_call()
+                        {
+                            info!(
+                                "Auto-running `{}` to break StaleVerification churn",
+                                display_cmd
+                            );
+                            self.consecutive_stale_verification = 0;
+                            self.tools.activate(&tool_name);
+                            let batch: Vec<CollectedToolCall> = vec![(tool_name, tool_args, None)];
+                            self.execute_tool_batch(batch).await?;
+                            self.messages.push(crate::api::types::Message::user(format!(
+                                "<selfware_system_directive>\n\
+                                 `{display_cmd}` was run automatically. If it passed, give your final \
+                                 answer now; if it reported errors, fix them and re-verify.\n\
+                                 </selfware_system_directive>"
+                            )));
+                            return Ok(false);
+                        }
                     }
                 } else {
                     self.consecutive_stale_verification = 0;
@@ -2934,6 +2976,107 @@ mod tests {
         );
 
         server.stop().await;
+    }
+
+    // =========================================================================
+    // StaleVerification churn-breaker rescue selection (P0-2)
+    // =========================================================================
+
+    fn checkpoint_shell_call(command: &str, success: bool) -> ToolCallLog {
+        ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: serde_json::json!({"command": command}).to_string(),
+            result: Some(if success {
+                "ok".to_string()
+            } else {
+                "failed".to_string()
+            }),
+            success,
+            duration_ms: Some(50),
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_verification_rescue_prefers_cargo_check_in_rust_project() {
+        // The original Rust rescue is preserved: Cargo.toml present → cargo_check.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+
+        let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .unwrap();
+        let (tool, args, display) = agent
+            .stale_verification_rescue_call()
+            .expect("a Rust project should rescue with cargo_check");
+        assert_eq!(tool, "cargo_check");
+        assert_eq!(args, "{}");
+        assert_eq!(display, "cargo_check");
+    }
+
+    #[tokio::test]
+    async fn stale_verification_rescue_reuses_models_own_command_outside_rust() {
+        // P0-2 regression: the churn breaker was Rust-only, so a non-Rust
+        // project whose model kept answering instead of re-verifying burned
+        // to MAX_ITERATIONS. The language-agnostic signal is the project's
+        // own test/check command the model already ran — re-run that.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("calc.py"),
+            "def div(a, b):\n    return a / b\n",
+        )
+        .unwrap();
+        let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+
+        let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .unwrap();
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "python-task".to_string(),
+            "fix the divide-by-zero bug in calc.py".to_string(),
+        );
+        // The most recent verification-framed command wins; non-verification
+        // commands around it are skipped.
+        checkpoint.log_tool_call(checkpoint_shell_call("python3 test_calc.py", false));
+        checkpoint.log_tool_call(checkpoint_shell_call("ls -la", true));
+        checkpoint.log_tool_call(checkpoint_shell_call("python3 test_calc.py", true));
+        checkpoint.log_tool_call(checkpoint_shell_call("python3 app.py", true));
+        agent.current_checkpoint = Some(checkpoint);
+
+        let (tool, args, display) = agent
+            .stale_verification_rescue_call()
+            .expect("a run with a known verification command should rescue with it");
+        assert_eq!(tool, "shell_exec");
+        assert_eq!(display, "python3 test_calc.py");
+        assert_eq!(
+            args,
+            serde_json::json!({"command": "python3 test_calc.py"}).to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_verification_rescue_is_none_without_any_verification_signal() {
+        // No Cargo.toml and no verification-framed command in the run: there
+        // is no honest command to auto-run, so no rescue.
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+
+        let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .unwrap();
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "python-task".to_string(),
+            "fix the divide-by-zero bug in calc.py".to_string(),
+        );
+        checkpoint.log_tool_call(checkpoint_shell_call("python3 app.py", true));
+        agent.current_checkpoint = Some(checkpoint);
+
+        assert!(agent.stale_verification_rescue_call().is_none());
     }
 
     #[tokio::test]
