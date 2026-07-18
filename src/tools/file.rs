@@ -1168,7 +1168,11 @@ fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
 /// Returns the joined slice, the number of lines scanned (== the true total
 /// only when the scan reached EOF), and whether any returned line contained
 /// invalid UTF-8 (i.e. the returned text is lossy rather than exact).
-async fn read_line_slice(path: &Path, start: usize, end: usize) -> Result<(String, usize, bool, bool)> {
+async fn read_line_slice(
+    path: &Path,
+    start: usize,
+    end: usize,
+) -> Result<(String, usize, bool, bool)> {
     use tokio::io::{AsyncBufReadExt, BufReader};
     // Preserve the legacy contract that an inverted range (end < start) yields
     // the single line at `start`.

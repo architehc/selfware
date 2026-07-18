@@ -320,7 +320,11 @@ mod tests {
         let result = run_shell_command("sleep 10", Duration::from_secs(1))
             .await
             .unwrap();
-        assert!(result.is_none(), "expected None (timed out), got: {:?}", result);
+        assert!(
+            result.is_none(),
+            "expected None (timed out), got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]

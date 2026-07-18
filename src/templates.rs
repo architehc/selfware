@@ -1365,15 +1365,17 @@ mod tests {
         let project_dir = dir.path().join("app");
         std::fs::create_dir_all(&project_dir).unwrap();
         // Pre-existing user file that a scaffold would silently clobber.
-        std::fs::write(project_dir.join("Cargo.toml"), "[package]\nname = \"mine\"\n").unwrap();
+        std::fs::write(
+            project_dir.join("Cargo.toml"),
+            "[package]\nname = \"mine\"\n",
+        )
+        .unwrap();
 
         let engine = TemplateEngine::new();
         let opts = ScaffoldOptions::default();
         let result = engine.scaffold_project("rust", "app", &project_dir, &opts);
 
-        let err = result
-            .err()
-            .expect("scaffolding over existing files must fail");
+        let err = result.expect_err("scaffolding over existing files must fail");
         let msg = err.to_string();
         assert!(
             msg.contains("Cargo.toml"),
@@ -1400,7 +1402,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let project_dir = dir.path().join("app");
         std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(project_dir.join("Cargo.toml"), "[package]\nname = \"mine\"\n").unwrap();
+        std::fs::write(
+            project_dir.join("Cargo.toml"),
+            "[package]\nname = \"mine\"\n",
+        )
+        .unwrap();
 
         let engine = TemplateEngine::new();
         let opts = ScaffoldOptions::default();

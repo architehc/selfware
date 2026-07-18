@@ -478,9 +478,10 @@ async fn test_git_diff_not_a_repo() {
         "path": dir.path().to_str().unwrap()
     });
 
-    // Should still return (git diff handles non-repo gracefully with error in stderr)
+    // git_diff now surfaces git's failure outside a repository as an error,
+    // instead of silently returning an empty diff with has_changes: false.
     let result = tool.execute(args).await;
-    assert!(result.is_ok()); // Returns empty diff with has_changes: false
+    assert!(result.is_err());
 }
 
 #[tokio::test]

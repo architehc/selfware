@@ -336,12 +336,12 @@ impl RunSupervisor {
     ///
     /// This is the P0-3 fix: the previous CLI loop checked the status only
     /// *before* each blocking `recv().await`, and the broadcast sender
-    /// lives in the run's [`RunHandle`] for the supervisor's lifetime, so
+    /// lives in the run's `RunHandle` for the supervisor's lifetime, so
     /// once the agent stopped emitting events the loop blocked in `recv()`
     /// forever and the final status was never observed (or persisted to
     /// the run registry). Here the status is re-checked after every event
     /// **and** on a fixed interval via `tokio::select!`, so a settled run
-    /// is always detected within [`STATUS_POLL_INTERVAL`] — even if its
+    /// is always detected within `STATUS_POLL_INTERVAL` — even if its
     /// terminal event was broadcast before the receiver attached, or was
     /// lost to lag.
     ///

@@ -878,16 +878,18 @@ mod tests {
             .expect("valid pid");
         // Give kill_on_drop a moment to deliver SIGKILL and the runtime to reap
         // the child, then verify it is really gone instead of still sleeping
-        // for the next minute.
+        // for the next minute. The window is generous (up to ~15s) because
+        // under coverage instrumentation (tarpaulin) SIGKILL delivery and
+        // reaping are markedly slower than on an uninstrumented run.
         use nix::sys::signal::kill;
         use nix::unistd::Pid;
         let mut alive = true;
-        for _ in 0..20 {
+        for _ in 0..75 {
             if kill(Pid::from_raw(child_pid), None).is_err() {
                 alive = false;
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         assert!(!alive, "timed-out npm child pid {child_pid} must be killed");
     }

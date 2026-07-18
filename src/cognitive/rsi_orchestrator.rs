@@ -103,7 +103,7 @@ impl RSIOrchestrator {
     }
 
     /// Override the per-run iteration ceiling (see
-    /// [`DEFAULT_MAX_ITERATIONS_PER_RUN`]). Each iteration runs two paid e2e
+    /// `DEFAULT_MAX_ITERATIONS_PER_RUN`). Each iteration runs two paid e2e
     /// benchmark suites, so this is effectively the run's cost ceiling.
     pub fn with_max_iterations_per_run(mut self, max: usize) -> Self {
         self.max_iterations_per_run = max.max(1);
