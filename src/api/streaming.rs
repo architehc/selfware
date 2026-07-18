@@ -460,9 +460,16 @@ pub(crate) fn parse_sse_event(
     let mut chunks = Vec::new();
 
     for line in event.lines() {
-        let Some(data) = line.strip_prefix("data: ") else {
+        // Strip the `data:` prefix. The SSE spec allows an optional single
+        // leading space after the colon, so accept both `data: ...` and
+        // `data:...`. A comment line starts with `:` (colon first), so it
+        // will not match the `data:` prefix and is correctly ignored.
+        let Some(data) = line.strip_prefix("data:") else {
             continue;
         };
+        // SSE only strips a single optional leading space — do NOT trim all
+        // whitespace, as that would alter the payload.
+        let data = data.strip_prefix(' ').unwrap_or(data);
 
         if data == "[DONE]" {
             for call in accumulator.flush() {
@@ -582,5 +589,23 @@ mod tests {
         let chunks = parse_sse_event(event, &mut acc);
         assert_eq!(chunks.len(), 1);
         assert!(matches!(&chunks[0], StreamChunk::Error(msg) if msg == "boom"));
+    }
+
+    #[test]
+    fn parse_sse_event_accepts_no_space_after_data_prefix() {
+        let event = "data:{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n";
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = parse_sse_event(event, &mut acc);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::Content(text) if text == "hi"));
+    }
+
+    #[test]
+    fn parse_sse_event_accepts_no_space_done_sentinel() {
+        let event = "data:[DONE]\n\n";
+        let mut acc = ToolCallAccumulator::new();
+        let chunks = parse_sse_event(event, &mut acc);
+        assert_eq!(chunks.len(), 1);
+        assert!(matches!(&chunks[0], StreamChunk::Done));
     }
 }
