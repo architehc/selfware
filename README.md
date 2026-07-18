@@ -325,6 +325,8 @@ base_delay_ms = 1000
 max_delay_ms = 60000
 ```
 
+> **Repo trust:** privileged sections in a checkout-local `selfware.toml` — `[safety]` path lists, `[hooks]`, `[mcp]`, `[agent] post_edit_test_command`, `[yolo]` — only take effect after you run `selfware trust` in that directory; untrusted checkouts run with the built-in safety defaults (`selfware init` trusts the config it writes automatically).
+
 Or use the setup wizard:
 
 ```bash
@@ -735,6 +737,8 @@ enabled = true
 presets = ["auto-commit", "auto-format", "lint-on-edit"]
 ```
 
+Hooks from a project-local `selfware.toml` only activate after `selfware trust` in that checkout (see **Repo trust** above).
+
 ### MCP Integration
 
 Selfware supports the **Model Context Protocol** as both client and server. Connect to external MCP servers (GitHub, Playwright, databases) to extend the agent's capabilities, or expose selfware's own tools to other AI systems via `selfware mcp-server`.
@@ -746,6 +750,8 @@ servers = [
     { name = "playwright", command = "npx", args = ["-y", "@playwright/mcp-server"] },
 ]
 ```
+
+MCP servers from a project-local `selfware.toml` only start after `selfware trust` in that checkout (see **Repo trust** above).
 
 ### LSP Integration
 

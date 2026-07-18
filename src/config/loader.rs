@@ -684,9 +684,7 @@ impl Config {
             .as_deref()
             .map(Self::content_sets_context_length)
             .unwrap_or(false);
-        if !context_length_explicit && match_profile(&config.model).is_none() {
-            config.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
-        }
+        config.apply_unknown_model_context_fallback(context_length_explicit);
 
         if !token_budget_was_explicit {
             // Default token_budget to 60% of context_length — this is the usable
@@ -899,6 +897,17 @@ impl Config {
         self.normalize_agent_limits();
     }
 
+    /// Conservative context window for UNRECOGNIZED models when the source
+    /// TOML did not set `context_length` explicitly. Single implementation of
+    /// the fallback `Config::load` applies on disk reads, shared with
+    /// [`Config::validate_generated_toml`] so a generated config is judged
+    /// against the SAME effective context window it gets at load time.
+    fn apply_unknown_model_context_fallback(&mut self, context_length_explicit: bool) {
+        if !context_length_explicit && match_profile(&self.model).is_none() {
+            self.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+        }
+    }
+
     /// Validate this in-memory generated config the way the loader would.
     /// Wizards (auto-config / unpack) call this before persisting so they can
     /// never emit a config `Config::load` would reject.
@@ -915,7 +924,16 @@ impl Config {
     pub fn validate_generated_toml(content: &str) -> Result<()> {
         let mut cfg: Config =
             toml::from_str(content).context("generated config does not match the Config schema")?;
+        // Mirror the load pipeline in order: the unknown-model context
+        // fallback fires BEFORE token_budget derives from context_length, and
+        // the strict context-fit check holds generated output to the
+        // unclamped invariant (the runtime derivation would silently clamp an
+        // oversized max_tokens — a wizard must not emit a config that only
+        // starts because of that clamp).
+        cfg.apply_unknown_model_context_fallback(Self::content_sets_context_length(content));
         cfg.apply_generated_derivations();
+        cfg.check_generated_context_fit()
+            .context("generated config failed validation — refusing to write it")?;
         cfg.validate()
             .context("generated config failed validation — refusing to write it")?;
         Ok(())
@@ -2733,9 +2751,64 @@ mod tests {
         let content = r#"
 endpoint = "http://127.0.0.1:1234/v1"
 model = "qwen3-coder"
+context_length = 32768
+max_tokens = 8192
+
+[safety]
+allowed_paths = ["./**"]
+"#;
+        Config::validate_generated_toml(content).unwrap();
+    }
+
+    #[test]
+    fn test_validate_generated_toml_applies_unknown_model_fallback() {
+        // P0-1: an unrecognized model with no explicit context_length gets the
+        // conservative 32k window at LOAD time — generated validation must
+        // judge against the same window. A 200k max_tokens fits the 1M
+        // built-in default but not the 32k fallback, so this can only fail
+        // when the fallback is applied during validation.
+        let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "qwen3-coder"
+max_tokens = 200000
+"#;
+        let err = Config::validate_generated_toml(content).unwrap_err();
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("context_length") && chain.contains("max_tokens"),
+            "error should name both knobs: {}",
+            chain
+        );
+    }
+
+    #[test]
+    fn test_validate_generated_toml_rejects_unknown_model_default_tokens() {
+        // The exact P0-1 wizard output pre-fix: unknown model, no
+        // context_length, implicit 64k max_tokens — must fail loudly now.
+        let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "qwen3-coder"
 
 [safety]
 allowed_paths = ["."]
+"#;
+        let err = Config::validate_generated_toml(content).unwrap_err();
+        let chain = format!("{:?}", err);
+        assert!(
+            chain.contains("context_length"),
+            "error should point at context_length: {}",
+            chain
+        );
+    }
+
+    #[test]
+    fn test_validate_generated_toml_explicit_context_length_skips_fallback() {
+        // A big explicit context window legitimately fits a big max_tokens.
+        let content = r#"
+endpoint = "http://127.0.0.1:1234/v1"
+model = "some-random-local-model"
+context_length = 1048576
+max_tokens = 200000
 "#;
         Config::validate_generated_toml(content).unwrap();
     }
@@ -2770,6 +2843,7 @@ token_budget = 0
 endpoint = "http://127.0.0.1:1234/v1"
 model = "m0"
 context_length = 32768
+max_tokens = 8192
 
 [agent]
 token_budget = 0

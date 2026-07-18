@@ -153,9 +153,12 @@ Set the API key securely (do not put it in the config file):
 ```bash
 # Option 1: Environment variable (recommended)
 export SELFWARE_API_KEY="sk-..."
+
+# Option 2: OS keyring
+selfware config set-key "sk-..."
 ```
 
-Selfware also reads from the OS keyring if a key is already stored there, but this repo does not expose a dedicated command for writing to the keyring.
+Selfware also reads from the OS keyring if a key is already stored there; `selfware config set-key` writes to it (prompting for the key when the argument is omitted).
 
 ### Multiple model profiles
 

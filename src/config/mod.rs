@@ -127,6 +127,15 @@ pub fn default_context_length() -> usize {
 /// `auto-config` / `unpack` still write the real value detected from the
 /// endpoint's `/models`, and an explicit `context_length` always wins.
 pub(crate) const UNKNOWN_MODEL_CONTEXT_LENGTH: usize = 32_768;
+
+/// Minimum usable conversation budget (tokens). Below this, file content and
+/// tool results cannot fit alongside the output reservation, so the agent
+/// refuses to start. Shared by the runtime derivation
+/// ([`Config::derive_context_budget`], used by the agent) and generated-config
+/// validation ([`Config::check_generated_context_fit`], used by the wizards)
+/// so both layers judge a config the same way.
+pub(crate) const MIN_CONVERSATION_TOKENS: usize = 2048;
+
 pub fn default_endpoint() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
@@ -293,6 +302,67 @@ impl Config {
             .get(key)
             .cloned()
             .unwrap_or(ConfigSource::Default)
+    }
+
+    /// Derive the usable conversation budget (tokens) from `context_length`
+    /// and the `max_tokens` output reservation, leaving a 20% safety margin
+    /// for tool definitions, chat-template formatting, and token-estimation
+    /// variance.
+    ///
+    /// `max_tokens` can exceed what the context window leaves — an
+    /// unrecognized local model falls back to a conservative 32k
+    /// `context_length` while `max_tokens` keeps its 64k default — so the
+    /// reservation is clamped DOWN to what fits instead of failing:
+    /// max_tokens may never exceed context_length minus the margin. Returns
+    /// `(max_context_tokens, effective_output_reservation)`; only errors when
+    /// the context window itself is too small to hold even the minimal
+    /// conversation floor.
+    pub fn derive_context_budget(&self) -> Result<(usize, usize)> {
+        let context = self.context_length;
+        let safety_margin = context / 5;
+        let max_reservable = context
+            .saturating_sub(safety_margin)
+            .saturating_sub(MIN_CONVERSATION_TOKENS);
+        let reserved_output = self.max_tokens.min(max_reservable);
+        let max_context_tokens = context
+            .saturating_sub(reserved_output)
+            .saturating_sub(safety_margin);
+        if max_context_tokens < MIN_CONVERSATION_TOKENS {
+            bail!(
+                "max_context_tokens too small ({}). context_length={}, max_tokens={}. \
+                 Increase context_length or decrease max_tokens so at least {} tokens remain for conversation.",
+                max_context_tokens,
+                context,
+                self.max_tokens,
+                MIN_CONVERSATION_TOKENS
+            );
+        }
+        Ok((max_context_tokens, reserved_output))
+    }
+
+    /// Strict context-fit check for GENERATED configs. The runtime
+    /// derivation ([`Config::derive_context_budget`]) clamps an oversized
+    /// `max_tokens`; a wizard must not silently emit a config that only
+    /// starts because of that clamp, so generated output is held to the
+    /// unclamped invariant.
+    pub fn check_generated_context_fit(&self) -> Result<()> {
+        let context = self.context_length;
+        let safety_margin = context / 5;
+        let max_context_tokens = context
+            .saturating_sub(self.max_tokens)
+            .saturating_sub(safety_margin);
+        if max_context_tokens < MIN_CONVERSATION_TOKENS {
+            bail!(
+                "generated config leaves {} tokens for conversation (< {}): context_length={} \
+                 minus max_tokens={} minus a 20% safety margin. Set context_length to the model's \
+                 real context window or lower max_tokens.",
+                max_context_tokens,
+                MIN_CONVERSATION_TOKENS,
+                context,
+                self.max_tokens
+            );
+        }
+        Ok(())
     }
 }
 

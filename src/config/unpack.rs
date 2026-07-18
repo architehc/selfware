@@ -1248,6 +1248,7 @@ mod tests {
         with_temp_cwd(|| {
             let mut config = Config::default();
             config.context_length = 65536;
+            config.max_tokens = 8192; // must fit inside context_length
             let path = save_unpack_config(&config).expect("save should succeed");
             let content = std::fs::read_to_string(&path).expect("should read file");
             assert!(
@@ -1295,6 +1296,7 @@ mod tests {
         with_temp_cwd(|| {
             let mut config = Config::default();
             config.context_length = 32768;
+            config.max_tokens = 8192; // must fit inside context_length
             config.agent.token_budget = 0; // serde sentinel: derive at load time
             let path = save_unpack_config(&config).expect("save should succeed");
             let content = std::fs::read_to_string(&path).expect("should read file");

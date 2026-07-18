@@ -4322,3 +4322,94 @@ model = "llama-3-70b-instruct"
     assert!(config.matched_profile.is_none());
     assert!(config.matched_profile_applied.is_empty());
 }
+
+// =========================================================================
+// Context-budget derivation (P0-1)
+// =========================================================================
+
+#[test]
+fn test_derive_context_budget_normal_case() {
+    let config = Config {
+        context_length: 262144,
+        max_tokens: 65536,
+        ..Config::default()
+    };
+    let (budget, reserved) = config.derive_context_budget().unwrap();
+    assert_eq!(reserved, 65536, "fitting max_tokens is not clamped");
+    assert_eq!(budget, 262144 - 65536 - 262144 / 5);
+}
+
+#[test]
+fn test_derive_context_budget_default_config() {
+    // The shipped default (1M context, 64k output) must pass with room.
+    let config = Config::default();
+    let (budget, reserved) = config.derive_context_budget().unwrap();
+    assert_eq!(reserved, default_max_tokens());
+    assert_eq!(
+        budget,
+        default_context_length() - default_max_tokens() - default_context_length() / 5
+    );
+}
+
+#[test]
+fn test_derive_context_budget_clamps_oversized_max_tokens() {
+    // P0-1 core: unknown local model → 32k context fallback while max_tokens
+    // keeps its 64k default. The derivation must clamp the output reservation
+    // down to what fits instead of producing a 0 conversation budget.
+    let config = Config {
+        context_length: UNKNOWN_MODEL_CONTEXT_LENGTH,
+        max_tokens: default_max_tokens(),
+        ..Config::default()
+    };
+    let (budget, reserved) = config.derive_context_budget().unwrap();
+    assert!(
+        reserved < config.max_tokens,
+        "reservation must be clamped below max_tokens"
+    );
+    assert_eq!(
+        budget, MIN_CONVERSATION_TOKENS,
+        "clamped reservation leaves exactly the conversation floor"
+    );
+}
+
+#[test]
+fn test_derive_context_budget_errors_only_for_tiny_context() {
+    // A context window too small to hold even the floor still refuses.
+    let config = Config {
+        context_length: 2000,
+        max_tokens: 65536,
+        ..Config::default()
+    };
+    let err = config.derive_context_budget().unwrap_err().to_string();
+    assert!(
+        err.contains("max_context_tokens too small"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_check_generated_context_fit() {
+    // Strict (unclamped) check used by generated-config validation.
+    let fitting = Config {
+        context_length: 32768,
+        max_tokens: 8192,
+        ..Config::default()
+    };
+    assert!(fitting.check_generated_context_fit().is_ok());
+
+    let overflowing = Config {
+        context_length: 32768,
+        max_tokens: 65536,
+        ..Config::default()
+    };
+    let err = overflowing
+        .check_generated_context_fit()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("context_length") && err.contains("max_tokens"),
+        "error should name both knobs: {err}"
+    );
+
+    assert!(Config::default().check_generated_context_fit().is_ok());
+}

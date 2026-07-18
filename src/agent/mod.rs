@@ -1098,17 +1098,21 @@ To call a tool, use this EXACT XML structure:
         // The old fixed 200K reserve was far too aggressive — it left only 46K
         // usable tokens on a 262K context model, causing premature eviction of
         // file content and tool-call retry loops.
+        //
+        // An oversized max_tokens (e.g. the 64k default against an
+        // unrecognized model's conservative 32k context fallback) no longer
+        // aborts startup: Config::derive_context_budget clamps the output
+        // reservation down to what the context window can actually hold.
+        // Surface the clamp so the user can make it explicit.
         let model_context_limit = config.context_length;
         let safety_margin = model_context_limit / 5; // 20% of context window
-        let max_context_tokens = model_context_limit
-            .saturating_sub(config.max_tokens) // reserve for output tokens
-            .saturating_sub(safety_margin); // tools + template + estimation safety
-
-        if max_context_tokens < 2048 {
-            anyhow::bail!(
-                "max_context_tokens too small ({}). context_length={}, max_tokens={}. \
-                 Increase context_length or decrease max_tokens so at least 2048 tokens remain for conversation.",
-                max_context_tokens, model_context_limit, config.max_tokens
+        let (max_context_tokens, reserved_output) = config.derive_context_budget()?;
+        if reserved_output < config.max_tokens {
+            warn!(
+                "max_tokens ({}) exceeds what context_length ({}) leaves after the safety \
+                 margin; clamping the output reservation to {} tokens. Lower max_tokens or \
+                 raise context_length to silence this.",
+                config.max_tokens, model_context_limit, reserved_output
             );
         }
         tracing::info!(

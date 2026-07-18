@@ -20,13 +20,20 @@ macro_rules! wizard_print {
 }
 
 pub(crate) fn run_init_wizard(template: Option<String>, scaffold: bool) -> Result<()> {
-    use std::io::{self, BufRead, Write};
+    use std::io::{self, BufRead, IsTerminal, Write};
     use std::path::PathBuf;
 
     // If a template is provided, skip the interactive wizard
     if let Some(ref tmpl) = template {
         return write_template_config(tmpl);
     }
+
+    // The wizard reads every answer from stdin; without a terminal each
+    // read_line hits EOF and silently selects the default, persisting an
+    // all-defaults localhost config (shadowing any working global config)
+    // that the user never asked for. Refuse instead — mirrors the headless
+    // fail-fast guards on the chat/run entry paths.
+    ensure_interactive_stdin(std::io::stdin().is_terminal())?;
 
     if scaffold {
         run_scaffold_interview()?;
@@ -132,23 +139,24 @@ pub(crate) fn run_init_wizard(template: Option<String>, scaffold: bool) -> Resul
     let allowed_paths = match path_choice.trim() {
         "2" => {
             let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-            format!("[\"{}\"]", home.display())
+            allowed_paths_toml([dir_allow_entry(&home)])
         }
         "3" => {
             print!("  Enter paths (comma-separated): ");
             io::stdout().flush()?;
             let mut paths = String::new();
             io::stdin().lock().read_line(&mut paths)?;
-            let paths: Vec<String> = paths
-                .trim()
-                .split(',')
-                .map(|p| format!("\"{}\"", p.trim()))
-                .collect();
-            format!("[{}]", paths.join(", "))
+            allowed_paths_toml(
+                paths
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(custom_allow_entry),
+            )
         }
         _ => {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            format!("[\"{}\"]", cwd.display())
+            allowed_paths_toml([dir_allow_entry(&cwd)])
         }
     };
     wizard_print!();
@@ -172,6 +180,81 @@ pub(crate) fn run_init_wizard(template: Option<String>, scaffold: bool) -> Resul
 
     // Write config
     write_config_file(&endpoint, &model, mode, &allowed_paths)
+}
+
+/// Refuse to run the interactive wizard without a terminal on stdin: every
+/// `read_line` would hit EOF and silently select the default answer,
+/// persisting an all-defaults localhost config the user never asked for.
+fn ensure_interactive_stdin(is_terminal: bool) -> Result<()> {
+    if !is_terminal {
+        anyhow::bail!(
+            "`selfware init` is an interactive wizard and needs a terminal on stdin. \
+             For a non-interactive setup use `selfware init --template <rust|python|node|minimal>`, \
+             or re-run in a terminal."
+        );
+    }
+    Ok(())
+}
+
+/// Quote `s` as a TOML basic-string literal. Backslashes, double quotes, and
+/// control characters are escaped, so Windows paths (`C:\Users\...`) don't
+/// produce invalid TOML escape sequences (`\U`, `\s`) in the generated config.
+fn toml_quote(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Allow-list entry for a concrete directory: `<dir>/**`. The path validator
+/// matches allow-list entries as exact globs, so a bare directory would match
+/// only the directory itself and DENY every file inside it — the descendant
+/// glob is what actually grants the project the user picked.
+fn dir_allow_entry(dir: &std::path::Path) -> String {
+    format!("{}/**", dir.display())
+}
+
+/// User-supplied custom path → allow-list entry. Entries that already carry
+/// glob metacharacters are left alone; plain directories get the descendant
+/// glob (`/**`) appended, for the same reason as [`dir_allow_entry`].
+fn custom_allow_entry(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.contains(['*', '?', '[']) {
+        return trimmed.to_string();
+    }
+    // Strip trailing separators so we don't emit `foo//**`, but never turn a
+    // Windows drive root (`C:\`) into a relative-looking `C:/**`.
+    let base = trimmed.trim_end_matches(['/', '\\']);
+    if base.len() == 2 && base.ends_with(':') {
+        format!("{}**", trimmed)
+    } else {
+        format!("{}/**", base)
+    }
+}
+
+/// Render allow-list entries as a TOML array literal with each entry quoted
+/// via [`toml_quote`].
+fn allowed_paths_toml<I, S>(entries: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let quoted: Vec<String> = entries
+        .into_iter()
+        .map(|e| toml_quote(e.as_ref()))
+        .collect();
+    format!("[{}]", quoted.join(", "))
 }
 
 /// Ask structured questions about the project to build, then scaffold it into
@@ -256,13 +339,13 @@ fn write_template_config(template: &str) -> Result<()> {
             "http://127.0.0.1:1234/v1".to_string(),
             "qwen3-coder".to_string(),
             "normal",
-            format!("[\"{}\"]", cwd.display()),
+            allowed_paths_toml([dir_allow_entry(&cwd)]),
         ),
         _ => (
             "http://127.0.0.1:1234/v1".to_string(),
             "qwen3-coder".to_string(),
             "normal",
-            "[\".\"]".to_string(),
+            "[\"./**\"]".to_string(),
         ),
     };
 
@@ -281,6 +364,16 @@ fn build_config_content(endpoint: &str, model: &str, allowed_paths: &str) -> Str
 endpoint = "{}"
 model = "{}"
 
+# Token limits. `context_length` MUST match your server's real context window
+# (vLLM --max-model-len, LM Studio's context slider, Ollama num_ctx); raise it
+# when your model serves more. `max_tokens` is the per-response output budget
+# and must fit inside context_length with room to spare for conversation.
+# Leaving these unset is NOT safe for models selfware doesn't recognize: the
+# context window falls back to a conservative 32k while max_tokens defaults
+# to 64k, which doesn't fit.
+context_length = 32768
+max_tokens = 8192
+
 # Execution mode is chosen per RUN, not stored here — a config file (this one
 # lives in the repo) must never be able to silently enable auto-approval.
 # Start Selfware in your chosen mode with a flag or env var:
@@ -292,8 +385,8 @@ model = "{}"
 allowed_paths = {}
 
 [agent]
-# token_budget defaults to max_tokens — set explicitly to match your model's context window
-# token_budget = 131072
+# token_budget defaults to 60% of context_length — set explicitly to override
+# token_budget = 19660
 "#,
         endpoint, model, allowed_paths
     )
@@ -369,6 +462,28 @@ fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &st
         config_path.display()
     );
 
+    // Trust the config we just wrote. It was created by the user, in this
+    // directory, by an explicit `init` — so the untrusted-checkout
+    // restriction (which silently resets allowed_paths/hooks/MCP to defaults)
+    // must not strip it on the next run. This is the same store
+    // `selfware trust` writes (~/.selfware/trusted_repos).
+    match crate::config::trust::add_trusted_config(&config_path) {
+        Ok(()) => wizard_print!(
+            "  {} Trusted this config — its [safety] settings take effect on the next run.",
+            Glyphs::bloom()
+        ),
+        Err(e) => {
+            wizard_print!(
+                "  {} Could not record repo trust ({}). Run `selfware trust` in this directory,",
+                Glyphs::frost(),
+                e
+            );
+            wizard_print!(
+                "     otherwise the untrusted-checkout protection resets allowed_paths/hooks/MCP to defaults."
+            );
+        }
+    }
+
     // The new project-local file shadows any global config in this directory —
     // name that explicitly so a working global setup doesn't look "lost".
     if let Some(home_config) = dirs::home_dir().map(|h| h.join(".config/selfware/config.toml")) {
@@ -419,6 +534,135 @@ fn write_config_file(endpoint: &str, model: &str, mode: &str, allowed_paths: &st
 #[cfg(test)]
 mod tests {
     use super::build_config_content;
+
+    #[test]
+    fn generated_default_config_passes_agent_context_check() {
+        // P0-1: the wizard's own suggested defaults (unknown model
+        // `qwen3-coder`) previously produced a config the agent refused to
+        // start (32k unknown-model fallback vs 64k default max_tokens →
+        // max_context_tokens = 0). The generated body must carry explicit,
+        // mutually-fitting token limits.
+        let content = build_config_content("http://127.0.0.1:1234/v1", "qwen3-coder", "[\"./**\"]");
+        let cfg: crate::config::Config =
+            toml::from_str(&content).expect("generated TOML must parse into Config");
+        let (budget, reserved) = cfg
+            .derive_context_budget()
+            .expect("wizard defaults must pass the agent's context check");
+        assert_eq!(
+            reserved, cfg.max_tokens,
+            "wizard defaults must fit without relying on the runtime clamp"
+        );
+        assert!(budget >= 2048, "conversation budget too small: {budget}");
+        // …and through the strict generated-validation path (fallback + fit).
+        crate::config::Config::validate_generated_toml(&content).unwrap();
+    }
+
+    #[test]
+    fn allowed_paths_use_descendant_glob_that_matches_files() {
+        // A bare directory allow-list entry matches only the directory itself
+        // and DENIES every file inside it — the wizard must emit `<dir>/**`.
+        let dir = tempfile::tempdir().unwrap();
+        let entry = super::dir_allow_entry(dir.path());
+        assert!(entry.ends_with("/**"), "must be a descendant glob: {entry}");
+
+        let canonical_dir = dir.path().canonicalize().unwrap();
+        let child = canonical_dir.join("src").join("main.rs");
+        let child_str = child.to_string_lossy().to_string();
+
+        let config = crate::config::SafetyConfig {
+            allowed_paths: vec![entry],
+            ..Default::default()
+        };
+        let validator =
+            crate::safety::path_validator::PathValidator::new(&config, dir.path().to_path_buf());
+        assert!(
+            validator
+                .is_path_in_allowed_list(&child_str, "src/main.rs")
+                .unwrap(),
+            "<dir>/** must match files inside the chosen project"
+        );
+        assert!(
+            validator
+                .is_path_in_allowed_list(&canonical_dir.to_string_lossy(), ".")
+                .unwrap(),
+            "<dir>/** must also match the chosen directory itself"
+        );
+
+        // Regression guard: the old bare-dir form must NOT match children.
+        let bare = crate::config::SafetyConfig {
+            allowed_paths: vec![dir.path().to_string_lossy().to_string()],
+            ..Default::default()
+        };
+        let bare_validator =
+            crate::safety::path_validator::PathValidator::new(&bare, dir.path().to_path_buf());
+        assert!(
+            !bare_validator
+                .is_path_in_allowed_list(&child_str, "src/main.rs")
+                .unwrap(),
+            "bare dir must not match children (this was the onboarding bug)"
+        );
+    }
+
+    #[test]
+    fn custom_allow_entry_appends_glob_but_keeps_existing_globs() {
+        assert_eq!(super::custom_allow_entry("/tmp/proj"), "/tmp/proj/**");
+        assert_eq!(super::custom_allow_entry("/tmp/proj/"), "/tmp/proj/**");
+        assert_eq!(super::custom_allow_entry(" /data "), "/data/**");
+        // Already-globbed entries pass through untouched.
+        assert_eq!(super::custom_allow_entry("/tmp/**"), "/tmp/**");
+        assert_eq!(super::custom_allow_entry("./**"), "./**");
+        assert_eq!(super::custom_allow_entry("~/**"), "~/**");
+    }
+
+    #[test]
+    fn windows_style_paths_are_toml_escaped() {
+        // Backslashes in a basic TOML string form invalid escapes (\U, \s);
+        // the generated config must quote them so it parses on Windows.
+        let entry = super::custom_allow_entry(r"C:\Users\ada\project");
+        assert_eq!(entry, r"C:\Users\ada\project/**");
+
+        let array = super::allowed_paths_toml([entry.clone()]);
+        let doc: toml::Value = toml::from_str(&format!("allowed_paths = {array}"))
+            .expect("escaped array must be valid TOML");
+        let decoded = doc
+            .get("allowed_paths")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(decoded, entry, "TOML round-trip must preserve the path");
+
+        // Sanity: WITHOUT escaping the same body is invalid TOML (\U escape).
+        assert!(toml::from_str::<toml::Value>(&format!("allowed_paths = [\"{entry}\"]")).is_err());
+
+        // The full generated config with such a path must pass validation.
+        let content = build_config_content("http://127.0.0.1:1234/v1", "qwen3-coder", &array);
+        crate::config::Config::validate_generated_toml(&content).unwrap();
+    }
+
+    #[test]
+    fn quotes_in_paths_are_toml_escaped() {
+        let array = super::allowed_paths_toml([r#"weird"path"#.to_string()]);
+        let doc: toml::Value = toml::from_str(&format!("allowed_paths = {array}")).unwrap();
+        let decoded = doc
+            .get("allowed_paths")
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert_eq!(decoded, r#"weird"path"#);
+    }
+
+    #[test]
+    fn non_terminal_stdin_is_refused() {
+        // Piped/EOF stdin must not silently write an all-defaults config.
+        assert!(super::ensure_interactive_stdin(true).is_ok());
+        let err = super::ensure_interactive_stdin(false).unwrap_err();
+        assert!(
+            err.to_string().contains("interactive"),
+            "error should explain the wizard needs a terminal: {err}"
+        );
+    }
 
     #[test]
     fn generated_config_has_no_live_execution_mode_key() {
