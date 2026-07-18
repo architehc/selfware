@@ -257,9 +257,10 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
-    # tarpaulin does a full instrumented build + single-threaded test run over
-    # the whole crate (~25-30m); a 30m budget intermittently cancels the
-    # "Generate coverage" step mid-run. Give it headroom.
+    # Coverage via cargo-llvm-cov (source-based instrumentation) rather than
+    # tarpaulin: no ptrace, so it is faster and free of tarpaulin's flaky
+    # child-reaping (which was cancelling the run at the 30m mark). A warm
+    # Swatinem/rust-cache keeps this well under the budget after the first run.
     timeout-minutes: 45
 
     steps:
@@ -273,27 +274,30 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v5
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-coverage-
+          components: llvm-tools-preview
 
-      - name: Install cargo-tarpaulin
-        uses: taiki-e/install-action@cargo-tarpaulin
+      - name: Cache build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: llvm-cov
 
-      # fail-under tracks the measured baseline (62.61% after the 2026-07
-      # cleanup + merge); raise it back as coverage improves.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Tests run single-threaded (as they did under tarpaulin) to avoid the
+      # suite's process-global cwd / port-bind races. One instrumented run,
+      # then cheap `report` renders reuse the collected profile data.
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 62 --skip-clean -- --test-threads 1
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --features extras --no-report -- --test-threads 1
+          cargo llvm-cov report --cobertura --output-path coverage/cobertura.xml
+          cargo llvm-cov report --html --output-dir coverage
+          cargo llvm-cov report --summary-only | tee coverage/summary.txt
 
       - name: Upload coverage report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -301,12 +305,19 @@ jobs:
           retention-days: 30
 
       - name: Upload to Codecov
+        if: always()
         uses: codecov/codecov-action@v5
         with:
           files: coverage/cobertura.xml
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+      # Provisional floor for the tarpaulin->llvm-cov migration: llvm-cov's
+      # line metric differs from tarpaulin's ~62.6%, so start below it and
+      # ratchet up once the summary above establishes the real baseline.
+      - name: Enforce coverage floor
+        run: cargo llvm-cov report --summary-only --fail-under-lines 50
 
   # Dependency policy (advisories, licenses, bans) — configured in deny.toml
   deny:
