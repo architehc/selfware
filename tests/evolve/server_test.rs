@@ -237,9 +237,12 @@ async fn test_start_serves_over_http() {
     let mut graph = None;
     for _ in 0..100 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(resp) = reqwest::get(format!("http://127.0.0.1:{}/api/graph", port)).await {
-            graph = Some(resp.json::<Value>().await.unwrap());
-            break;
+        match reqwest::get(format!("http://127.0.0.1:{}/api/graph", port)).await {
+            Ok(resp) => {
+                graph = Some(resp.json::<Value>().await.unwrap());
+                break;
+            }
+            Err(e) => eprintln!("poll failed: {e:?}"),
         }
     }
     handle.abort();
