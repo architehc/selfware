@@ -1,22 +1,261 @@
-body {
-    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
-    margin: 20px;
-    background: #fafafa;
-    color: #222;
+:root {
+    --bg: #0d1117;
+    --bg-panel: #161b22;
+    --bg-raised: #1c2330;
+    --border: #2d3748;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+
+    --node-code: #58a6ff;
+    --node-concept: #bc8cff;
+    --node-preset: #39c5cf;
+    --edge-default: #4a5568;
+    --edge-duplicate: #f85149;
+    --edge-similar: #d29922;
 }
 
-h1 {
-    font-size: 1.4em;
-    margin-bottom: 12px;
+* {
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* --- Header --- */
+
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 24px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+}
+
+.topbar h1 {
+    font-size: 1.05rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 0;
+}
+
+.badge {
+    font-size: 0.78rem;
+    font-weight: 500;
+    padding: 4px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+.badge-ok    { color: var(--ok);   border-color: var(--ok);   background: rgba(63, 185, 80, 0.12); }
+.badge-err   { color: var(--err);  border-color: var(--err);  background: rgba(248, 81, 73, 0.12); }
+.badge-muted { color: var(--text-muted); }
+
+/* --- Graph canvas --- */
+
+.graph-shell {
+    flex: 1;
+    padding: 20px 24px 24px;
+    display: flex;
+    min-height: 0;
 }
 
 #graph {
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    background: #fff;
-    display: inline-block;
+    position: relative;
+    flex: 1;
+    min-height: 480px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background:
+        radial-gradient(circle at 1px 1px, #21262d 1px, transparent 0) 0 0 / 28px 28px,
+        var(--bg-panel);
+    overflow: hidden;
 }
 
 #graph svg {
     display: block;
+    width: 100%;
+    height: 100%;
 }
+
+/* --- Overlays (loading / error / empty) --- */
+
+.overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    text-align: center;
+    padding: 24px;
+    background: rgba(13, 17, 23, 0.75);
+    z-index: 5;
+}
+
+#graph-error {
+    color: var(--err);
+    font-size: 0.95rem;
+}
+
+.muted {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+}
+
+.hidden {
+    display: none !important;
+}
+
+.spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+/* --- Floating panels (legend, zoom controls) --- */
+
+.panel {
+    position: absolute;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    z-index: 4;
+}
+
+#legend {
+    top: 14px;
+    left: 14px;
+    padding: 10px 14px;
+    font-size: 0.78rem;
+    line-height: 1.9;
+    color: var(--text-muted);
+}
+
+#legend .legend-title {
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 2px;
+}
+
+#legend .swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 8px;
+    vertical-align: baseline;
+}
+
+#legend .swatch-line {
+    border-radius: 0;
+    width: 16px;
+    height: 2px;
+    vertical-align: middle;
+}
+
+#zoom-controls {
+    bottom: 14px;
+    right: 14px;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    gap: 4px;
+}
+
+#zoom-controls button {
+    width: 32px;
+    height: 32px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+#zoom-controls button:hover {
+    background: var(--border);
+}
+
+/* --- Tooltip --- */
+
+#tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--text);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    max-width: 280px;
+    z-index: 6;
+}
+
+#tooltip .tooltip-title {
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+#tooltip .tooltip-meta {
+    color: var(--text-muted);
+}
+
+/* --- Graph elements --- */
+
+.node {
+    cursor: pointer;
+    stroke: rgba(255, 255, 255, 0.25);
+    stroke-width: 1px;
+    transition: stroke-width 0.15s ease;
+}
+
+.node:hover {
+    stroke: #fff;
+    stroke-width: 2px;
+}
+
+.node-label {
+    fill: var(--text);
+    font-size: 11px;
+    paint-order: stroke;
+    stroke: var(--bg-panel);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+    pointer-events: none;
+}
+
+.edge {
+    stroke: var(--edge-default);
+    stroke-opacity: 0.55;
+    stroke-width: 1.2px;
+}
+
+.edge-DuplicateOf { stroke: var(--edge-duplicate); stroke-opacity: 0.8; stroke-dasharray: 5 3; }
+.edge-SimilarTo    { stroke: var(--edge-similar);   stroke-opacity: 0.8; stroke-dasharray: 2 3; }

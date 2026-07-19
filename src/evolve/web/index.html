@@ -1,13 +1,42 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Selfware Self-Evolve</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-    <h1>Self-Evolve Context Selector</h1>
-    <div id="graph"></div>
+    <header class="topbar">
+        <h1>Self-Evolve Context Selector</h1>
+        <div id="validation-status" class="badge badge-muted">Validation: pending</div>
+    </header>
+
+    <main class="graph-shell">
+        <div id="graph">
+            <div id="loading" class="overlay">
+                <div class="spinner" aria-hidden="true"></div>
+                <p>Loading graph&hellip;</p>
+            </div>
+            <div id="graph-error" class="overlay hidden"></div>
+            <div id="graph-empty" class="overlay hidden">
+                <p>No nodes in the graph yet.</p>
+                <p class="muted">Run an analysis pass to populate the ontology.</p>
+            </div>
+
+            <div id="legend" class="panel hidden"></div>
+
+            <div id="zoom-controls" class="panel hidden">
+                <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
+                <button id="zoom-out" title="Zoom out" aria-label="Zoom out">&minus;</button>
+                <button id="zoom-reset" title="Reset view" aria-label="Reset view">&#10226;</button>
+            </div>
+
+            <div id="tooltip" class="hidden" role="tooltip"></div>
+        </div>
+    </main>
+
     <script src="/app.js"></script>
 </body>
 </html>

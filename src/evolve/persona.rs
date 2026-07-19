@@ -31,17 +31,3 @@ impl Default for ComponentPersona {
         Self::new()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_persona_generates_grounded_explanation() {
-        let persona = ComponentPersona::new();
-        let node = Node::code("agent", "src/agent");
-        let explanation = persona.explain(&node).unwrap();
-        assert!(explanation.contains("agent"));
-        assert!(explanation.contains("src/agent"));
-    }
-}

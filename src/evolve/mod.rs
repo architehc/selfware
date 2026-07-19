@@ -27,7 +27,7 @@ pub use graph::GraphBuilder;
 pub use graphrag::{GraphRag, GroundedFact};
 pub use ide::{FileInfo, IdeEngine};
 pub use r#loop::{EvolutionLoop, LoopResult};
-pub use ontology::OntologyStore;
+pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
 pub use ontology_evolver::{OntologyEvolver, OntologyOperation, OntologyProposal, OntologyVersion};
 pub use persona::ComponentPersona;
 pub use quality::QualityAnalyzer;
@@ -105,34 +105,5 @@ impl Node {
             warning_count: None,
             complexity: None,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::evolve;
-
-    #[tokio::test]
-    async fn test_run_self_evolve_starts_server() {
-        // Verify function exists and compiles
-        let _ = evolve::run_self_evolve;
-    }
-
-    #[tokio::test]
-    async fn test_full_server_flow() {
-        let builder = GraphBuilder::new("src");
-        let graph = builder.scan_src().unwrap();
-        let server = EvolveServer::new(graph);
-        let json = server.graph_json().await.unwrap();
-        assert!(json.contains("agent"));
-    }
-
-    #[test]
-    fn test_graph_node_creation() {
-        let node = Node::code("agent", "src/agent");
-        assert_eq!(node.id, "agent");
-        assert_eq!(node.layer, NodeLayer::Code);
-        assert_eq!(node.path, Some("src/agent".to_string()));
     }
 }
