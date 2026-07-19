@@ -196,6 +196,10 @@ name = "unit"
 path = "tests/unit/mod.rs"
 
 [[test]]
+name = "evolve"
+path = "tests/evolve/mod.rs"
+
+[[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
 required-features = ["integration"]
