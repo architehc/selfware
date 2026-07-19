@@ -182,6 +182,12 @@ function renderGraph(data) {
         .on('mouseleave', () => hide(tooltip));
 
     simulation.on('tick', () => {
+        // Keep nodes inside the viewport so nothing is clipped off-screen.
+        for (const d of nodes) {
+            const r = nodeRadius(d);
+            d.x = Math.max(r + 16, Math.min(width - r - 16, d.x));
+            d.y = Math.max(r + 16, Math.min(height - r - 32, d.y));
+        }
         link
             .attr('x1', d => d.source.x)
             .attr('y1', d => d.source.y)
@@ -256,9 +262,15 @@ async function loadEditor() {
     }
     files.forEach(f => {
         const el = document.createElement('div');
-        el.textContent = f.path;
+        el.textContent = f.is_dir ? `${f.path}/` : f.path;
         el.dataset.path = f.path;
-        el.onclick = () => openFile(f.path);
+        if (f.is_dir) {
+            // Directories can't be opened in the editor; show them muted.
+            el.style.color = '#6e7681';
+            el.style.cursor = 'default';
+        } else {
+            el.onclick = () => openFile(f.path);
+        }
         tree.appendChild(el);
     });
 }
