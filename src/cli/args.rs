@@ -485,6 +485,14 @@ pub(crate) enum Commands {
     #[command(display_order = 10)]
     McpServer,
 
+    /// Self-evolve: build the code graph and serve the evolution UI over HTTP
+    #[command(display_order = 10)]
+    SelfEvolve {
+        /// Port for the evolve HTTP server
+        #[arg(short, long, default_value_t = 7777)]
+        port: u16,
+    },
+
     /// Start selfware in LSP server mode (for editor extensions)
     #[command(hide = true)]
     Lsp,

@@ -1,0 +1,22 @@
+body {
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    margin: 20px;
+    background: #fafafa;
+    color: #222;
+}
+
+h1 {
+    font-size: 1.4em;
+    margin-bottom: 12px;
+}
+
+#graph {
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: #fff;
+    display: inline-block;
+}
+
+#graph svg {
+    display: block;
+}

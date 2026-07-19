@@ -2983,6 +2983,10 @@ async fn handle_command(
             crate::mcp::server::run_mcp_server(&config, config_path.as_deref()).await?;
         }
 
+        Commands::SelfEvolve { port } => {
+            crate::evolve::run_self_evolve(port).await?;
+        }
+
         Commands::Lsp => {
             crate::lsp::run_lsp_server().await?;
         }

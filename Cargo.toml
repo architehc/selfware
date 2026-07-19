@@ -116,6 +116,12 @@ metrics = "0.21.0"
 metrics-exporter-prometheus = "0.12.1"
 syn = { version = "2.0", features = ["full", "parsing"] }
 
+# Self-evolve feature (code graph + evolution UI server)
+axum = "0.7"
+tower-http = { version = "0.5", features = ["fs"] }
+tree-sitter = "0.22"
+tree-sitter-rust = "0.21"
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal"] }
 
@@ -167,6 +173,7 @@ extras = ["tui", "resilience", "execution-modes", "log-analysis", "tokens", "sel
 
 [dev-dependencies]
 tokio-test = "0.4"
+tower = { version = "0.4", features = ["util"] }  # ServiceExt::oneshot for evolve server tests
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1.5"
 assert_cmd = "2.1.2"
