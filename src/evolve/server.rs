@@ -174,6 +174,7 @@ impl EvolveServer {
             .route("/api/context/sizes", get(context_sizes_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
+            .route("/api/graph/findings", get(graph_findings_handler))
             .route("/api/persona", get(persona_handler))
             .route("/api/xray", get(xray_handler))
             .route("/api/xray/hubs", get(xray_hubs_handler))
@@ -322,6 +323,71 @@ async fn duplicate_fns_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
         "exact": exact,
         "near": pairs.len() - exact,
         "pairs": pairs,
+    })))
+}
+
+/// Per-node graph findings with the actions each enables — dead symbols
+/// (`promote_to_hotpath` / `stage_deletion`) and duplicate functions
+/// (`merge_duplicate`), keyed by file path so the graph can overlay them.
+async fn graph_findings_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let root = server.project_root.as_ref().clone();
+    let src = root.join("src");
+    let (dead, dupes) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let dead = super::DeadCodeAnalyzer::new(&root).find()?;
+        let dupes = super::FnDedupAnalyzer::new(&src).find()?;
+        Ok((dead, dupes))
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .map_err(internal_error)?;
+
+    // Accumulate per file path.
+    use std::collections::BTreeMap;
+    let mut nodes: BTreeMap<String, (Vec<Value>, Vec<Value>)> = BTreeMap::new();
+    for d in &dead {
+        if d.cfg_gated {
+            continue; // platform/feature code, not a hot-path candidate
+        }
+        nodes.entry(d.path.clone()).or_default().0.push(json!({
+            "name": d.name, "kind": d.kind, "line": d.line, "is_pub": d.is_pub,
+        }));
+    }
+    for p in &dupes {
+        let entry = json!({
+            "kind": p.kind, "similarity": p.similarity,
+            "first": p.first, "second": p.second,
+        });
+        nodes.entry(p.first.path.clone()).or_default().1.push(entry.clone());
+        if p.second.path != p.first.path {
+            nodes.entry(p.second.path.clone()).or_default().1.push(entry);
+        }
+    }
+
+    let entries: Vec<Value> = nodes
+        .into_iter()
+        .map(|(path, (dead_syms, dup_fns))| {
+            let mut actions = Vec::new();
+            if !dead_syms.is_empty() {
+                actions.push("promote_to_hotpath");
+                actions.push("stage_deletion");
+            }
+            if !dup_fns.is_empty() {
+                actions.push("merge_duplicate");
+            }
+            json!({
+                "path": path,
+                "dead_symbols": dead_syms,
+                "duplicate_functions": dup_fns,
+                "actions": actions,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "nodes_with_findings": entries.len(),
+        "dead_symbols_total": dead.iter().filter(|d| !d.cfg_gated).count(),
+        "duplicate_functions_total": dupes.len(),
+        "nodes": entries,
     })))
 }
 
