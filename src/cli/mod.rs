@@ -2984,7 +2984,7 @@ async fn handle_command(
         }
 
         Commands::SelfEvolve { port } => {
-            crate::evolve::run_self_evolve(port).await?;
+            crate::evolve::run_self_evolve_with_config(port, &config).await?;
         }
 
         Commands::Lsp => {

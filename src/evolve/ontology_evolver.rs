@@ -53,9 +53,7 @@ impl OntologyEvolver {
                     id: new_name,
                 }]
             }
-            OntologyProposal::MergeConcepts { from, into } => {
-                self.merge_operations(&from, &into)
-            }
+            OntologyProposal::MergeConcepts { from, into } => self.merge_operations(&from, &into),
         };
         Ok(OntologyVersion {
             id: uuid::Uuid::new_v4().to_string(),

@@ -119,7 +119,7 @@ fn read_content(path: &Path) -> Option<String> {
 }
 
 /// Whitespace-normalized, non-empty lines as a set.
-fn normalized_lines(content: &str) -> HashSet<String> {
+pub(crate) fn normalized_lines(content: &str) -> HashSet<String> {
     content
         .lines()
         .map(|l| l.split_whitespace().collect::<String>())

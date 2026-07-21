@@ -1,6 +1,4 @@
-use selfware::evolve::ontology_evolver::{
-    OntologyEvolver, OntologyOperation, OntologyProposal,
-};
+use selfware::evolve::ontology_evolver::{OntologyEvolver, OntologyOperation, OntologyProposal};
 use selfware::evolve::{Edge, EdgeType, Graph, Node, NodeLayer, OntologyStore};
 
 fn evolver_in(dir: &tempfile::TempDir) -> OntologyEvolver {
@@ -58,13 +56,12 @@ fn test_propose_merge_rewires_edges_and_removes_node() {
         })
         .unwrap();
     // Merging must produce real operations, not an empty version.
-    assert!(version
-        .operations
-        .contains(&OntologyOperation::RemoveNode { id: "a".to_string() }));
-    assert!(version
-        .operations
-        .iter()
-        .any(|op| matches!(op, OntologyOperation::AddEdge { from, to } if from == "c" && to == "b")));
+    assert!(version.operations.contains(&OntologyOperation::RemoveNode {
+        id: "a".to_string()
+    }));
+    assert!(version.operations.iter().any(
+        |op| matches!(op, OntologyOperation::AddEdge { from, to } if from == "c" && to == "b")
+    ));
 }
 
 #[test]

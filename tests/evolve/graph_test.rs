@@ -1,10 +1,16 @@
 use selfware::evolve::graph::GraphBuilder;
+use selfware::evolve::{EdgeType, NodeLayer};
+
+fn write_rust(path: &std::path::Path, content: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
 
 #[test]
 fn test_graph_builder_scans_agent_component() {
     let builder = GraphBuilder::new("src");
     let graph = builder.scan_src().unwrap();
-    let agent = graph.nodes.iter().find(|n| n.id == "agent").unwrap();
+    let agent = graph.nodes.iter().find(|n| n.id == "crate::agent").unwrap();
     assert!(agent.tokens > 0);
     assert!(agent.files > 0);
 }
@@ -17,7 +23,258 @@ fn test_depends_on_edges_never_dangle() {
     // File modules must be normalized to bare names (no `.rs` suffix).
     assert!(ids.iter().all(|id| !id.ends_with(".rs")));
     for edge in &graph.edges {
-        assert!(ids.contains(edge.from.as_str()), "dangling from: {}", edge.from);
+        assert!(
+            ids.contains(edge.from.as_str()),
+            "dangling from: {}",
+            edge.from
+        );
         assert!(ids.contains(edge.to.as_str()), "dangling to: {}", edge.to);
     }
+}
+
+#[test]
+fn test_scan_is_deterministic_and_separates_production_from_tests() {
+    let project = tempfile::tempdir().unwrap();
+    write_rust(
+        &project.path().join("src/agent/mod.rs"),
+        "use crate::agent::Agent;\nuse crate::config::Config;\npub struct Agent;\n",
+    );
+    write_rust(
+        &project.path().join("src/config.rs"),
+        "pub struct Config;\n#[cfg(test)]\nmod tests { #[test] fn config_works() {} }\n",
+    );
+    write_rust(
+        &project.path().join("src/api/mod.rs"),
+        "#[cfg(test)]\n#[path = \"tests.rs\"]\nmod tests;\npub fn request() {}\n",
+    );
+    write_rust(
+        &project.path().join("src/api/tests.rs"),
+        "use super::*;\n#[test]\nfn request_works() {}\n",
+    );
+    write_rust(
+        &project.path().join("src/bin/tool.rs"),
+        "use selfware::config::Config;\nfn main() {}\n",
+    );
+    std::fs::create_dir_all(project.path().join("src/web")).unwrap();
+    std::fs::write(
+        project.path().join("src/web/app.js"),
+        "export function boot() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"demo\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.path().join("scripts")).unwrap();
+    std::fs::write(
+        project.path().join("scripts/generate.py"),
+        "print('generate')\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.path().join("system_tests")).unwrap();
+    std::fs::write(project.path().join("system_tests/flow.sh"), "echo test\n").unwrap();
+    write_rust(
+        &project.path().join("tests/agent_test.rs"),
+        "use selfware::agent::Agent;\n#[test]\nfn agent_works() {}\n",
+    );
+    write_rust(
+        &project.path().join("examples/demo.rs"),
+        "use selfware::config::Config;\nfn main() {}\n",
+    );
+
+    let builder = GraphBuilder::new(project.path().join("src"));
+    let first = builder.scan_src().unwrap();
+    let second = builder.scan_src().unwrap();
+
+    let ids: Vec<_> = first
+        .nodes
+        .iter()
+        .filter(|node| node.path.is_some())
+        .map(|node| node.id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "bin::tool",
+            "crate::agent",
+            "crate::api",
+            "crate::config",
+            "crate::web::app.js",
+            "example::demo",
+            "test::agent_test",
+            "test::api::tests",
+            "test::system_tests::flow.sh",
+            "tool::Cargo.toml",
+            "tool::scripts::generate.py"
+        ]
+    );
+    assert!(first
+        .nodes
+        .iter()
+        .filter(|node| node.layer == NodeLayer::Code)
+        .all(|node| {
+            node.path.as_deref().unwrap().contains("/src/") || node.id.starts_with("tool::")
+        }));
+    assert!(first
+        .nodes
+        .iter()
+        .filter(|node| node.layer == NodeLayer::Test)
+        .all(|node| node.id.starts_with("test::") || node.id.starts_with("example::")));
+    assert_eq!(
+        first
+            .nodes
+            .iter()
+            .find(|node| node.id == "test::api::tests")
+            .unwrap()
+            .layer,
+        NodeLayer::Test
+    );
+    let config = first
+        .nodes
+        .iter()
+        .find(|node| node.id == "crate::config")
+        .unwrap();
+    assert_eq!(config.inline_test_ranges, 1);
+    assert_eq!(config.inline_test_lines, 2);
+
+    assert!(first.edges.iter().any(|edge| {
+        edge.from == "crate::api"
+            && edge.to == "test::api::tests"
+            && edge.edge_type == EdgeType::Contains
+    }));
+
+    let dependency_edges: Vec<_> = first
+        .edges
+        .iter()
+        .filter(|edge| edge.edge_type == EdgeType::DependsOn)
+        .map(|edge| (edge.from.as_str(), edge.to.as_str()))
+        .collect();
+    assert_eq!(
+        dependency_edges,
+        vec![
+            ("bin::tool", "crate::config"),
+            ("crate::agent", "crate::config"),
+            ("example::demo", "crate::config"),
+            ("test::agent_test", "crate::agent")
+        ]
+    );
+    assert!(first.edges.iter().all(|edge| edge.from != edge.to));
+
+    let second_ids: Vec<_> = second.nodes.iter().map(|node| node.id.as_str()).collect();
+    let first_ids: Vec<_> = first.nodes.iter().map(|node| node.id.as_str()).collect();
+    let second_edges: Vec<_> = second
+        .edges
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.edge_type.clone()))
+        .collect();
+    let first_edges: Vec<_> = first
+        .edges
+        .iter()
+        .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.edge_type.clone()))
+        .collect();
+    assert_eq!(first_ids, second_ids);
+    assert_eq!(first_edges, second_edges);
+}
+
+#[test]
+fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
+    let project = tempfile::tempdir().unwrap();
+    for (path, content) in [
+        ("src/lib.rs", "pub fn library() {}\n"),
+        (
+            "vscode-selfware/src/extension.ts",
+            "export function activate() {}\n",
+        ),
+        ("zed-extension/src/lib.rs", "pub fn extension() {}\n"),
+        ("fuzz/fuzz_targets/parser.rs", "fn fuzz_target() {}\n"),
+        ("workflows/code_review.swl", "workflow code_review {}\n"),
+        ("rustfmt.toml", "edition = \"2021\"\n"),
+        ("Makefile", "check:\n\tcargo check\n"),
+        ("target/generated.rs", "pub fn generated() {}\n"),
+        (
+            "node_modules/pkg/index.ts",
+            "export const dependency = 1;\n",
+        ),
+        ("vendor/copied.rs", "pub fn copied() {}\n"),
+        ("build/bundle.js", "export const built = 1;\n"),
+        (".selfware/private.json", "{}\n"),
+        ("selfware.toml", "api_key = \"do-not-index\"\n"),
+        ("credentials.json", "{}\n"),
+        ("codegraph.json", "{}\n"),
+    ] {
+        let full = project.path().join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, content).unwrap();
+    }
+    let binary = project.path().join("src/binary.rs");
+    std::fs::write(binary, [0, 159, 146, 150]).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink(
+            project.path().join("vscode-selfware/src/extension.ts"),
+            project.path().join("src/symlink.ts"),
+        )
+        .unwrap();
+    }
+
+    let graph = GraphBuilder::new(project.path().join("src"))
+        .scan_src()
+        .unwrap();
+    let by_id = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap();
+
+    assert_eq!(
+        by_id("tool::vscode-selfware::src::extension.ts").layer,
+        NodeLayer::Code
+    );
+    assert_eq!(
+        by_id("tool::zed-extension::src::lib").layer,
+        NodeLayer::Code
+    );
+    assert_eq!(
+        by_id("test::fuzz::fuzz_targets::parser").layer,
+        NodeLayer::Test
+    );
+    assert_eq!(
+        by_id("tool::workflows::code_review.swl").layer,
+        NodeLayer::Code
+    );
+    assert!(graph
+        .nodes
+        .iter()
+        .any(|node| node.id == "tool::rustfmt.toml"));
+    assert!(graph.nodes.iter().any(|node| node.id == "tool::Makefile"));
+
+    let paths = graph
+        .nodes
+        .iter()
+        .filter_map(|node| node.path.as_deref())
+        .collect::<Vec<_>>();
+    for excluded in [
+        "/target/",
+        "/node_modules/",
+        "/vendor/",
+        "/build/",
+        "/.selfware/",
+        "selfware.toml",
+        "credentials.json",
+        "codegraph.json",
+        "binary.rs",
+        "symlink.ts",
+    ] {
+        assert!(
+            paths.iter().all(|path| !path.contains(excluded)),
+            "{excluded}"
+        );
+    }
+    for node in graph.nodes.iter().filter(|node| node.path.is_some()) {
+        assert!(graph.edges.iter().any(|edge| {
+            edge.edge_type == EdgeType::Contains
+                && edge.to == node.id
+                && edge.from.starts_with("structure::")
+        }));
+    }
+    assert!(selfware::evolve::validate_graph(&graph).valid);
 }

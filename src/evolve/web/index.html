@@ -1,42 +1,276 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Selfware Self-Evolve</title>
-    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <title>Selfware Evolve Workspace</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/style.css">
+    <script src="/vendor/d3/d3.min.js" defer></script>
+    <script src="/vendor/lucide/lucide.min.js" defer></script>
+    <script src="/vendor/monaco/vs/loader.js" defer></script>
+    <script src="/app.js" defer></script>
 </head>
 <body>
-    <header class="topbar">
-        <h1>Self-Evolve Context Selector</h1>
-        <div id="validation-status" class="badge badge-muted">Validation: pending</div>
-    </header>
-
-    <main class="graph-shell">
-        <div id="graph">
-            <div id="loading" class="overlay">
-                <div class="spinner" aria-hidden="true"></div>
-                <p>Loading graph&hellip;</p>
-            </div>
-            <div id="graph-error" class="overlay hidden"></div>
-            <div id="graph-empty" class="overlay hidden">
-                <p>No nodes in the graph yet.</p>
-                <p class="muted">Run an analysis pass to populate the ontology.</p>
+    <div id="app" class="app-shell">
+        <header class="app-header">
+            <div class="product-mark" aria-label="Selfware Evolve">
+                <span class="product-name">Selfware</span>
+                <span class="product-area">Evolve</span>
             </div>
 
-            <div id="legend" class="panel hidden"></div>
-
-            <div id="zoom-controls" class="panel hidden">
-                <button id="zoom-in" title="Zoom in" aria-label="Zoom in">+</button>
-                <button id="zoom-out" title="Zoom out" aria-label="Zoom out">&minus;</button>
-                <button id="zoom-reset" title="Reset view" aria-label="Reset view">&#10226;</button>
+            <div class="workspace-identity" aria-live="polite">
+                <strong id="workspace-name">Workspace</strong>
+                <span id="workspace-root">Loading...</span>
             </div>
 
-            <div id="tooltip" class="hidden" role="tooltip"></div>
-        </div>
-    </main>
+            <div class="context-control" aria-label="Context mode">
+                <span class="context-picker-label"><i data-lucide="brain" aria-hidden="true"></i> AI Context:</span>
+                <div id="context-segments" class="segmented context-picker" role="radiogroup" aria-label="Context mode">
+                    <button type="button" data-context-mode="lite" role="radio" aria-checked="false" title="Minimal context for fast queries">Lite</button>
+                    <button type="button" data-context-mode="full" role="radio" aria-checked="false" title="Full workspace code (excludes tests)">Full</button>
+                    <button type="button" data-context-mode="full_extended" role="radio" aria-checked="false" title="Full workspace including tests">Full Extended</button>
+                </div>
+                <span id="context-metrics" class="context-metrics">Context unavailable</span>
+            </div>
+        </header>
 
-    <script src="/app.js"></script>
+        <nav class="action-toolbar" aria-label="Workspace actions">
+            <button id="save-action" class="tool-button primary" type="button" disabled title="Save current file">
+                <i data-lucide="save" aria-hidden="true"></i><span>Save</span>
+            </button>
+            <span class="toolbar-divider" aria-hidden="true"></span>
+            <button class="tool-button" type="button" data-analysis-kind="cargo_check" title="Run cargo check">
+                <i data-lucide="circle-check-big" aria-hidden="true"></i><span>Cargo Check</span>
+            </button>
+            <button class="tool-button" type="button" data-analysis-kind="clippy" title="Run Clippy">
+                <i data-lucide="scan-search" aria-hidden="true"></i><span>Clippy</span>
+            </button>
+            <button class="tool-button" type="button" data-analysis-kind="evolve_tests" title="Run evolve tests">
+                <i data-lucide="flask-conical" aria-hidden="true"></i><span>Evolve Tests</span>
+            </button>
+            <span class="toolbar-divider" aria-hidden="true"></span>
+            <button id="readiness-action" class="tool-button" type="button" title="Run readiness checks">
+                <i data-lucide="shield-check" aria-hidden="true"></i><span>Readiness</span>
+            </button>
+            <button id="review-action" class="tool-button" type="button" disabled title="Request grounded GLM review">
+                <i data-lucide="sparkles" aria-hidden="true"></i><span>Grounded Review</span>
+            </button>
+            <button id="branch-action" class="tool-button" type="button" title="Preview or create a Git branch">
+                <i data-lucide="git-branch" aria-hidden="true"></i><span>Branch</span>
+            </button>
+            <div class="toolbar-spacer"></div>
+            <span id="branch-summary" class="branch-summary" title="Git status">
+                <i data-lucide="git-branch" aria-hidden="true"></i>
+                <span>Git unavailable</span>
+            </span>
+        </nav>
+
+        <main class="workbench">
+            <aside class="explorer-pane" aria-label="Source explorer">
+                <div class="pane-heading">
+                    <span>Explorer</span>
+                    <button id="refresh-files" class="icon-button" type="button" title="Refresh files" aria-label="Refresh files">
+                        <i data-lucide="refresh-cw" aria-hidden="true"></i>
+                    </button>
+                </div>
+                <div id="explorer-status" class="pane-state" aria-live="polite">
+                    <span class="small-spinner" aria-hidden="true"></span>Loading files
+                </div>
+                <div id="file-tree" class="file-tree" role="tree" aria-label="Workspace files"></div>
+            </aside>
+
+            <section class="workspace-pane" aria-label="Editor and graph">
+                <div class="view-tabs" role="tablist" aria-label="Workspace views">
+                    <button id="editor-tab" class="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="editor-view" data-view="editor">
+                        <i data-lucide="file-code-2" aria-hidden="true"></i><span>Editor</span>
+                    </button>
+                    <button id="graph-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="graph-view" data-view="graph">
+                        <i data-lucide="waypoints" aria-hidden="true"></i><span>Graph</span>
+                    </button>
+                </div>
+
+                <section id="editor-view" class="work-view active" role="tabpanel" aria-labelledby="editor-tab">
+                    <div id="document-tabs" class="document-tabs" role="tablist" aria-label="Open files"></div>
+                    <div class="editor-stage">
+                        <div id="editor-empty" class="center-state">
+                            <i data-lucide="file-code-2" aria-hidden="true"></i>
+                            <strong>No file open</strong>
+                        </div>
+                        <div id="editor-loading" class="center-state hidden" aria-live="polite">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <strong>Loading document</strong>
+                        </div>
+                        <div id="editor" class="code-editor" aria-label="Source editor"></div>
+                        <textarea id="editor-fallback" class="editor-fallback hidden" spellcheck="false" aria-label="Source editor fallback"></textarea>
+                    </div>
+                </section>
+
+                <section id="graph-view" class="work-view hidden" role="tabpanel" aria-labelledby="graph-tab">
+                    <div id="graph-canvas" class="graph-canvas">
+                        <div id="graph-loading" class="center-state">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <strong>Loading graph</strong>
+                        </div>
+                        <div id="graph-error" class="center-state error-state hidden"></div>
+                        <div id="graph-empty" class="center-state hidden">
+                            <i data-lucide="circle-dashed" aria-hidden="true"></i>
+                            <strong>No graph nodes</strong>
+                        </div>
+                        <div id="graph-legend" class="graph-legend hidden" aria-label="Graph legend"></div>
+                        <div id="graph-controls" class="graph-controls hidden">
+                            <input id="graph-search" type="search" autocomplete="off" placeholder="Find node" aria-label="Find graph node">
+                            <button id="graph-zoom-in" class="icon-button" type="button" title="Zoom in" aria-label="Zoom in"><i data-lucide="zoom-in" aria-hidden="true"></i></button>
+                            <button id="graph-zoom-out" class="icon-button" type="button" title="Zoom out" aria-label="Zoom out"><i data-lucide="zoom-out" aria-hidden="true"></i></button>
+                            <button id="graph-reset" class="icon-button" type="button" title="Reset graph view" aria-label="Reset graph view"><i data-lucide="focus" aria-hidden="true"></i></button>
+                            <button id="graph-refresh" class="icon-button" type="button" title="Refresh graph" aria-label="Refresh graph"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
+                        </div>
+                        <div id="graph-tooltip" class="graph-tooltip hidden" role="tooltip"></div>
+                    </div>
+                </section>
+            </section>
+
+            <aside class="inspector-pane" aria-label="Inspector">
+                <div class="selection-heading">
+                    <span>Inspector</span>
+                    <strong id="selection-name">No selection</strong>
+                    <span id="selection-path"></span>
+                </div>
+                <div class="inspector-tabs" role="tablist" aria-label="Inspector views">
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="node">Node</button>
+                    <button class="inspector-tab active" type="button" role="tab" aria-selected="true" data-inspector="ast">AST</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="summary">Summary</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="grounding">Grounding</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="readiness">Readiness</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="recommendations">Recommendations</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="context">Context</button>
+                </div>
+
+                <section id="inspector-summary" class="inspector-view hidden" role="tabpanel">
+                    <div id="summary-state" class="pane-state">Select a source file to view its structural summary.</div>
+                    <div id="summary-content" class="summary-content inspector-result hidden">
+                        <div id="summary-grounding" class="summary-grounding"></div>
+                        <pre id="summary-code" class="summary-code"></pre>
+                        <div id="summary-evidence" class="summary-evidence" aria-label="Structural summary source evidence"></div>
+                    </div>
+                </section>
+
+                <section id="inspector-context" class="inspector-view hidden" role="tabpanel">
+                    <div id="context-state" class="pane-state">Context is loading...</div>
+                    <div id="context-list-result" class="inspector-result pane-state hidden" style="padding: 0; display: block; overflow-y: auto;">
+                        <ul id="context-files-list" class="context-files-list" style="list-style: none; margin: 0; padding: 0;"></ul>
+                    </div>
+                </section>
+
+                <section id="inspector-node" class="inspector-view hidden" role="tabpanel">
+                    <div id="node-state" class="pane-state">Select a graph node</div>
+                    <div id="node-actions" class="node-actions hidden">
+                        <button id="node-open-action" class="command-button" type="button" title="Open exact source file">
+                            <i data-lucide="file-code-2" aria-hidden="true"></i><span>Open Source</span>
+                        </button>
+                        <button id="node-review-action" class="command-button" type="button" title="Review this node with cited source evidence">
+                            <i data-lucide="sparkles" aria-hidden="true"></i><span>Grounded Review</span>
+                        </button>
+                        <button id="node-branch-action" class="command-button" type="button" title="Preview a branch for this node">
+                            <i data-lucide="git-branch" aria-hidden="true"></i><span>Branch</span>
+                        </button>
+                        <button id="node-delete-preview-action" class="command-button danger" type="button" title="Preview deletion impact without changing source">
+                            <i data-lucide="trash-2" aria-hidden="true"></i><span>Deletion Preview</span>
+                        </button>
+                    </div>
+                    <div id="node-result" class="inspector-result pane-state">No node evidence loaded</div>
+                </section>
+
+                <section id="inspector-ast" class="inspector-view active" role="tabpanel">
+                    <div id="ast-state" class="pane-state">Select a source file</div>
+                    <div id="ast-tree" class="ast-tree"></div>
+                </section>
+
+                <section id="inspector-grounding" class="inspector-view hidden" role="tabpanel">
+                    <label class="field-label" for="review-scope">Evidence scope</label>
+                    <select id="review-scope">
+                        <option value="selected_document">Selected file</option>
+                        <option value="active_context">Active context</option>
+                    </select>
+                    <button id="review-evidence-preview" class="command-button secondary" type="button" disabled>
+                        <i data-lucide="scan-search" aria-hidden="true"></i><span>Preview Evidence</span>
+                    </button>
+                    <label class="field-label" for="review-question">Question</label>
+                    <textarea id="review-question" rows="4">Review this file for correctness, grounding, and readiness to evolve.</textarea>
+                    <button id="review-submit" class="command-button" type="button" disabled>
+                        <i data-lucide="sparkles" aria-hidden="true"></i><span>Run Grounded Review</span>
+                    </button>
+                    <div id="review-result" class="inspector-result pane-state">Select a source file</div>
+                </section>
+
+                <section id="inspector-readiness" class="inspector-view hidden" role="tabpanel">
+                    <button id="readiness-submit" class="command-button" type="button">
+                        <i data-lucide="shield-check" aria-hidden="true"></i><span>Refresh Readiness</span>
+                    </button>
+                    <div id="readiness-result" class="inspector-result pane-state">Not checked</div>
+                </section>
+
+                <section id="inspector-recommendations" class="inspector-view hidden" role="tabpanel">
+                    <button id="recommendations-submit" class="command-button" type="button">
+                        <i data-lucide="list-checks" aria-hidden="true"></i><span>Load Recommendations</span>
+                    </button>
+                    <div id="recommendations-result" class="inspector-result pane-state">Not loaded</div>
+                    <ul id="recommendations-list" class="recommendations-list"></ul>
+                </section>
+            </aside>
+        </main>
+
+        <section id="bottom-panel" class="bottom-panel" aria-label="Problems and output">
+            <div class="bottom-tabs" role="tablist" aria-label="Diagnostics">
+                <button class="bottom-tab active" type="button" role="tab" aria-selected="true" data-bottom-view="problems">
+                    Problems <span id="problem-count" class="count-badge">0</span>
+                </button>
+                <button class="bottom-tab" type="button" role="tab" aria-selected="false" data-bottom-view="output">Output</button>
+                <div class="toolbar-spacer"></div>
+                <button id="clear-output" class="icon-button" type="button" title="Clear output" aria-label="Clear output"><i data-lucide="trash-2" aria-hidden="true"></i></button>
+                <button id="toggle-bottom" class="icon-button" type="button" title="Collapse panel" aria-label="Collapse panel"><i data-lucide="panel-bottom-close" aria-hidden="true"></i></button>
+            </div>
+            <div id="problems-view" class="bottom-content active" role="tabpanel">
+                <div id="problems-empty" class="empty-row">No diagnostics reported</div>
+                <div id="problems-list" class="problems-list"></div>
+            </div>
+            <div id="output-view" class="bottom-content hidden" role="tabpanel">
+                <pre id="output-log" class="output-log">Workspace output will appear here.</pre>
+            </div>
+        </section>
+
+        <footer class="statusbar" aria-live="polite">
+            <span id="global-status" class="status-item status-neutral"><span class="status-indicator"></span><span>Connecting</span></span>
+            <span id="document-status" class="status-item">No file open</span>
+            <span id="cursor-status" class="status-item status-end">Ln -, Col -</span>
+        </footer>
+    </div>
+
+    <dialog id="branch-dialog" class="branch-dialog" aria-labelledby="branch-title">
+        <form method="dialog" class="dialog-shell">
+            <div class="dialog-heading">
+                <div>
+                    <h2 id="branch-title">Git Branch</h2>
+                    <p id="branch-head">Loading Git status...</p>
+                </div>
+                <button class="icon-button" value="cancel" type="submit" title="Close" aria-label="Close"><i data-lucide="x" aria-hidden="true"></i></button>
+            </div>
+            <div id="git-status-detail" class="git-status-detail pane-state"></div>
+            <label class="field-label" for="branch-name">Branch name</label>
+            <input id="branch-name" name="branch-name" type="text" autocomplete="off" placeholder="evolve/description">
+            <div id="branch-preview" class="branch-preview pane-state">No preview</div>
+            <label class="confirm-row">
+                <input id="branch-confirm" type="checkbox" disabled>
+                <span>Confirm branch creation at the displayed HEAD</span>
+            </label>
+            <div class="dialog-actions">
+                <button class="command-button secondary" value="cancel" type="submit">Cancel</button>
+                <button id="branch-preview-action" class="command-button" value="preview" type="button">Preview</button>
+                <button id="branch-create-action" class="command-button primary" value="create" type="button" disabled>Create Branch</button>
+            </div>
+        </form>
+    </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
 </body>
 </html>

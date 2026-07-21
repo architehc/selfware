@@ -12,10 +12,14 @@ use tower::ServiceExt;
 use selfware::evolve::{Edge, EdgeType, EvolveServer, Graph, Node, NodeLayer};
 
 mod actions_test;
+mod assistant_test;
 mod ast_test;
 mod context_test;
 mod dedup_test;
+mod deletion_test;
+mod diagnostics_test;
 mod gate_test;
+mod git_test;
 mod graph_test;
 mod graphrag_test;
 mod ide_test;
@@ -25,7 +29,9 @@ mod ontology_evolver_test;
 mod ontology_test;
 mod persona_test;
 mod quality_test;
+mod readiness_test;
 mod server_test;
+mod summary_test;
 
 /// Shorthand for a `DependsOn` edge between two node ids.
 fn edge(from: &str, to: &str) -> Edge {
@@ -52,6 +58,9 @@ fn sample_graph() -> Graph {
                 dead_code_ratio: None,
                 warning_count: None,
                 complexity: None,
+                inline_test_ranges: 0,
+                inline_test_lines: 0,
+                inline_test_tokens: 0,
             },
         ],
         edges: vec![
@@ -91,6 +100,7 @@ async fn post_json(server: &EvolveServer, uri: &str, body: Value) -> (StatusCode
                 .method("POST")
                 .uri(uri)
                 .header("content-type", "application/json")
+                .header("x-selfware-session", server.session_token())
                 .body(Body::from(serde_json::to_string(&body).unwrap()))
                 .unwrap(),
         )
@@ -101,6 +111,26 @@ async fn post_json(server: &EvolveServer, uri: &str, body: Value) -> (StatusCode
         .await
         .unwrap();
     (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+async fn get_json_auth(server: &EvolveServer, uri: &str) -> (StatusCode, Value) {
+    let response = server
+        .router()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header("x-selfware-session", server.session_token())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&body).unwrap();
+    (status, json)
 }
 
 async fn get_text(server: &EvolveServer, uri: &str) -> (StatusCode, String) {

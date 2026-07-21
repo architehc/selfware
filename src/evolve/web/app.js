@@ -1,340 +1,2855 @@
-// --- Shared helpers ---
-
-function show(el) {
-    if (el) el.classList.remove('hidden');
-}
-
-function hide(el) {
-    if (el) el.classList.add('hidden');
-}
-
-async function fetchJson(url) {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status} from ${url}`);
-    return res.json();
-}
-
-// --- Graph page (index.html) ---
+'use strict';
 
 const LAYER_COLORS = {
-    Code: '#58a6ff',
-    Concept: '#bc8cff',
-    Preset: '#39c5cf',
+    Code: '#56b6c2',
+    Test: '#e06c75',
+    Structure: '#98a2ad',
+    Concept: '#c678dd',
+    Preset: '#e5c07b',
 };
 
 const EDGE_COLORS = {
-    DuplicateOf: '#f85149',
-    SimilarTo: '#d29922',
+    Contains: '#6f7782',
+    DependsOn: '#6fb6c8',
+    Influences: '#8aceaa',
+    Feedback: '#b19bd2',
+    ContextIncluded: '#69b88d',
+    DuplicateOf: '#e06c75',
+    SimilarTo: '#e5c07b',
 };
 
-function showGraphError(message) {
-    hide(document.getElementById('loading'));
-    const el = document.getElementById('graph-error');
-    if (el) {
-        el.textContent = message;
-        show(el);
+const ANALYSIS_LABELS = {
+    cargo_check: 'Cargo Check',
+    clippy: 'Clippy',
+    evolve_tests: 'Evolve Tests',
+};
+
+const state = {
+    workspace: null,
+    sessionToken: null,
+    files: [],
+    fileIndex: new Map(),
+    expandedFolders: new Set(['src']),
+    openDocuments: new Map(),
+    activePath: null,
+    editor: null,
+    editorMode: 'pending',
+    editorReady: null,
+    suppressEditorChange: false,
+    activeView: 'editor',
+    activeInspector: 'ast',
+    activeBottomView: 'problems',
+    graphData: null,
+    graphLoaded: false,
+    graphLoading: false,
+    graphRuntime: null,
+    selectedNode: null,
+    astRequest: 0,
+    summaryRequest: 0,
+    context: { mode: null, files: null, tokens: null },
+    contextSizes: null,
+    git: null,
+    branchPreview: null,
+    problems: [],
+    output: [],
+    loadingDocuments: new Map(),
+    groundingRequest: 0,
+};
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
+
+class ApiError extends Error {
+    constructor(message, status, payload) {
+        super(message);
+        this.name = 'ApiError';
+        this.status = status;
+        this.payload = payload;
     }
 }
 
-function setValidationBadge(text, cls, title) {
-    const badge = document.getElementById('validation-status');
-    if (!badge) return;
-    badge.textContent = text;
-    badge.className = `badge ${cls}`;
-    if (title) badge.title = title;
+function show(element) {
+    element?.classList.remove('hidden');
 }
 
-async function loadValidation() {
+function hide(element) {
+    element?.classList.add('hidden');
+}
+
+function refreshIcons() {
+    if (window.lucide?.createIcons) {
+        window.lucide.createIcons({ attrs: { 'aria-hidden': 'true' } });
+    }
+}
+
+function icon(name, className = '') {
+    const element = document.createElement('i');
+    element.dataset.lucide = name;
+    element.setAttribute('aria-hidden', 'true');
+    if (className) element.className = className;
+    return element;
+}
+
+function formatError(error) {
+    if (error instanceof ApiError) {
+        return error.status ? `${error.message} (HTTP ${error.status})` : error.message;
+    }
+    return error instanceof Error ? error.message : String(error);
+}
+
+async function request(url, options = {}) {
+    const init = {
+        method: options.method || 'GET',
+        headers: { Accept: 'application/json', ...(options.headers || {}) },
+    };
+    const sessionToken = state.sessionToken;
+    if (sessionToken) init.headers['x-selfware-session'] = sessionToken;
+
+    if (Object.prototype.hasOwnProperty.call(options, 'body')) {
+        init.headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(options.body);
+    }
+
+    let response;
     try {
-        const v = await fetchJson('/api/ontology/validate');
-        if (v.valid) {
-            setValidationBadge('Ontology: valid', 'badge-ok');
-        } else {
-            const problems = [];
-            if (v.cycles && v.cycles.length) problems.push(`${v.cycles.length} cycle(s)`);
-            if (v.dangling_edges && v.dangling_edges.length) problems.push(`${v.dangling_edges.length} dangling edge(s)`);
-            if (v.isolated_nodes && v.isolated_nodes.length) problems.push(`${v.isolated_nodes.length} isolated node(s)`);
-            setValidationBadge(`Ontology: ${problems.join(', ')}`, 'badge-err',
-                [...(v.cycles || []).map(c => `Cycle: ${c.join(' → ')}`),
-                 ...(v.dangling_edges || []).map(e => `Dangling: ${e.from} → ${e.to}`),
-                 ...(v.isolated_nodes || []).map(n => `Isolated: ${n}`)].join('\n'));
+        response = await fetch(url, init);
+    } catch (error) {
+        throw new ApiError(`Could not reach ${url}: ${formatError(error)}`, 0, null);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    let payload = null;
+    if (response.status !== 204) {
+        const text = await response.text();
+        if (text) {
+            if (contentType.includes('application/json')) {
+                try {
+                    payload = JSON.parse(text);
+                } catch (error) {
+                    throw new ApiError(`Invalid JSON from ${url}: ${formatError(error)}`, response.status, text);
+                }
+            } else {
+                try {
+                    payload = JSON.parse(text);
+                } catch (_) {
+                    payload = text;
+                }
+            }
         }
-    } catch (err) {
-        setValidationBadge('Validation: unavailable', 'badge-muted', err.message);
+    }
+
+    if (!response.ok) {
+        const detail = payload && typeof payload === 'object'
+            ? payload.error || payload.message || payload.detail
+            : payload;
+        const message = detail ? String(detail) : `${response.status} ${response.statusText}`.trim();
+        throw new ApiError(message || `Request failed for ${url}`, response.status, payload);
+    }
+
+    return payload;
+}
+
+function setGlobalStatus(message, type = 'neutral') {
+    const element = $('#global-status');
+    if (!element) return;
+    element.className = `status-item status-${type}`;
+    const label = element.querySelector('span:last-child');
+    if (label) label.textContent = message;
+}
+
+function toast(message, type = 'neutral') {
+    const region = $('#toast-region');
+    if (!region) return;
+    const element = document.createElement('div');
+    element.className = `toast ${type}`;
+    element.textContent = message;
+    region.appendChild(element);
+    window.setTimeout(() => element.remove(), 5200);
+}
+
+function outputText(value) {
+    if (typeof value === 'string') return value;
+    if (value === undefined) return 'No response body';
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch (_) {
+        return String(value);
     }
 }
 
-function buildLegend() {
-    const legend = document.getElementById('legend');
-    if (!legend) return;
-    let html = '<div class="legend-title">Node layers</div>';
-    for (const [layer, color] of Object.entries(LAYER_COLORS)) {
-        html += `<div><span class="swatch" style="background:${color}"></span>${layer}</div>`;
-    }
-    html += '<div class="legend-title" style="margin-top:6px">Edges</div>';
-    html += '<div><span class="swatch swatch-line" style="background:#4a5568"></span>Dependency</div>';
-    for (const [type, color] of Object.entries(EDGE_COLORS)) {
-        html += `<div><span class="swatch swatch-line" style="background:${color}"></span>${type}</div>`;
-    }
-    legend.innerHTML = html;
-    show(legend);
+function appendOutput(label, payload) {
+    const timestamp = new Date().toLocaleTimeString();
+    state.output.push(`[${timestamp}] ${label}\n${outputText(payload)}`);
+    const log = $('#output-log');
+    if (log) log.textContent = state.output.join('\n\n');
 }
 
-function nodeTooltipHtml(d) {
-    const rows = [
-        `<div class="tooltip-title">${d.id}</div>`,
-        `<div class="tooltip-meta">Layer: ${d.layer || 'Code'}</div>`,
-    ];
-    if (d.path) rows.push(`<div class="tooltip-meta">${d.path}</div>`);
-    if (typeof d.tokens === 'number') rows.push(`<div class="tooltip-meta">${d.tokens.toLocaleString()} tokens · ${d.lines} lines · ${d.files} file(s)</div>`);
-    if (typeof d.coverage === 'number') rows.push(`<div class="tooltip-meta">Coverage: ${(d.coverage * 100).toFixed(1)}%</div>`);
-    if (typeof d.warning_count === 'number') rows.push(`<div class="tooltip-meta">Warnings: ${d.warning_count}</div>`);
-    return rows.join('');
+function clearOutput() {
+    state.output = [];
+    const log = $('#output-log');
+    if (log) log.textContent = 'Workspace output will appear here.';
+}
+
+function setBusy(button, busy) {
+    if (!button) return;
+    button.classList.toggle('busy', busy);
+    button.setAttribute('aria-busy', String(busy));
+    button.disabled = busy;
+}
+
+function formatCount(value) {
+    if (value === null || value === undefined || Number.isNaN(Number(value))) return '-';
+    return new Intl.NumberFormat().format(Number(value));
+}
+
+function formatBytes(value) {
+    const size = Number(value);
+    if (!Number.isFinite(size)) return '';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10240 ? 1 : 0)} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function basename(path) {
+    const parts = String(path || '').split('/').filter(Boolean);
+    return parts.at(-1) || String(path || '');
+}
+
+function dirname(path) {
+    if (!path) return '';
+    const parts = String(path).split('/').filter(Boolean);
+    if (parts.length <= 1) return '.';
+    return parts.slice(0, -1).join('/');
+}
+
+function normalizePath(path) {
+    return String(path || '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+}
+
+function resolveWorkspacePath(path) {
+    const normalized = normalizePath(path);
+    if (!normalized || state.fileIndex.has(normalized)) return normalized;
+    const suffixMatch = [...state.fileIndex.keys()].find((candidate) => normalized.endsWith(`/${candidate}`));
+    if (suffixMatch) return suffixMatch;
+    const sameName = [...state.fileIndex.keys()].filter((candidate) => basename(candidate) === basename(normalized));
+    return sameName.length === 1 ? sameName[0] : normalized;
+}
+
+function languageForPath(path) {
+    const extension = String(path).split('.').pop()?.toLowerCase();
+    return {
+        rs: 'rust', js: 'javascript', mjs: 'javascript', cjs: 'javascript',
+        ts: 'typescript', tsx: 'typescript', jsx: 'javascript', json: 'json',
+        html: 'html', css: 'css', scss: 'scss', md: 'markdown', toml: 'ini',
+        yaml: 'yaml', yml: 'yaml', sh: 'shell', py: 'python', sql: 'sql',
+    }[extension] || 'plaintext';
+}
+
+function createStateMessage(text, kind = 'neutral') {
+    const element = document.createElement('div');
+    element.className = `pane-state${kind === 'error' ? ' error' : ''}`;
+    element.textContent = text;
+    return element;
+}
+
+function explicitOutcome(payload) {
+    if (!payload || typeof payload !== 'object') return null;
+    if (payload.success === true || payload.passed === true || payload.ready === true) return true;
+    if (payload.success === false || payload.passed === false || payload.ready === false) return false;
+    if (typeof payload.exit_code === 'number') return payload.exit_code === 0;
+    if (typeof payload.status === 'string') {
+        const status = payload.status.toLowerCase();
+        if (['success', 'passed', 'ready', 'ok', 'created'].includes(status)) return true;
+        if (['error', 'failed', 'not_ready', 'blocked'].includes(status)) return false;
+    }
+    return null;
+}
+
+async function initialize() {
+    wireEvents();
+    refreshIcons();
+    state.editorReady = initializeEditor();
+
+    const results = await Promise.allSettled([
+        loadWorkspace(),
+        loadContext(),
+        loadFiles(),
+        loadGitStatus(),
+    ]);
+
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length === 0) {
+        setGlobalStatus('Workspace connected', 'success');
+    } else {
+        setGlobalStatus(`${failures.length} workspace request${failures.length === 1 ? '' : 's'} failed`, 'error');
+    }
+}
+
+function wireEvents() {
+    $$('#context-segments [data-context-mode]').forEach((button) => {
+        button.addEventListener('click', () => setContextMode(button.dataset.contextMode));
+    });
+
+    $$('.view-tab[data-view]').forEach((button) => {
+        button.addEventListener('click', () => selectView(button.dataset.view));
+    });
+
+    $$('.inspector-tab[data-inspector]').forEach((button) => {
+        button.addEventListener('click', () => selectInspector(button.dataset.inspector));
+    });
+
+    $$('.bottom-tab[data-bottom-view]').forEach((button) => {
+        button.addEventListener('click', () => selectBottomView(button.dataset.bottomView));
+    });
+
+    $('#save-action')?.addEventListener('click', saveActiveDocument);
+    $('#refresh-files')?.addEventListener('click', () => loadFiles(true));
+    $$('[data-analysis-kind]').forEach((button) => {
+        button.addEventListener('click', () => runAnalysis(button.dataset.analysisKind, button));
+    });
+
+    $('#readiness-action')?.addEventListener('click', () => {
+        selectInspector('readiness');
+        loadReadiness();
+    });
+    $('#readiness-submit')?.addEventListener('click', loadReadiness);
+    $('#recommendations-submit')?.addEventListener('click', loadRecommendations);
+    $('#review-action')?.addEventListener('click', () => {
+        selectInspector('grounding');
+        runReview();
+    });
+    $('#review-submit')?.addEventListener('click', runReview);
+    $('#review-evidence-preview')?.addEventListener('click', previewReviewEvidence);
+    $('#node-open-action')?.addEventListener('click', openSelectedNodeSource);
+    $('#node-review-action')?.addEventListener('click', reviewSelectedNode);
+    $('#node-branch-action')?.addEventListener('click', branchSelectedNode);
+    $('#node-delete-preview-action')?.addEventListener('click', previewSelectedNodeDeletion);
+
+    $('#clear-output')?.addEventListener('click', clearOutput);
+    $('#toggle-bottom')?.addEventListener('click', toggleBottomPanel);
+
+    $('#graph-zoom-in')?.addEventListener('click', () => graphZoom(1.3));
+    $('#graph-zoom-out')?.addEventListener('click', () => graphZoom(0.77));
+    $('#graph-reset')?.addEventListener('click', resetGraphView);
+    $('#graph-refresh')?.addEventListener('click', () => loadGraph(true));
+    $('#graph-search')?.addEventListener('input', (event) => highlightGraphSearch(event.target.value));
+    $('#graph-search')?.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            event.stopPropagation();
+            openFirstGraphSearchResult();
+        }
+    });
+
+    $('#branch-action')?.addEventListener('click', openBranchDialog);
+    $('#branch-preview-action')?.addEventListener('click', previewBranch);
+    $('#branch-create-action')?.addEventListener('click', createBranch);
+    $('#branch-confirm')?.addEventListener('change', updateBranchCreateState);
+    $('#branch-name')?.addEventListener('input', resetBranchPreview);
+
+    $('#editor-fallback')?.addEventListener('input', () => {
+        updateFallbackCursorStatus();
+        if (state.suppressEditorChange || !state.activePath) return;
+        const documentState = state.openDocuments.get(state.activePath);
+        if (!documentState) return;
+        const content = $('#editor-fallback').value;
+        if (content === documentState.content) return;
+        const wasDirty = documentState.dirty;
+        documentState.content = content;
+        documentState.contentGeneration += 1;
+        documentState.dirty = documentState.content !== documentState.savedContent;
+        renderDocumentTabs();
+        updateDocumentStatus();
+        if (wasDirty && !documentState.dirty && documentState.language === 'rust') {
+            loadAst(state.activePath);
+            loadSummary(state.activePath);
+        }
+    });
+    ['click', 'keyup', 'select'].forEach((eventName) => {
+        $('#editor-fallback')?.addEventListener(eventName, updateFallbackCursorStatus);
+    });
+
+    window.addEventListener('keydown', (event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+            event.preventDefault();
+            saveActiveDocument();
+        }
+    });
+
+    window.addEventListener('beforeunload', (event) => {
+        if (![...state.openDocuments.values()].some((documentState) => documentState.dirty)) return;
+        event.preventDefault();
+        event.returnValue = '';
+    });
+}
+
+async function initializeEditor() {
+    const fallback = (reason) => {
+        state.editorMode = 'fallback';
+        hide($('#editor'));
+        if (state.activePath) show($('#editor-fallback'));
+        appendOutput('Editor fallback', reason);
+        toast('Monaco could not load; using the text editor fallback.', 'warning');
+        return null;
+    };
+
+    if (typeof window.require !== 'function') {
+        return fallback('Monaco loader is unavailable.');
+    }
+
+    return new Promise((resolve) => {
+        let settled = false;
+        const finishFallback = (reason) => {
+            if (settled) return;
+            settled = true;
+            resolve(fallback(reason));
+        };
+        const timeout = window.setTimeout(() => finishFallback('Monaco initialization timed out.'), 12000);
+
+        try {
+            window.require.config({ paths: { vs: '/vendor/monaco/vs' } });
+            window.require(['vs/editor/editor.main'], () => {
+                if (settled) return;
+                settled = true;
+                window.clearTimeout(timeout);
+                state.editor = window.monaco.editor.create($('#editor'), {
+                    automaticLayout: true,
+                    theme: 'vs-dark',
+                    fontFamily: "'SFMono-Regular', Consolas, 'Liberation Mono', monospace",
+                    fontSize: 13,
+                    lineHeight: 21,
+                    minimap: { enabled: true, scale: 1 },
+                    scrollBeyondLastLine: false,
+                    padding: { top: 10 },
+                    renderWhitespace: 'selection',
+                    bracketPairColorization: { enabled: true },
+                    fixedOverflowWidgets: true,
+                });
+                state.editorMode = 'monaco';
+                state.editor.onDidChangeModelContent(() => {
+                    if (state.suppressEditorChange || !state.activePath) return;
+                    const documentState = state.openDocuments.get(state.activePath);
+                    if (!documentState) return;
+                    const content = state.editor.getValue();
+                    if (content === documentState.content) return;
+                    const wasDirty = documentState.dirty;
+                    documentState.content = content;
+                    documentState.contentGeneration += 1;
+                    documentState.dirty = documentState.content !== documentState.savedContent;
+                    renderDocumentTabs();
+                    updateDocumentStatus();
+                    if (wasDirty && !documentState.dirty && documentState.language === 'rust') {
+                        loadAst(state.activePath);
+                        loadSummary(state.activePath);
+                    }
+                });
+                state.editor.onDidChangeCursorPosition((event) => {
+                    const cursor = $('#cursor-status');
+                    if (cursor) cursor.textContent = `Ln ${event.position.lineNumber}, Col ${event.position.column}`;
+                });
+                if (state.activePath) activateDocument(state.activePath);
+                resolve(state.editor);
+            }, (error) => {
+                window.clearTimeout(timeout);
+                finishFallback(formatError(error));
+            });
+        } catch (error) {
+            window.clearTimeout(timeout);
+            finishFallback(formatError(error));
+        }
+    });
+}
+
+async function loadWorkspace() {
+    try {
+        const payload = await request('/api/workspace');
+        state.workspace = payload || {};
+        state.sessionToken = payload?.session_token || payload?.sessionToken || null;
+        const root = payload?.root || payload?.workspace_root || payload?.path || '';
+        const name = payload?.name || payload?.workspace?.name || basename(root) || 'Selfware workspace';
+        const detail = root || [payload?.model, payload?.endpoint_host].filter(Boolean).join(' · ');
+        $('#workspace-name').textContent = name;
+        $('#workspace-root').textContent = detail || 'Workspace metadata not reported';
+        if (state.context.mode) renderContext();
+        return payload;
+    } catch (error) {
+        $('#workspace-name').textContent = 'Workspace unavailable';
+        $('#workspace-root').textContent = formatError(error);
+        appendOutput('Workspace request failed', formatError(error));
+        throw error;
+    }
+}
+
+function normalizeContextMode(mode) {
+    const value = String(mode || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    if (['lite', 'full', 'full_extended'].includes(value)) return value;
+    if (value === 'fullextended') return 'full_extended';
+    return value || null;
+}
+
+function contextLabel(mode) {
+    return { lite: 'Lite', full: 'Full', full_extended: 'Full Extended' }[mode] || mode || 'Unknown';
+}
+
+function normalizeContext(payload) {
+    if (typeof payload === 'string') {
+        return { mode: normalizeContextMode(payload), files: null, tokens: null };
+    }
+    const data = payload?.context && typeof payload.context === 'object' ? payload.context : payload || {};
+    const included = Array.isArray(data.included) ? data.included : null;
+    const filesValue = typeof data.files === 'number' ? data.files : null;
+    const summarizedFiles = [data.production, data.tests, data.examples]
+        .filter((summary) => summary && Number.isFinite(Number(summary.files)))
+        .reduce((total, summary) => total + Number(summary.files), 0);
+    return {
+        mode: normalizeContextMode(data.mode || payload?.mode),
+        files: data.file_count ?? filesValue ?? data.stats?.files ?? (summarizedFiles || null) ?? included?.length ?? null,
+        tokens: data.estimated_tokens ?? data.tokens ?? data.token_count ?? data.stats?.tokens ?? null,
+        mixedFiles: Number(data.production_files_with_inline_tests || 0),
+        inlineTestLines: Number(data.inline_test_lines || 0),
+        includedIds: included || [],
+    };
+}
+
+function renderContext(previous = null) {
+    $$('#context-segments [data-context-mode]').forEach((button) => {
+        const selected = button.dataset.contextMode === state.context.mode;
+        button.setAttribute('aria-checked', String(selected));
+    });
+
+    const metrics = $('#context-metrics');
+    if (!metrics) return;
+    metrics.replaceChildren();
+
+    if (state.context.files === null && state.context.tokens === null) {
+        metrics.textContent = state.context.mode ? `${contextLabel(state.context.mode)} context` : 'Context unavailable';
+        return;
+    }
+
+    const base = document.createElement('span');
+    const contextLimit = Number(state.workspace?.context_length);
+    const selectedTokens = Number(state.context.tokens);
+    const hasLimit = Number.isFinite(contextLimit) && contextLimit > 0 && Number.isFinite(selectedTokens);
+    base.textContent = hasLimit
+        ? `${formatCount(state.context.files)} files · ${formatCount(selectedTokens)} / ${formatCount(contextLimit)} tokens`
+        : `${formatCount(state.context.files)} files · ${formatCount(state.context.tokens)} tokens`;
+    metrics.appendChild(base);
+
+    if (hasLimit && selectedTokens > contextLimit) {
+        const overflow = document.createElement('span');
+        overflow.className = 'capacity-overflow';
+        overflow.textContent = ` · +${formatCount(selectedTokens - contextLimit)} over window`;
+        metrics.appendChild(overflow);
+        metrics.title = 'Active context is indexed, but it cannot fit in one configured model request.';
+    } else {
+        metrics.title = '';
+    }
+    if (state.context.mixedFiles > 0) {
+        const mixed = document.createElement('span');
+        mixed.className = 'partition-warning';
+        mixed.textContent = ` · ${formatCount(state.context.mixedFiles)} files contain inline test-only bodies`;
+        metrics.appendChild(mixed);
+        metrics.title = [metrics.title, `${formatCount(state.context.inlineTestLines)} inline test lines are excluded from Full active-context evidence.`]
+            .filter(Boolean)
+            .join(' ');
+    }
+
+    if (previous) {
+        const fileDelta = Number(state.context.files) - Number(previous.files);
+        const tokenDelta = Number(state.context.tokens) - Number(previous.tokens);
+        if (Number.isFinite(fileDelta) && Number.isFinite(tokenDelta) && (fileDelta !== 0 || tokenDelta !== 0)) {
+            const delta = document.createElement('span');
+            delta.className = fileDelta > 0 || tokenDelta > 0 ? 'delta-positive' : 'delta-negative';
+            delta.textContent = ` (${fileDelta >= 0 ? '+' : ''}${formatCount(fileDelta)} files, ${tokenDelta >= 0 ? '+' : ''}${formatCount(tokenDelta)} tokens)`;
+            metrics.appendChild(delta);
+        }
+    }
+
+    renderContextInspector();
+}
+
+function renderContextInspector() {
+    const list = $('#context-files-list');
+    const stateEl = $('#context-state');
+    const resultEl = $('#context-list-result');
+    if (!list || !stateEl || !resultEl) return;
+
+    if (!state.context?.includedIds?.length) {
+        stateEl.textContent = 'No context files available.';
+        stateEl.classList.remove('hidden');
+        resultEl.classList.add('hidden');
+        return;
+    }
+
+    stateEl.classList.add('hidden');
+    resultEl.classList.remove('hidden');
+    list.replaceChildren();
+
+    const nodesMap = new Map();
+    if (state.graphRuntime?.nodes) {
+        state.graphRuntime.nodes.forEach(n => nodesMap.set(n.id, n));
+    } else if (state.graph?.nodes) {
+        state.graph.nodes.forEach(n => nodesMap.set(n.id, n));
+    }
+
+    const sortedIds = [...state.context.includedIds].sort((a, b) => {
+        const nodeA = nodesMap.get(a);
+        const nodeB = nodesMap.get(b);
+        if (nodeA && nodeB) {
+             const pathA = graphNodePath(nodeA) || a;
+             const pathB = graphNodePath(nodeB) || b;
+             return pathA.localeCompare(pathB);
+        }
+        return a.localeCompare(b);
+    });
+
+    for (const id of sortedIds) {
+        const li = document.createElement('li');
+        li.style.padding = '8px 12px';
+        li.style.borderBottom = '1px solid var(--border)';
+        li.style.display = 'flex';
+        li.style.justifyContent = 'space-between';
+        li.style.alignItems = 'center';
+        li.style.cursor = 'pointer';
+
+        const nameSpan = document.createElement('span');
+        const node = nodesMap.get(id);
+        const path = node ? (graphNodePath(node) || id) : id;
+        nameSpan.textContent = path.split('/').pop() || path;
+        nameSpan.style.fontFamily = 'var(--font-mono)';
+        nameSpan.style.fontSize = '12px';
+        nameSpan.style.wordBreak = 'break-all';
+        nameSpan.title = path;
+
+        li.appendChild(nameSpan);
+
+        if (node?.tokens !== undefined) {
+            const tokenSpan = document.createElement('span');
+            tokenSpan.textContent = `${formatCount(node.tokens)} tk`;
+            tokenSpan.style.color = 'var(--muted)';
+            tokenSpan.style.fontSize = '11px';
+            tokenSpan.style.whiteSpace = 'nowrap';
+            tokenSpan.style.marginLeft = '8px';
+            li.appendChild(tokenSpan);
+        }
+
+        li.addEventListener('click', () => {
+             if (node) {
+                 selectGraphNode(node);
+             } else {
+                 openFile(id);
+             }
+        });
+        li.addEventListener('mouseover', () => li.style.background = 'var(--surface-hover)');
+        li.addEventListener('mouseout', () => li.style.background = 'transparent');
+
+        list.appendChild(li);
+    }
+}
+
+async function loadContext() {
+    try {
+        const payload = await request('/api/context');
+        state.context = normalizeContext(payload);
+        renderContext();
+        loadContextSizes();
+        return payload;
+    } catch (error) {
+        $('#context-metrics').textContent = `Context unavailable: ${formatError(error)}`;
+        appendOutput('Context request failed', formatError(error));
+        throw error;
+    }
+}
+
+// Compact token count for the picker labels: 0, 12.3K, 1.8M.
+function formatTokensShort(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return '0';
+    if (n < 1000) return String(n);
+    if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+    return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+// Fetch each mode's node/token size and annotate the picker buttons, so the
+// selection cost is visible before choosing (and confirms which mode is active).
+async function loadContextSizes() {
+    try {
+        const payload = await request('/api/context/sizes');
+        const sizes = Array.isArray(payload?.sizes) ? payload.sizes : [];
+        state.contextSizes = new Map(
+            sizes.map((entry) => [normalizeContextMode(entry.mode), entry]),
+        );
+        renderContextSizes();
+    } catch (error) {
+        appendOutput('Context sizes unavailable', formatError(error));
+    }
+}
+
+function renderContextSizes() {
+    if (!state.contextSizes) return;
+    $$('#context-segments [data-context-mode]').forEach((button) => {
+        const size = state.contextSizes.get(button.dataset.contextMode);
+        let badge = button.querySelector('.mode-size');
+        if (!size) {
+            badge?.remove();
+            return;
+        }
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'mode-size';
+            button.appendChild(badge);
+        }
+        badge.textContent = `${formatTokensShort(size.tokens)} tok`;
+        button.title = `${button.title.split(' — ')[0]} — ${formatCount(size.nodes)} nodes · ${formatCount(size.tokens)} tokens`;
+    });
+}
+
+async function setContextMode(mode) {
+    const canonicalMode = normalizeContextMode(mode);
+    if (!canonicalMode || canonicalMode === state.context.mode) return;
+    const previous = { ...state.context };
+    const buttons = $$('#context-segments [data-context-mode]');
+    buttons.forEach((button) => { button.disabled = true; });
+    setGlobalStatus(`Loading ${contextLabel(canonicalMode)} context`, 'working');
+
+    try {
+        const response = await request('/api/context/mode', {
+            method: 'POST',
+            body: { mode: canonicalMode },
+        });
+        const normalized = normalizeContext(response);
+        if (normalized.mode && (normalized.files !== null || normalized.tokens !== null)) {
+            state.context = normalized;
+        } else {
+            const refreshed = await request('/api/context');
+            state.context = normalizeContext(refreshed);
+        }
+        renderContext(previous);
+        appendOutput(`Context mode: ${contextLabel(canonicalMode)}`, response);
+        setGlobalStatus(`Context: ${contextLabel(state.context.mode)}`, 'success');
+    } catch (error) {
+        state.context = previous;
+        renderContext();
+        appendOutput('Context mode change failed', formatError(error));
+        toast(`Context change failed: ${formatError(error)}`, 'error');
+        setGlobalStatus('Context change failed', 'error');
+    } finally {
+        buttons.forEach((button) => { button.disabled = false; });
+    }
+}
+
+function collectFileEntries(payload) {
+    const source = Array.isArray(payload) ? payload : payload?.files || payload?.entries || payload?.tree || [];
+    const entries = [];
+
+    const visit = (entry, parentPath = '') => {
+        if (typeof entry === 'string') {
+            entries.push({ path: normalizePath(entry), isDirectory: false, size: null });
+            return;
+        }
+        if (!entry || typeof entry !== 'object') return;
+
+        const rawPath = entry.path || entry.relative_path || entry.name || '';
+        const path = normalizePath(rawPath.includes('/') || !parentPath ? rawPath : `${parentPath}/${rawPath}`);
+        const children = entry.children || entry.entries;
+        const isDirectory = entry.is_dir === true || entry.directory === true || entry.kind === 'directory' || Array.isArray(children);
+        if (path) {
+            entries.push({
+                ...entry,
+                path,
+                isDirectory,
+                size: entry.size ?? entry.bytes ?? null,
+            });
+        }
+        if (Array.isArray(children)) children.forEach((child) => visit(child, path));
+    };
+
+    if (Array.isArray(source)) source.forEach((entry) => visit(entry));
+    else visit(source);
+    return entries;
+}
+
+function buildFileTree(entries) {
+    const root = { name: '', path: '', isDirectory: true, children: new Map(), metadata: null };
+
+    entries.forEach((entry) => {
+        const path = normalizePath(entry.path);
+        if (!path) return;
+        const parts = path.split('/').filter(Boolean);
+        let cursor = root;
+        parts.forEach((part, index) => {
+            const partialPath = parts.slice(0, index + 1).join('/');
+            const isLast = index === parts.length - 1;
+            if (!cursor.children.has(part)) {
+                cursor.children.set(part, {
+                    name: part,
+                    path: partialPath,
+                    isDirectory: !isLast || entry.isDirectory,
+                    children: new Map(),
+                    metadata: null,
+                });
+            }
+            cursor = cursor.children.get(part);
+            if (isLast) {
+                cursor.isDirectory = entry.isDirectory;
+                cursor.metadata = entry;
+            }
+        });
+    });
+    return root;
+}
+
+function renderFileTree() {
+    const container = $('#file-tree');
+    container.replaceChildren();
+    const root = buildFileTree(state.files);
+
+    const sortedChildren = (node) => [...node.children.values()].sort((left, right) => {
+        if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
+        return left.name.localeCompare(right.name);
+    });
+
+    const renderNode = (node, depth) => {
+        const wrapper = document.createElement('div');
+        wrapper.setAttribute('role', 'treeitem');
+        wrapper.setAttribute('aria-level', String(depth + 1));
+
+        if (node.isDirectory) {
+            const openForActive = state.activePath?.startsWith(`${node.path}/`);
+            const expanded = state.expandedFolders.has(node.path) || openForActive;
+            const label = document.createElement('button');
+            label.type = 'button';
+            label.className = 'tree-folder-label';
+            label.style.paddingLeft = `${8 + depth * 14}px`;
+            label.setAttribute('aria-expanded', String(expanded));
+            label.append(icon('chevron-right', 'folder-chevron'), icon(expanded ? 'folder-open' : 'folder'));
+            const text = document.createElement('span');
+            text.className = 'tree-label';
+            text.textContent = node.name;
+            label.appendChild(text);
+
+            const children = document.createElement('div');
+            children.className = 'tree-children';
+            children.hidden = !expanded;
+            children.setAttribute('role', 'group');
+            sortedChildren(node).forEach((child) => children.appendChild(renderNode(child, depth + 1)));
+
+            label.addEventListener('click', () => {
+                const willExpand = label.getAttribute('aria-expanded') !== 'true';
+                label.setAttribute('aria-expanded', String(willExpand));
+                children.hidden = !willExpand;
+                if (willExpand) state.expandedFolders.add(node.path);
+                else state.expandedFolders.delete(node.path);
+                const folderIcon = label.querySelector('svg:not(.folder-chevron)');
+                if (folderIcon) folderIcon.outerHTML = `<i data-lucide="${willExpand ? 'folder-open' : 'folder'}" aria-hidden="true"></i>`;
+                refreshIcons();
+            });
+
+            wrapper.append(label, children);
+        } else {
+            const row = document.createElement('button');
+            row.type = 'button';
+            row.className = `tree-row${state.activePath === node.path ? ' active' : ''}`;
+            row.style.paddingLeft = `${24 + depth * 14}px`;
+            row.dataset.path = node.path;
+            row.appendChild(icon('file-code-2'));
+
+            const text = document.createElement('span');
+            text.className = 'tree-label';
+            text.textContent = node.name;
+            row.appendChild(text);
+
+            const size = formatBytes(node.metadata?.size);
+            if (size) {
+                const meta = document.createElement('span');
+                meta.className = 'tree-meta';
+                meta.textContent = size;
+                row.appendChild(meta);
+            }
+            row.addEventListener('click', () => openFile(node.path));
+            wrapper.appendChild(row);
+        }
+
+        return wrapper;
+    };
+
+    sortedChildren(root).forEach((node) => container.appendChild(renderNode(node, 0)));
+    refreshIcons();
+}
+
+async function loadFiles(force = false) {
+    const status = $('#explorer-status');
+    status.className = 'pane-state';
+    status.textContent = force ? 'Refreshing files...' : 'Loading files...';
+    show(status);
+    setBusy($('#refresh-files'), true);
+
+    try {
+        const payload = await request('/api/ide/files');
+        state.files = collectFileEntries(payload);
+        state.fileIndex = new Map(state.files.filter((entry) => !entry.isDirectory).map((entry) => [entry.path, entry]));
+        renderFileTree();
+
+        if (state.fileIndex.size === 0) {
+            status.textContent = 'No source files reported';
+            show(status);
+            return payload;
+        }
+
+        hide(status);
+        if (!state.activePath) {
+            const preferred = ['src/lib.rs', 'src/main.rs', 'Cargo.toml'].find((path) => state.fileIndex.has(path));
+            await openFile(preferred || state.fileIndex.keys().next().value);
+        }
+        return payload;
+    } catch (error) {
+        status.className = 'pane-state error';
+        status.textContent = `Files unavailable: ${formatError(error)}`;
+        show(status);
+        appendOutput('File list request failed', formatError(error));
+        throw error;
+    } finally {
+        setBusy($('#refresh-files'), false);
+    }
+}
+
+function normalizeDocument(payload, requestedPath) {
+    if (typeof payload === 'string') {
+        return { path: requestedPath, content: payload, hash: null, readOnly: false };
+    }
+    const documentPayload = payload?.document && typeof payload.document === 'object' ? payload.document : payload || {};
+    const content = documentPayload.content ?? documentPayload.text ?? payload?.content;
+    if (typeof content !== 'string') throw new Error(`Document response for ${requestedPath} did not include text content.`);
+    return {
+        path: normalizePath(documentPayload.path || requestedPath),
+        content,
+        hash: documentPayload.hash ?? documentPayload.content_hash ?? payload?.hash ?? payload?.content_hash ?? null,
+        readOnly: documentPayload.read_only === true || documentPayload.readOnly === true,
+        language: documentPayload.language || languageForPath(requestedPath),
+    };
+}
+
+async function openFile(path, location = null) {
+    const normalizedPath = resolveWorkspacePath(path);
+    if (!normalizedPath) return;
+    selectView('editor');
+
+    if (state.openDocuments.has(normalizedPath)) {
+        activateDocument(normalizedPath, location);
+        return;
+    }
+    if (state.loadingDocuments.has(normalizedPath)) {
+        await state.loadingDocuments.get(normalizedPath);
+        activateDocument(normalizedPath, location);
+        return;
+    }
+
+    hide($('#editor-empty'));
+    show($('#editor-loading'));
+    setGlobalStatus(`Opening ${normalizedPath}`, 'working');
+
+    const load = (async () => {
+        try {
+            const payload = await request(`/api/ide/document?path=${encodeURIComponent(normalizedPath)}`);
+            const normalized = normalizeDocument(payload, normalizedPath);
+            const documentState = {
+                ...normalized,
+                savedContent: normalized.content,
+                dirty: false,
+                model: null,
+                saving: false,
+                contentGeneration: 0,
+            };
+            state.openDocuments.set(normalizedPath, documentState);
+            await state.editorReady;
+            if (state.editorMode === 'monaco') {
+                const uri = window.monaco.Uri.parse(`inmemory://selfware/${encodeURIComponent(normalizedPath)}`);
+                documentState.model = window.monaco.editor.createModel(normalized.content, normalized.language, uri);
+            }
+            activateDocument(normalizedPath, location);
+            setGlobalStatus(`Opened ${normalizedPath}`, 'success');
+            return documentState;
+        } catch (error) {
+            appendOutput(`Open failed: ${normalizedPath}`, formatError(error));
+            toast(`Could not open ${normalizedPath}: ${formatError(error)}`, 'error');
+            setGlobalStatus('Document open failed', 'error');
+            if (!state.activePath) show($('#editor-empty'));
+            throw error;
+        } finally {
+            hide($('#editor-loading'));
+            state.loadingDocuments.delete(normalizedPath);
+        }
+    })();
+
+    state.loadingDocuments.set(normalizedPath, load);
+    try {
+        await load;
+    } catch (_) {
+        // The exact error is already visible in output and the toast region.
+    }
+}
+
+function activateDocument(path, location = null) {
+    const documentState = state.openDocuments.get(path);
+    if (!documentState) return;
+    state.activePath = path;
+    state.suppressEditorChange = true;
+
+    hide($('#editor-empty'));
+    hide($('#editor-loading'));
+    if (state.editorMode === 'monaco' && state.editor) {
+        hide($('#editor-fallback'));
+        show($('#editor'));
+        state.editor.setModel(documentState.model);
+        state.editor.updateOptions({ readOnly: documentState.readOnly });
+        if (location?.line) {
+            const lineNumber = Math.max(1, Number(location.line));
+            const column = Math.max(1, Number(location.column || 1));
+            state.editor.setPosition({ lineNumber, column });
+            state.editor.revealPositionInCenter({ lineNumber, column });
+        }
+        const position = state.editor.getPosition();
+        if (position) {
+            $('#cursor-status').textContent = `Ln ${position.lineNumber}, Col ${position.column}`;
+        }
+        state.editor.focus();
+    } else if (state.editorMode === 'fallback') {
+        hide($('#editor'));
+        show($('#editor-fallback'));
+        $('#editor-fallback').value = documentState.content;
+        $('#editor-fallback').readOnly = documentState.readOnly;
+        $('#editor-fallback').focus();
+        updateFallbackCursorStatus();
+    }
+    state.suppressEditorChange = false;
+
+    renderDocumentTabs();
+    renderFileTree();
+    updateDocumentStatus();
+    selectSource(path);
+}
+
+function updateFallbackCursorStatus() {
+    const fallback = $('#editor-fallback');
+    if (!fallback || state.editorMode !== 'fallback' || !state.activePath) return;
+    const offset = Math.max(0, Number(fallback.selectionStart || 0));
+    const before = fallback.value.slice(0, offset);
+    const line = before.split('\n').length;
+    const lastNewline = before.lastIndexOf('\n');
+    const column = offset - lastNewline;
+    $('#cursor-status').textContent = `Ln ${line}, Col ${column}`;
+}
+
+function renderDocumentTabs() {
+    const container = $('#document-tabs');
+    container.replaceChildren();
+    state.openDocuments.forEach((documentState, path) => {
+        const tab = document.createElement('div');
+        tab.className = `document-tab${state.activePath === path ? ' active' : ''}${documentState.dirty ? ' dirty' : ''}`;
+        tab.setAttribute('role', 'tab');
+        tab.setAttribute('aria-selected', String(state.activePath === path));
+        tab.tabIndex = state.activePath === path ? 0 : -1;
+        tab.title = path;
+
+        const dirty = document.createElement('span');
+        dirty.className = 'dirty-dot';
+        dirty.setAttribute('aria-label', documentState.dirty ? 'Unsaved changes' : 'Saved');
+        const name = document.createElement('span');
+        name.className = 'tab-name';
+        name.textContent = basename(path);
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'tab-close';
+        close.title = `Close ${path}`;
+        close.setAttribute('aria-label', `Close ${path}`);
+        close.appendChild(icon('x'));
+
+        tab.append(dirty, name, close);
+        tab.addEventListener('click', (event) => {
+            if (!event.target.closest('.tab-close')) activateDocument(path);
+        });
+        tab.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                activateDocument(path);
+            }
+        });
+        close.addEventListener('click', (event) => {
+            event.stopPropagation();
+            closeDocument(path);
+        });
+        container.appendChild(tab);
+    });
+    refreshIcons();
+}
+
+function closeDocument(path) {
+    const documentState = state.openDocuments.get(path);
+    if (!documentState) return;
+    if (documentState.dirty && !window.confirm(`Discard unsaved changes in ${path}?`)) return;
+
+    const paths = [...state.openDocuments.keys()];
+    const index = paths.indexOf(path);
+    documentState.model?.dispose();
+    state.openDocuments.delete(path);
+
+    if (state.activePath === path) {
+        const nextPath = paths[index + 1] || paths[index - 1];
+        state.activePath = null;
+        if (nextPath && state.openDocuments.has(nextPath)) {
+            activateDocument(nextPath);
+        } else {
+            state.editor?.setModel(null);
+            hide($('#editor'));
+            hide($('#editor-fallback'));
+            show($('#editor-empty'));
+            $('#document-status').textContent = 'No file open';
+            $('#cursor-status').textContent = 'Ln -, Col -';
+            updateSelection(null, null);
+            clearSourceInspectors();
+        }
+    }
+    renderDocumentTabs();
+    renderFileTree();
+    updateDocumentStatus();
+}
+
+function updateDocumentStatus() {
+    const documentState = state.activePath ? state.openDocuments.get(state.activePath) : null;
+    const save = $('#save-action');
+    const review = $('#review-action');
+    const reviewSubmit = $('#review-submit');
+    const evidencePreview = $('#review-evidence-preview');
+    const anyDirty = [...state.openDocuments.values()].some((document) => document.dirty);
+
+    $$('[data-analysis-kind]').forEach((button) => { button.disabled = anyDirty; });
+    if ($('#readiness-action')) $('#readiness-action').disabled = anyDirty;
+    if ($('#readiness-submit')) $('#readiness-submit').disabled = anyDirty;
+    if ($('#branch-action')) $('#branch-action').disabled = anyDirty;
+    const selectedSource = selectedNodePath();
+    if ($('#node-review-action')) $('#node-review-action').disabled = anyDirty || !selectedSource;
+    if ($('#node-delete-preview-action')) $('#node-delete-preview-action').disabled = anyDirty || !selectedSource;
+    if ($('#node-branch-action')) $('#node-branch-action').disabled = anyDirty || !state.selectedNode;
+    if (anyDirty && state.branchPreview) resetBranchPreview();
+
+    if (!documentState) {
+        $('#document-status').textContent = 'No file open';
+        save.disabled = true;
+        review.disabled = true;
+        reviewSubmit.disabled = true;
+        evidencePreview.disabled = true;
+        return;
+    }
+
+    const status = documentState.readOnly ? 'read only' : documentState.dirty ? 'modified' : 'saved';
+    $('#document-status').textContent = `${state.activePath} · ${status}`;
+    save.disabled = documentState.readOnly || !documentState.dirty || documentState.saving;
+    review.disabled = documentState.dirty;
+    reviewSubmit.disabled = documentState.dirty;
+    evidencePreview.disabled = documentState.dirty;
+    if (documentState.dirty && documentState.language === 'rust') {
+        clearSourceInspectors(
+            'Save the visible buffer before requesting disk-backed AST or compiler feedback.',
+            'Save the visible buffer before requesting the disk-backed structural summary.',
+        );
+    }
+}
+
+async function saveActiveDocument() {
+    const path = state.activePath;
+    const documentState = path ? state.openDocuments.get(path) : null;
+    if (!documentState || documentState.readOnly || !documentState.dirty || documentState.saving) return;
+
+    if (state.editorMode === 'monaco' && state.editor) documentState.content = state.editor.getValue();
+    if (state.editorMode === 'fallback') documentState.content = $('#editor-fallback').value;
+
+    const submittedContent = documentState.content;
+    const submittedHash = documentState.hash;
+    const submittedGeneration = documentState.contentGeneration;
+
+    documentState.saving = true;
+    setBusy($('#save-action'), true);
+    setGlobalStatus(`Saving ${path}`, 'working');
+
+    try {
+        const response = await request('/api/ide/write', {
+            method: 'POST',
+            body: {
+                path,
+                content: submittedContent,
+                expected_hash: submittedHash,
+            },
+        });
+
+        if (response && typeof response === 'object' && response.success === false) {
+            throw new ApiError(response.error || response.message || 'Write was not accepted.', 0, response);
+        }
+
+        let hash = response?.hash ?? response?.content_hash ?? response?.write?.hash ?? response?.document?.hash ?? null;
+        if (hash === null) {
+            const verificationPayload = await request(`/api/ide/document?path=${encodeURIComponent(path)}`);
+            const verification = normalizeDocument(verificationPayload, path);
+            if (verification.content !== submittedContent) {
+                throw new Error('The write response had no hash and the document content could not be verified.');
+            }
+            hash = verification.hash;
+        }
+
+        documentState.hash = hash;
+        documentState.savedContent = submittedContent;
+        documentState.dirty = documentState.content !== submittedContent;
+        const newerEditsRemain = documentState.dirty;
+        const bufferChangedDuringSave = documentState.contentGeneration !== submittedGeneration;
+        if (response?.graph_revision && state.workspace) {
+            state.workspace.graph_revision = response.graph_revision;
+        }
+        appendOutput(`Saved ${path}`, {
+            ...response,
+            submitted_generation: submittedGeneration,
+            current_generation: documentState.contentGeneration,
+            buffer_changed_during_save: bufferChangedDuringSave,
+            newer_edits_remain: newerEditsRemain,
+        });
+        if (response?.graph_refresh?.success === false) {
+            const refreshes = [loadFiles(true), loadGitStatus({ silent: true })];
+            if (!documentState.dirty) {
+                refreshes.push(loadAst(path));
+                refreshes.push(loadSummary(path));
+            }
+            await Promise.allSettled(refreshes);
+            setGlobalStatus(
+                newerEditsRemain
+                    ? `Saved snapshot for ${path}; newer editor changes remain`
+                    : `Saved ${path}; graph refresh failed`,
+                'warning',
+            );
+            toast(`Saved ${path}, but graph refresh failed.`, 'warning');
+        } else {
+            const refreshes = [
+                loadGraph(true),
+                loadContext(),
+                loadFiles(true),
+                loadGitStatus({ silent: true }),
+            ];
+            if (!documentState.dirty) {
+                refreshes.push(loadAst(path));
+                refreshes.push(loadSummary(path));
+            }
+            await Promise.allSettled(refreshes);
+            if (newerEditsRemain) {
+                setGlobalStatus(`Saved snapshot for ${path}; newer editor changes remain`, 'warning');
+                toast(`Saved the submitted snapshot; newer changes in ${path} are still unsaved.`, 'warning');
+            } else {
+                setGlobalStatus(`Saved ${path}`, 'success');
+                toast(`Saved ${path}`, 'success');
+            }
+        }
+    } catch (error) {
+        appendOutput(`Save failed: ${path}`, formatError(error));
+        setGlobalStatus('Save failed', 'error');
+        toast(`Save failed: ${formatError(error)}`, 'error');
+    } finally {
+        documentState.saving = false;
+        $('#save-action').classList.remove('busy');
+        $('#save-action').setAttribute('aria-busy', 'false');
+        renderDocumentTabs();
+        updateDocumentStatus();
+    }
+}
+
+function selectView(view) {
+    state.activeView = view;
+    $$('.view-tab[data-view]').forEach((button) => {
+        const active = button.dataset.view === view;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+    });
+    ['editor', 'graph'].forEach((name) => {
+        const panel = $(`#${name}-view`);
+        const active = name === view;
+        panel.classList.toggle('active', active);
+        panel.classList.toggle('hidden', !active);
+    });
+    if (view === 'graph' && !state.graphLoaded && !state.graphLoading) loadGraph();
+    if (view === 'editor') state.editor?.layout();
+}
+
+function selectInspector(name) {
+    state.activeInspector = name;
+    $$('.inspector-tab[data-inspector]').forEach((button) => {
+        const active = button.dataset.inspector === name;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+    });
+    $$('.inspector-view').forEach((panel) => {
+        const active = panel.id === `inspector-${name}`;
+        panel.classList.toggle('active', active);
+        panel.classList.toggle('hidden', !active);
+    });
+}
+
+function selectBottomView(name) {
+    state.activeBottomView = name;
+    $('#app').classList.remove('bottom-collapsed');
+    $$('.bottom-tab[data-bottom-view]').forEach((button) => {
+        const active = button.dataset.bottomView === name;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', String(active));
+    });
+    ['problems', 'output'].forEach((view) => {
+        const panel = $(`#${view}-view`);
+        const active = view === name;
+        panel.classList.toggle('active', active);
+        panel.classList.toggle('hidden', !active);
+    });
+    updateBottomToggleIcon();
+}
+
+function toggleBottomPanel() {
+    $('#app').classList.toggle('bottom-collapsed');
+    updateBottomToggleIcon();
+}
+
+function updateBottomToggleIcon() {
+    const button = $('#toggle-bottom');
+    if (!button) return;
+    const collapsed = $('#app').classList.contains('bottom-collapsed');
+    button.title = collapsed ? 'Expand panel' : 'Collapse panel';
+    button.setAttribute('aria-label', button.title);
+    button.replaceChildren(icon(collapsed ? 'panel-bottom-open' : 'panel-bottom-close'));
+    refreshIcons();
+}
+
+function updateSelection(path, node) {
+    state.selectedNode = node;
+    $('#selection-name').textContent = node?.name || node?.label || (path ? basename(path) : 'No selection');
+    $('#selection-path').textContent = path || node?.id || '';
+    renderNodeInspector(node, path);
+}
+
+function selectedNodePath() {
+    return state.selectedNode ? graphNodePath(state.selectedNode) : '';
+}
+
+function renderNodeInspector(node, path) {
+    const stateElement = $('#node-state');
+    const actions = $('#node-actions');
+    const result = $('#node-result');
+    if (!node) {
+        stateElement.className = 'pane-state';
+        stateElement.textContent = 'Select a graph node';
+        show(stateElement);
+        hide(actions);
+        result.className = 'inspector-result pane-state';
+        result.textContent = 'No node evidence loaded';
+        $('#node-open-action').disabled = true;
+        $('#node-review-action').disabled = true;
+        $('#node-branch-action').disabled = true;
+        $('#node-delete-preview-action').disabled = true;
+        return;
+    }
+
+    hide(stateElement);
+    show(actions);
+    const sourcePath = path || graphNodePath(node);
+    const hasSource = Boolean(sourcePath);
+    const anyDirty = [...state.openDocuments.values()].some((document) => document.dirty);
+    $('#node-open-action').disabled = !hasSource;
+    $('#node-review-action').disabled = !hasSource || anyDirty;
+    $('#node-branch-action').disabled = anyDirty;
+    $('#node-delete-preview-action').disabled = !hasSource || anyDirty;
+
+    const edges = state.graphData?.edges || [];
+    const inbound = edges.filter((edge) => String(edge.to ?? edge.target?.id ?? edge.target) === node.id);
+    const outbound = edges.filter((edge) => String(edge.from ?? edge.source?.id ?? edge.source) === node.id);
+    result.className = 'inspector-result';
+    result.replaceChildren(renderStructured({
+        snapshot: {
+            id: node.id,
+            path: sourcePath || null,
+            layer: node.layer,
+            lines: node.lines,
+            tokens: node.tokens,
+            coverage: node.coverage,
+            dead_code_annotation_ratio_heuristic: node.dead_code_annotation_ratio ?? node.dead_code_ratio,
+            semantic_dead_code_detection: 'not_performed',
+            warning_count: node.warning_count,
+            complexity: node.complexity,
+        },
+        inbound,
+        outbound,
+    }));
+    refreshIcons();
+}
+
+async function openSelectedNodeSource() {
+    const path = selectedNodePath();
+    if (path) await openFile(path);
+}
+
+async function reviewSelectedNode() {
+    const node = state.selectedNode;
+    const path = selectedNodePath();
+    if (!node || !path) return;
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        toast('Save all modified buffers before reviewing a graph node.', 'warning');
+        return;
+    }
+    await openFile(path);
+    state.selectedNode = node;
+    updateSelection(path, node);
+    selectInspector('grounding');
+    await runReview();
+}
+
+function branchSelectedNode() {
+    if (!state.selectedNode) return;
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        toast('Save all modified buffers before creating a graph action branch.', 'warning');
+        return;
+    }
+    const segment = String(state.selectedNode.id || 'component')
+        .toLowerCase()
+        .replace(/[^a-z0-9._-]+/g, '-')
+        .replace(/^[.-]+|[.-]+$/g, '') || 'component';
+    openBranchDialog(`evolve/${segment}`);
+}
+
+async function previewSelectedNodeDeletion() {
+    const node = state.selectedNode;
+    if (!node?.id) return;
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        toast('Save all modified buffers before calculating deletion impact.', 'warning');
+        return;
+    }
+    const button = $('#node-delete-preview-action');
+    const result = $('#node-result');
+    setBusy(button, true);
+    result.className = 'inspector-result pane-state';
+    result.textContent = `Calculating deletion impact for ${node.id}...`;
+    setGlobalStatus('Deletion impact preview running', 'working');
+    try {
+        const payload = await request('/api/actions/deletion/preview', {
+            method: 'POST',
+            body: { node_id: node.id },
+        });
+        result.className = 'inspector-result';
+        result.replaceChildren(renderStructured(payload));
+        appendOutput(`Deletion preview: ${node.id}`, payload);
+        const executable = payload?.executable === true;
+        setGlobalStatus(
+            executable ? 'Deletion preview is executable' : 'Deletion remains blocked by evidence requirements',
+            executable ? 'warning' : 'neutral',
+        );
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Deletion preview failed: ${formatError(error)}`;
+        appendOutput(`Deletion preview failed: ${node.id}`, formatError(error));
+        setGlobalStatus('Deletion preview failed', 'error');
+    } finally {
+        setBusy(button, false);
+    }
+}
+
+function selectSource(path, node = null) {
+    updateSelection(path, node);
+    const documentState = state.openDocuments.get(path);
+    if (documentState && documentState.language !== 'rust') {
+        const language = documentState.language || 'this language';
+        clearSourceInspectors(
+            `AST inspection is unavailable for ${language}.`,
+            `Structural summary is unavailable for ${language}.`,
+        );
+        return;
+    }
+    loadAst(path);
+    loadSummary(path);
+}
+
+function clearSourceInspectors(
+    astMessage = 'Select a source file to inspect its AST.',
+    summaryMessage = 'Select a source file to view its structural summary.',
+) {
+    state.astRequest += 1;
+    state.summaryRequest += 1;
+    const astState = $('#ast-state');
+    astState.className = 'pane-state';
+    astState.textContent = astMessage;
+    $('#ast-tree').replaceChildren();
+    show(astState);
+
+    const summaryState = $('#summary-state');
+    summaryState.className = 'pane-state';
+    summaryState.textContent = summaryMessage;
+    $('#summary-code').textContent = '';
+    $('#summary-grounding').textContent = '';
+    $('#summary-evidence').replaceChildren();
+    show(summaryState);
+    hide($('#summary-content'));
+}
+
+async function loadAst(path) {
+    const requestId = ++state.astRequest;
+    const stateElement = $('#ast-state');
+    const tree = $('#ast-tree');
+    tree.replaceChildren();
+
+    if (!path) {
+        stateElement.className = 'pane-state';
+        stateElement.textContent = 'Select a source file';
+        show(stateElement);
+        return;
+    }
+    const documentState = state.openDocuments.get(path);
+    if (documentState?.dirty) {
+        stateElement.className = 'pane-state';
+        stateElement.textContent = 'Save the visible buffer before requesting disk-backed AST.';
+        show(stateElement);
+        return;
+    }
+    const expectedHash = documentState?.hash ?? null;
+    const expectedGeneration = documentState?.contentGeneration ?? null;
+
+    stateElement.className = 'pane-state';
+    stateElement.textContent = `Loading AST for ${path}...`;
+    show(stateElement);
+    try {
+        const payload = await request(`/api/ide/ast?path=${encodeURIComponent(path)}`);
+        if (requestId !== state.astRequest) return;
+        const current = state.openDocuments.get(path);
+        if (documentState && (
+            current !== documentState
+            || current.dirty
+            || current.hash !== expectedHash
+            || current.contentGeneration !== expectedGeneration
+            || payload?.hash !== expectedHash
+        )) {
+            stateElement.className = 'pane-state';
+            stateElement.textContent = 'AST response discarded because the editor or disk snapshot changed. Reload the file and try again.';
+            show(stateElement);
+            appendOutput(`AST response discarded: ${path}`, {
+                expected_hash: expectedHash,
+                response_hash: payload?.hash ?? null,
+                expected_generation: expectedGeneration,
+            });
+            return;
+        }
+        const root = payload?.ast ?? payload?.root ?? payload;
+        tree.replaceChildren(renderAstNode(root, 0, { count: 0, limit: 2500 }));
+        hide(stateElement);
+        refreshIcons();
+    } catch (error) {
+        if (requestId !== state.astRequest) return;
+        stateElement.className = 'pane-state error';
+        stateElement.textContent = `AST unavailable: ${formatError(error)}`;
+        appendOutput(`AST request failed: ${path}`, formatError(error));
+    }
+}
+
+async function loadSummary(path) {
+    const stateElement = $('#summary-state');
+    const contentElement = $('#summary-content');
+    const codeElement = $('#summary-code');
+    if (!stateElement || !contentElement || !codeElement) return;
+
+    const requestId = ++state.summaryRequest;
+    if (!path) {
+        stateElement.textContent = 'Select a source file to view its structural summary.';
+        codeElement.textContent = '';
+        $('#summary-grounding').textContent = '';
+        $('#summary-evidence').replaceChildren();
+        show(stateElement);
+        hide(contentElement);
+        return;
+    }
+
+    const documentState = state.openDocuments.get(path);
+    if (documentState?.dirty) {
+        stateElement.className = 'pane-state';
+        stateElement.textContent = 'Save the visible buffer before requesting the disk-backed structural summary.';
+        codeElement.textContent = '';
+        show(stateElement);
+        hide(contentElement);
+        return;
+    }
+    const expectedHash = documentState?.hash ?? null;
+    const expectedGeneration = documentState?.contentGeneration ?? null;
+
+    stateElement.className = 'pane-state';
+    stateElement.textContent = `Loading structural summary for ${path}...`;
+    show(stateElement);
+    hide(contentElement);
+
+    try {
+        const payload = await request(`/api/ide/summary?path=${encodeURIComponent(path)}`);
+        if (requestId !== state.summaryRequest) return;
+
+        const current = state.openDocuments.get(path);
+        if (documentState && (
+            current !== documentState
+            || current.dirty
+            || current.hash !== expectedHash
+            || current.contentGeneration !== expectedGeneration
+            || payload?.hash !== expectedHash
+        )) {
+            stateElement.className = 'pane-state';
+            stateElement.textContent = 'Summary response discarded because the editor or disk snapshot changed. Reload the file and try again.';
+            codeElement.textContent = '';
+            $('#summary-grounding').textContent = '';
+            $('#summary-evidence').replaceChildren();
+            show(stateElement);
+            hide(contentElement);
+            return;
+        }
+
+        const summary = payload?.summary ?? '';
+        const structural = payload?.structural ?? {};
+        hide(stateElement);
+        codeElement.textContent = summary;
+        renderSummaryGrounding(path, payload, structural);
+        show(contentElement);
+    } catch (error) {
+        if (requestId !== state.summaryRequest) return;
+        stateElement.className = 'pane-state error';
+        stateElement.textContent = `Summary unavailable: ${formatError(error)}`;
+        codeElement.textContent = '';
+        $('#summary-grounding').textContent = '';
+        $('#summary-evidence').replaceChildren();
+        hide(contentElement);
+        show(stateElement);
+        appendOutput(`Summary request failed: ${path}`, formatError(error));
+    }
+}
+
+function renderSummaryGrounding(path, payload, structural) {
+    const evidence = Array.isArray(structural?.evidence) ? structural.evidence : [];
+    const complete = structural?.complete === true && payload?.grounding?.complete === true;
+    const grounding = $('#summary-grounding');
+    grounding.className = `summary-grounding${complete ? '' : ' partial'}`;
+    const completeness = complete ? ['complete'] : [
+        'partial',
+        structural?.parse_has_error ? 'parse errors' : null,
+        structural?.truncated ? 'truncated' : null,
+        structural?.depth_limit_reached ? 'depth limit reached' : null,
+        Number(structural?.invalid_ranges || 0) > 0 ? `${structural.invalid_ranges} invalid range(s)` : null,
+        Array.isArray(structural?.omitted_node_kinds) && structural.omitted_node_kinds.length
+            ? `omitted: ${structural.omitted_node_kinds.join(', ')}`
+            : null,
+    ].filter(Boolean);
+    grounding.textContent = [
+        `sha256 ${payload?.hash || 'unavailable'}`,
+        payload?.grounding?.parser || 'parser unavailable',
+        `${evidence.length} source range${evidence.length === 1 ? '' : 's'}`,
+        ...completeness,
+    ].join(' · ');
+
+    const container = $('#summary-evidence');
+    container.replaceChildren();
+    const visible = evidence.slice(0, 500);
+    visible.forEach((item) => {
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = 'summary-evidence-row';
+        row.title = `${path}:${item.start_line}:${item.start_column}-${item.end_line}:${item.end_column} bytes ${item.start_byte}-${item.end_byte}`;
+        const identity = document.createElement('span');
+        identity.textContent = item.label ? `${item.kind} · ${item.label}` : item.kind;
+        const range = document.createElement('span');
+        range.className = 'summary-evidence-range';
+        range.textContent = `L${item.start_line}:C${item.start_column}-L${item.end_line}:C${item.end_column} · B${item.start_byte}-${item.end_byte} · ${item.projection}`;
+        row.append(identity, range);
+        row.addEventListener('click', () => openFile(path, {
+            line: item.start_line,
+            column: item.start_column,
+        }));
+        container.appendChild(row);
+    });
+    if (evidence.length > visible.length) {
+        const remainder = document.createElement('div');
+        remainder.className = 'pane-state';
+        remainder.textContent = `${evidence.length - visible.length} additional ranges are available in the API response.`;
+        container.appendChild(remainder);
+    }
+}
+
+function astChildren(node) {
+    if (Array.isArray(node)) return node;
+    if (!node || typeof node !== 'object') return [];
+    for (const key of ['children', 'nodes', 'items', 'body']) {
+        if (Array.isArray(node[key])) return node[key];
+    }
+    return [];
+}
+
+function astRange(node) {
+    if (!node || typeof node !== 'object') return '';
+    const lineRange = Number.isFinite(Number(node.start_line))
+        ? `${node.start_line}:${node.start_column ?? '?'}-${node.end_line ?? '?'}:${node.end_column ?? '?'}`
+        : '';
+    if (node.start_byte !== undefined || node.end_byte !== undefined) {
+        const byteRange = `b${node.start_byte ?? '?'}-${node.end_byte ?? '?'}`;
+        return lineRange ? `${lineRange} · ${byteRange}` : byteRange;
+    }
+    const start = node.range?.start || node.start;
+    const end = node.range?.end || node.end;
+    if (start && typeof start === 'object') {
+        const first = `${start.line ?? '?'}:${start.column ?? start.character ?? '?'}`;
+        const last = end ? `${end.line ?? '?'}:${end.column ?? end.character ?? '?'}` : '';
+        return last ? `${first}-${last}` : first;
+    }
+    return '';
+}
+
+function renderAstNode(node, depth, budget) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'ast-node';
+    if (budget.count >= budget.limit) {
+        wrapper.appendChild(createStateMessage(`AST display limited to ${formatCount(budget.limit)} nodes.`));
+        return wrapper;
+    }
+    budget.count += 1;
+
+    if (node === null || node === undefined || typeof node !== 'object') {
+        const row = document.createElement('div');
+        row.className = 'ast-row';
+        const value = document.createElement('span');
+        value.className = 'ast-kind';
+        value.textContent = String(node);
+        row.appendChild(value);
+        wrapper.appendChild(row);
+        return wrapper;
+    }
+
+    const children = astChildren(node);
+    const row = document.createElement('div');
+    row.className = 'ast-row';
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.title = children.length ? 'Toggle AST children' : 'AST leaf';
+    toggle.disabled = children.length === 0;
+    toggle.appendChild(icon(children.length ? 'chevron-down' : 'minus'));
+    const kind = document.createElement('span');
+    kind.className = 'ast-kind';
+    const baseKind = node.kind || node.type || node.name || (Array.isArray(node) ? 'Array' : 'Node');
+    kind.textContent = node.label ? `${baseKind} · ${node.label}` : baseKind;
+    row.append(toggle, kind);
+
+    const range = astRange(node);
+    if (range) {
+        const rangeElement = document.createElement('span');
+        rangeElement.className = 'ast-range';
+        rangeElement.textContent = range;
+        row.appendChild(rangeElement);
+    }
+    if (Number.isFinite(Number(node.start_line))) {
+        row.dataset.line = String(node.start_line);
+        row.title = `Open line ${node.start_line}`;
+        row.addEventListener('click', () => {
+            if (!state.editor || state.editorMode !== 'monaco') return;
+            const position = {
+                lineNumber: Math.max(1, Number(node.start_line)),
+                column: Math.max(1, Number(node.start_column || 1)),
+            };
+            selectView('editor');
+            state.editor.setPosition(position);
+            state.editor.revealPositionInCenter(position);
+            state.editor.focus();
+        });
+    }
+    wrapper.appendChild(row);
+
+    if (children.length) {
+        const childContainer = document.createElement('div');
+        childContainer.style.paddingLeft = '12px';
+        const collapsed = depth >= 2;
+        childContainer.hidden = collapsed;
+        toggle.replaceChildren(icon(collapsed ? 'chevron-right' : 'chevron-down'));
+        children.forEach((child) => childContainer.appendChild(renderAstNode(child, depth + 1, budget)));
+        toggle.addEventListener('click', () => {
+            childContainer.hidden = !childContainer.hidden;
+            toggle.replaceChildren(icon(childContainer.hidden ? 'chevron-right' : 'chevron-down'));
+            refreshIcons();
+        });
+        toggle.addEventListener('click', (event) => event.stopPropagation());
+        wrapper.appendChild(childContainer);
+    }
+    return wrapper;
+}
+
+async function loadGraph(force = false) {
+    if (state.graphLoading) return;
+    if (state.graphLoaded && !force) return;
+    state.graphLoading = true;
+    show($('#graph-loading'));
+    hide($('#graph-error'));
+    hide($('#graph-empty'));
+    hide($('#graph-legend'));
+    hide($('#graph-controls'));
+    setBusy($('#graph-refresh'), true);
+
+    try {
+        const payload = await request('/api/graph');
+        const nodes = Array.isArray(payload) ? payload : payload?.nodes || [];
+        const edges = payload?.edges || payload?.links || [];
+        if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new Error('Graph response did not include node and edge arrays.');
+        state.graphData = { nodes, edges };
+        state.graphLoaded = true;
+        if (force) await loadWorkspace();
+        if (nodes.length === 0) {
+            show($('#graph-empty'));
+        } else {
+            renderGraph(state.graphData);
+            show($('#graph-legend'));
+            show($('#graph-controls'));
+        }
+    } catch (error) {
+        state.graphLoaded = false;
+        const element = $('#graph-error');
+        element.textContent = `Graph unavailable: ${formatError(error)}`;
+        show(element);
+        appendOutput('Graph request failed', formatError(error));
+    } finally {
+        state.graphLoading = false;
+        hide($('#graph-loading'));
+        setBusy($('#graph-refresh'), false);
+    }
+}
+
+function graphNodeId(node) {
+    return String(node?.id ?? node?.node_id ?? node?.path ?? node?.name ?? '');
+}
+
+function graphNodePath(node) {
+    return resolveWorkspacePath(node?.path || node?.file || node?.source_path || node?.metadata?.path || '');
+}
+
+function graphEdgeType(edge) {
+    return edge?.edge_type || edge?.type || edge?.kind || 'DependsOn';
 }
 
 function renderGraph(data) {
-    hide(document.getElementById('loading'));
+    const canvas = $('#graph-canvas');
+    if (!window.d3) throw new Error('D3 did not load.');
+    state.graphRuntime?.simulation?.stop();
+    canvas.querySelector('svg')?.remove();
 
-    const nodes = (data && (data.nodes || (Array.isArray(data) ? data : []))) || [];
-    if (nodes.length === 0) {
-        show(document.getElementById('graph-empty'));
-        return;
-    }
+    const width = Math.max(canvas.clientWidth, 640);
+    const height = Math.max(canvas.clientHeight, 420);
+    const nodes = data.nodes.map((node) => ({ ...node, id: graphNodeId(node) }));
+    const links = data.edges.map((edge) => ({
+        ...edge,
+        source: typeof edge.source === 'object' ? graphNodeId(edge.source) : String(edge.source ?? edge.from ?? ''),
+        target: typeof edge.target === 'object' ? graphNodeId(edge.target) : String(edge.target ?? edge.to ?? ''),
+    })).filter((edge) => edge.source && edge.target);
+    const degree = new Map(nodes.map((item) => [item.id, 0]));
+    links.forEach((item) => {
+        degree.set(item.source, (degree.get(item.source) || 0) + 1);
+        degree.set(item.target, (degree.get(item.target) || 0) + 1);
+    });
+    nodes.forEach((item) => {
+        item.graph_status = degree.get(item.id) === 0 ? 'isolated' : 'connected';
+    });
 
-    // Defense-in-depth: drop links whose endpoints are not in the node set,
-    // otherwise d3.forceLink throws "node not found".
-    const nodeIds = new Set(nodes.map(n => n.id));
-    const links = ((data && data.edges) || [])
-        .filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
-        .map(e => ({ ...e, source: e.from, target: e.to }));
-
-    const container = document.getElementById('graph');
-    const width = container.clientWidth || 960;
-    const height = container.clientHeight || 600;
-
-    const svg = d3.select('#graph').append('svg')
+    const svg = window.d3.select(canvas).append('svg')
         .attr('viewBox', [0, 0, width, height])
-        .attr('preserveAspectRatio', 'xMidYMid meet');
-
+        .attr('role', 'img')
+        .attr('aria-label', `Code graph with ${nodes.length} nodes and ${links.length} edges`);
     const viewport = svg.append('g');
-
-    const zoom = d3.zoom()
-        .scaleExtent([0.2, 4])
-        .on('zoom', event => viewport.attr('transform', event.transform));
+    const zoom = window.d3.zoom().scaleExtent([0.15, 4]).on('zoom', (event) => viewport.attr('transform', event.transform));
     svg.call(zoom);
 
-    const zoomControls = document.getElementById('zoom-controls');
-    show(zoomControls);
-    const zoomBy = factor => svg.transition().duration(200).call(zoom.scaleBy, factor);
-    document.getElementById('zoom-in').onclick = () => zoomBy(1.3);
-    document.getElementById('zoom-out').onclick = () => zoomBy(1 / 1.3);
-    document.getElementById('zoom-reset').onclick = () =>
-        svg.transition().duration(300).call(zoom.transform, d3.zoomIdentity);
-
-    buildLegend();
-
-    const simulation = d3.forceSimulation(nodes)
-        .force('charge', d3.forceManyBody().strength(-220))
-        .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collide', d3.forceCollide().radius(d => nodeRadius(d) + 18))
-        .force('link', d3.forceLink(links).id(d => d.id).distance(140));
-
-    function nodeRadius(d) {
-        return Math.max(6, Math.min(22, Math.sqrt(d.tokens || 100) / 8));
-    }
-
-    const link = viewport.append('g')
-        .selectAll('line')
+    const edge = viewport.append('g').selectAll('line')
         .data(links)
-        .enter().append('line')
-        .attr('class', d => `edge edge-${d.edge_type || 'DependsOn'}`);
+        .join('line')
+        .attr('class', (item) => `graph-edge edge-${graphEdgeType(item)}`)
+        .attr('stroke', (item) => EDGE_COLORS[graphEdgeType(item)] || '#59636f');
 
-    const node = viewport.append('g')
-        .selectAll('circle')
+    const node = viewport.append('g').selectAll('circle')
         .data(nodes)
-        .enter().append('circle')
-        .attr('class', 'node')
-        .attr('r', nodeRadius)
-        .attr('fill', d => LAYER_COLORS[d.layer] || LAYER_COLORS.Code);
+        .join('circle')
+        .attr('class', (item) => {
+            const isolated = item.graph_status === 'isolated' ? ' isolated' : '';
+            const inContext = state.context.includedIds?.includes(item.id) ? ' in-context' : '';
+            return `graph-node${isolated}${inContext}`;
+        })
+        .attr('r', (item) => Math.max(6, Math.min(15, 6 + Math.sqrt(Number(item.weight || item.lines || item.tokens || 1)) * 0.25)))
+        .attr('fill', (item) => LAYER_COLORS[item.layer] || '#98c379')
+        .attr('tabindex', 0)
+        .attr('role', 'button')
+        .attr('aria-label', (item) => item.name || item.label || item.id)
+        .on('mouseenter focus', (event, item) => showGraphTooltip(event, item, links))
+        .on('mousemove', positionGraphTooltip)
+        .on('mouseleave blur', hideGraphTooltip)
+        .on('click', (_event, item) => handleGraphNode(item, node))
+        .on('keydown', (event, item) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                handleGraphNode(item, node);
+            }
+        });
 
-    const label = viewport.append('g')
-        .selectAll('text')
+    const labels = viewport.append('g').selectAll('text')
         .data(nodes)
-        .enter().append('text')
-        .attr('class', 'node-label')
-        .text(d => d.id)
-        .attr('text-anchor', 'middle')
-        .attr('dy', d => nodeRadius(d) + 14);
+        .join('text')
+        .attr('class', 'graph-label')
+        .text((item) => {
+            const label = item.name || item.label || basename(graphNodePath(item)) || item.id;
+            const tokenStr = item.tokens ? ` (${formatCount(item.tokens)} tokens)` : '';
+            return label + tokenStr;
+        });
 
-    const tooltip = document.getElementById('tooltip');
-    node
-        .on('mouseenter', (event, d) => {
-            tooltip.innerHTML = nodeTooltipHtml(d);
-            show(tooltip);
+    const groups = [...new Set(nodes.map((n) => dirname(graphNodePath(n))))];
+    const groupCenters = {};
+    groups.forEach((g, i) => {
+        const angle = (i / Math.max(1, groups.length)) * 2 * Math.PI;
+        groupCenters[g] = { x: width / 2 + Math.cos(angle) * 200, y: height / 2 + Math.sin(angle) * 200 };
+    });
+
+    const simulation = window.d3.forceSimulation(nodes)
+        .force('link', window.d3.forceLink(links).id((item) => item.id).distance(78).strength(0.35))
+        .force('charge', window.d3.forceManyBody().strength(-170))
+        .force('center', window.d3.forceCenter(width / 2, height / 2))
+        .force('collision', window.d3.forceCollide().radius(24))
+        .force('groupX', window.d3.forceX((item) => groupCenters[dirname(graphNodePath(item))]?.x || width / 2).strength(0.1))
+        .force('groupY', window.d3.forceY((item) => groupCenters[dirname(graphNodePath(item))]?.y || height / 2).strength(0.1))
+        .on('tick', () => {
+            edge.attr('x1', (item) => item.source.x).attr('y1', (item) => item.source.y)
+                .attr('x2', (item) => item.target.x).attr('y2', (item) => item.target.y);
+            node.attr('cx', (item) => item.x).attr('cy', (item) => item.y);
+            labels.attr('x', (item) => item.x + 10).attr('y', (item) => item.y + 4);
+        });
+
+    node.call(window.d3.drag()
+        .on('start', (event, item) => {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            item.fx = item.x;
+            item.fy = item.y;
         })
-        .on('mousemove', event => {
-            const bounds = container.getBoundingClientRect();
-            const x = Math.min(event.clientX - bounds.left + 14, bounds.width - 200);
-            const y = Math.min(event.clientY - bounds.top + 14, bounds.height - 90);
-            tooltip.style.left = `${Math.max(0, x)}px`;
-            tooltip.style.top = `${Math.max(0, y)}px`;
+        .on('drag', (event, item) => {
+            item.fx = event.x;
+            item.fy = event.y;
         })
-        .on('mouseleave', () => hide(tooltip));
+        .on('end', (event, item) => {
+            if (!event.active) simulation.alphaTarget(0);
+            item.fx = null;
+            item.fy = null;
+        }));
 
-    simulation.on('tick', () => {
-        // Keep nodes inside the viewport so nothing is clipped off-screen.
-        for (const d of nodes) {
-            const r = nodeRadius(d);
-            d.x = Math.max(r + 16, Math.min(width - r - 16, d.x));
-            d.y = Math.max(r + 16, Math.min(height - r - 32, d.y));
-        }
-        link
-            .attr('x1', d => d.source.x)
-            .attr('y1', d => d.source.y)
-            .attr('x2', d => d.target.x)
-            .attr('y2', d => d.target.y);
-        node.attr('cx', d => d.x).attr('cy', d => d.y);
-        label.attr('x', d => d.x).attr('y', d => d.y);
+    state.graphRuntime = {
+        svg,
+        viewport,
+        zoom,
+        simulation,
+        nodes,
+        links,
+        width,
+        height,
+        nodeSelection: node,
+        labelSelection: labels,
+    };
+    highlightGraphSearch($('#graph-search')?.value || '');
+    renderGraphLegend();
+}
+
+function graphSearchMatches(query) {
+    const normalized = String(query || '').trim().toLowerCase();
+    if (!normalized || !state.graphRuntime) return [];
+    return state.graphRuntime.nodes.filter((node) => {
+        const haystack = [node.id, graphNodePath(node), node.layer].filter(Boolean).join(' ').toLowerCase();
+        return haystack.includes(normalized);
     });
 }
 
-async function loadGraph() {
-    if (typeof d3 === 'undefined') {
-        showGraphError('Failed to load the D3 library from the CDN. Check your network connection and reload.');
-        return;
+function highlightGraphSearch(query) {
+    const runtime = state.graphRuntime;
+    if (!runtime) return;
+    const normalized = String(query || '').trim();
+    const matches = new Set(graphSearchMatches(normalized).map((node) => node.id));
+    runtime.nodeSelection
+        .classed('search-muted', (node) => Boolean(normalized) && !matches.has(node.id))
+        .classed('search-match', (node) => Boolean(normalized) && matches.has(node.id));
+    runtime.labelSelection.classed('search-muted', (node) => Boolean(normalized) && !matches.has(node.id));
+    const search = $('#graph-search');
+    if (search) search.title = normalized ? `${formatCount(matches.size)} matching nodes` : 'Find graph node';
+}
+
+function openFirstGraphSearchResult() {
+    const runtime = state.graphRuntime;
+    const match = graphSearchMatches($('#graph-search')?.value || '')[0];
+    if (!runtime || !match) return;
+    handleGraphNode(match, runtime.nodeSelection);
+    if (Number.isFinite(match.x) && Number.isFinite(match.y)) {
+        runtime.svg.transition().duration(220).call(
+            runtime.zoom.transform,
+            window.d3.zoomIdentity.translate(runtime.width / 2, runtime.height / 2).scale(1.5)
+                .translate(-match.x, -match.y),
+        );
     }
-    try {
-        const data = await fetchJson('/api/graph');
-        renderGraph(data);
-    } catch (err) {
-        showGraphError(`Failed to load graph: ${err.message}`);
-    }
-    loadValidation();
 }
 
-if (document.getElementById('graph')) loadGraph();
-
-// --- IDE editor panel (editor.html) ---
-
-let monacoEditor = null;
-let currentFile = null;
-
-function languageFor(path) {
-    const ext = path.split('.').pop();
-    return { rs: 'rust', js: 'javascript', html: 'html', css: 'css', json: 'json', md: 'markdown', toml: 'toml', yaml: 'yaml', yml: 'yaml' }[ext] || 'rust';
-}
-
-function setStatus(message, isError = false) {
-    const status = document.getElementById('status');
-    if (!status) return;
-    status.textContent = message;
-    status.style.color = isError ? '#f48771' : '#4ec9b0';
-}
-
-function ensureMonaco() {
-    return new Promise((resolve, reject) => {
-        if (monacoEditor || (typeof monaco !== 'undefined' && monaco.editor)) {
-            resolve();
-            return;
-        }
-        if (typeof require === 'undefined') {
-            reject(new Error('Monaco loader is unavailable (CDN unreachable?).'));
-            return;
-        }
-        require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.44.0/min/vs' }});
-        require(['vs/editor/editor.main'], resolve, () =>
-            reject(new Error('Failed to load the Monaco editor from the CDN.')));
+function renderGraphLegend() {
+    const legend = $('#graph-legend');
+    legend.replaceChildren();
+    Object.entries(LAYER_COLORS).forEach(([label, color]) => {
+        const entry = document.createElement('div');
+        entry.className = 'legend-entry';
+        const swatch = document.createElement('span');
+        swatch.className = 'legend-swatch';
+        swatch.style.background = color;
+        entry.append(swatch, document.createTextNode(label));
+        legend.appendChild(entry);
     });
-}
-
-async function loadEditor() {
-    const tree = document.getElementById('file-tree');
-    let files;
-    try {
-        files = await fetchJson('/api/ide/files');
-    } catch (err) {
-        setStatus(`Failed to list files: ${err.message}`, true);
-        return;
-    }
-    if (!Array.isArray(files) || files.length === 0) {
-        tree.innerHTML = '<div class="muted" style="padding:6px 12px">No files found.</div>';
-        return;
-    }
-    files.forEach(f => {
-        const el = document.createElement('div');
-        el.textContent = f.is_dir ? `${f.path}/` : f.path;
-        el.dataset.path = f.path;
-        if (f.is_dir) {
-            // Directories can't be opened in the editor; show them muted.
-            el.style.color = '#6e7681';
-            el.style.cursor = 'default';
-        } else {
-            el.onclick = () => openFile(f.path);
-        }
-        tree.appendChild(el);
+    const edgeTypes = [...new Set((state.graphData?.edges || []).map(graphEdgeType))];
+    edgeTypes.forEach((label) => {
+        const entry = document.createElement('div');
+        entry.className = 'legend-entry';
+        const swatch = document.createElement('span');
+        swatch.className = 'legend-swatch edge';
+        swatch.style.background = EDGE_COLORS[label] || '#59636f';
+        entry.append(swatch, document.createTextNode(label));
+        legend.appendChild(entry);
     });
+    if (state.graphRuntime?.nodes?.some((node) => node.graph_status === 'isolated')) {
+        const entry = document.createElement('div');
+        entry.className = 'legend-entry';
+        const swatch = document.createElement('span');
+        swatch.className = 'legend-swatch isolated';
+        entry.append(swatch, document.createTextNode('Isolated'));
+        legend.appendChild(entry);
+    }
 }
 
-async function openFile(path) {
-    setStatus(`Loading ${path}…`);
-    let content;
-    try {
-        const res = await fetch(`/api/ide/read?path=${encodeURIComponent(path)}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        content = await res.text();
-    } catch (err) {
-        setStatus(`Failed to open ${path}: ${err.message}`, true);
-        return;
-    }
-    try {
-        await ensureMonaco();
-    } catch (err) {
-        setStatus(err.message, true);
-        return;
-    }
-    if (monacoEditor) {
-        monaco.editor.setModelLanguage(monacoEditor.getModel(), languageFor(path));
-        monacoEditor.setValue(content);
+function showGraphTooltip(event, node, links) {
+    const tooltip = $('#graph-tooltip');
+    tooltip.replaceChildren();
+    const title = document.createElement('div');
+    title.className = 'tooltip-name';
+    title.textContent = node.name || node.label || node.id;
+    tooltip.appendChild(title);
+
+    const fields = [
+        ['ID', node.id], ['Path', graphNodePath(node)], ['Layer', node.layer],
+        ['Tokens', node.tokens ?? node.token_count], ['Lines', node.lines ?? node.line_count],
+        ['Files', node.files ?? node.file_count], ['Coverage', node.coverage],
+        ['Dead-code allowance ratio', node.dead_code_annotation_ratio ?? node.dead_code_ratio ?? node.dead_code ?? node.deadCode],
+        ['Warnings', node.warning_count ?? node.warnings],
+        ['Complexity heuristic', node.complexity],
+        ['Edges', links.filter((edge) => graphNodeId(edge.source) === node.id || graphNodeId(edge.target) === node.id).length],
+        ['Status', node.graph_status || node.status],
+    ];
+    fields.filter(([, value]) => value !== undefined && value !== null && value !== '').forEach(([label, value]) => {
+        const row = document.createElement('div');
+        row.className = 'tooltip-row';
+        const key = document.createElement('span');
+        key.textContent = label;
+        const detail = document.createElement('span');
+        detail.textContent = String(value);
+        row.append(key, detail);
+        tooltip.appendChild(row);
+    });
+    show(tooltip);
+    positionGraphTooltip(event);
+}
+
+function positionGraphTooltip(event) {
+    const tooltip = $('#graph-tooltip');
+    const canvas = $('#graph-canvas');
+    if (!tooltip || !canvas || !event) return;
+    const bounds = canvas.getBoundingClientRect();
+    const clientX = event.clientX ?? bounds.left + bounds.width / 2;
+    const clientY = event.clientY ?? bounds.top + bounds.height / 2;
+    const left = Math.min(bounds.width - tooltip.offsetWidth - 10, Math.max(10, clientX - bounds.left + 14));
+    const top = Math.min(bounds.height - tooltip.offsetHeight - 10, Math.max(10, clientY - bounds.top + 14));
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+}
+
+function hideGraphTooltip() {
+    hide($('#graph-tooltip'));
+}
+
+async function handleGraphNode(item, selection) {
+    selection.classed('selected', (node) => node.id === item.id);
+    const path = graphNodePath(item);
+    updateSelection(path, item);
+    if (path) {
+        await openFile(path);
+        selectSource(path, item);
+        selectInspector('node');
     } else {
-        monacoEditor = monaco.editor.create(document.getElementById('editor'), {
-            value: content,
-            language: languageFor(path),
-            theme: 'vs-dark'
-        });
+        clearSourceInspectors(
+            'The selected graph node has no source file.',
+            'The selected graph node has no source file for structural summary evidence.',
+        );
+        selectInspector('node');
     }
-    currentFile = path;
-    document.getElementById('save-btn').disabled = false;
-    document.querySelectorAll('#file-tree div').forEach(el => {
-        el.classList.toggle('active', el.dataset.path === path);
-    });
-    setStatus(path);
 }
 
-async function saveFile() {
-    if (!monacoEditor || !currentFile) return;
+function graphZoom(factor) {
+    const runtime = state.graphRuntime;
+    if (!runtime) return;
+    runtime.svg.transition().duration(180).call(runtime.zoom.scaleBy, factor);
+}
+
+function resetGraphView() {
+    const runtime = state.graphRuntime;
+    if (!runtime) return;
+    runtime.svg.transition().duration(220).call(runtime.zoom.transform, window.d3.zoomIdentity);
+}
+
+function renderStructured(value, depth = 0, budget = { count: 0, limit: 500 }) {
+    const wrapper = document.createElement('div');
+    if (budget.count >= budget.limit) {
+        wrapper.textContent = `Display limited to ${budget.limit} values.`;
+        return wrapper;
+    }
+    budget.count += 1;
+
+    if (value === null || value === undefined || typeof value !== 'object') {
+        wrapper.textContent = value === null ? 'null' : value === undefined ? 'No response body' : String(value);
+        return wrapper;
+    }
+
+    if (Array.isArray(value)) {
+        if (value.length === 0) {
+            wrapper.textContent = '[]';
+            return wrapper;
+        }
+        value.forEach((item, index) => {
+            const row = document.createElement('div');
+            row.className = 'result-row';
+            const key = document.createElement('strong');
+            key.textContent = String(index + 1);
+            row.append(key, renderStructured(item, depth + 1, budget));
+            wrapper.appendChild(row);
+        });
+        return wrapper;
+    }
+
+    const entries = Object.entries(value);
+    if (entries.length === 0) {
+        wrapper.textContent = '{}';
+        return wrapper;
+    }
+    entries.forEach(([keyName, item]) => {
+        const row = document.createElement('div');
+        row.className = 'result-row';
+        const key = document.createElement('strong');
+        key.textContent = keyName.replace(/_/g, ' ');
+        row.append(key, renderStructured(item, depth + 1, budget));
+        wrapper.appendChild(row);
+    });
+    return wrapper;
+}
+
+function captureGroundingSnapshot(path) {
+    const documentState = state.openDocuments.get(path);
+    if (!documentState || documentState.dirty) return null;
+    if (typeof documentState.hash !== 'string' || documentState.hash.length === 0) return null;
+    state.groundingRequest += 1;
+    return {
+        requestId: state.groundingRequest,
+        path,
+        hash: documentState.hash,
+        contentGeneration: documentState.contentGeneration,
+        documentState,
+    };
+}
+
+function captureCleanWorkspaceSnapshot() {
+    const documents = [...state.openDocuments.entries()].map(([path, documentState]) => ({
+        path,
+        documentState,
+        hash: documentState.hash,
+        contentGeneration: documentState.contentGeneration,
+        dirty: documentState.dirty,
+    }));
+    if (documents.some((document) => document.dirty)) return null;
+    return documents;
+}
+
+function workspaceSnapshotStaleness(snapshot) {
+    const dirtyEntry = [...state.openDocuments.entries()].find(([, documentState]) => documentState.dirty);
+    if (dirtyEntry) return `${dirtyEntry[0]} has unsaved changes`;
+    for (const expected of snapshot) {
+        const current = state.openDocuments.get(expected.path);
+        if (!current || current !== expected.documentState) return `${expected.path} was closed or reloaded`;
+        if (current.hash !== expected.hash) return `${expected.path} changed its saved hash`;
+        if (current.contentGeneration !== expected.contentGeneration) return `${expected.path} changed in the editor`;
+        if (current.dirty) return `${expected.path} has unsaved changes`;
+    }
+    return null;
+}
+
+function groundingSnapshotStaleness(snapshot) {
+    if (snapshot.requestId !== state.groundingRequest) return 'a newer grounding request started';
+    if (state.activePath !== snapshot.path) return `the active document changed to ${state.activePath || 'none'}`;
+    const current = state.openDocuments.get(snapshot.path);
+    if (!current || current !== snapshot.documentState) return 'the requested document was closed or reloaded';
+    if (current.hash !== snapshot.hash) return 'the saved document hash changed';
+    if (current.contentGeneration !== snapshot.contentGeneration) return 'the editor buffer changed';
+    if (current.dirty) return 'the editor buffer has unsaved changes';
+    return null;
+}
+
+function discardStaleGroundingResponse(result, snapshot, label) {
+    const reason = groundingSnapshotStaleness(snapshot);
+    if (!reason) return false;
+    const message = `${label} response discarded because ${reason}. Run the action again for the current snapshot.`;
+    appendOutput(`${label} response discarded: ${snapshot.path}`, {
+        discarded: true,
+        reason,
+        path: snapshot.path,
+        expected_hash: snapshot.hash,
+        content_generation: snapshot.contentGeneration,
+    });
+    if (snapshot.requestId === state.groundingRequest) {
+        result.className = 'inspector-result pane-state';
+        result.textContent = message;
+        setGlobalStatus(`${label} response discarded as stale`, 'warning');
+        toast(message, 'warning');
+    }
+    return true;
+}
+
+async function runReview() {
+    const path = state.activePath;
+    if (!path) return;
+    const question = $('#review-question').value.trim();
+    if (!question) {
+        toast('Enter a review question.', 'warning');
+        return;
+    }
+    const snapshot = captureGroundingSnapshot(path);
+    if (!snapshot) {
+        toast('Save the visible buffer and reload it if its disk hash is unavailable before requesting a grounded review.', 'warning');
+        return;
+    }
+    const button = $('#review-submit');
+    const toolbarButton = $('#review-action');
+    setBusy(button, true);
+    setBusy(toolbarButton, true);
+    selectInspector('grounding');
+    const result = $('#review-result');
+    result.className = 'inspector-result pane-state';
+    result.textContent = `Requesting grounded review for ${path}...`;
+    setGlobalStatus('Grounded review running', 'working');
+
     try {
-        const res = await fetch('/api/ide/write', {
+        const payload = await request('/api/assistant/review', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ path: currentFile, content: monacoEditor.getValue() })
+            body: {
+                path,
+                question,
+                expected_hash: snapshot.hash,
+                mode: state.context.mode,
+                graph_revision: state.workspace?.graph_revision || null,
+                scope: $('#review-scope')?.value || 'selected_document',
+            },
         });
-        if (res.ok) {
-            setStatus(`Saved ${currentFile}`);
-        } else {
-            setStatus(`Failed to save ${currentFile}: HTTP ${res.status}`, true);
+        if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
+        result.className = 'inspector-result';
+        result.replaceChildren(renderStructured(payload));
+        appendOutput(`Grounded review: ${path}`, payload);
+        const evidenceComplete = payload?.review?.evidence_complete === true
+            && payload?.context?.evidence_complete !== false;
+        setGlobalStatus(
+            evidenceComplete ? 'Grounded review response received' : 'Grounded review used partial evidence',
+            evidenceComplete ? 'success' : 'warning',
+        );
+        if (!evidenceComplete) {
+            toast('Grounded review completed with explicitly partial evidence.', 'warning');
         }
-    } catch (err) {
-        setStatus(`Failed to save ${currentFile}: ${err.message}`, true);
+    } catch (error) {
+        if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Review failed: ${formatError(error)}`;
+        appendOutput(`Grounded review failed: ${path}`, formatError(error));
+        setGlobalStatus('Grounded review failed', 'error');
+        toast(`Review failed: ${formatError(error)}`, 'error');
+    } finally {
+        setBusy(button, false);
+        setBusy(toolbarButton, false);
+        updateDocumentStatus();
     }
 }
 
-if (document.getElementById('file-tree')) {
-    document.getElementById('save-btn').onclick = saveFile;
-    document.addEventListener('keydown', e => {
-        if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-            e.preventDefault();
-            saveFile();
-        }
-    });
-    loadEditor();
+async function previewReviewEvidence() {
+    const path = state.activePath;
+    if (!path) return;
+    const snapshot = captureGroundingSnapshot(path);
+    if (!snapshot) {
+        toast('Save the visible buffer and reload it if its disk hash is unavailable before previewing disk-backed evidence.', 'warning');
+        return;
+    }
+    const button = $('#review-evidence-preview');
+    const result = $('#review-result');
+    setBusy(button, true);
+    result.className = 'inspector-result pane-state';
+    result.textContent = `Building evidence manifest for ${path}...`;
+    setGlobalStatus('Evidence preview running', 'working');
+    try {
+        const payload = await request('/api/assistant/evidence/preview', {
+            method: 'POST',
+            body: {
+                path,
+                expected_hash: snapshot.hash,
+                mode: state.context.mode,
+                graph_revision: state.workspace?.graph_revision || null,
+                scope: $('#review-scope')?.value || 'selected_document',
+            },
+        });
+        if (discardStaleGroundingResponse(result, snapshot, 'Evidence preview')) return;
+        result.className = 'inspector-result';
+        result.replaceChildren(renderStructured(payload));
+        appendOutput(`Evidence preview: ${path}`, payload);
+        setGlobalStatus(
+            payload?.evidence_complete ? 'Evidence snapshot is complete' : 'Evidence snapshot is explicitly partial',
+            payload?.evidence_complete ? 'success' : 'warning',
+        );
+    } catch (error) {
+        if (discardStaleGroundingResponse(result, snapshot, 'Evidence preview')) return;
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Evidence preview failed: ${formatError(error)}`;
+        appendOutput(`Evidence preview failed: ${path}`, formatError(error));
+        setGlobalStatus('Evidence preview failed', 'error');
+    } finally {
+        setBusy(button, false);
+        updateDocumentStatus();
+    }
 }
+
+async function loadReadiness() {
+    const workspaceSnapshot = captureCleanWorkspaceSnapshot();
+    if (!workspaceSnapshot) {
+        toast('Save all modified buffers before running readiness checks.', 'warning');
+        return;
+    }
+    const button = $('#readiness-submit');
+    const toolbarButton = $('#readiness-action');
+    setBusy(button, true);
+    setBusy(toolbarButton, true);
+    selectInspector('readiness');
+    const result = $('#readiness-result');
+    result.className = 'inspector-result pane-state';
+    result.textContent = 'Loading readiness checks...';
+    setGlobalStatus('Readiness checks running', 'working');
+
+    try {
+        const payload = await request('/api/readiness');
+        const staleReason = workspaceSnapshotStaleness(workspaceSnapshot);
+        if (staleReason) {
+            result.className = 'inspector-result pane-state';
+            result.textContent = `Readiness response discarded because ${staleReason}. Run it again for the current buffers.`;
+            appendOutput('Readiness response discarded', { discarded: true, reason: staleReason });
+            setGlobalStatus('Readiness response discarded as stale', 'warning');
+            toast('Readiness response discarded after an editor change.', 'warning');
+            return;
+        }
+        const outcome = explicitOutcome(payload);
+        result.className = 'inspector-result';
+        result.replaceChildren();
+        if (outcome !== null) {
+            const heading = document.createElement('div');
+            heading.className = `result-status ${outcome ? 'status-pass' : 'status-fail'}`;
+            heading.textContent = outcome ? 'Ready' : 'Not ready';
+            result.appendChild(heading);
+        }
+        result.appendChild(renderStructured(payload));
+        appendOutput('Readiness', payload);
+        setGlobalStatus(
+            outcome === true ? 'Ready' : outcome === false ? 'Not ready' : 'Readiness response received',
+            outcome === true ? 'success' : outcome === false ? 'error' : 'neutral',
+        );
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Readiness unavailable: ${formatError(error)}`;
+        appendOutput('Readiness request failed', formatError(error));
+        setGlobalStatus('Readiness request failed', 'error');
+        toast(`Readiness failed: ${formatError(error)}`, 'error');
+    } finally {
+        setBusy(button, false);
+        setBusy(toolbarButton, false);
+        updateDocumentStatus();
+    }
+}
+
+async function loadRecommendations() {
+    const button = $('#recommendations-submit');
+    setBusy(button, true);
+    selectInspector('recommendations');
+    const result = $('#recommendations-result');
+    const list = $('#recommendations-list');
+    result.className = 'inspector-result pane-state';
+    result.textContent = 'Loading recommendations...';
+    list.replaceChildren();
+    setGlobalStatus('Recommendations running', 'working');
+
+    try {
+        const payload = await request('/api/ide/recommendations');
+        if (!Array.isArray(payload) || payload.length === 0) {
+            result.className = 'inspector-result pane-state';
+            result.textContent = 'No recommendations available.';
+            setGlobalStatus('Recommendations complete', 'success');
+            return;
+        }
+
+        result.className = 'inspector-result hidden';
+        payload.forEach((rec, idx) => {
+            const card = document.createElement('div');
+            card.className = `recommendation-card severity-${rec.severity || 'info'}`;
+
+            const header = document.createElement('div');
+            header.className = 'rec-card-header';
+            const sevBadge = document.createElement('span');
+            sevBadge.className = `rec-severity rec-severity-${rec.severity || 'info'}`;
+            sevBadge.textContent = rec.severity || 'info';
+            const idLabel = document.createElement('span');
+            idLabel.className = 'rec-id';
+            idLabel.textContent = rec.id || `R${idx + 1}`;
+            header.append(sevBadge, idLabel);
+            card.appendChild(header);
+
+            const title = document.createElement('div');
+            title.className = 'rec-title';
+            title.textContent = rec.title || `Recommendation ${idx + 1}`;
+            card.appendChild(title);
+
+            if (rec.rationale) {
+                const rationale = document.createElement('div');
+                rationale.className = 'rec-rationale';
+                rationale.textContent = rec.rationale;
+                card.appendChild(rationale);
+            }
+
+            if (Array.isArray(rec.evidence) && rec.evidence.length > 0) {
+                const evHeader = document.createElement('div');
+                evHeader.className = 'rec-section-label';
+                evHeader.textContent = 'Evidence';
+                card.appendChild(evHeader);
+                rec.evidence.forEach((ev) => {
+                    const row = document.createElement('button');
+                    row.className = 'rec-evidence-row';
+                    row.type = 'button';
+                    const evDetail = document.createElement('span');
+                    evDetail.textContent = ev.detail || ev.source || '';
+                    const evPath = document.createElement('span');
+                    evPath.className = 'rec-evidence-path';
+                    evPath.textContent = ev.path ? `${ev.path}${ev.line ? ':' + ev.line : ''}` : ev.source || '';
+                    row.append(evDetail, evPath);
+                    if (ev.path) {
+                        row.addEventListener('click', () => openFile(ev.path, { line: ev.line, column: ev.column }));
+                    }
+                    card.appendChild(row);
+                });
+            }
+
+            if (rec.evidence_complete === false) {
+                const partial = document.createElement('div');
+                partial.className = 'rec-partial';
+                partial.textContent = 'Evidence is partial — some diagnostics were truncated.';
+                card.appendChild(partial);
+            }
+
+            if (Array.isArray(rec.hops) && rec.hops.length > 0) {
+                const hopsHeader = document.createElement('div');
+                hopsHeader.className = 'rec-section-label';
+                hopsHeader.textContent = 'Recommended steps';
+                card.appendChild(hopsHeader);
+                rec.hops.forEach((hop) => {
+                    const hopDiv = document.createElement('div');
+                    hopDiv.className = 'rec-hop';
+                    const hopNum = document.createElement('span');
+                    hopNum.className = 'rec-hop-number';
+                    hopNum.textContent = String(hop.order || '');
+                    const hopBody = document.createElement('div');
+                    hopBody.className = 'rec-hop-body';
+                    const hopAction = document.createElement('div');
+                    hopAction.className = 'rec-hop-action';
+                    hopAction.textContent = hop.action || '';
+                    const hopTarget = document.createElement('div');
+                    hopTarget.className = 'rec-hop-target';
+                    hopTarget.textContent = hop.target || '';
+                    const hopVerify = document.createElement('div');
+                    hopVerify.className = 'rec-hop-verify';
+                    hopVerify.textContent = hop.verification || '';
+                    hopBody.append(hopAction, hopTarget, hopVerify);
+                    hopDiv.append(hopNum, hopBody);
+                    card.appendChild(hopDiv);
+                });
+            }
+
+            list.appendChild(card);
+        });
+
+        appendOutput('Recommendations', payload);
+        setGlobalStatus('Recommendations loaded', 'success');
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Recommendations unavailable: ${formatError(error)}`;
+        appendOutput('Recommendations request failed', formatError(error));
+        setGlobalStatus('Recommendations request failed', 'error');
+        toast(`Recommendations failed: ${formatError(error)}`, 'error');
+    } finally {
+        if (button) setBusy(button, false);
+        updateDocumentStatus();
+    }
+}
+
+function diagnosticFromObject(item, fallbackSource) {
+    if (!item || typeof item !== 'object') return null;
+    const span = Array.isArray(item.spans) ? item.spans.find((candidate) => candidate.is_primary) || item.spans[0] : null;
+    const message = item.message || item.rendered || item.text || item.description;
+    if (!message) return null;
+    const severity = String(item.severity || item.level || item.kind || 'info').toLowerCase();
+    return {
+        severity: severity.includes('error') ? 'error' : severity.includes('warn') ? 'warning' : 'info',
+        message: String(message).trim(),
+        path: resolveWorkspacePath(item.path || item.file || item.file_name || span?.file || span?.file_name || ''),
+        line: item.line || item.line_start || span?.line_start || null,
+        column: item.column || item.column_start || span?.column_start || null,
+        source: item.source || fallbackSource,
+    };
+}
+
+function extractDiagnostics(payload, source) {
+    const diagnostics = [];
+    const seenObjects = new Set();
+
+    const visit = (value, key = '') => {
+        if (!value || typeof value !== 'object' || seenObjects.has(value)) return;
+        seenObjects.add(value);
+        if (Array.isArray(value)) {
+            if (['problems', 'diagnostics', 'messages', 'errors', 'warnings'].includes(key)) {
+                value.forEach((item) => {
+                    const diagnostic = diagnosticFromObject(item, source);
+                    if (diagnostic) diagnostics.push(diagnostic);
+                });
+            }
+            value.forEach((item) => visit(item, key));
+            return;
+        }
+        Object.entries(value).forEach(([childKey, child]) => visit(child, childKey));
+    };
+    visit(payload);
+
+    for (const stream of [payload?.stdout, payload?.stderr, payload?.output]) {
+        if (typeof stream !== 'string') continue;
+        stream.split(/\r?\n/).forEach((line) => {
+            if (!line.trim().startsWith('{')) return;
+            try {
+                const parsed = JSON.parse(line);
+                if (parsed.reason === 'compiler-message' && parsed.message) {
+                    const diagnostic = diagnosticFromObject(parsed.message, source);
+                    if (diagnostic) diagnostics.push(diagnostic);
+                }
+            } catch (_) {
+                // Non-JSON process output remains available verbatim in Output.
+            }
+        });
+    }
+
+    const unique = new Map();
+    diagnostics.forEach((item) => {
+        const key = `${item.severity}|${item.path}|${item.line}|${item.column}|${item.message}`;
+        unique.set(key, item);
+    });
+    return [...unique.values()];
+}
+
+function renderProblems() {
+    const list = $('#problems-list');
+    list.replaceChildren();
+    $('#problem-count').textContent = String(state.problems.length);
+    $('#problems-empty').classList.toggle('hidden', state.problems.length > 0);
+
+    state.problems.forEach((problem) => {
+        const row = document.createElement('div');
+        row.className = `problem-row problem-${problem.severity}`;
+        if (problem.path) row.dataset.path = problem.path;
+        row.appendChild(icon(problem.severity === 'error' ? 'circle-x' : problem.severity === 'warning' ? 'triangle-alert' : 'info', 'problem-icon'));
+
+        const message = document.createElement('span');
+        message.className = 'problem-message';
+        message.textContent = problem.message;
+        const source = document.createElement('span');
+        source.className = 'problem-source';
+        source.textContent = problem.source || '';
+        const location = document.createElement('span');
+        location.className = 'problem-location';
+        location.textContent = problem.path
+            ? `${problem.path}${problem.line ? `:${problem.line}${problem.column ? `:${problem.column}` : ''}` : ''}`
+            : '';
+        row.append(message, source, location);
+
+        if (problem.path) {
+            row.tabIndex = 0;
+            row.setAttribute('role', 'button');
+            const open = () => openFile(problem.path, { line: problem.line, column: problem.column });
+            row.addEventListener('click', open);
+            row.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    open();
+                }
+            });
+        }
+        list.appendChild(row);
+    });
+    refreshIcons();
+}
+
+async function runAnalysis(kind, trigger) {
+    const workspaceSnapshot = captureCleanWorkspaceSnapshot();
+    if (!workspaceSnapshot) {
+        toast('Save all modified buffers before running compiler feedback.', 'warning');
+        return;
+    }
+    const label = ANALYSIS_LABELS[kind] || kind;
+    const analysisButtons = $$('[data-analysis-kind]');
+    analysisButtons.forEach((button) => setBusy(button, button === trigger));
+    analysisButtons.forEach((button) => { button.disabled = true; });
+    setGlobalStatus(`${label} running`, 'working');
+    selectBottomView('output');
+    appendOutput(label, 'Started');
+
+    try {
+        const payload = await request('/api/analysis/run', { method: 'POST', body: { kind } });
+        const staleReason = workspaceSnapshotStaleness(workspaceSnapshot);
+        if (staleReason) {
+            appendOutput(`${label} response discarded`, { discarded: true, reason: staleReason });
+            setGlobalStatus(`${label} response discarded as stale`, 'warning');
+            toast(`${label} results were discarded after an editor change.`, 'warning');
+            return;
+        }
+        state.problems = extractDiagnostics(payload, label);
+        renderProblems();
+        appendOutput(label, payload);
+        const outcome = explicitOutcome(payload);
+        if (state.problems.length > 0) selectBottomView('problems');
+        setGlobalStatus(
+            outcome === true ? `${label} passed` : outcome === false ? `${label} failed` : `${label} response received`,
+            outcome === false ? 'error' : outcome === true ? 'success' : 'neutral',
+        );
+    } catch (error) {
+        state.problems = [{ severity: 'error', message: formatError(error), path: '', line: null, column: null, source: label }];
+        renderProblems();
+        appendOutput(`${label} failed`, formatError(error));
+        selectBottomView('problems');
+        setGlobalStatus(`${label} request failed`, 'error');
+        toast(`${label} failed: ${formatError(error)}`, 'error');
+    } finally {
+        analysisButtons.forEach((button) => {
+            button.classList.remove('busy');
+            button.setAttribute('aria-busy', 'false');
+            button.disabled = false;
+        });
+        updateDocumentStatus();
+    }
+}
+
+function normalizeGit(payload) {
+    const data = payload?.git && typeof payload.git === 'object' ? payload.git : payload || {};
+    const changes = data.changes || data.files || data.modified || [];
+    return {
+        branch: data.branch || data.current_branch || data.head?.name || 'detached',
+        head: typeof data.head === 'string' ? data.head : data.head?.oid || data.commit || data.sha || null,
+        dirty: data.dirty ?? data.is_dirty ?? (Array.isArray(changes) ? changes.length > 0 : null),
+        changes,
+        raw: payload,
+    };
+}
+
+function shortHead(head) {
+    return head ? String(head).slice(0, 10) : 'HEAD unavailable';
+}
+
+function renderGitStatus() {
+    const summary = $('#branch-summary span');
+    const detail = $('#git-status-detail');
+    const heading = $('#branch-head');
+    if (!state.git) {
+        summary.textContent = 'Git unavailable';
+        heading.textContent = 'Git status unavailable';
+        detail.textContent = 'No Git status response';
+        return;
+    }
+    const dirtyLabel = state.git.dirty === true ? ' · modified' : state.git.dirty === false ? ' · clean' : '';
+    summary.textContent = `${state.git.branch}${dirtyLabel}`;
+    heading.textContent = `${state.git.branch} at ${shortHead(state.git.head)}`;
+    detail.className = 'git-status-detail';
+    detail.replaceChildren(renderStructured(state.git.raw));
+}
+
+async function loadGitStatus(options = {}) {
+    try {
+        const payload = await request('/api/git/status');
+        state.git = normalizeGit(payload);
+        renderGitStatus();
+        return payload;
+    } catch (error) {
+        state.git = null;
+        renderGitStatus();
+        $('#git-status-detail').className = 'git-status-detail pane-state error';
+        $('#git-status-detail').textContent = `Git status unavailable: ${formatError(error)}`;
+        if (!options.silent) appendOutput('Git status request failed', formatError(error));
+        throw error;
+    }
+}
+
+async function openBranchDialog(prefill = '') {
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        toast('Save all modified buffers before previewing a Git branch.', 'warning');
+        return;
+    }
+    const dialog = $('#branch-dialog');
+    resetBranchPreview();
+    $('#branch-name').value = prefill;
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+    $('#branch-name').focus();
+    try {
+        await loadGitStatus({ silent: true });
+    } catch (_) {
+        // The dialog displays the precise status request error.
+    }
+}
+
+function validBranchName(name) {
+    return name.length > 0
+        && name.length <= 200
+        && /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)
+        && !name.endsWith('/')
+        && !name.endsWith('.')
+        && !name.includes('..')
+        && !name.includes('//')
+        && !name.includes('@{');
+}
+
+function resetBranchPreview() {
+    state.branchPreview = null;
+    const preview = $('#branch-preview');
+    preview.className = 'branch-preview pane-state';
+    preview.textContent = 'No preview';
+    $('#branch-confirm').checked = false;
+    $('#branch-confirm').disabled = true;
+    $('#branch-create-action').disabled = true;
+}
+
+function updateBranchCreateState() {
+    const currentName = $('#branch-name').value.trim();
+    const anyDirty = [...state.openDocuments.values()].some((document) => document.dirty);
+    const previewMatches = state.branchPreview
+        && state.branchPreview.name === currentName
+        && state.branchPreview.expectedHead === state.git?.head;
+    $('#branch-create-action').disabled = anyDirty || !previewMatches || !$('#branch-confirm').checked;
+}
+
+async function previewBranch() {
+    const name = $('#branch-name').value.trim();
+    const preview = $('#branch-preview');
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        resetBranchPreview();
+        preview.className = 'branch-preview pane-state error';
+        preview.textContent = 'Save all modified buffers before previewing a Git branch.';
+        return;
+    }
+    if (!validBranchName(name)) {
+        preview.className = 'branch-preview pane-state error';
+        preview.textContent = 'Enter a valid Git branch name using letters, numbers, dot, slash, underscore, or hyphen.';
+        return;
+    }
+    if (!state.git?.head) {
+        preview.className = 'branch-preview pane-state error';
+        preview.textContent = 'Git HEAD is unavailable; branch preview cannot be grounded.';
+        return;
+    }
+
+    const button = $('#branch-preview-action');
+    setBusy(button, true);
+    preview.className = 'branch-preview pane-state';
+    preview.textContent = `Requesting preview for ${name} at ${state.git.head}...`;
+    try {
+        const payload = await request('/api/git/branch', {
+            method: 'POST',
+            body: { name, expected_head: state.git.head, confirm: false },
+        });
+        if (payload && typeof payload === 'object' && payload.success === false) {
+            throw new ApiError(payload.error || payload.message || 'Branch preview was rejected.', 0, payload);
+        }
+        preview.className = 'branch-preview';
+        preview.replaceChildren(renderStructured(payload));
+        const blockers = Array.isArray(payload?.blockers) ? payload.blockers : [];
+        if (blockers.length === 0) {
+            state.branchPreview = { name, expectedHead: state.git.head, payload };
+            $('#branch-confirm').disabled = false;
+        } else {
+            state.branchPreview = null;
+            $('#branch-confirm').disabled = true;
+        }
+        appendOutput(`Branch preview: ${name}`, payload);
+        updateBranchCreateState();
+    } catch (error) {
+        state.branchPreview = null;
+        preview.className = 'branch-preview pane-state error';
+        preview.textContent = `Preview failed: ${formatError(error)}`;
+        $('#branch-confirm').disabled = true;
+        appendOutput(`Branch preview failed: ${name}`, formatError(error));
+    } finally {
+        setBusy(button, false);
+    }
+}
+
+async function createBranch() {
+    const name = $('#branch-name').value.trim();
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        resetBranchPreview();
+        $('#branch-preview').className = 'branch-preview pane-state error';
+        $('#branch-preview').textContent = 'Save all modified buffers before creating a Git branch.';
+        return;
+    }
+    if (!state.branchPreview || state.branchPreview.name !== name || !$('#branch-confirm').checked) return;
+    if (state.branchPreview.expectedHead !== state.git?.head) {
+        resetBranchPreview();
+        $('#branch-preview').className = 'branch-preview pane-state error';
+        $('#branch-preview').textContent = 'Git HEAD changed after preview. Preview the branch again.';
+        return;
+    }
+
+    const button = $('#branch-create-action');
+    setBusy(button, true);
+    setGlobalStatus(`Creating branch ${name}`, 'working');
+    try {
+        const payload = await request('/api/git/branch', {
+            method: 'POST',
+            body: { name, expected_head: state.git.head, confirm: true },
+        });
+        appendOutput(`Branch create: ${name}`, payload);
+        const created = payload?.created === true || payload?.success === true || String(payload?.status || '').toLowerCase() === 'created';
+        if (created) {
+            setGlobalStatus(`Created branch ${name}`, 'success');
+            toast(`Created branch ${name}`, 'success');
+            $('#branch-dialog').close();
+            try {
+                await loadGitStatus({ silent: true });
+            } catch (_) {
+                // Git status carries its own precise error state after creation.
+            }
+        } else {
+            $('#branch-preview').className = 'branch-preview';
+            $('#branch-preview').replaceChildren(renderStructured(payload));
+            setGlobalStatus('Branch response received; creation was not confirmed', 'neutral');
+        }
+    } catch (error) {
+        $('#branch-preview').className = 'branch-preview pane-state error';
+        $('#branch-preview').textContent = `Branch creation failed: ${formatError(error)}`;
+        appendOutput(`Branch creation failed: ${name}`, formatError(error));
+        setGlobalStatus('Branch creation failed', 'error');
+        toast(`Branch creation failed: ${formatError(error)}`, 'error');
+    } finally {
+        button.classList.remove('busy');
+        button.setAttribute('aria-busy', 'false');
+        updateBranchCreateState();
+    }
+}
+
+document.addEventListener('DOMContentLoaded', initialize);

@@ -4,7 +4,8 @@
 //! - `warning_count`: compiler warnings from `cargo check` (cached per analyzer;
 //!   `None` when `cargo` is unavailable).
 //! - `complexity`: estimated cyclomatic complexity summed over the component's files.
-//! - `dead_code_ratio`: `#[allow(dead_code)]` annotations per function (static heuristic).
+//! - `dead_code_annotation_ratio`: `#[allow(dead_code)]` annotations per function
+//!   (static heuristic, not semantic dead-code detection).
 //! - `coverage`: left `None`; real coverage requires tarpaulin/llvm-cov integration.
 
 use anyhow::Result;
@@ -22,6 +23,7 @@ pub struct QualityAnalyzer {
     warnings: OnceCell<Option<HashMap<String, usize>>>,
     /// Command used to run `cargo check`; overridable for tests.
     cargo_cmd: String,
+    collect_compiler_warnings: bool,
 }
 
 impl QualityAnalyzer {
@@ -33,6 +35,18 @@ impl QualityAnalyzer {
         Self {
             warnings: OnceCell::new(),
             cargo_cmd: cmd.to_string(),
+            collect_compiler_warnings: true,
+        }
+    }
+
+    /// Static-only analysis for graph indexing. Compiler feedback is an
+    /// explicit IDE action and must not spawn nested Cargo processes while a
+    /// graph is being built or refreshed.
+    pub fn static_only() -> Self {
+        Self {
+            warnings: OnceCell::new(),
+            cargo_cmd: "cargo".to_string(),
+            collect_compiler_warnings: false,
         }
     }
 
@@ -41,7 +55,10 @@ impl QualityAnalyzer {
             return Ok(());
         };
 
-        node.warning_count = self.warnings_for(path);
+        node.warning_count = self
+            .collect_compiler_warnings
+            .then(|| self.warnings_for(path))
+            .flatten();
         node.complexity = Some(cyclomatic_complexity(Path::new(path))?);
         node.dead_code_ratio = Some(dead_code_ratio(Path::new(path))?);
         // Real coverage requires tarpaulin/llvm-cov; unknown for now.
@@ -138,7 +155,16 @@ pub fn cyclomatic_complexity(path: &Path) -> Result<f64> {
     let mut total = 0.0;
     for content in read_rs_files(path)? {
         let mut score = 1.0;
-        for token in [" if ", " else if ", " match ", " for ", " while ", " loop ", "&&", "||"] {
+        for token in [
+            " if ",
+            " else if ",
+            " match ",
+            " for ",
+            " while ",
+            " loop ",
+            "&&",
+            "||",
+        ] {
             score += content.matches(token).count() as f64;
         }
         total += score;

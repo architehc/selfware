@@ -38,10 +38,27 @@ impl Gatekeeper {
         })
     }
 
-    pub fn check_architecture_gates(&self, _graph: &super::Graph) -> Result<GateResult> {
+    pub fn check_architecture_gates(&self, graph: &super::Graph) -> Result<GateResult> {
+        let report = super::validate_graph(graph);
+        let mut errors = Vec::new();
+        if !report.duplicate_ids.is_empty() {
+            errors.push(format!(
+                "duplicate node ids: {}",
+                report.duplicate_ids.join(", ")
+            ));
+        }
+        if !report.cycles.is_empty() {
+            errors.push(format!("{} ontology cycle(s)", report.cycles.len()));
+        }
+        if !report.dangling_edges.is_empty() {
+            errors.push(format!("{} dangling edge(s)", report.dangling_edges.len()));
+        }
+        if !report.isolated_nodes.is_empty() {
+            errors.push(format!("{} isolated node(s)", report.isolated_nodes.len()));
+        }
         Ok(GateResult {
-            passed: true,
-            errors: vec![],
+            passed: report.valid,
+            errors,
         })
     }
 }

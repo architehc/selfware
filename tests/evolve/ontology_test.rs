@@ -93,7 +93,7 @@ fn test_validate_clean_graph_is_valid() {
 }
 
 #[test]
-fn test_validate_detects_cycle() {
+fn test_validate_allows_dependency_cycle() {
     let graph = Graph {
         nodes: vec![
             Node::code("a", "src/a.rs"),
@@ -103,11 +103,50 @@ fn test_validate_detects_cycle() {
         edges: vec![edge("a", "b"), edge("b", "c"), edge("c", "a")],
     };
     let report = validate_graph(&graph);
+    assert!(report.valid);
+    assert!(report.cycles.is_empty());
+}
+
+#[test]
+fn test_validate_detects_concept_hierarchy_cycle() {
+    let concept = |id: &str| {
+        let mut node = Node::code(id, id);
+        node.layer = NodeLayer::Concept;
+        node.path = None;
+        node
+    };
+    let influences = |from: &str, to: &str| Edge {
+        from: from.to_string(),
+        to: to.to_string(),
+        edge_type: EdgeType::Influences,
+    };
+    let graph = Graph {
+        nodes: vec![concept("a"), concept("b"), concept("c")],
+        edges: vec![
+            influences("a", "b"),
+            influences("b", "c"),
+            influences("c", "a"),
+        ],
+    };
+    let report = validate_graph(&graph);
     assert!(!report.valid);
     assert_eq!(report.cycles.len(), 1);
-    let cycle = &report.cycles[0];
-    assert_eq!(cycle.first(), cycle.last());
-    assert_eq!(cycle.len(), 4);
+    assert_eq!(report.cycles[0].first(), report.cycles[0].last());
+}
+
+#[test]
+fn test_validate_detects_duplicate_ids() {
+    let graph = Graph {
+        nodes: vec![
+            Node::code("same", "src/a.rs"),
+            Node::test("same", "tests/a.rs"),
+        ],
+        edges: vec![],
+    };
+    let report = validate_graph(&graph);
+    assert!(!report.valid);
+    assert_eq!(report.duplicate_ids, vec!["same".to_string()]);
+    assert_eq!(report.isolated_nodes, vec!["same".to_string()]);
 }
 
 #[test]

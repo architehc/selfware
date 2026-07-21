@@ -393,18 +393,5 @@ fn extract_outcome(output: &[u8]) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_count_steps() {
-        let output = b"Step 1 Executing...\nStep 2 Executing...\n";
-        assert_eq!(count_steps(output), 2);
-    }
-
-    #[test]
-    fn test_extract_outcome() {
-        let output = b"Some log\nOutcome: task_completed\nMore log\n";
-        assert_eq!(extract_outcome(output), "task_completed");
-    }
-}
+#[path = "../../../tests/unit/bench_harness/long_running/runner/runner_test.rs"]
+mod tests;

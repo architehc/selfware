@@ -1,7 +1,7 @@
-//! ActionEngine: executes evolution actions.
+//! ActionEngine: builds non-mutating evolution action proposals.
 //!
-//! Actions either change the active context (handled elsewhere) or are
-//! represented as git branches (`evolve/<kind>-<target>-<timestamp>`).
+//! Actions either change the active context (handled elsewhere) or produce a
+//! branch proposal. Branch creation itself is owned by the guarded Git engine.
 
 use anyhow::Result;
 use chrono::Utc;
@@ -15,13 +15,13 @@ pub enum Action {
 }
 
 pub struct ActionResult {
-    /// Suggested branch name only — no git branch is created (see `execute`).
+    /// Suggested branch name only; no Git branch is created by `propose`.
     pub branch: Option<String>,
     pub message: String,
 }
 
 pub struct ActionEngine {
-    // Git operations will use git2 or shell
+    // Stateless by design. Guarded mutations live in the dedicated engines.
 }
 
 impl Default for ActionEngine {
@@ -38,28 +38,59 @@ impl ActionEngine {
     pub fn branch_name(action: &Action) -> String {
         let ts = Utc::now().format("%Y%m%d-%H%M%S");
         match action {
-            Action::Extend { component } => format!("evolve/extend-{}-{}", component, ts),
-            Action::Connect { from, to } => format!("evolve/connect-{}-{}-{}", from, to, ts),
-            Action::BlockEvolution { component } => format!("evolve/block-{}-{}", component, ts),
-            Action::Notify { component } => format!("evolve/notify-{}-{}", component, ts),
+            Action::Extend { component } => {
+                format!("evolve/extend-{}-{}", branch_segment(component), ts)
+            }
+            Action::Connect { from, to } => format!(
+                "evolve/connect-{}-{}-{}",
+                branch_segment(from),
+                branch_segment(to),
+                ts
+            ),
+            Action::BlockEvolution { component } => {
+                format!("evolve/block-{}-{}", branch_segment(component), ts)
+            }
+            Action::Notify { component } => {
+                format!("evolve/notify-{}-{}", branch_segment(component), ts)
+            }
         }
     }
 
-    /// Execute an action.
+    /// Build an action proposal.
     ///
-    /// STUB: this does **not** create a real git branch yet. `ActionResult::branch`
-    /// is only a *suggested* branch name for the action; wiring it to actual
-    /// branch creation (git2 or shell) is planned follow-up work.
-    pub fn execute(&self, action: &Action) -> Result<ActionResult> {
+    /// This does not mutate Git or source. It returns a proposal that must be
+    /// previewed and confirmed through the guarded Git engine.
+    pub fn propose(&self, action: &Action) -> Result<ActionResult> {
         match action {
             Action::Extend { component } => Ok(ActionResult {
                 branch: Some(Self::branch_name(action)),
-                message: format!("Extended {}", component),
+                message: format!("Proposed an extension branch for {component}"),
             }),
             _ => Ok(ActionResult {
                 branch: None,
-                message: "Action not implemented yet".to_string(),
+                message: "No mutation was performed; this action has no executor".to_string(),
             }),
         }
+    }
+}
+
+fn branch_segment(value: &str) -> String {
+    let mut result = String::new();
+    let mut previous_separator = false;
+    for character in value.chars() {
+        let allowed = character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-');
+        if allowed {
+            result.push(character.to_ascii_lowercase());
+            previous_separator = false;
+        } else if !previous_separator && !result.is_empty() {
+            result.push('-');
+            previous_separator = true;
+        }
+    }
+    let trimmed = result.trim_matches(['.', '-']).to_string();
+    if trimmed.is_empty() {
+        "component".to_string()
+    } else {
+        trimmed
     }
 }
