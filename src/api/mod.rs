@@ -26,7 +26,41 @@ const DISABLED_THINKING_SYSTEM_MESSAGE: &str =
 /// Enforce OpenAI-style message ordering: all system messages must precede
 /// non-system messages. SGLang and other strict backends reject requests
 /// where system messages appear after user/assistant/tool messages.
+/// Some providers (Moonshot/Kimi, others) reject an `assistant` message whose
+/// content is empty. A pure "thinking" turn — or a step that produced only
+/// reasoning and no tool call — leaves exactly that, so every subsequent
+/// request 400s and the agent loops on the error. Recognize the state and adapt:
+/// give such a message a minimal non-empty body (its own reasoning if present,
+/// otherwise a placeholder). Messages that carry tool calls are left alone —
+/// their empty content is valid.
+fn sanitize_assistant_content(messages: &mut [Message]) {
+    for message in messages.iter_mut() {
+        if message.role != "assistant" {
+            continue;
+        }
+        let has_tool_calls = message
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| !calls.is_empty());
+        if has_tool_calls || !message.content.text().trim().is_empty() {
+            continue;
+        }
+        let filler = message
+            .reasoning_content
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("(no textual output)")
+            .to_string();
+        message.content = MessageContent::Text(filler);
+    }
+}
+
 fn canonicalize_message_order(messages: &mut Vec<Message>) {
+    // Every send path canonicalizes order here, so also guarantee no empty
+    // assistant message reaches providers that reject them (Moonshot/Kimi).
+    sanitize_assistant_content(messages);
+
     let sys_indices: Vec<usize> = messages
         .iter()
         .enumerate()
@@ -200,6 +234,10 @@ pub enum ThinkingMode {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/api/message_compat_test.rs"]
+mod message_compat_test;
 
 /// Mock LLM client for unit testing.
 ///
