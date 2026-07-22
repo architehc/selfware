@@ -91,6 +91,47 @@ fn render_includes_header_and_component_names() {
 }
 
 #[test]
+fn taxonomy_outline_groups_components_by_cluster_in_loop_order() {
+    let graph = Graph {
+        nodes: vec![
+            Node::code("crate::evolve::map", "src/evolve/map.rs"),
+            Node::code("crate::agent::execution", "src/agent/execution.rs"),
+            Node::code("crate::tools::shell", "src/tools/shell.rs"),
+        ],
+        edges: Vec::<Edge>::new(),
+    };
+    let out = crate::evolve::clusters::taxonomy_outline(&graph);
+    assert!(out.contains("# Architectural taxonomy"));
+    assert!(out.contains("## Loop Core — agent"));
+    assert!(out.contains("## Action — tools"));
+    assert!(out.contains("## Evolution — evolve"));
+    // Loop Core precedes Action precedes Evolution (dev-loop order).
+    let loop_core = out.find("Loop Core").unwrap();
+    let action = out.find("Action").unwrap();
+    let evolution = out.find("Evolution").unwrap();
+    assert!(loop_core < action && action < evolution);
+}
+
+#[test]
+fn orientation_always_has_taxonomy_and_gates_the_map() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("errors.rs"), "//! Errors.\npub struct E;\n").unwrap();
+    let graph = Graph {
+        nodes: vec![Node::code("crate::errors", "errors.rs")],
+        edges: Vec::<Edge>::new(),
+    };
+
+    let without = orientation(&graph, dir.path(), false);
+    assert!(without.contains("# Architectural taxonomy"));
+    assert!(!without.contains("# Component map"));
+
+    let with = orientation(&graph, dir.path(), true);
+    assert!(with.contains("# Architectural taxonomy"));
+    assert!(with.contains("# Component map"));
+    assert!(with.len() > without.len());
+}
+
+#[test]
 fn build_map_and_expand_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let src = "//! Errors for the crate.\npub struct MyError;\npub fn boom() -> MyError { MyError }\n";

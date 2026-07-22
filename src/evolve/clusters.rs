@@ -12,6 +12,49 @@ use serde::Serialize;
 
 use super::{EdgeType, Graph, NodeLayer};
 
+/// The 10 clusters in dev-loop order — the canonical taxonomy ordering.
+pub const CLUSTER_ORDER: [&str; 10] = [
+    "Loop Core",
+    "Reasoning",
+    "Action",
+    "Cognition",
+    "Safety & Verify",
+    "Evolution",
+    "Interface",
+    "Observability",
+    "Eval / Bench",
+    "Foundation",
+];
+
+/// Render the architectural taxonomy: each cluster and the production components
+/// it contains, in loop order. A compact orientation the assistant can use to
+/// place any component in the overall architecture.
+pub fn taxonomy_outline(graph: &Graph) -> String {
+    let mut by_cluster: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+    for node in graph.nodes.iter().filter(|n| n.layer == NodeLayer::Code) {
+        let component = component_of(&node.id);
+        let cluster = cluster_of(&component);
+        by_cluster.entry(cluster).or_default().insert(component);
+    }
+    let mut out = String::from(
+        "# Architectural taxonomy — 10 clusters (perceive -> reason -> act -> verify -> learn)\n",
+    );
+    for cluster in CLUSTER_ORDER {
+        let Some(members) = by_cluster.get(cluster) else {
+            continue;
+        };
+        if members.is_empty() {
+            continue;
+        }
+        out.push_str(&format!(
+            "## {} — {}\n",
+            cluster,
+            members.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out.trim_end().to_string()
+}
+
 /// The 10 clusters, in loop order. Anything unmapped falls to Foundation.
 pub fn cluster_of(component: &str) -> &'static str {
     match component {

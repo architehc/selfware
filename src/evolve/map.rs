@@ -74,6 +74,20 @@ pub fn build_map(graph: &Graph, root: &Path) -> ContextMap {
     }
 }
 
+/// Assemble the assistant's workspace orientation: the architectural taxonomy
+/// (always), plus the full component map when `include_map` is set. This is
+/// background for navigation — it is not citeable evidence, so the model can see
+/// the whole tree's structure while still grounding claims in the deep evidence
+/// of the selected files.
+pub fn orientation(graph: &Graph, root: &Path, include_map: bool) -> String {
+    let mut out = crate::evolve::clusters::taxonomy_outline(graph);
+    if include_map {
+        out.push_str("\n\n");
+        out.push_str(&build_map(graph, root).rendered);
+    }
+    out
+}
+
 /// Expand one component to real detail for the model. `full` returns the whole
 /// source with comments stripped; otherwise just the interface signatures.
 pub fn expand(graph: &Graph, root: &Path, component: &str, full: bool) -> Option<String> {

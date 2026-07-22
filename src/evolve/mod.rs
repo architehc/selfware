@@ -48,7 +48,10 @@ pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
 pub use gate::{GateResult, Gatekeeper};
 pub use graph::GraphBuilder;
-pub use map::{build_map, expand as expand_component, ComponentCard, ContextMap};
+pub use map::{
+    build_map, expand as expand_component, orientation as workspace_orientation, ComponentCard,
+    ContextMap,
+};
 pub use graphrag::{GraphRag, GroundedFact};
 pub use ide::{DocumentSnapshot, FileClass, FileInfo, IdeEngine, WriteResult};
 pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};

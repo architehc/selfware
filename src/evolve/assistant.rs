@@ -115,6 +115,21 @@ impl GroundedAssistant {
         evidence: Vec<GroundingEvidence>,
         evidence_complete: bool,
     ) -> Result<GroundedReview> {
+        self.review_with_orientation(question, evidence, evidence_complete, None)
+            .await
+    }
+
+    /// Grounded review with an optional non-citeable workspace orientation
+    /// (architectural taxonomy + component map) prepended as navigation context.
+    /// The orientation lets the model place the cited evidence in the wider tree
+    /// without loading every file — claims still bind to supplied evidence IDs.
+    pub async fn review_with_orientation(
+        &self,
+        question: &str,
+        evidence: Vec<GroundingEvidence>,
+        evidence_complete: bool,
+        orientation: Option<&str>,
+    ) -> Result<GroundedReview> {
         if question.trim().is_empty() {
             bail!("review question cannot be empty");
         }
@@ -124,7 +139,11 @@ impl GroundedAssistant {
 
         let evidence_json = serde_json::to_string_pretty(&evidence)?;
         let system = Message::system(
-            "You are a code-review engine. Use only the supplied evidence. \
+            "You are a code-review engine. Use only the supplied evidence for \
+             claims. A `Workspace orientation` section may precede the question: \
+             it is a non-citeable map of the codebase's architecture and public \
+             symbols, for navigation only — never cite it, and ground every claim \
+             in a supplied evidence ID. \
              Return one JSON object and no markdown. Schema: \
              {\"claims\":[{\"text\":string,\"evidence_ids\":[string]}],\
              \"recommendations\":[{\"title\":string,\"rationale\":string,\
@@ -135,11 +154,19 @@ impl GroundedAssistant {
              two valid action hops numbered contiguously from 1. If evidence is \
              insufficient, omit the item.",
         );
-        let user = Message::user(format!(
-            "Question:\n{}\n\nGrounding evidence:\n{}",
-            question.trim(),
-            evidence_json
-        ));
+        let user = Message::user(match orientation {
+            Some(text) if !text.trim().is_empty() => format!(
+                "Workspace orientation (background, not citeable):\n{}\n\nQuestion:\n{}\n\nGrounding evidence:\n{}",
+                text.trim(),
+                question.trim(),
+                evidence_json
+            ),
+            _ => format!(
+                "Question:\n{}\n\nGrounding evidence:\n{}",
+                question.trim(),
+                evidence_json
+            ),
+        });
 
         let response = self
             .client

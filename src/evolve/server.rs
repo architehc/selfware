@@ -209,6 +209,7 @@ impl EvolveServer {
             )
             .route("/api/assistant/review", post(assistant_review_handler))
             .route("/api/assistant/task", post(assistant_task_handler))
+            .route("/api/assistant/orientation", get(assistant_orientation_handler))
             .route("/api/git/status", get(git_status_handler))
             .route("/api/git/branch", post(git_branch_handler))
             .with_state(Arc::new(self.clone()))
@@ -1230,6 +1231,19 @@ struct AssistantTaskRequest {
     /// stripped code (self-consistent within the evidence).
     #[serde(default)]
     compact: bool,
+    /// Prepend a non-citeable workspace orientation (architectural taxonomy +
+    /// component map) so the model can place the cited evidence in the wider
+    /// tree without loading every file. Defaults on.
+    #[serde(default = "default_true")]
+    orient: bool,
+    /// When orienting, include the full component map (~28K tokens) alongside the
+    /// always-present taxonomy. Turn off for the smallest windows. Defaults on.
+    #[serde(default = "default_true")]
+    include_map: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_task_max_files() -> usize {
@@ -1257,9 +1271,14 @@ async fn assistant_task_handler(
     let target = body.target.clone();
     let max_files = body.max_files.clamp(1, 20);
     let compact = body.compact;
+    let orient = body.orient;
+    let include_map = body.include_map;
 
-    let (selected, mut evidence, complete) =
+    let (selected, mut evidence, complete, orientation) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            // Whole-tree navigation context (taxonomy + optional component map),
+            // built once and shared as non-citeable background for the review.
+            let orientation = orient.then(|| super::workspace_orientation(&graph, &root, include_map));
             let selection = super::select_context(kind, &target, &graph, &root)?;
             let mut files = selection.files;
             // Seeds first, then findings, then dependents/dependencies.
@@ -1288,7 +1307,7 @@ async fn assistant_task_handler(
                 evidence.extend(ev);
                 used.push(file);
             }
-            Ok((used, evidence, complete))
+            Ok((used, evidence, complete, orientation))
         })
         .await
         .map_err(internal_error)?
@@ -1300,16 +1319,48 @@ async fn assistant_task_handler(
         ));
     }
     renumber_evidence(&mut evidence);
+    let orientation_tokens = orientation
+        .as_deref()
+        .map(crate::token_count::estimate_content_tokens)
+        .unwrap_or(0);
     let review = server
         .assistant
-        .review(&body.question, evidence, complete)
+        .review_with_orientation(&body.question, evidence, complete, orientation.as_deref())
         .await
         .map_err(internal_error)?;
     Ok(Json(json!({
         "task_kind": body.kind,
         "target": body.target,
         "selected_files": selected,
+        "orientation": {
+            "enabled": orientation.is_some(),
+            "included_map": orientation.is_some() && include_map,
+            "tokens": orientation_tokens,
+        },
         "review": review,
+    })))
+}
+
+/// Preview the exact non-citeable orientation (taxonomy + optional component map)
+/// the assistant task flow injects — a local render, no model call. Use it to
+/// audit what background the model sees. `?include_map=false` for taxonomy only.
+async fn assistant_orientation_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let include_map = params
+        .get("include_map")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let text = tokio::task::spawn_blocking(move || super::workspace_orientation(&graph, &root, include_map))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+    Ok(Json(json!({
+        "included_map": include_map,
+        "tokens": crate::token_count::estimate_content_tokens(&text),
+        "text": text,
     })))
 }
 
