@@ -4,6 +4,7 @@
 //! and action execution with git branch isolation.
 
 pub mod actions;
+pub mod apply;
 pub mod assistant;
 pub mod ast;
 pub mod context;
@@ -30,6 +31,7 @@ pub mod summary;
 pub mod xray;
 
 pub use actions::{Action, ActionEngine, ActionResult};
+pub use apply::{ApplyRegistry, ApplyRun, ApplyStatus};
 pub use ast::{AstAnalyzer, AstNode};
 pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,

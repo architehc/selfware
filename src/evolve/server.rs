@@ -53,6 +53,7 @@ pub struct EvolveServer {
     readiness: Arc<ReadinessEngine>,
     assistant: Arc<GroundedAssistant>,
     concept_index: Arc<super::ConceptIndex>,
+    apply_runs: super::ApplyRegistry,
     ontology: Option<Arc<OntologyStore>>,
     project_root: Arc<PathBuf>,
     configured_model: Arc<String>,
@@ -136,6 +137,7 @@ impl EvolveServer {
             readiness: Arc::new(ReadinessEngine::new(&project_root)),
             assistant: Arc::new(GroundedAssistant::new(config)?),
             concept_index: Arc::new(concept_index),
+            apply_runs: super::apply::new_registry(),
             ontology: persist_ontology.then(|| Arc::new(ontology)),
             project_root: Arc::new(project_root),
             configured_model: Arc::new(config.model.clone()),
@@ -185,6 +187,8 @@ impl EvolveServer {
                 "/api/actions/deletion/preview",
                 post(deletion_preview_handler),
             )
+            .route("/api/actions/apply", post(apply_action_handler))
+            .route("/api/actions/apply/status", get(apply_status_handler))
             .route("/api/gates", get(gates_handler))
             .route("/api/ontology/validate", get(ontology_validate_handler))
             .route("/api/ide/files", get(ide_files_handler))
@@ -392,6 +396,86 @@ async fn graph_findings_handler(State(server): State<Arc<EvolveServer>>) -> ApiR
         "duplicate_functions_total": dupes.len(),
         "nodes": entries,
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyActionRequest {
+    kind: String,
+    #[serde(default)]
+    target: String,
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+/// Build the agent task prompt for a kind/target, or use a caller override.
+fn apply_prompt(kind: &str, target: &str, custom: Option<&str>) -> String {
+    if let Some(p) = custom.filter(|s| !s.trim().is_empty()) {
+        return p.to_string();
+    }
+    let scope = if target.is_empty() {
+        "the codebase".to_string()
+    } else {
+        format!("`{target}`")
+    };
+    match kind {
+        "consolidate" => format!(
+            "Find duplicated functions in {scope} and consolidate them: extract the shared logic \
+             into a helper that both call sites use, preserving behavior exactly. Then run \
+             `cargo build` and `cargo test` and make sure they pass."
+        ),
+        "cleanup" => format!(
+            "Remove unused/dead public functions in {scope} that are referenced nowhere. After \
+             removing, run `cargo build --all-targets` to confirm nothing breaks and revert any \
+             removal that does."
+        ),
+        "refactor" => format!(
+            "Refactor {scope} to improve clarity while preserving behavior. Keep `cargo build` \
+             and `cargo test` green."
+        ),
+        "extend" => format!(
+            "Extend {scope} with the requested capability, add tests, and keep the build green."
+        ),
+        _ => format!("Work on {scope}, keeping the build and tests green."),
+    }
+}
+
+/// Apply an evolve action by driving the agent (`selfware run --yolo`) as a
+/// subprocess. Requires a clean working tree so the resulting diff is exactly
+/// the agent's work. POST /api/actions/apply {kind, target, prompt?}.
+async fn apply_action_handler(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplyActionRequest>,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let status = server.git.status().map_err(internal_error)?;
+    if status.dirty {
+        return Err(bad_request(format!(
+            "working tree has {} uncommitted path(s); commit or stash first so the agent's diff \
+             stays isolated and reviewable",
+            status.files.len()
+        )));
+    }
+    let prompt = apply_prompt(&body.kind, &body.target, body.prompt.as_deref());
+    let root = server.project_root.as_ref().clone();
+    let id = super::apply::spawn(prompt.clone(), root, server.apply_runs.clone())
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(json!({ "id": id, "status": "running", "prompt": prompt })))
+}
+
+/// Poll an apply run's status + streamed output. GET /api/actions/apply/status?id=X
+async fn apply_status_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let id = params
+        .get("id")
+        .ok_or_else(|| bad_request("missing id parameter"))?;
+    let run = super::apply::get(&server.apply_runs, id)
+        .await
+        .ok_or_else(|| not_found(format!("unknown apply run: {id}")))?;
+    Ok(Json(serde_json::to_value(run).map_err(internal_error)?))
 }
 
 /// Reachability-based dead code: symbols whose name appears only at their own
