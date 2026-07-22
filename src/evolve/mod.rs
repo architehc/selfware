@@ -7,6 +7,7 @@ pub mod actions;
 pub mod apply;
 pub mod assistant;
 pub mod ast;
+pub mod clusters;
 pub mod context;
 pub mod context_selector;
 pub mod dead_code;
@@ -37,6 +38,7 @@ pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,
     ContextSummary,
 };
+pub use clusters::{cluster_of, clustered, ClusteredGraph};
 pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};

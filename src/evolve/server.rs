@@ -179,6 +179,7 @@ impl EvolveServer {
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
             .route("/api/graph/findings", get(graph_findings_handler))
+            .route("/api/graph/clustered", get(graph_clustered_handler))
             .route("/api/persona", get(persona_handler))
             .route("/api/xray", get(xray_handler))
             .route("/api/xray/hubs", get(xray_hubs_handler))
@@ -330,6 +331,19 @@ async fn duplicate_fns_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
         "exact": exact,
         "near": pairs.len() - exact,
         "pairs": pairs,
+    })))
+}
+
+/// The code graph aggregated into the 10 architectural clusters (loop-role
+/// super-nodes) with inter-cluster dependency edges — same shape as /api/graph,
+/// so the D3 view can default to 10 nodes and expand on demand.
+async fn graph_clustered_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let clustered = super::clustered(&graph);
+    Ok(Json(json!({
+        "nodes": clustered.nodes,
+        "edges": clustered.edges,
+        "cluster_count": clustered.nodes.len(),
     })))
 }
 
