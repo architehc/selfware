@@ -1,8 +1,9 @@
 //! ContextComposer: manages which graph components are in the active context.
 //!
-//! Explicit loading modes:
-//! - `Lite`: nothing loaded (default).
-//! - `Full`: production code nodes only.
+//! Explicit loading tiers (smallest → largest), all over production code nodes:
+//! - `Lite`: interface signatures only (~18% of full) — the smallest tier.
+//! - `Compact`: full code with comments stripped (~82%) — for smaller models.
+//! - `Full`: full production code.
 //! - `FullExtended`: production code plus test/example nodes.
 //! - `Preset(name)`: a single named preset loaded.
 
@@ -15,6 +16,7 @@ const TOKENS_PER_LINE: usize = 10;
 #[serde(rename_all = "snake_case")]
 pub enum ContextMode {
     Lite,
+    Compact,
     Full,
     FullExtended,
     Preset(String),
@@ -24,6 +26,7 @@ impl ContextMode {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Lite => "lite",
+            Self::Compact => "compact",
             Self::Full => "full",
             Self::FullExtended => "full_extended",
             Self::Preset(_) => "preset",
@@ -95,8 +98,7 @@ impl ContextComposer {
     /// The node ids a given mode would include, without changing active state.
     fn included_for(&self, mode: &ContextMode) -> Vec<String> {
         match mode {
-            ContextMode::Lite => Vec::new(),
-            ContextMode::Full => self
+            ContextMode::Lite | ContextMode::Compact | ContextMode::Full => self
                 .graph
                 .nodes
                 .iter()
@@ -118,24 +120,29 @@ impl ContextComposer {
     /// without mutating the active selection — used to show the cost of each
     /// option in the context picker.
     pub fn mode_sizes(&self) -> Vec<ContextModeSize> {
-        [ContextMode::Lite, ContextMode::Full, ContextMode::FullExtended]
-            .into_iter()
-            .map(|mode| {
-                let included = self.included_for(&mode);
-                let tokens = self
-                    .graph
-                    .nodes
-                    .iter()
-                    .filter(|node| included.contains(&node.id))
-                    .map(|node| estimate_context_node_tokens(node, &mode))
-                    .sum();
-                ContextModeSize {
-                    mode: mode.name().to_string(),
-                    nodes: included.len(),
-                    tokens,
-                }
-            })
-            .collect()
+        [
+            ContextMode::Lite,
+            ContextMode::Compact,
+            ContextMode::Full,
+            ContextMode::FullExtended,
+        ]
+        .into_iter()
+        .map(|mode| {
+            let included = self.included_for(&mode);
+            let tokens = self
+                .graph
+                .nodes
+                .iter()
+                .filter(|node| included.contains(&node.id))
+                .map(|node| estimate_context_node_tokens(node, &mode))
+                .sum();
+            ContextModeSize {
+                mode: mode.name().to_string(),
+                nodes: included.len(),
+                tokens,
+            }
+        })
+        .collect()
     }
 
     pub fn mode_name(&self) -> &'static str {
@@ -250,11 +257,21 @@ fn estimate_node_tokens(tokens: usize, lines: usize) -> usize {
     }
 }
 
+/// Fraction of a file's implementation tokens that its public-signature skeleton
+/// occupies — measured at ~18% across the tree (pub fn/struct/trait lines + doc).
+const SIGNATURE_FRACTION: f64 = 0.18;
+/// Fraction remaining after stripping comments — measured at ~82%.
+const COMMENT_STRIPPED_FRACTION: f64 = 0.82;
+
 fn estimate_context_node_tokens(node: &Node, mode: &ContextMode) -> usize {
     let total = estimate_node_tokens(node.tokens, node.lines);
-    if node.layer == NodeLayer::Code && matches!(mode, ContextMode::Full) {
-        total.saturating_sub(node.inline_test_tokens)
-    } else {
-        total
+    let code_tokens = total.saturating_sub(node.inline_test_tokens);
+    match mode {
+        // Lite: interface signatures only — the smallest useful tier.
+        ContextMode::Lite => ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize,
+        // Compact: full code with comments stripped, for smaller models.
+        ContextMode::Compact => ((code_tokens as f64) * COMMENT_STRIPPED_FRACTION).round() as usize,
+        ContextMode::Full => code_tokens,
+        _ => total,
     }
 }
