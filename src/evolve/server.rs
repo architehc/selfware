@@ -200,6 +200,7 @@ impl EvolveServer {
                 post(assistant_evidence_preview_handler),
             )
             .route("/api/assistant/review", post(assistant_review_handler))
+            .route("/api/assistant/task", post(assistant_task_handler))
             .route("/api/git/status", get(git_status_handler))
             .route("/api/git/branch", post(git_branch_handler))
             .with_state(Arc::new(self.clone()))
@@ -1009,6 +1010,90 @@ async fn assistant_review_handler(
             "evidence_char_budget": server.evidence_char_budget,
             "evidence_complete": selection.complete
         }
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct AssistantTaskRequest {
+    kind: String,
+    #[serde(default)]
+    target: String,
+    question: String,
+    #[serde(default = "default_task_max_files")]
+    max_files: usize,
+}
+
+fn default_task_max_files() -> usize {
+    8
+}
+
+/// Task-scoped grounded review: instead of the caller hand-picking one document,
+/// the context_selector auto-selects the source a task kind needs (seed +
+/// dependents / findings), evidence is built from those files, and the assistant
+/// reviews against that. POST /api/assistant/task {kind, target, question}.
+async fn assistant_task_handler(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<AssistantTaskRequest>,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let _assistant_guard = server.assistant_lock.lock().await;
+    if body.question.trim().is_empty() {
+        return Err(bad_request("task question cannot be empty"));
+    }
+    let kind = super::TaskKind::parse(&body.kind).map_err(|e| bad_request(e.to_string()))?;
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let ide = server.ide.clone();
+    let target = body.target.clone();
+    let max_files = body.max_files.clamp(1, 20);
+
+    let (selected, mut evidence, complete) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let selection = super::select_context(kind, &target, &graph, &root)?;
+            let mut files = selection.files;
+            // Seeds first, then findings, then dependents/dependencies.
+            files.sort_by_key(|file| match file.role.as_str() {
+                "seed" => 0,
+                "finding" => 1,
+                "dependent" => 2,
+                _ => 3,
+            });
+            let mut evidence = Vec::new();
+            let mut complete = true;
+            let mut used = Vec::new();
+            for file in files.into_iter().take(max_files) {
+                let Ok(doc) = ide.read_document(&file.path) else {
+                    continue;
+                };
+                let (ev, is_complete) =
+                    evidence_from_document(&doc.path, &doc.content, &doc.hash, 120);
+                complete &= is_complete;
+                evidence.extend(ev);
+                used.push(file);
+            }
+            Ok((used, evidence, complete))
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?;
+
+    if evidence.is_empty() {
+        return Err(bad_request(
+            "task selection produced no readable source evidence",
+        ));
+    }
+    renumber_evidence(&mut evidence);
+    let review = server
+        .assistant
+        .review(&body.question, evidence, complete)
+        .await
+        .map_err(internal_error)?;
+    Ok(Json(json!({
+        "task_kind": body.kind,
+        "target": body.target,
+        "selected_files": selected,
+        "review": review,
     })))
 }
 
