@@ -1153,6 +1153,11 @@ struct AssistantTaskRequest {
     question: String,
     #[serde(default = "default_task_max_files")]
     max_files: usize,
+    /// Strip comments from the selected source before building evidence — a
+    /// ~18% token cut for smaller models. Line numbers are relative to the
+    /// stripped code (self-consistent within the evidence).
+    #[serde(default)]
+    compact: bool,
 }
 
 fn default_task_max_files() -> usize {
@@ -1179,6 +1184,7 @@ async fn assistant_task_handler(
     let ide = server.ide.clone();
     let target = body.target.clone();
     let max_files = body.max_files.clamp(1, 20);
+    let compact = body.compact;
 
     let (selected, mut evidence, complete) =
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
@@ -1198,8 +1204,14 @@ async fn assistant_task_handler(
                 let Ok(doc) = ide.read_document(&file.path) else {
                     continue;
                 };
+                // For smaller models, strip comments to cut the prompt (~18%).
+                let content = if compact {
+                    super::strip_comments(&doc.content)
+                } else {
+                    doc.content.clone()
+                };
                 let (ev, is_complete) =
-                    evidence_from_document(&doc.path, &doc.content, &doc.hash, 120);
+                    evidence_from_document(&doc.path, &content, &doc.hash, 120);
                 complete &= is_complete;
                 evidence.extend(ev);
                 used.push(file);
