@@ -7,6 +7,7 @@ pub mod actions;
 pub mod assistant;
 pub mod ast;
 pub mod context;
+pub mod context_selector;
 pub mod dead_code;
 pub mod dedup;
 pub mod deletion;
@@ -33,6 +34,7 @@ pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,
     ContextSummary,
 };
+pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};

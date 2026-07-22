@@ -172,6 +172,7 @@ impl EvolveServer {
             .route("/api/context", get(context_handler))
             .route("/api/context/mode", post(context_mode_handler))
             .route("/api/context/sizes", get(context_sizes_handler))
+            .route("/api/context/select", get(context_select_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
             .route("/api/graph/findings", get(graph_findings_handler))
@@ -405,6 +406,33 @@ async fn dead_code_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
         "confident": confident,
         "cfg_gated": dead.len() - confident,
         "symbols": dead,
+    })))
+}
+
+/// Task-aware context selection: given a task kind (extend/refactor/consolidate/
+/// cleanup/understand) and a target, return the source files that task needs and
+/// the role each plays. `/api/context/select?kind=refactor&target=agent::execution`
+async fn context_select_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let kind = super::TaskKind::parse(params.get("kind").map(String::as_str).unwrap_or("understand"))
+        .map_err(|e| bad_request(e.to_string()))?;
+    let target = params.get("target").cloned().unwrap_or_default();
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let selection = tokio::task::spawn_blocking(move || {
+        super::select_context(kind, &target, &graph, &root)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .map_err(internal_error)?;
+    Ok(Json(json!({
+        "task_kind": selection.task_kind,
+        "target": selection.target,
+        "rationale": selection.rationale,
+        "file_count": selection.files.len(),
+        "files": selection.files,
     })))
 }
 
