@@ -178,6 +178,7 @@
                     <span class="inspector-group-label">Review</span>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="grounding">Grounding</button>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="recommendations">Advice</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="orientation">Orientation</button>
                     <span class="inspector-group-label">Status</span>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="readiness">Readiness</button>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="context">Context</button>
@@ -268,6 +269,20 @@
                     </button>
                     <div id="recommendations-result" class="inspector-result pane-state">Not loaded</div>
                     <ul id="recommendations-list" class="recommendations-list"></ul>
+                </section>
+
+                <section id="inspector-orientation" class="inspector-view hidden" role="tabpanel">
+                    <p class="inspector-hint">The non-citeable background the assistant task flow injects so the model can place cited evidence in the whole tree: the architectural taxonomy, plus the component map on demand.</p>
+                    <div class="orientation-controls">
+                        <label class="orientation-toggle" title="Add the ~28K component map beneath the always-present taxonomy. Turn off for the smallest model windows.">
+                            <input id="orientation-include-map" type="checkbox" checked />
+                            <span>Include component map</span>
+                        </label>
+                        <button id="orientation-load" class="command-button" type="button" title="Preview the exact orientation block — a local render, no model call">
+                            <i data-lucide="compass" aria-hidden="true"></i><span>Load Orientation</span>
+                        </button>
+                    </div>
+                    <div id="orientation-result" class="inspector-result pane-state">Load to preview the taxonomy + map. This is exactly what a Task Review sends the model as background.</div>
                 </section>
             </aside>
         </main>

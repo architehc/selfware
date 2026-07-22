@@ -330,6 +330,10 @@ function wireEvents() {
     $('#node-branch-action')?.addEventListener('click', branchSelectedNode);
     $('#node-delete-preview-action')?.addEventListener('click', previewSelectedNodeDeletion);
     $('#node-task')?.addEventListener('submit', taskReviewSelectedNode);
+    $('#orientation-load')?.addEventListener('click', loadOrientation);
+    $('#orientation-include-map')?.addEventListener('change', () => {
+        if (state.orientationLoaded) loadOrientation();
+    });
 
     $('#clear-output')?.addEventListener('click', clearOutput);
     $('#toggle-bottom')?.addEventListener('click', toggleBottomPanel);
@@ -1379,6 +1383,7 @@ function selectInspector(name) {
         panel.classList.toggle('active', active);
         panel.classList.toggle('hidden', !active);
     });
+    if (name === 'orientation' && !state.orientationLoaded) loadOrientation();
 }
 
 function selectBottomView(name) {
@@ -1518,9 +1523,10 @@ async function taskReviewSelectedNode(event) {
     result.textContent = `Selecting ${kind} context for ${node.id}…`;
     setGlobalStatus(`Task review: ${kind}`, 'working');
     try {
+        const includeMap = $('#orientation-include-map')?.checked ?? true;
         const payload = await request('/api/assistant/task', {
             method: 'POST',
-            body: { kind, target: node.id, question, max_files: 6 },
+            body: { kind, target: node.id, question, max_files: 6, orient: true, include_map: includeMap },
         });
         result.className = 'inspector-result';
         result.replaceChildren(renderStructured(payload));
@@ -1536,6 +1542,117 @@ async function taskReviewSelectedNode(event) {
         setBusy(button, false);
         refreshIcons();
     }
+}
+
+// Preview the exact non-citeable orientation (taxonomy + optional component map)
+// the assistant task flow injects — a local render, no model call. This is the
+// same block a Task Review sends as background.
+async function loadOrientation() {
+    const result = $('#orientation-result');
+    const includeMap = $('#orientation-include-map')?.checked ?? true;
+    const button = $('#orientation-load');
+    setBusy(button, true);
+    result.className = 'inspector-result pane-state';
+    result.textContent = 'Compiling workspace orientation…';
+    try {
+        const payload = await request(`/api/assistant/orientation?include_map=${includeMap}`);
+        state.orientationLoaded = true;
+        result.className = 'inspector-result';
+        result.replaceChildren(renderOrientation(payload));
+        refreshIcons();
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Orientation failed: ${formatError(error)}`;
+    } finally {
+        setBusy(button, false);
+    }
+}
+
+function renderOrientation(payload) {
+    const wrap = document.createElement('div');
+    wrap.className = 'orientation-view';
+
+    // Cost banner, related to the active model's context window when known.
+    const banner = document.createElement('div');
+    banner.className = 'orientation-banner';
+    const tokens = Number(payload.tokens) || 0;
+    const limit = Number(state.workspace?.context_length) || 0;
+    const kind = payload.included_map ? 'taxonomy + component map' : 'taxonomy only';
+    const cost = document.createElement('strong');
+    cost.textContent = `${formatCount(tokens)} tokens`;
+    banner.append(cost, document.createTextNode(` · ${kind}`));
+    if (limit > 0) {
+        const pct = Math.round((tokens / limit) * 100);
+        const fit = document.createElement('span');
+        fit.className = 'orientation-fit';
+        fit.textContent = `${pct}% of ${formatCount(limit)} window · ${formatCount(Math.max(0, limit - tokens))} left for evidence`;
+        banner.appendChild(fit);
+    }
+    wrap.appendChild(banner);
+
+    // Taxonomy: one row per cluster, component names click through to the graph.
+    const text = String(payload.text || '');
+    const mapIndex = text.indexOf('# Component map');
+    const taxonomyText = mapIndex >= 0 ? text.slice(0, mapIndex) : text;
+    const clusters = document.createElement('div');
+    clusters.className = 'orientation-taxonomy';
+    for (const line of taxonomyText.split('\n')) {
+        const match = line.match(/^##\s+(.+?)\s+—\s+(.+)$/);
+        if (!match) continue;
+        const row = document.createElement('div');
+        row.className = 'taxonomy-cluster';
+        const name = document.createElement('span');
+        name.className = 'taxonomy-cluster-name';
+        name.textContent = match[1];
+        row.appendChild(name);
+        const chips = document.createElement('span');
+        chips.className = 'taxonomy-chips';
+        for (const component of match[2].split(',').map((c) => c.trim()).filter(Boolean)) {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'taxonomy-chip';
+            chip.textContent = component;
+            chip.title = `Focus ${component} in the graph`;
+            chip.addEventListener('click', () => focusComponent(component));
+            chips.appendChild(chip);
+        }
+        row.appendChild(chips);
+        clusters.appendChild(row);
+    }
+    if (clusters.childElementCount > 0) wrap.appendChild(clusters);
+
+    // The component map itself is large — keep it collapsed behind a disclosure.
+    if (payload.included_map && mapIndex >= 0) {
+        const details = document.createElement('details');
+        details.className = 'orientation-map';
+        const summary = document.createElement('summary');
+        summary.textContent = 'Component map (full text)';
+        details.appendChild(summary);
+        const pre = document.createElement('pre');
+        pre.className = 'orientation-map-text';
+        pre.textContent = text.slice(mapIndex).trim();
+        details.appendChild(pre);
+        wrap.appendChild(details);
+    }
+    return wrap;
+}
+
+// Focus a component from the taxonomy in the graph: switch to the graph view and
+// select the first matching node so the user can drill in.
+function focusComponent(component) {
+    const nodes = state.graphData?.nodes || [];
+    const match = nodes.find((node) => {
+        const id = String(node.id || '');
+        const top = id.replace(/^crate::/, '').split('::')[0];
+        return top === component || id === component;
+    });
+    if (!match) {
+        toast(`No graph node for “${component}” in the current view.`, 'warning');
+        return;
+    }
+    selectView('graph');
+    updateSelection(graphNodePath(match), match);
+    selectInspector('node');
 }
 
 function branchSelectedNode() {
