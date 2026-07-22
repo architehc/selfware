@@ -156,35 +156,6 @@ pub fn requires_confirmation(
     }
 }
 
-/// Prompt the user for confirmation
-pub fn prompt_confirmation(operation: &DestructiveOperation) -> io::Result<ConfirmResult> {
-    let risk = operation.risk_level();
-    let reset = "\x1b[0m";
-
-    eprintln!();
-    eprintln!(
-        "{}⚠️  CONFIRMATION REQUIRED [{}]{}",
-        risk.color_code(),
-        risk.as_str(),
-        reset
-    );
-    eprintln!("Operation: {}", operation.description());
-    eprintln!();
-    eprint!("Do you want to proceed? [y/N/s(kip)]: ");
-    io::stderr().flush()?;
-
-    let mut input = String::new();
-    // Use block_in_place to prevent blocking the async runtime
-    tokio::task::block_in_place(|| io::stdin().read_line(&mut input))?;
-
-    let input = input.trim().to_lowercase();
-
-    Ok(match input.as_str() {
-        "y" | "yes" => ConfirmResult::Approved,
-        "s" | "skip" => ConfirmResult::Skipped,
-        _ => ConfirmResult::Rejected,
-    })
-}
 
 /// Non-interactive confirmation (for testing or automation)
 pub fn auto_confirm(operation: &DestructiveOperation, config: &ConfirmConfig) -> ConfirmResult {

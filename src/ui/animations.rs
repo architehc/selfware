@@ -842,10 +842,6 @@ impl AnimatedStatus {
         self.start_time.elapsed()
     }
 
-    /// Reset the timer
-    pub fn reset_timer(&mut self) {
-        self.start_time = Instant::now();
-    }
 }
 
 impl Animation for AnimatedStatus {

@@ -155,19 +155,6 @@ pub fn render_inline_mascot(mood: MascotMood) -> String {
     format!("{} {}", icon, FoxMascot::INLINE.custom_color(color))
 }
 
-/// Render mascot with a message
-pub fn render_mascot_with_message(mood: MascotMood, message: &str) -> String {
-    let mascot = render_mascot(mood);
-    let theme = current_theme();
-    let msg_color = match mood {
-        MascotMood::Success => theme.success,
-        MascotMood::Error => theme.error,
-        MascotMood::Thinking | MascotMood::Working => theme.accent,
-        _ => theme.primary,
-    };
-
-    format!("{}\n  {}\n", mascot, message.custom_color(msg_color))
-}
 
 /// Get a thinking animation frame
 pub fn thinking_frame(tick: usize) -> &'static [&'static str] {

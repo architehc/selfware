@@ -375,24 +375,6 @@ pub fn is_no_action_error(e: &anyhow::Error) -> bool {
         || error_string.contains("Agent failed to take action")
 }
 
-/// Check if an anyhow error is a visual assertion error.
-/// This happens when visual verification fails with high confidence and hard-gates execution.
-pub fn is_visual_assertion_error(e: &anyhow::Error) -> bool {
-    // Check if wrapped as SelfwareError::Agent(AgentError::VisualAssertionFailed)
-    if let Some(SelfwareError::Agent(AgentError::VisualAssertionFailed { .. })) =
-        e.downcast_ref::<SelfwareError>()
-    {
-        return true;
-    }
-
-    // Also check if AgentError was returned directly into anyhow
-    if let Some(AgentError::VisualAssertionFailed { .. }) = e.downcast_ref::<AgentError>() {
-        return true;
-    }
-
-    // Check the error message directly
-    e.to_string().contains("Visual assertion failed")
-}
 
 #[derive(Error, Debug)]
 pub enum ResourceError {

@@ -68,11 +68,6 @@ impl PlanStep {
         self
     }
 
-    /// Set the file path for this step
-    pub fn with_file_path(mut self, path: impl Into<String>) -> Self {
-        self.file_path = Some(path.into());
-        self
-    }
 
     /// Set additional context for this step
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
@@ -175,12 +170,6 @@ impl Plan {
             .find(|s| !matches!(s.status, StepStatus::Done))
     }
 
-    /// Get the next pending step mutably (first step that is not done)
-    pub fn next_pending_step_mut(&mut self) -> Option<&mut PlanStep> {
-        self.steps
-            .iter_mut()
-            .find(|s| !matches!(s.status, StepStatus::Done))
-    }
 
     /// Format the plan as a human-readable string
     pub fn format(&self) -> String {
@@ -318,10 +307,6 @@ impl PlanModeManager {
         self.plan.as_ref()
     }
 
-    /// Get the stored plan mutably
-    pub fn get_plan_mut(&mut self) -> Option<&mut Plan> {
-        self.plan.as_mut()
-    }
 
     /// Store plan text during the planning phase
     pub fn store_plan_text(&mut self, text: impl Into<String>) {
@@ -372,10 +357,6 @@ impl PlanModeManager {
 /// Thread-safe shared plan mode manager
 pub type SharedPlanModeManager = Arc<RwLock<PlanModeManager>>;
 
-/// Create a new shared plan mode manager
-pub fn create_shared_plan_manager() -> SharedPlanModeManager {
-    Arc::new(RwLock::new(PlanModeManager::new()))
-}
 
 /// List of tool names that are read-only and safe to use in plan mode
 pub const READONLY_TOOLS: &[&str] = &[

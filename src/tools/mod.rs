@@ -654,12 +654,6 @@ impl ToolRegistry {
         }
     }
 
-    /// Activate multiple tools at once.
-    pub fn activate_many(&mut self, names: &[&str]) {
-        for name in names {
-            self.activate(name);
-        }
-    }
 
     /// Return references to all registered tools (both critical and deferred).
     pub fn list(&self) -> Vec<&dyn Tool> {
@@ -783,18 +777,7 @@ impl ToolRegistry {
         self.activated_tools.len()
     }
 
-    /// Get the count of critical tools.
-    pub fn critical_count(&self) -> usize {
-        self.all_tools
-            .values()
-            .filter(|info| info.is_critical)
-            .count()
-    }
 
-    /// Get info about a tool by name.
-    pub fn get_info(&self, name: &str) -> Option<&ToolInfo> {
-        self.all_tools.get(name)
-    }
 
     /// Return only read-only tools (tools that don't modify files or state).
     /// This is used in plan mode to restrict available tools.
@@ -805,21 +788,6 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Return tool definitions for read-only tools only.
-    /// Used when building API tool definitions in plan mode.
-    pub fn readonly_definitions(&self) -> Vec<crate::api::types::ToolDefinition> {
-        self.filter_by_readonly()
-            .into_iter()
-            .map(|tool| crate::api::types::ToolDefinition {
-                def_type: "function".to_string(),
-                function: crate::api::types::FunctionDefinition {
-                    name: tool.name().to_string(),
-                    description: tool.description().to_string(),
-                    parameters: tool.schema(),
-                },
-            })
-            .collect()
-    }
 }
 
 impl Default for ToolRegistry {

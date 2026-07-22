@@ -206,16 +206,6 @@ impl StderrProgressEmitter {
         }
     }
 
-    /// Construct a stderr emitter that prints monotonic timestamps starting
-    /// from zero. Useful for snapshot tests.
-    #[allow(dead_code)]
-    pub fn with_monotonic_clock() -> Self {
-        Self {
-            start: Instant::now(),
-            use_system_clock: false,
-            lock: Mutex::new(()),
-        }
-    }
 
     fn timestamp(&self) -> String {
         if self.use_system_clock {

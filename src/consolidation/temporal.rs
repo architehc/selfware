@@ -138,10 +138,6 @@ impl TemporalRecord {
         Some((min, max))
     }
 
-    /// Check if this record has causal connections.
-    pub fn has_causal_links(&self) -> bool {
-        !self.causal_parents.is_empty() || !self.causal_children.is_empty()
-    }
 }
 
 /// Report from a consolidation cycle.

@@ -194,18 +194,6 @@ impl LongTermStore {
             .collect())
     }
 
-    /// Get records with active causal links to a given record ID.
-    pub fn causal_neighbors(&self, record_id: &str) -> Result<Vec<TemporalRecord>> {
-        let all = self.load_all()?;
-        Ok(all
-            .into_iter()
-            .filter(|r| {
-                r.causal_parents.iter().any(|p| p == record_id)
-                    || r.causal_children.iter().any(|c| c == record_id)
-                    || r.id == record_id
-            })
-            .collect())
-    }
 
     /// Index all persisted records from disk into the in-memory vector index.
     ///

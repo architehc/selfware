@@ -226,24 +226,6 @@ impl GpuManager {
         // This would communicate with the LLM engine to reduce batch size
     }
 
-    /// Determine appropriate quantization level based on available memory
-    pub async fn adjust_quantization(&self, required_memory: u64) -> QuantizationLevel {
-        let available = self.get_available_memory().await;
-
-        if available > required_memory * 2 {
-            QuantizationLevel::None
-        } else if available as f64 > required_memory as f64 * 1.5 {
-            QuantizationLevel::FP8
-        } else if available > required_memory {
-            QuantizationLevel::Int8
-        } else if available as f64 > required_memory as f64 * 0.6 {
-            QuantizationLevel::Int4
-        } else {
-            // Not enough memory even with int4
-            warn!("Insufficient GPU memory even with quantization");
-            QuantizationLevel::Int4
-        }
-    }
 
     /// Allocate GPU memory for a model
     pub async fn allocate_memory(

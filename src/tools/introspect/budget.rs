@@ -228,10 +228,6 @@ impl TokenBudget {
         Ok(Depth::Overview)
     }
 
-    /// Check if we can afford a specific operation
-    pub fn can_afford(&self, tokens: usize) -> bool {
-        tokens <= self.remaining()
-    }
 
     /// Get budget utilization percentage
     pub fn utilization_pct(&self) -> f64 {
@@ -241,10 +237,6 @@ impl TokenBudget {
         (self.used as f64 / self.total as f64) * 100.0
     }
 
-    /// Force allocation even if over budget (for critical operations)
-    pub fn force_allocate(&mut self, tokens: usize) {
-        self.used += tokens;
-    }
 }
 
 /// Metadata about a file for depth suggestion
@@ -286,10 +278,6 @@ impl PlanBudget {
         self.current_iteration += 1;
     }
 
-    /// Check if we can afford another phase
-    pub fn can_continue(&self) -> bool {
-        !self.iteration_exhausted() && !self.token_budget.exhausted()
-    }
 }
 
 #[cfg(test)]

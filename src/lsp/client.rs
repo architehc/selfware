@@ -696,34 +696,6 @@ impl LspClient {
         .await
     }
 
-    /// Notify the server that a file has changed (full content sync).
-    pub async fn did_change(&self, file: &str, content: &str) -> Result<()> {
-        let lang = Language::from_path(file)
-            .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
-
-        let uri = Self::file_uri(file);
-        let version = {
-            let mut versions = self.document_versions.lock().await;
-            let next = versions.get(&uri).copied().unwrap_or(1) + 1;
-            versions.insert(uri.clone(), next);
-            next
-        };
-
-        let conn = self.connection_for(lang).await?;
-        conn.notify(
-            "textDocument/didChange",
-            serde_json::json!({
-                "textDocument": {
-                    "uri": uri,
-                    "version": version,
-                },
-                "contentChanges": [{
-                    "text": content,
-                }]
-            }),
-        )
-        .await
-    }
 
     /// Go to the definition of the symbol at the given position.
     pub async fn goto_definition(&self, file: &str, line: u32, col: u32) -> Result<Vec<Location>> {

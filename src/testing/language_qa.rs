@@ -503,23 +503,6 @@ pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageRes
     results
 }
 
-/// Dispatch QA to the appropriate language runner.
-pub async fn run_qa(
-    language: QaLanguage,
-    project_root: &Path,
-    timeout_secs: u64,
-) -> Vec<QaStageResult> {
-    match language {
-        QaLanguage::Rust => run_rust_qa(project_root, timeout_secs).await,
-        QaLanguage::Python => run_python_qa(project_root, timeout_secs).await,
-        QaLanguage::Node => run_node_qa(project_root, timeout_secs).await,
-        QaLanguage::Go => run_go_qa(project_root, timeout_secs).await,
-        QaLanguage::Unknown => {
-            warn!("Unknown project language, skipping QA");
-            Vec::new()
-        }
-    }
-}
 
 #[cfg(test)]
 #[path = "../../tests/unit/testing/language_qa/language_qa_test.rs"]

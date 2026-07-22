@@ -96,11 +96,6 @@ impl HarnessConfig {
         self
     }
 
-    /// Set max tokens per response.
-    pub fn with_max_tokens(mut self, n: usize) -> Self {
-        self.max_tokens = n.max(1);
-        self
-    }
 
     /// Validate that the configuration is sane.
     pub fn validate(&self) -> Result<(), String> {

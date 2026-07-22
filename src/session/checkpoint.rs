@@ -614,30 +614,7 @@ impl TaskCheckpoint {
         self.touch();
     }
 
-    /// Mark a pending visual assertion as verified and move it to the history.
-    ///
-    /// Checks the ID before taking the assertion so it is not lost on mismatch.
-    pub fn mark_assertion_verified(&mut self, assertion_id: &str, result: VerificationResult) {
-        let id_matches = self
-            .pending_visual_assertion
-            .as_ref()
-            .is_some_and(|p| p.id == assertion_id);
-        if id_matches {
-            if let Some(mut pending) = self.pending_visual_assertion.take() {
-                pending.verified = true;
-                pending.verification_result = Some(result);
-                pending.verified_at = Some(Utc::now());
-                self.visual_assertions.push(pending);
-            }
-        }
-        self.touch();
-    }
 
-    /// Clear the pending visual assertion (e.g., after recovery)
-    pub fn clear_pending_visual_assertion(&mut self) {
-        self.pending_visual_assertion = None;
-        self.touch();
-    }
 
     /// Add an error log entry
     pub fn log_error(&mut self, step: usize, error: String, recovered: bool) {

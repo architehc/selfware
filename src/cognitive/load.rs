@@ -467,11 +467,6 @@ impl FocusMode {
         self
     }
 
-    /// Add filter
-    pub fn with_filter(mut self, filter: FocusFilter) -> Self {
-        self.filters.push(filter);
-        self
-    }
 
     /// Enable distraction hiding
     pub fn hide_distractions(mut self) -> Self {
@@ -629,11 +624,6 @@ impl FocusItem {
         self
     }
 
-    /// Set current file
-    pub fn with_current_file(mut self, file: impl Into<String>) -> Self {
-        self.current_file = Some(file.into());
-        self
-    }
 
     /// Add tag
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
@@ -734,10 +724,6 @@ impl CognitiveLoadReducer {
         &self.focus_mode
     }
 
-    /// Set focus mode
-    pub fn set_focus_mode(&mut self, mode: FocusMode) {
-        self.focus_mode = mode;
-    }
 
     /// Check if content should be shown
     pub fn should_show(&self, item: &FocusItem) -> bool {

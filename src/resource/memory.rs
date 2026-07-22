@@ -200,11 +200,6 @@ impl MemoryManager {
         self.allocated.load(Ordering::Relaxed)
     }
 
-    /// Check if enough memory is available
-    pub async fn check_available(&self, required_bytes: u64) -> Result<bool, ResourceError> {
-        let usage = self.get_usage().await?;
-        Ok(usage.available >= required_bytes)
-    }
 
     /// Estimate memory for operation
     pub fn estimate_for_tokens(&self, tokens: usize, bytes_per_token: usize) -> u64 {

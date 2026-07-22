@@ -219,44 +219,7 @@ impl Widget for ToolOutput {
     }
 }
 
-/// Render a keyboard shortcut hint
-pub fn _render_shortcut(frame: &mut Frame, area: Rect, key: &str, action: &str) {
-    let line = Line::from(vec![
-        Span::styled(
-            format!(" {} ", key),
-            Style::default()
-                .fg(TuiPalette::INK)
-                .bg(TuiPalette::SAGE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(action, TuiPalette::muted_style()),
-    ]);
 
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, area);
-}
-
-/// Render a help bar at the bottom
-pub fn _render_help_bar(frame: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
-    let spans: Vec<Span> = hints
-        .iter()
-        .flat_map(|(key, action)| {
-            vec![
-                Span::styled(
-                    format!(" {} ", key),
-                    Style::default().fg(TuiPalette::INK).bg(TuiPalette::SAGE),
-                ),
-                Span::styled(format!(" {} ", action), TuiPalette::muted_style()),
-                Span::raw("  "),
-            ]
-        })
-        .collect();
-
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, area);
-}
 
 #[cfg(test)]
 #[path = "../../../tests/unit/ui/tui/widgets/widgets_test.rs"]

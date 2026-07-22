@@ -185,10 +185,6 @@ fn patch_len(hypothesis: &Hypothesis) -> usize {
     hypothesis.patch.len()
 }
 
-/// Check if a file content is small enough for micro mode
-pub fn is_micro_safe_file(content: &str) -> bool {
-    content.len() <= MICRO_MAX_CONTEXT_CHARS / MICRO_MAX_FILES
-}
 
 #[cfg(test)]
 #[path = "../../tests/unit/evolution/micro_mode/micro_mode_test.rs"]

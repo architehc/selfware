@@ -31,9 +31,6 @@ impl L3Architecture {
         }
     }
 
-    pub fn with_fixtures_dir(dir: PathBuf) -> Self {
-        Self { fixtures_dir: dir }
-    }
 }
 
 #[async_trait]

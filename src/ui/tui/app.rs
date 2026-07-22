@@ -135,20 +135,6 @@ impl App {
         }
     }
 
-    /// Toggle garden view
-    pub fn toggle_garden_view(&mut self) {
-        self.state = if self.state == AppState::GardenView {
-            AppState::Chatting
-        } else {
-            // Try to load garden data if not already loaded
-            if self.garden_view.garden().is_none() {
-                if let Ok(garden) = crate::ui::garden::build_garden_from_path(".") {
-                    self.garden_view.set_garden(garden);
-                }
-            }
-            AppState::GardenView
-        };
-    }
 
     /// Add a user message
     pub fn add_user_message(&mut self, content: &str) {
@@ -487,20 +473,8 @@ impl App {
         self.status_line.status_message = Some(self.status.clone());
     }
 
-    /// Set the execution mode displayed in the status line
-    pub fn set_status_mode(&mut self, mode: super::StatusMode) {
-        self.status_line.mode = mode;
-    }
 
-    /// Update token usage in the status line
-    pub fn set_token_usage(&mut self, input: usize, output: usize) {
-        self.status_line.tokens_used = (input, output);
-    }
 
-    /// Update context window percentage in the status line
-    pub fn set_context_percent(&mut self, percent: f32) {
-        self.status_line.context_percent = percent.clamp(0.0, 100.0);
-    }
 
     /// Render command palette overlay
     fn render_palette(&self, frame: &mut Frame, area: Rect) {

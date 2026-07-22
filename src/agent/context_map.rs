@@ -952,16 +952,6 @@ impl ContextMap {
         freed
     }
 
-    /// Ensure the context budget has at least `headroom` tokens free.
-    /// Automatically downgrades/evicts the least relevant files.
-    /// Returns true if enough space was made available.
-    pub fn ensure_headroom(&mut self, headroom: usize) -> bool {
-        if self.remaining() >= headroom {
-            return true;
-        }
-        self.compress_to_fit(headroom);
-        self.remaining() >= headroom
-    }
 
     /// Add a web search result or external reference to the context.
     /// These are tracked as virtual files at L3 with the given content.
@@ -1006,18 +996,6 @@ impl ContextMap {
         self.sync_budget();
     }
 
-    /// Remove a specific context entry entirely.
-    pub fn remove_context(&mut self, path: &Path) -> usize {
-        if let Some(entry) = self.entries.remove(path) {
-            let freed = entry.current_tokens;
-            self.total_tokens = self.total_tokens.saturating_sub(freed);
-            debug!("Removed context {}: freed {} tokens", path.display(), freed);
-            self.sync_budget();
-            freed
-        } else {
-            0
-        }
-    }
 
     /// Get the most relevant files for a query using simple keyword matching.
     /// Returns paths sorted by relevance score (highest first).
@@ -1229,33 +1207,6 @@ impl ContextMap {
         }
     }
 
-    /// Apply a recommendation: promote and evict as suggested.
-    /// Note: promotions that require file reads return paths that need loading.
-    pub fn apply_recommendation(&mut self, rec: &ContextRecommendation) -> Vec<PathBuf> {
-        let mut needs_loading = Vec::new();
-
-        // Evict first to free space.
-        for suggestion in &rec.evict {
-            match suggestion.suggested_level {
-                ContextLevel::Tree => {
-                    self.evict_to_tree(&suggestion.path);
-                }
-                ContextLevel::Skeleton => {
-                    self.downgrade_to_skeleton(&suggestion.path);
-                }
-                _ => {}
-            }
-        }
-
-        // Promote — mark files that need content loaded from disk.
-        for suggestion in &rec.promote {
-            if suggestion.suggested_level == ContextLevel::Full {
-                needs_loading.push(suggestion.path.clone());
-            }
-        }
-
-        needs_loading
-    }
 
     /// Summary stats for logging/display.
     pub fn stats(&self) -> ContextMapStats {

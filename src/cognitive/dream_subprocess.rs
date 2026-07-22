@@ -78,11 +78,6 @@ impl AutoDreamConfig {
         self
     }
 
-    /// Set prefer local flag
-    pub fn with_prefer_local(mut self, prefer: bool) -> Self {
-        self.prefer_local = prefer;
-        self
-    }
 
     /// Set the API key
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {

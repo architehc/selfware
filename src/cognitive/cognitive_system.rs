@@ -273,33 +273,6 @@ impl CognitiveSystem {
         Ok(())
     }
 
-    /// Record episode from message
-    pub async fn record_message_episode(
-        &self,
-        message: &Message,
-        importance: Importance,
-    ) -> Result<()> {
-        let episode = Episode {
-            id: generate_id(),
-            episode_type: if message.role == "user" {
-                EpisodeType::Conversation
-            } else {
-                EpisodeType::Success
-            },
-            content: format!("[{}] {}", message.role, message.content),
-            token_count: 0, // Will be calculated
-            importance,
-            timestamp: current_timestamp_secs(),
-            embedding_id: String::new(),
-            related_episodes: Vec::new(),
-            insights: Vec::new(),
-            is_summarized: false,
-            original_id: None,
-            metadata: std::collections::HashMap::new(),
-        };
-
-        self.record_episode(episode).await
-    }
 
     /// Adapt token budget based on usage
     pub async fn adapt_budget(&self) -> Result<AdaptationResult> {
@@ -320,20 +293,6 @@ impl CognitiveSystem {
         Ok(result)
     }
 
-    /// Get self-improvement context
-    #[allow(clippy::await_holding_lock)]
-    pub async fn get_self_improvement_context(&self, goal: &str) -> Result<SelfImprovementContext> {
-        let self_ref = self.self_ref.read().await;
-
-        let allocation = {
-            let budget = self.budget.read().await;
-            budget.get_allocation().clone()
-        };
-
-        self_ref
-            .get_improvement_context(goal, allocation.semantic_memory)
-            .await
-    }
 
     /// Read own source code
     #[allow(clippy::await_holding_lock)]

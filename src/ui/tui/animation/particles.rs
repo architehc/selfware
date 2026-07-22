@@ -124,10 +124,6 @@ impl ParticleSystem {
         }
     }
 
-    pub fn with_bounds(mut self, bounds: Rect) -> Self {
-        self.bounds = Some(bounds);
-        self
-    }
 
     /// Add a particle to the system
     pub fn add(&mut self, particle: Particle) {

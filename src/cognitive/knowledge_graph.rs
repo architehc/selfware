@@ -385,11 +385,6 @@ impl Pattern {
         }
     }
 
-    /// Add entity
-    pub fn with_entity(mut self, entity_id: impl Into<String>) -> Self {
-        self.entities.push(entity_id.into());
-        self
-    }
 
     /// Set confidence
     pub fn with_confidence(mut self, confidence: f32) -> Self {

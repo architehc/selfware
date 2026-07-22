@@ -96,27 +96,6 @@ impl ShortTermCollector {
             .collect()
     }
 
-    /// Collect memory entries from working memory.
-    pub fn collect_memory_entries(&self, entries: &[MemoryEntryData]) -> Vec<CollectedItem> {
-        let cutoff = Utc::now() - chrono::Duration::seconds(self.max_age_secs as i64);
-
-        entries
-            .iter()
-            .filter(|e| e.timestamp >= cutoff)
-            .map(|e| CollectedItem {
-                source_id: format!("mem-{}", e.timestamp.timestamp()),
-                source_type: SourceType::MemoryEntry,
-                content: e.content.clone(),
-                timestamp: e.timestamp,
-                importance: 2, // Normal
-                tags: vec![e.role.clone()],
-                metadata: HashMap::new(),
-                related_ids: Vec::new(),
-                session_id: None,
-                file_refs: Vec::new(),
-            })
-            .collect()
-    }
 
     /// Assemble a batch from multiple sources.
     pub fn assemble_batch(&self, items: Vec<CollectedItem>) -> CollectedBatch {

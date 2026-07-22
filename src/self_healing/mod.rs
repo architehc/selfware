@@ -578,18 +578,6 @@ impl StateManager {
         id
     }
 
-    /// Check if checkpoint is needed
-    pub fn needs_checkpoint(&self) -> bool {
-        if !self.config.enable_checkpointing {
-            return false;
-        }
-
-        let last = self.last_checkpoint.read();
-        if let Some(instant) = *last {
-            return instant.elapsed() >= Duration::from_secs(self.config.checkpoint_interval_secs);
-        }
-        true
-    }
 
     /// Restore from checkpoint
     pub fn restore(&self, checkpoint_id: Option<&str>) -> Option<StateCheckpoint> {
@@ -1362,10 +1350,6 @@ impl SelfHealingEngine {
         );
     }
 
-    /// Get health predictions
-    pub fn predict_health(&self) -> Vec<HealthPrediction> {
-        self.predictor.all_predictions()
-    }
 
     /// Reset retry state for a pattern after a successful operation,
     /// so the next failure starts with fresh backoff.

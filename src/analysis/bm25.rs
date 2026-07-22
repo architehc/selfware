@@ -240,42 +240,6 @@ impl BM25Index {
             .collect()
     }
 
-    /// Search without modifying self (requires index to be up-to-date)
-    pub fn search_immutable(&self, query: &str, limit: usize) -> Vec<BM25Result> {
-        // Immutable search should still provide best-effort results even if the
-        // mutable index is marked dirty.
-        if self.documents.is_empty() {
-            return Vec::new();
-        }
-
-        let query_tokens = Self::tokenize(query);
-        if query_tokens.is_empty() {
-            return Vec::new();
-        }
-
-        let mut scores: Vec<(usize, f32)> = self
-            .documents
-            .iter()
-            .enumerate()
-            .map(|(i, doc)| (i, self.score_document(doc, &query_tokens)))
-            .filter(|(_, score)| *score > 0.0)
-            .collect();
-
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        scores
-            .into_iter()
-            .take(limit)
-            .map(|(i, score)| {
-                let doc = &self.documents[i];
-                BM25Result {
-                    id: doc.id.clone(),
-                    text: doc.text.clone(),
-                    score,
-                }
-            })
-            .collect()
-    }
 
     /// Compute BM25 score for a document given query tokens
     fn score_document(&self, doc: &Document, query_tokens: &[String]) -> f32 {

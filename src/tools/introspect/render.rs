@@ -230,61 +230,8 @@ impl OutputRenderer {
         )
     }
 
-    /// Render suggestions
-    pub fn render_suggestions(&self, suggestions: &[String]) -> String {
-        if suggestions.is_empty() {
-            return String::new();
-        }
-
-        let mut output = String::new();
-        output.push_str("💡 Suggestions\n");
-        output.push_str("─────────────\n");
-
-        for suggestion in suggestions {
-            output.push_str(&format!("  • {}\n", suggestion));
-        }
-
-        output.push('\n');
-        output
-    }
 }
 
-/// Render symbols in a compact format
-pub fn render_symbols_compact(symbols: &[Symbol]) -> String {
-    let mut output = String::new();
-
-    for symbol in symbols {
-        let vis = match symbol.visibility {
-            super::parser::Visibility::Public => "pub ",
-            super::parser::Visibility::PublicCrate => "pub(crate) ",
-            _ => "",
-        };
-
-        let kind_emoji = match symbol.kind {
-            super::parser::SymbolKind::Function | super::parser::SymbolKind::Method => "🔧",
-            super::parser::SymbolKind::Struct | super::parser::SymbolKind::Class => "📦",
-            super::parser::SymbolKind::Trait => "🔷",
-            super::parser::SymbolKind::Enum => "🔢",
-            super::parser::SymbolKind::Module => "📁",
-            super::parser::SymbolKind::Const | super::parser::SymbolKind::Static => "📌",
-            _ => "•",
-        };
-
-        output.push_str(&format!(
-            "{} {}{}{}\n",
-            kind_emoji,
-            vis,
-            symbol.name,
-            if symbol.signature.contains('(') {
-                "(...)"
-            } else {
-                ""
-            }
-        ));
-    }
-
-    output
-}
 
 /// Truncate output to fit within token budget
 pub fn truncate_output(output: &str, max_tokens: usize) -> String {

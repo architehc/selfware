@@ -94,17 +94,6 @@ impl CompilationSandbox {
         self.parse_output(output)
     }
 
-    /// Build the project (cargo build --release)
-    pub fn build_release(&self) -> Result<CompileResult> {
-        info!("Running 'cargo build --release' in sandbox");
-        let output = Command::new("cargo")
-            .arg("build")
-            .arg("--release")
-            .current_dir(&self.work_dir)
-            .output()?;
-
-        self.parse_output(output)
-    }
 
     /// Run tests (cargo test)
     pub fn test(&self) -> Result<CompileResult> {

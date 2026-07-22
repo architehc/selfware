@@ -32,9 +32,6 @@ impl L1TuiState {
         }
     }
 
-    pub fn with_fixtures_dir(dir: PathBuf) -> Self {
-        Self { fixtures_dir: dir }
-    }
 }
 
 #[async_trait]

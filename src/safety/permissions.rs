@@ -55,11 +55,6 @@ impl PermissionGrant {
         self
     }
 
-    /// Add a reason for the grant.
-    pub fn with_reason(mut self, reason: &str) -> Self {
-        self.reason = Some(reason.to_string());
-        self
-    }
 
     /// Check if this grant has expired.
     pub fn is_expired(&self) -> bool {
@@ -143,16 +138,6 @@ impl PermissionStore {
             .any(|g| g.matches(tool_name, resource_path))
     }
 
-    /// Remove expired grants.
-    pub fn cleanup_expired(&mut self) -> usize {
-        let before = self.grants.len();
-        self.grants.retain(|g| !g.is_expired());
-        let removed = before - self.grants.len();
-        if removed > 0 {
-            debug!("Cleaned up {} expired permission grant(s)", removed);
-        }
-        removed
-    }
 
     /// Number of active (non-expired) grants.
     pub fn active_count(&self) -> usize {

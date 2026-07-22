@@ -123,20 +123,8 @@ pub fn get_description() -> String {
     ShellExecPrompt::new().description()
 }
 
-/// Get the rich when_to_use guidance for shell_exec tool.
-pub fn get_when_to_use() -> String {
-    ShellExecPrompt::new().when_to_use()
-}
 
-/// Get examples for shell_exec tool.
-pub fn get_examples() -> Vec<ToolExample> {
-    ShellExecPrompt::new().examples()
-}
 
-/// Get important notes for shell_exec tool.
-pub fn get_important_notes() -> Option<String> {
-    ShellExecPrompt::new().important_notes()
-}
 
 #[cfg(test)]
 #[path = "../../../tests/unit/tools/shell_exec/prompt/prompt_test.rs"]

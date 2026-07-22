@@ -43,12 +43,6 @@ pub use types::{
 use crate::errors::SelfwareError;
 use crate::swl::parser::ast::SwlDocument;
 
-/// Initialize guardrail enforcer from SWL document
-pub fn enforcer_from_document(doc: &SwlDocument) -> GuardrailEnforcer {
-    let mut enforcer = GuardrailEnforcer::new();
-    enforcer.register_guardrails(&doc.guardrails);
-    enforcer
-}
 
 /// Quick check if a guardrail would pass
 pub async fn quick_check(
@@ -139,15 +133,7 @@ pub mod patterns {
         Condition::Inline(format!("agent_output.len() <= {}", max_chars))
     }
 
-    /// Create a condition that blocks on critical markers
-    pub fn no_critical_issues() -> Condition {
-        Condition::Inline("!agent_output.contains('[CRITICAL]')".to_string())
-    }
 
-    /// Create a condition that requires specific marker
-    pub fn requires_marker(marker: impl Into<String>) -> Condition {
-        Condition::Inline(format!("agent_output.contains('{}')", marker.into()))
-    }
 
     /// Create a condition for safe shell commands
     pub fn safe_shell_command() -> Condition {

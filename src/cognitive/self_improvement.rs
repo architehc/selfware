@@ -244,12 +244,6 @@ impl PromptOptimizer {
         self.patterns.insert(pattern.id.clone(), pattern);
     }
 
-    /// Update a pattern with new outcome
-    pub fn update_pattern(&mut self, pattern_id: &str, outcome: Outcome, quality: f32) {
-        if let Some(pattern) = self.patterns.get_mut(pattern_id) {
-            pattern.update(outcome, quality);
-        }
-    }
 
     /// Get best patterns for a task type
     pub fn best_patterns_for(&self, task_type: &str) -> Vec<&PromptPattern> {
@@ -271,10 +265,6 @@ impl PromptOptimizer {
         patterns.into_iter().take(5).collect()
     }
 
-    /// Get task stats
-    pub fn get_task_stats(&self, task_type: &str) -> Option<&TaskPromptStats> {
-        self.task_stats.get(task_type)
-    }
 
     /// Suggest prompt improvements based on patterns
     pub fn suggest_improvements(&self, prompt: &str, task_type: &str) -> Vec<PromptSuggestion> {
@@ -1000,12 +990,6 @@ impl ErrorPatternLearner {
         self.patterns.get(pattern_id)
     }
 
-    /// Get most common error patterns
-    pub fn most_common_patterns(&self, limit: usize) -> Vec<&ErrorPattern> {
-        let mut patterns: Vec<_> = self.patterns.values().collect();
-        patterns.sort_by_key(|x| std::cmp::Reverse(x.count));
-        patterns.into_iter().take(limit).collect()
-    }
 
     /// Check if action might trigger known error
     pub fn might_trigger_error(&self, action: &str, context: &str) -> Vec<ErrorWarning> {

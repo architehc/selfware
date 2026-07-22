@@ -304,14 +304,6 @@ impl VisualVerifier {
         parse_diff_response(&raw)
     }
 
-    /// Extract visible text from a screenshot using the VLM as an OCR engine.
-    pub async fn extract_text_from_screenshot(&self, image_base64: &str) -> Result<String> {
-        let prompt = "Extract ALL visible text from this screenshot. \
-                      Return only the extracted text, preserving line breaks \
-                      and layout as much as possible. Do not add commentary.";
-        let body = self.build_single_image_request(prompt, image_base64)?;
-        self.call_vlm(&body).await
-    }
 
     /// Verify that specific UI elements are present and visible.
     pub async fn verify_ui_elements(
@@ -325,60 +317,13 @@ impl VisualVerifier {
         parse_elements_response(&raw, elements)
     }
 
-    /// Analyze page layout for alignment, spacing, and quality.
-    pub async fn analyze_layout(&self, image_base64: &str) -> Result<LayoutAnalysis> {
-        let prompt = "Analyze the layout of this screenshot. Respond in JSON with these fields:\n\
-                      - \"overall_quality\": \"good\", \"fair\", or \"poor\"\n\
-                      - \"alignment_issues\": array of strings describing any alignment problems\n\
-                      - \"spacing_issues\": array of strings describing any spacing problems\n\
-                      - \"responsive_notes\": array of strings with notes about the layout\n\
-                      \n\
-                      Respond ONLY with the JSON object, no extra text.";
-        let body = self.build_single_image_request(prompt, image_base64)?;
-        let raw = self.call_vlm(&body).await?;
-        parse_layout_response(&raw)
-    }
 
     // -----------------------------------------------------------------------
     // Convenience methods
     // -----------------------------------------------------------------------
 
-    /// Capture the current screen and verify it against a description.
-    ///
-    /// Combines [`crate::computer::screen::ScreenCapture::capture_full`]
-    /// with [`verify_screenshot`](Self::verify_screenshot).
-    pub async fn capture_and_verify(&self, expected: &str) -> Result<VisualVerificationResult> {
-        let captured = crate::computer::screen::ScreenCapture::capture_full().await?;
-        self.verify_screenshot(&captured.base64_png, expected).await
-    }
 
-    /// Capture the terminal screen and verify expected text patterns are visible.
-    pub async fn verify_terminal_output(
-        &self,
-        expected_patterns: &[&str],
-    ) -> Result<VisualVerificationResult> {
-        let captured = crate::computer::screen::ScreenCapture::capture_full().await?;
-        let description = format!(
-            "A terminal window showing the following text patterns: {}",
-            expected_patterns.join(", ")
-        );
-        self.verify_screenshot(&captured.base64_png, &description)
-            .await
-    }
 
-    /// Capture a browser page and verify specific UI elements.
-    ///
-    /// Note: this captures the current screen -- the caller is responsible
-    /// for navigating the browser to the target URL first.
-    pub async fn verify_browser_page(
-        &self,
-        _url: &str,
-        expected_elements: &[UiElement],
-    ) -> Result<Vec<ElementVerification>> {
-        let captured = crate::computer::screen::ScreenCapture::capture_full().await?;
-        self.verify_ui_elements(&captured.base64_png, expected_elements)
-            .await
-    }
 
     // -----------------------------------------------------------------------
     // Integration with VerificationGate
@@ -1245,42 +1190,6 @@ pub fn compute_perceptual_hash(screenshot_path: &Path) -> Result<String> {
     Ok(hex_string)
 }
 
-/// Compute perceptual hash from image bytes (for in-memory images)
-pub fn compute_perceptual_hash_from_bytes(image_bytes: &[u8]) -> Result<String> {
-    use image::GenericImageView;
-
-    // Decode the image from bytes
-    let img = image::load_from_memory(image_bytes)
-        .with_context(|| "Failed to decode image from bytes")?;
-
-    // Convert to grayscale and resize to 9x8 for dhash
-    let gray = img.to_luma8();
-    let resized = image::imageops::resize(&gray, 9, 8, image::imageops::FilterType::Lanczos3);
-
-    // Compute difference hash
-    let mut hash_bits = Vec::with_capacity(64);
-    for y in 0..8 {
-        for x in 0..8 {
-            let left = resized.get_pixel(x, y)[0];
-            let right = resized.get_pixel(x + 1, y)[0];
-            hash_bits.push(if right > left { 1 } else { 0 });
-        }
-    }
-
-    // Convert bits to hex string
-    let mut hex_string = String::with_capacity(16);
-    for chunk in hash_bits.chunks(4) {
-        let nibble = chunk.iter().fold(0u8, |acc, &bit| (acc << 1) | bit);
-        let hex_char = match nibble {
-            0..=9 => (b'0' + nibble) as char,
-            10..=15 => (b'a' + nibble - 10) as char,
-            _ => '0',
-        };
-        hex_string.push(hex_char);
-    }
-
-    Ok(hex_string)
-}
 
 /// Compare two perceptual hashes using Hamming distance
 /// Returns similarity score 0.0-1.0 where 1.0 is identical
@@ -1366,23 +1275,6 @@ impl VisualLoopConfig {
     }
 }
 
-/// Utility function to quickly check for stuck loops with minimal config
-///
-/// This is a convenience function for simple use cases. For more control,
-/// use `VisualStateTracker` directly.
-pub fn check_visual_loop(
-    tracker: &mut VisualStateTracker,
-    screenshot_path: &Path,
-    action: &str,
-    action_succeeded: bool,
-) -> Result<LoopDetectionResult> {
-    tracker.record_state(
-        screenshot_path,
-        String::new(), // No semantic description in simple mode
-        action.to_string(),
-        action_succeeded,
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Tests

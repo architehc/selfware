@@ -502,36 +502,6 @@ impl Usage {
         Ok(())
     }
 
-    /// Validate usage against model configuration limits.
-    pub fn validate_against_limits(
-        &self,
-        context_length: usize,
-        max_tokens: usize,
-    ) -> anyhow::Result<()> {
-        self.validate()?;
-        if self.prompt_tokens > context_length {
-            anyhow::bail!(
-                "Prompt tokens ({}) exceed context_length ({})",
-                self.prompt_tokens,
-                context_length
-            );
-        }
-        if self.completion_tokens > max_tokens {
-            anyhow::bail!(
-                "Completion tokens ({}) exceed max_tokens ({})",
-                self.completion_tokens,
-                max_tokens
-            );
-        }
-        if self.total_tokens > context_length {
-            anyhow::bail!(
-                "Total tokens ({}) exceed context_length ({})",
-                self.total_tokens,
-                context_length
-            );
-        }
-        Ok(())
-    }
 }
 
 /// Definition of a tool available to the model.

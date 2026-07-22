@@ -253,13 +253,6 @@ impl DebtMetrics {
         }
     }
 
-    pub fn debt_ratio(&self) -> f64 {
-        if self.total_fix_cost == 0.0 {
-            0.0
-        } else {
-            self.total_current_cost / self.total_fix_cost
-        }
-    }
 }
 
 // ============================================================================
@@ -475,13 +468,6 @@ impl RefactoringRoadmap {
         self.phases.push(phase);
     }
 
-    pub fn overall_roi(&self) -> f64 {
-        if self.total_cost == 0.0 {
-            0.0
-        } else {
-            self.annual_savings / self.total_cost
-        }
-    }
 
     pub fn payback_months(&self) -> f64 {
         if self.annual_savings == 0.0 {
@@ -514,10 +500,6 @@ impl RoadmapGenerator {
         self
     }
 
-    pub fn with_phases(mut self, phases: u32) -> Self {
-        self.num_phases = phases;
-        self
-    }
 
     pub fn generate(&self, title: &str, prioritized: &[PrioritizedItem]) -> RefactoringRoadmap {
         let mut roadmap = RefactoringRoadmap::new(title);
@@ -640,14 +622,6 @@ impl FileStats {
         self.churn_rate() * (1.0 + self.instability_index()) * (self.unique_authors as f64 / 2.0)
     }
 
-    /// Calculate code growth rate
-    pub fn growth_rate(&self) -> f64 {
-        if self.lines_deleted == 0 {
-            self.lines_added as f64
-        } else {
-            self.lines_added as f64 / self.lines_deleted as f64
-        }
-    }
 }
 
 /// Correlation analysis result
@@ -684,9 +658,6 @@ impl CorrelationResult {
         }
     }
 
-    pub fn is_significant(&self) -> bool {
-        self.p_value < 0.05
-    }
 }
 
 /// Churn analyzer
@@ -732,12 +703,6 @@ impl ChurnAnalyzer {
             .collect()
     }
 
-    pub fn old_but_stable(&self, min_age_days: u64, max_churn: f64) -> Vec<&FileStats> {
-        self.files
-            .values()
-            .filter(|f| f.age_days() > min_age_days && f.churn_rate() < max_churn)
-            .collect()
-    }
 
     pub fn correlate_age_debt(&self) -> CorrelationResult {
         // Simplified correlation calculation
@@ -887,9 +852,6 @@ impl DebtTracker {
         self.items.push(item);
     }
 
-    pub fn add_file_stats(&mut self, stats: FileStats) {
-        self.churn_analyzer.add_file(stats);
-    }
 
     pub fn metrics(&self) -> DebtMetrics {
         DebtMetrics::calculate(&self.items)
@@ -926,12 +888,6 @@ impl DebtTracker {
             .collect()
     }
 
-    pub fn items_by_type(&self, debt_type: DebtType) -> Vec<&DebtItem> {
-        self.items
-            .iter()
-            .filter(|i| i.debt_type == debt_type)
-            .collect()
-    }
 
     /// Save tracker state to a JSON file.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {

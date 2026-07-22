@@ -168,20 +168,6 @@ impl DiskManager {
         ))
     }
 
-    /// Start maintenance loop
-    pub async fn maintenance_loop(&self) {
-        let mut interval = tokio::time::interval(Duration::from_secs(
-            self.config.maintenance_interval_seconds,
-        ));
-
-        loop {
-            interval.tick().await;
-
-            if let Err(e) = self.perform_maintenance().await {
-                warn!(error = %e, "Maintenance failed");
-            }
-        }
-    }
 
     /// Perform maintenance tasks
     async fn perform_maintenance(&self) -> Result<(), ResourceError> {
@@ -420,11 +406,6 @@ impl DiskManager {
         Ok(usage.available)
     }
 
-    /// Check if there's enough space for an operation
-    pub async fn check_space(&self, required_bytes: u64) -> Result<bool, ResourceError> {
-        let available = self.available_space().await?;
-        Ok(available >= required_bytes)
-    }
 }
 
 #[cfg(test)]

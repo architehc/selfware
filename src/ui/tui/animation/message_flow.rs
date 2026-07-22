@@ -88,10 +88,6 @@ impl MessageFlow {
         self
     }
 
-    pub fn with_trail(mut self, length: u8) -> Self {
-        self.trail_length = length;
-        self
-    }
 
     pub fn looping(mut self, looping: bool) -> Self {
         self.looping = looping;

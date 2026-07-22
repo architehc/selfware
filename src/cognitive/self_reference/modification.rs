@@ -27,9 +27,6 @@ impl ModificationEngine {
         }
     }
 
-    pub fn with_default_config(state: ReferenceState) -> Self {
-        Self::new(state, ReferenceConfig::default())
-    }
 
     /// Propose a modification
     pub async fn propose(
@@ -152,10 +149,6 @@ impl ModificationEngine {
         self.protected_targets.insert(target.to_string());
     }
 
-    /// Remove protection from a target
-    pub fn unprotect(&mut self, target: &str) {
-        self.protected_targets.remove(target);
-    }
 
     /// Check if a target is protected
     pub fn is_protected(&self, target: &str) -> bool {

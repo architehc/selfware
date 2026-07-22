@@ -18,12 +18,6 @@ impl IntrospectionEngine {
         Self { state, config }
     }
 
-    pub fn with_default_config(state: ReferenceState) -> Self {
-        Self {
-            state,
-            config: ReferenceConfig::default(),
-        }
-    }
 
     /// Perform introspection on a target
     pub async fn introspect(
@@ -121,27 +115,8 @@ impl IntrospectionEngine {
         diff <= self.config.max_reflection_depth as i32
     }
 
-    /// Query memory for context
-    pub async fn query_memory(
-        &self,
-        memory: &HierarchicalMemory,
-        query: &str,
-    ) -> anyhow::Result<Vec<String>> {
-        let mem_query = MemoryQuery::new(query).with_tier(MemoryTier::Working);
-        let results = memory.query(mem_query).await;
-        Ok(results.into_iter().map(|r| r.content).collect())
-    }
 
-    /// Get current self-reference
-    pub async fn get_self(&self) -> Option<SelfReference> {
-        self.state.get_reference("self").await
-    }
 
-    /// List all references
-    pub async fn list_references(&self) -> Vec<(String, SelfReference)> {
-        let refs = self.state.references.read().await;
-        refs.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    }
 }
 
 /// A reflection result
@@ -163,7 +138,4 @@ impl Reflection {
         }
     }
 
-    pub fn is_meta(&self) -> bool {
-        self.meta_thought.is_some()
-    }
 }

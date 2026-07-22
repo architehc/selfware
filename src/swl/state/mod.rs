@@ -108,11 +108,6 @@ impl StateManager {
         self
     }
 
-    /// Set auto-save behavior
-    pub fn with_auto_save(mut self, auto_save: bool) -> Self {
-        self.auto_save = auto_save;
-        self
-    }
 
     /// Load state from the backend
     pub async fn load(&mut self) -> Result<()> {
@@ -189,14 +184,6 @@ impl StateManager {
         Ok(())
     }
 
-    /// Set a state value and persist immediately if auto_save is enabled.
-    pub async fn set_and_save(&mut self, key: String, value: serde_json::Value) -> Result<()> {
-        self.set(key, value)?;
-        if self.auto_save && self.dirty {
-            self.save().await?;
-        }
-        Ok(())
-    }
 
     /// Delete a state value
     pub fn delete(&mut self, key: &str) -> bool {

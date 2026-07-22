@@ -99,11 +99,6 @@ impl DreamState {
         Self::default()
     }
 
-    /// Set the lock file path for cross-process coordination
-    pub fn with_lock_file(mut self, path: impl Into<PathBuf>) -> Self {
-        self.lock_file_path = Some(path.into());
-        self
-    }
 
     /// Get the path to the dream state file
     fn state_file_path(base_dir: &Path) -> PathBuf {
@@ -187,16 +182,6 @@ impl DreamState {
         self.sessions_since_last_dream += 1;
     }
 
-    /// Record that a dream has completed
-    pub fn record_dream_completed(&mut self) {
-        self.last_dream_timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.sessions_since_last_dream = 0;
-        self.dream_count += 1;
-        self.release_consolidation_lock();
-    }
 
     /// Check if the state indicates a dream should run (without checking lock)
     pub fn should_run_dream_check_gates(&self, trigger: &DreamTrigger) -> bool {

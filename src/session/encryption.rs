@@ -221,18 +221,6 @@ impl EncryptionManager {
         }
     }
 
-    /// Save password to OS keychain
-    pub fn save_to_keychain(password: &str) -> Result<()> {
-        let entry = keyring::Entry::new(
-            "selfware",
-            &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()),
-        )
-        .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
-        entry
-            .set_password(password)
-            .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
-        Ok(())
-    }
 
     /// Create an EncryptionManager directly (test only, bypasses OnceLock)
     #[cfg(test)]

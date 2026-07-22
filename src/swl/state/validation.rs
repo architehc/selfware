@@ -205,20 +205,6 @@ fn yaml_to_json(value: &serde_yaml::Value) -> std::result::Result<Value, serde_j
     serde_json::to_value(value)
 }
 
-/// Check if a value satisfies a field's constraints
-pub fn satisfies_constraints(value: &Value, field: &StateField) -> std::result::Result<(), String> {
-    // Type check
-    validate_value_type(value, &field.field_type)?;
-
-    // Additional constraints could be added here:
-    // - String length limits
-    // - Numeric range constraints
-    // - Regex patterns
-    // - Enum values
-    // etc.
-
-    Ok(())
-}
 
 /// Get a summary of validation issues
 pub fn get_validation_issues(

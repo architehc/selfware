@@ -210,31 +210,6 @@ fn parse_diagnostic(msg: &serde_json::Value) -> Option<CompilerDiagnostic> {
     })
 }
 
-/// Quick-and-dirty verification gate for any Rust file edit.
-/// This is the "Day 1" implementation — wrap existing file_edit/file_write
-/// tools with a cargo check gate.
-pub fn verify_edit_or_rollback(repo_root: &Path, edited_file: &Path) -> Result<bool, String> {
-    // Only gate Rust files
-    if edited_file.extension().and_then(|e| e.to_str()) != Some("rs") {
-        return Ok(true);
-    }
-
-    let diagnostics = cargo_check_json(repo_root)?;
-    let has_errors = diagnostics
-        .iter()
-        .any(|d| d.level == DiagnosticLevel::Error);
-
-    if has_errors {
-        // Rollback the edit
-        let _ = Command::new("git")
-            .args(["checkout", "--"])
-            .arg(edited_file)
-            .current_dir(repo_root)
-            .output();
-    }
-
-    Ok(!has_errors)
-}
 
 fn uuid_short() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

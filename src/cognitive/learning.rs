@@ -568,19 +568,6 @@ impl Curriculum {
         self.concepts.get(id)
     }
 
-    pub fn lessons_by_difficulty(&self, max_difficulty: Difficulty) -> Vec<&Lesson> {
-        self.lessons
-            .iter()
-            .filter(|l| {
-                l.concepts.iter().all(|c| {
-                    self.concepts
-                        .get(c)
-                        .map(|concept| concept.difficulty <= max_difficulty)
-                        .unwrap_or(true)
-                })
-            })
-            .collect()
-    }
 
     pub fn suggested_order(&self) -> Vec<&Lesson> {
         let mut sorted: Vec<_> = self.lessons.iter().collect();
@@ -929,12 +916,6 @@ impl Quiz {
         self.questions.len()
     }
 
-    pub fn questions_by_difficulty(&self, difficulty: Difficulty) -> Vec<&QuizQuestion> {
-        self.questions
-            .iter()
-            .filter(|q| q.difficulty == difficulty)
-            .collect()
-    }
 }
 
 /// Quiz attempt result

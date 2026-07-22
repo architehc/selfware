@@ -1524,11 +1524,6 @@ impl VectorStore {
         self
     }
 
-    /// Set chunker
-    pub fn with_chunker(mut self, chunker: CodeChunker) -> Self {
-        self.chunker = chunker;
-        self
-    }
 
     /// Create or get collection
     pub fn collection(&mut self, name: &str, scope: CollectionScope) -> &mut VectorCollection {
@@ -2097,10 +2092,6 @@ impl BoundedVectorStore {
         &self.inner
     }
 
-    /// Get a mutable reference to the inner `VectorStore`.
-    pub fn inner_mut(&mut self) -> &mut VectorStore {
-        &mut self.inner
-    }
 
     /// Delegate: create or get a collection.
     pub fn collection(&mut self, name: &str, scope: CollectionScope) -> &mut VectorCollection {

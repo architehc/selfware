@@ -106,21 +106,6 @@ pub fn extract_tool_calls_from_text(content: &str) -> Vec<ToolCall> {
         .collect()
 }
 
-/// String representation of a [`ParseMethod`] for telemetry / logging.
-///
-/// Currently consumers of [`extract_tool_calls`] receive normalized
-/// [`ToolCall`] values without the originating `ParseMethod`, so this
-/// helper is a hook for future telemetry that wants to track fallback
-/// rate. Kept hidden until it has a real consumer.
-#[doc(hidden)]
-pub fn parse_method_for(method: ParseMethod) -> &'static str {
-    match method {
-        ParseMethod::Native => "native",
-        ParseMethod::Xml => "xml",
-        ParseMethod::Json => "json",
-        ParseMethod::Markdown => "markdown",
-    }
-}
 
 #[cfg(test)]
 #[path = "../../tests/unit/api/tool_calling/tool_calling_test.rs"]

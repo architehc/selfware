@@ -464,29 +464,6 @@ impl PatternDetector {
         self.threshold
     }
 
-    /// Check if two messages are similar based on the threshold
-    pub fn are_similar(&self, msg1: &str, msg2: &str) -> bool {
-        let t1 = self.extract_template(msg1);
-        let t2 = self.extract_template(msg2);
-
-        // Simple Jaccard similarity on words
-        let words1: std::collections::HashSet<_> = t1.split_whitespace().collect();
-        let words2: std::collections::HashSet<_> = t2.split_whitespace().collect();
-
-        if words1.is_empty() && words2.is_empty() {
-            return true;
-        }
-
-        let intersection = words1.intersection(&words2).count();
-        let union = words1.union(&words2).count();
-
-        if union == 0 {
-            return false;
-        }
-
-        let similarity = intersection as f32 / union as f32;
-        similarity >= self.threshold
-    }
 
     /// Get top patterns
     pub fn top_patterns(&self, n: usize) -> Vec<LogPattern> {
@@ -760,13 +737,6 @@ impl AnomalyDetector {
         self.error_baseline.read().map(|b| *b).unwrap_or(0.05)
     }
 
-    /// Update the error baseline based on observed error rate
-    pub fn update_baseline(&self, observed_rate: f32) {
-        if let Ok(mut baseline) = self.error_baseline.write() {
-            // Exponential moving average: new = 0.9 * old + 0.1 * observed
-            *baseline = (*baseline * 0.9) + (observed_rate * 0.1);
-        }
-    }
 
     /// Get recent anomalies
     pub fn recent_anomalies(&self, count: usize) -> Vec<Anomaly> {

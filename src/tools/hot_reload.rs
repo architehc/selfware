@@ -214,11 +214,6 @@ impl HotReloadTool {
         }
     }
 
-    /// Create a hot-reload tool that shares an existing manager (e.g. one
-    /// already wired into other parts of the system).
-    pub fn with_manager(manager: Arc<Mutex<HotReloadManager>>) -> Self {
-        Self { manager }
-    }
 }
 
 impl Default for HotReloadTool {

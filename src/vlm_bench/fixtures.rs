@@ -228,11 +228,6 @@ pub fn ensure_fixture_dir(base: &Path, level: &str) -> std::io::Result<PathBuf> 
     Ok(dir)
 }
 
-/// Load ground truth from a JSON file.
-pub fn load_ground_truth(path: &Path) -> anyhow::Result<GroundTruth> {
-    let content = std::fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&content)?)
-}
 
 #[cfg(test)]
 #[path = "../../tests/unit/vlm_bench/fixtures/fixtures_test.rs"]

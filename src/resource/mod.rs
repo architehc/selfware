@@ -229,20 +229,6 @@ impl ResourceManager {
         self.usage.read().await.clone()
     }
 
-    /// Report metrics
-    pub async fn report_metrics(&self) -> Result<(), SelfwareError> {
-        let usage = self.get_usage().await;
-
-        info!(
-            memory_used_gb = usage.memory_used_bytes / 1_000_000_000,
-            gpu_memory_used_gb = usage.gpu_memory_used_bytes / 1_000_000_000,
-            gpu_temp = usage.gpu_temperature,
-            disk_used_gb = usage.disk_used_bytes / 1_000_000_000,
-            "Resource usage report"
-        );
-
-        Ok(())
-    }
 
     /// Check if operation is within quotas
     pub async fn check_quotas(&self, required: &ResourceRequest) -> Result<(), ResourceError> {

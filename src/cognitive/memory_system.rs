@@ -236,26 +236,6 @@ impl MemorySystem {
         parts.join("\n\n")
     }
 
-    /// Load all memory sources (both .selfware.md and consolidated MEMORY.md)
-    pub fn load_all_memories(cwd: &Path) -> String {
-        let mut parts = Vec::new();
-
-        // Load .selfware.md files
-        let memory_files = Self::discover(cwd);
-        let formatted = Self::format_for_prompt(&memory_files);
-        if !formatted.is_empty() {
-            parts.push(formatted);
-        }
-
-        // Load consolidated MEMORY.md files
-        let consolidated = Self::discover_consolidated(cwd);
-        let formatted_consolidated = Self::format_consolidated_for_prompt(&consolidated);
-        if !formatted_consolidated.is_empty() {
-            parts.push(formatted_consolidated);
-        }
-
-        parts.join("\n\n")
-    }
 }
 
 impl DreamIntegratedMemorySystem {
@@ -280,14 +260,6 @@ impl DreamIntegratedMemorySystem {
         self
     }
 
-    /// Create with custom autoDream configuration.
-    pub fn with_auto_dream_config(
-        mut self,
-        config: crate::cognitive::dream_subprocess::AutoDreamConfig,
-    ) -> Self {
-        self.auto_dream_config = config;
-        self
-    }
 
     /// Load consolidated MEMORY.md for the project.
     pub fn load_consolidated_memory(&self) -> Option<ConsolidatedMemory> {
@@ -310,21 +282,6 @@ impl DreamIntegratedMemorySystem {
         }
     }
 
-    /// Check dream gates and potentially spawn the autoDream background task.
-    ///
-    /// Call this after a session ends. Returns the task handle if spawned.
-    pub async fn check_and_spawn_dream(
-        &self,
-        project_path: &Path,
-    ) -> anyhow::Result<Option<crate::cognitive::dream_subprocess::AutoDreamHandle>> {
-        crate::cognitive::dream_subprocess::check_and_spawn_autodream(
-            project_path,
-            &self.project_key,
-            &self.auto_dream_config,
-            &self.dream_config,
-        )
-        .await
-    }
 
     /// Get dream status for display.
     pub async fn dream_status(&self) -> crate::cognitive::dream::DreamStatus {

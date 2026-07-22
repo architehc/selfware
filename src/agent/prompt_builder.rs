@@ -86,14 +86,6 @@ impl SystemPromptBuilder {
         }
     }
 
-    /// Add an optional dynamic section only if the generator produces non-empty content
-    pub fn add_dynamic_optional<F>(&mut self, generator: F)
-    where
-        F: Fn() -> Option<String> + Send + Sync + 'static,
-    {
-        self.dynamic_sections
-            .push(Box::new(move || generator().unwrap_or_default()));
-    }
 
     /// Build the full prompt by combining static and dynamic sections
     ///
@@ -214,13 +206,6 @@ pub fn split_at_boundary(prompt: &str) -> (&str, &str) {
     }
 }
 
-/// Extract just the static portion from a prompt (for cache lookups)
-pub fn extract_static_part(prompt: &str) -> &str {
-    match prompt.find(PROMPT_DYNAMIC_BOUNDARY) {
-        Some(pos) => prompt[..pos].trim(),
-        None => prompt.trim(),
-    }
-}
 
 /// Check if a prompt contains the dynamic boundary marker
 pub fn has_boundary(prompt: &str) -> bool {

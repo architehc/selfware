@@ -42,10 +42,6 @@ impl RiskLevel {
         }
     }
 
-    /// Reset ANSI color
-    pub fn reset_color(&self) -> &'static str {
-        "\x1b[0m"
-    }
 }
 
 impl std::fmt::Display for RiskLevel {
@@ -226,17 +222,7 @@ impl PermissionChecker {
         }
     }
 
-    /// Set whether to allow destructive operations in YOLO mode
-    pub fn with_destructive_in_yolo(mut self, allow: bool) -> Self {
-        self.allow_destructive_in_yolo = allow;
-        self
-    }
 
-    /// Set whether to allow network operations
-    pub fn with_network(mut self, allow: bool) -> Self {
-        self.allow_network = allow;
-        self
-    }
 
     /// Get the current execution mode
     pub fn mode(&self) -> ExecutionMode {

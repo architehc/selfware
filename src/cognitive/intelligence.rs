@@ -322,20 +322,6 @@ impl SymbolIndex {
         results
     }
 
-    /// Search symbols using simple substring matching (legacy)
-    ///
-    /// Use `search()` for ranked results; this is for exact substring matching.
-    pub fn search_contains(&self, query: &str) -> Vec<&Symbol> {
-        let query_lower = query.to_lowercase();
-        let mut results: Vec<_> = self
-            .by_name
-            .iter()
-            .filter(|(name, _)| name.to_lowercase().contains(&query_lower))
-            .flat_map(|(_, symbols)| symbols.iter())
-            .collect();
-        results.sort_by(|a, b| a.name.cmp(&b.name));
-        results
-    }
 
     /// Get symbols by exact name
     pub fn get(&self, name: &str) -> Option<&Vec<Symbol>> {

@@ -89,41 +89,6 @@ pub struct VisualScenario {
     pub capture_method: CaptureMethod,
 }
 
-/// Built-in visual SAB scenario stubs.
-///
-/// These are placeholders — the actual prompt files and reference images live
-/// in `system_tests/projecte2e/`.
-pub fn visual_sab_scenarios() -> Vec<VisualScenario> {
-    vec![
-        VisualScenario {
-            name: "visual_landing_page".into(),
-            description: "Generate a responsive landing page with hero section, \
-                          feature cards, and a call-to-action. Score visual quality."
-                .into(),
-            reference_image: None,
-            quality_threshold: 0.7,
-            capture_method: CaptureMethod::BrowserUrl("http://localhost:3000".into()),
-        },
-        VisualScenario {
-            name: "visual_dashboard".into(),
-            description: "Create a data dashboard with a chart, a stats bar, \
-                          and a table. Score layout and readability."
-                .into(),
-            reference_image: None,
-            quality_threshold: 0.7,
-            capture_method: CaptureMethod::BrowserUrl("http://localhost:3000".into()),
-        },
-        VisualScenario {
-            name: "visual_game_ui".into(),
-            description: "Build a simple game HUD with health bar, score counter, \
-                          mini-map, and inventory slots. Score composition and hierarchy."
-                .into(),
-            reference_image: None,
-            quality_threshold: 0.65,
-            capture_method: CaptureMethod::Screen,
-        },
-    ]
-}
 
 /// Run the full SAB benchmark and return structured results
 pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, FitnessError> {

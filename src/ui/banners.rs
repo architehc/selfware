@@ -406,22 +406,8 @@ pub fn text_box(text: &str, width: usize) -> Banner {
 // Quick Helpers
 // ============================================================================
 
-/// Print a banner to stdout
-pub fn print_banner(banner: &Banner) {
-    print!("{}", banner);
-}
 
-/// Print a boxed banner
-pub fn print_boxed(banner: &Banner) {
-    print!("{}", banner.boxed());
-}
 
-/// Print centered banner
-pub fn print_centered(banner: &Banner, width: usize) {
-    for line in banner.centered(width) {
-        println!("{}", line);
-    }
-}
 
 // ============================================================================
 // Tests

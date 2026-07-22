@@ -199,35 +199,6 @@ impl ConsolidationEngine {
         Ok(report)
     }
 
-    /// Run one consolidation cycle with raw collected items.
-    pub async fn consolidate_items(
-        &mut self,
-        items: Vec<CollectedItem>,
-    ) -> Result<ConsolidationReport> {
-        if items.is_empty() {
-            let now = chrono::Utc::now();
-            return Ok(ConsolidationReport {
-                started_at: now,
-                ended_at: now,
-                episodes_processed: 0,
-                records_produced: 0,
-                duplicates_removed: 0,
-                tokens_used: 0,
-                causal_links_created: 0,
-                multimodal_refs_count: 0,
-                errors: vec![],
-            });
-        }
-
-        let batch = self.collector.assemble_batch(items);
-        let (records, mut report) = self.compactor.compact(batch).await?;
-        let store_result = self.store.store(&records).await?;
-        if !store_result.errors.is_empty() {
-            report.errors.extend(store_result.errors);
-        }
-
-        Ok(report)
-    }
 
     /// Start periodic consolidation in the background.
     pub fn start_periodic(self, interval: Duration) -> tokio::task::JoinHandle<()> {

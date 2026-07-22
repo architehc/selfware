@@ -506,12 +506,6 @@ impl YoloManager {
         }
     }
 
-    /// Export audit log to file
-    pub fn export_audit_log(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let log = self.audit_log.read().unwrap_or_else(|e| e.into_inner());
-        let json = serde_json::to_string_pretty(&*log).unwrap_or_default();
-        fs::write(path, json)
-    }
 }
 
 /// Decision from YOLO mode check

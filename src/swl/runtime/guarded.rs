@@ -470,11 +470,6 @@ impl GuardedSwlRuntime {
         enforcer.get_telemetry_events().await
     }
 
-    /// Export guardrail telemetry as JSON
-    pub async fn export_guardrail_telemetry_json(&self) -> crate::errors::Result<String> {
-        let enforcer = self.enforcer.lock().await;
-        enforcer.export_telemetry_json().await
-    }
 }
 
 /// Evaluate an agent's condition output for a conditional workflow.
@@ -568,11 +563,6 @@ impl GuardedRuntimeBuilder {
         }
     }
 
-    /// Set the API client
-    pub fn with_client(mut self, client: Arc<ApiClient>) -> Self {
-        self.client = Some(client);
-        self
-    }
 
     /// Set the tool registry
     pub fn with_tool_registry(mut self, registry: Arc<ToolRegistry>) -> Self {

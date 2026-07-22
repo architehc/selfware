@@ -57,10 +57,6 @@ impl super::Agent {
         self.last_tool_output.clone()
     }
 
-    /// Clear the stored output.
-    pub fn clear_last_tool_output(&mut self) {
-        self.last_tool_output = None;
-    }
 }
 
 #[cfg(test)]

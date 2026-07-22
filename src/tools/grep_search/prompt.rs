@@ -144,20 +144,8 @@ pub fn get_description() -> String {
     GrepSearchPrompt::new().description()
 }
 
-/// Get the rich when_to_use guidance for grep_search tool.
-pub fn get_when_to_use() -> String {
-    GrepSearchPrompt::new().when_to_use()
-}
 
-/// Get examples for grep_search tool.
-pub fn get_examples() -> Vec<ToolExample> {
-    GrepSearchPrompt::new().examples()
-}
 
-/// Get important notes for grep_search tool.
-pub fn get_important_notes() -> Option<String> {
-    GrepSearchPrompt::new().important_notes()
-}
 
 #[cfg(test)]
 #[path = "../../../tests/unit/tools/grep_search/prompt/prompt_test.rs"]
