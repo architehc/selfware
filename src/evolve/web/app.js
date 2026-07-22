@@ -296,6 +296,7 @@ function wireEvents() {
     $('#classes-search')?.addEventListener('input', (event) => {
         if (state.structure) renderStructure(state.structure, event.target.value || '');
     });
+    $('#graph-cluster-toggle')?.addEventListener('click', toggleGraphMode);
 
     $$('.inspector-tab[data-inspector]').forEach((button) => {
         button.addEventListener('click', () => selectInspector(button.dataset.inspector));
@@ -1921,7 +1922,8 @@ async function loadGraph(force = false) {
     setBusy($('#graph-refresh'), true);
 
     try {
-        const payload = await request('/api/graph');
+        const url = state.graphMode === 'clusters' ? '/api/graph/clustered' : '/api/graph';
+        const payload = await request(url);
         const nodes = Array.isArray(payload) ? payload : payload?.nodes || [];
         const edges = payload?.edges || payload?.links || [];
         if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new Error('Graph response did not include node and edge arrays.');
@@ -1946,6 +1948,20 @@ async function loadGraph(force = false) {
         hide($('#graph-loading'));
         setBusy($('#graph-refresh'), false);
     }
+}
+
+// Toggle the graph between the 10 architectural clusters and the 45 components.
+function toggleGraphMode() {
+    state.graphMode = state.graphMode === 'clusters' ? 'components' : 'clusters';
+    const button = $('#graph-cluster-toggle');
+    if (button) {
+        const clustered = state.graphMode === 'clusters';
+        button.classList.toggle('active', clustered);
+        const label = button.querySelector('span');
+        if (label) label.textContent = clustered ? 'Components' : 'Clusters';
+    }
+    state.graphLoaded = false;
+    loadGraph(true);
 }
 
 function graphNodeId(node) {
