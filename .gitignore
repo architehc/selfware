@@ -131,3 +131,6 @@ scripts/package.json
 
 # stray cargo --message-format=json dumps
 check.json
+
+# swe-bench sample datasets (kept locally, not in repo)
+system_tests/swe_bench_pro/*.jsonl
