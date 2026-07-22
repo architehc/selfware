@@ -293,6 +293,9 @@ function wireEvents() {
     $$('.view-tab[data-view]').forEach((button) => {
         button.addEventListener('click', () => selectView(button.dataset.view));
     });
+    $('#classes-search')?.addEventListener('input', (event) => {
+        if (state.structure) renderStructure(state.structure, event.target.value || '');
+    });
 
     $$('.inspector-tab[data-inspector]').forEach((button) => {
         button.addEventListener('click', () => selectInspector(button.dataset.inspector));
@@ -1265,14 +1268,101 @@ function selectView(view) {
         button.classList.toggle('active', active);
         button.setAttribute('aria-selected', String(active));
     });
-    ['editor', 'graph'].forEach((name) => {
+    ['editor', 'graph', 'classes'].forEach((name) => {
         const panel = $(`#${name}-view`);
+        if (!panel) return;
         const active = name === view;
         panel.classList.toggle('active', active);
         panel.classList.toggle('hidden', !active);
     });
     if (view === 'graph' && !state.graphLoaded && !state.graphLoading) loadGraph();
+    if (view === 'classes' && !state.structureLoaded) loadStructure();
     if (view === 'editor') state.editor?.layout();
+}
+
+// Structural outline: component -> file -> class -> method, collapsible, with
+// each method clickable to open its source at the exact line.
+async function loadStructure() {
+    state.structureLoaded = true;
+    const tree = $('#classes-tree');
+    try {
+        const data = await request('/api/structure');
+        state.structure = data;
+        $('#classes-summary').textContent =
+            `${formatCount(data.class_count)} classes · ${formatCount(data.symbol_count)} symbols · ${data.components.length} components`;
+        renderStructure(data, '');
+    } catch (error) {
+        tree.innerHTML = '';
+        tree.append(Object.assign(document.createElement('div'), {
+            className: 'center-state error-state',
+            textContent: `Structure unavailable: ${formatError(error)}`,
+        }));
+    }
+}
+
+function renderStructure(data, filter) {
+    const tree = $('#classes-tree');
+    tree.replaceChildren();
+    const needle = filter.trim().toLowerCase();
+    const match = (s) => !needle || s.toLowerCase().includes(needle);
+
+    for (const comp of data.components) {
+        const compFiles = comp.files
+            .map((file) => ({
+                file,
+                classes: file.classes.filter((c) => match(c.name) || c.methods.some((m) => match(m.name))),
+                frees: file.free_functions.filter((m) => match(m.name)),
+            }))
+            .filter((entry) => entry.classes.length || entry.frees.length || match(entry.file.module));
+        if (!compFiles.length) continue;
+
+        const compEl = makeTreeGroup(`component ${comp.component}`, comp.component, 'box', !!needle);
+        for (const { file, classes, frees } of compFiles) {
+            const fileEl = makeTreeGroup(file.path.replace('src/', ''), file.path, 'file-code-2', !!needle || compFiles.length <= 2);
+            for (const cls of classes) {
+                const clsEl = makeTreeGroup(`${cls.kind} ${cls.name}`, `${cls.name} (${cls.methods.length})`, kindIcon(cls.kind), !!needle);
+                for (const m of cls.methods) clsEl.body.append(methodRow(file.path, m));
+                fileEl.body.append(clsEl.el);
+            }
+            for (const m of frees) fileEl.body.append(methodRow(file.path, m, 'fn'));
+            compEl.body.append(fileEl.el);
+        }
+        tree.append(compEl.el);
+    }
+    if (!tree.childElementCount) {
+        tree.append(Object.assign(document.createElement('div'), { className: 'center-state', textContent: 'No matches' }));
+    }
+    refreshIcons();
+}
+
+function kindIcon(kind) {
+    return { struct: 'box', enum: 'layers', trait: 'shapes', impl: 'wrench' }[kind] || 'box';
+}
+
+function makeTreeGroup(label, title, icon, expanded) {
+    const el = document.createElement('div');
+    el.className = 'tree-group';
+    const head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'tree-group-head';
+    head.innerHTML = `<i data-lucide="chevron-right" class="tree-chevron"></i><i data-lucide="${icon}" class="tree-kind"></i><span>${title}</span>`;
+    const body = document.createElement('div');
+    body.className = 'tree-group-body';
+    if (expanded) { el.classList.add('open'); }
+    head.addEventListener('click', () => el.classList.toggle('open'));
+    el.append(head, body);
+    return { el, body };
+}
+
+function methodRow(path, method, kindLabel = 'method') {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'tree-leaf';
+    row.innerHTML = `<i data-lucide="${kindLabel === 'fn' ? 'square-function' : 'chevron-right'}" class="tree-kind"></i>`
+        + `<span class="leaf-name">${method.name}()</span>`
+        + `<span class="leaf-meta">${method.is_pub ? 'pub · ' : ''}L${method.line}</span>`;
+    row.addEventListener('click', () => openFile(path, { line: method.line, column: 1 }));
+    return row;
 }
 
 function selectInspector(name) {

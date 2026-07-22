@@ -101,6 +101,9 @@
                     <button id="graph-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="graph-view" data-view="graph">
                         <i data-lucide="waypoints" aria-hidden="true"></i><span>Graph</span>
                     </button>
+                    <button id="classes-tab" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="classes-view" data-view="classes">
+                        <i data-lucide="list-tree" aria-hidden="true"></i><span>Classes</span>
+                    </button>
                 </div>
 
                 <section id="editor-view" class="work-view active" role="tabpanel" aria-labelledby="editor-tab">
@@ -139,6 +142,16 @@
                             <button id="graph-refresh" class="icon-button" type="button" title="Refresh graph" aria-label="Refresh graph"><i data-lucide="refresh-cw" aria-hidden="true"></i></button>
                         </div>
                         <div id="graph-tooltip" class="graph-tooltip hidden" role="tooltip"></div>
+                    </div>
+                </section>
+
+                <section id="classes-view" class="work-view hidden" role="tabpanel" aria-labelledby="classes-tab">
+                    <div class="classes-toolbar">
+                        <input id="classes-search" type="search" autocomplete="off" placeholder="Filter classes / methods…" aria-label="Filter classes and methods" />
+                        <span id="classes-summary" class="classes-summary"></span>
+                    </div>
+                    <div id="classes-tree" class="classes-tree" role="tree" aria-label="Class and method outline">
+                        <div class="center-state"><span class="spinner" aria-hidden="true"></span><strong>Loading structure…</strong></div>
                     </div>
                 </section>
             </section>

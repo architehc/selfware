@@ -173,6 +173,7 @@ impl EvolveServer {
             .route("/api/context/mode", post(context_mode_handler))
             .route("/api/context/sizes", get(context_sizes_handler))
             .route("/api/context/select", get(context_select_handler))
+            .route("/api/structure", get(structure_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
             .route("/api/graph/findings", get(graph_findings_handler))
@@ -407,6 +408,39 @@ async fn dead_code_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
         "confident": confident,
         "cfg_gated": dead.len() - confident,
         "symbols": dead,
+    })))
+}
+
+/// Structural outline for navigation: every file's classes (struct/enum/trait)
+/// with the methods in their impl blocks, plus free functions. Read-only.
+async fn structure_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let root = server.project_root.join("src");
+    let files = tokio::task::spawn_blocking(move || super::StructureAnalyzer::new(root).outline())
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+        .map_err(internal_error)?;
+    // Group by top-level component for the navigator.
+    use std::collections::BTreeMap;
+    let mut by_component: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    let (mut class_total, mut method_total) = (0usize, 0usize);
+    for f in &files {
+        class_total += f.classes.len();
+        method_total += f.classes.iter().map(|c| c.methods.len()).sum::<usize>()
+            + f.free_functions.len();
+        let component = f.path.trim_start_matches("src/").split('/').next().unwrap_or("").replace(".rs", "");
+        by_component
+            .entry(component)
+            .or_default()
+            .push(serde_json::to_value(f).unwrap_or(Value::Null));
+    }
+    let components: Vec<Value> = by_component
+        .into_iter()
+        .map(|(name, files)| json!({ "component": name, "files": files }))
+        .collect();
+    Ok(Json(json!({
+        "components": components,
+        "class_count": class_total,
+        "symbol_count": method_total,
     })))
 }
 

@@ -1843,3 +1843,59 @@ textarea:focus-visible,
     font-family: var(--font-mono);
     font-size: 11px;
 }
+
+/* Classes / structure navigator: collapsible component → file → class → method. */
+.classes-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+.classes-toolbar #classes-search {
+    flex: 1;
+    max-width: 360px;
+    background: var(--panel, #161a22);
+    color: inherit;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 5px 9px;
+    font-size: 0.85em;
+}
+.classes-summary {
+    font-size: 0.72rem;
+    color: var(--text-muted, #7a8290);
+    font-variant-numeric: tabular-nums;
+}
+.classes-tree {
+    overflow: auto;
+    height: 100%;
+    padding: 6px 4px 40px;
+    font-size: 0.86rem;
+}
+.tree-group-body { display: none; padding-left: 14px; }
+.tree-group.open > .tree-group-body { display: block; }
+.tree-group-head,
+.tree-leaf {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    color: inherit;
+    padding: 3px 6px;
+    border-radius: 5px;
+    cursor: pointer;
+    font: inherit;
+}
+.tree-group-head:hover,
+.tree-leaf:hover { background: var(--hover, rgba(255,255,255,0.05)); }
+.tree-group-head { font-weight: 500; }
+.tree-chevron { width: 13px; height: 13px; transition: transform 0.12s ease; opacity: 0.7; }
+.tree-group.open > .tree-group-head .tree-chevron { transform: rotate(90deg); }
+.tree-kind { width: 13px; height: 13px; opacity: 0.65; flex: 0 0 auto; }
+.tree-leaf .leaf-name { flex: 1; color: var(--accent-blue, #7db3ff); }
+.tree-leaf .leaf-meta { font-size: 0.7rem; color: var(--text-muted, #7a8290); font-variant-numeric: tabular-nums; }
