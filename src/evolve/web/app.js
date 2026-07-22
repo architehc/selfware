@@ -324,6 +324,7 @@ function wireEvents() {
     $('#node-review-action')?.addEventListener('click', reviewSelectedNode);
     $('#node-branch-action')?.addEventListener('click', branchSelectedNode);
     $('#node-delete-preview-action')?.addEventListener('click', previewSelectedNodeDeletion);
+    $('#node-task')?.addEventListener('submit', taskReviewSelectedNode);
 
     $('#clear-output')?.addEventListener('click', clearOutput);
     $('#toggle-bottom')?.addEventListener('click', toggleBottomPanel);
@@ -1346,8 +1347,10 @@ function renderNodeInspector(node, path) {
         $('#node-review-action').disabled = true;
         $('#node-branch-action').disabled = true;
         $('#node-delete-preview-action').disabled = true;
+        if ($('#node-task-action')) $('#node-task-action').disabled = true;
         return;
     }
+    if ($('#node-task-action')) $('#node-task-action').disabled = false;
 
     hide(stateElement);
     show(actions);
@@ -1400,6 +1403,47 @@ async function reviewSelectedNode() {
     updateSelection(path, node);
     selectInspector('grounding');
     await runReview();
+}
+
+// Task-aware grounded review: the server's context_selector auto-picks the
+// source this task kind needs (seed + dependents / findings) and the assistant
+// reviews against that multi-file context — no manual document picking.
+async function taskReviewSelectedNode(event) {
+    event?.preventDefault();
+    const node = state.selectedNode;
+    if (!node) {
+        toast('Select a graph node first.', 'warning');
+        return;
+    }
+    const kind = $('#node-task-kind').value;
+    const question = $('#node-task-question').value.trim()
+        || `${kind} ${node.id}: summarize what this task involves, grounded in the selected source.`;
+    const button = $('#node-task-action');
+    setBusy(button, true);
+    selectInspector('node');
+    const result = $('#node-result');
+    result.className = 'inspector-result pane-state';
+    result.textContent = `Selecting ${kind} context for ${node.id}…`;
+    setGlobalStatus(`Task review: ${kind}`, 'working');
+    try {
+        const payload = await request('/api/assistant/task', {
+            method: 'POST',
+            body: { kind, target: node.id, question, max_files: 6 },
+        });
+        result.className = 'inspector-result';
+        result.replaceChildren(renderStructured(payload));
+        appendOutput(`Task review (${kind}): ${node.id}`, payload);
+        setGlobalStatus('Task review received', 'success');
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Task review failed: ${formatError(error)}`;
+        appendOutput(`Task review failed: ${node.id}`, formatError(error));
+        setGlobalStatus('Task review failed', 'error');
+        toast(`Task review failed: ${formatError(error)}`, 'error');
+    } finally {
+        setBusy(button, false);
+        refreshIcons();
+    }
 }
 
 function branchSelectedNode() {

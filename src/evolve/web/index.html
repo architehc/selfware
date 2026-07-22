@@ -178,6 +178,21 @@
                             <i data-lucide="trash-2" aria-hidden="true"></i><span>Deletion Preview</span>
                         </button>
                     </div>
+                    <form id="node-task" class="node-task">
+                        <div class="node-task-row">
+                            <select id="node-task-kind" title="Selects the context this task needs">
+                                <option value="understand">Understand</option>
+                                <option value="refactor">Refactor</option>
+                                <option value="extend">Extend</option>
+                                <option value="consolidate">Consolidate (dupes)</option>
+                                <option value="cleanup">Cleanup (dead code)</option>
+                            </select>
+                            <button id="node-task-action" class="command-button" type="submit" title="Auto-select the task's context and run a grounded review">
+                                <i data-lucide="wand-2" aria-hidden="true"></i><span>Task Review</span>
+                            </button>
+                        </div>
+                        <input id="node-task-question" type="text" placeholder="Ask about this node / task…" autocomplete="off" />
+                    </form>
                     <div id="node-result" class="inspector-result pane-state">No node evidence loaded</div>
                 </section>
 
