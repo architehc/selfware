@@ -128,3 +128,6 @@ system_tests/**/*.recovery.toml
 scripts/node_modules/
 scripts/package-lock.json
 scripts/package.json
+
+# stray cargo --message-format=json dumps
+check.json
