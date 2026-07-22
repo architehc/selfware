@@ -109,6 +109,35 @@ impl GroundedAssistant {
         &self.configured_model
     }
 
+    /// A single non-grounded chat turn for generative tasks such as pair
+    /// evolution suggestions. Unlike [`review`](Self::review), the output is not
+    /// validated against evidence IDs — the caller supplies whatever context the
+    /// model should reason over. Returns (text, model, usage).
+    pub async fn freeform(
+        &self,
+        system: &str,
+        user: &str,
+    ) -> Result<(String, String, ReviewUsage)> {
+        if user.trim().is_empty() {
+            bail!("freeform prompt cannot be empty");
+        }
+        let response = self
+            .client
+            .chat(
+                vec![Message::system(system), Message::user(user)],
+                None,
+                ThinkingMode::Disabled,
+            )
+            .await
+            .context("model suggestion call failed")?;
+        let text = response
+            .choices
+            .first()
+            .map(|choice| choice.message.content.text_all())
+            .ok_or_else(|| anyhow!("model returned no choice"))?;
+        Ok((text, response.model, response.usage.into()))
+    }
+
     pub async fn review(
         &self,
         question: &str,

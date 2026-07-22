@@ -24,6 +24,7 @@ pub mod ide;
 pub mod r#loop;
 pub mod map;
 pub mod ontology;
+pub mod pair_suggest;
 pub mod ontology_evolver;
 pub mod persona;
 pub mod quality;
@@ -51,6 +52,9 @@ pub use graph::GraphBuilder;
 pub use map::{
     build_map, expand as expand_component, orientation as workspace_orientation, ComponentCard,
     ContextMap,
+};
+pub use pair_suggest::{
+    connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,
 };
 pub use graphrag::{GraphRag, GroundedFact};
 pub use ide::{DocumentSnapshot, FileClass, FileInfo, IdeEngine, WriteResult};

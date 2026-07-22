@@ -210,6 +210,8 @@ impl EvolveServer {
             .route("/api/assistant/review", post(assistant_review_handler))
             .route("/api/assistant/task", post(assistant_task_handler))
             .route("/api/assistant/orientation", get(assistant_orientation_handler))
+            .route("/api/evolve/pairs", get(evolve_pairs_handler))
+            .route("/api/evolve/pairs/suggest", post(evolve_pair_suggest_handler))
             .route("/api/git/status", get(git_status_handler))
             .route("/api/git/branch", post(git_branch_handler))
             .with_state(Arc::new(self.clone()))
@@ -1362,6 +1364,127 @@ async fn assistant_orientation_handler(
         "tokens": crate::token_count::estimate_content_tokens(&text),
         "text": text,
     })))
+}
+
+/// List every level-1 connected component pair in the production graph — the
+/// candidates for combined-evolution suggestions. Local, no model call.
+async fn evolve_pairs_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let pairs = super::connected_pairs(&graph);
+    Ok(Json(json!({
+        "pair_count": pairs.len(),
+        "cross_cluster": pairs.iter().filter(|p| p.cross_cluster).count(),
+        "pairs": pairs,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct PairSuggestRequest {
+    a: String,
+    b: String,
+    /// Return the assembled pair context without calling the model — lets a
+    /// caller inspect exactly what would be sent (and its token cost) first.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Suggest how a connected component pair should evolve together. Builds the
+/// combined context (both components' public surface + relationship) and asks
+/// the configured model. `dry_run` returns just the context for inspection.
+async fn evolve_pair_suggest_handler(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<PairSuggestRequest>,
+) -> ApiResult<Json<Value>> {
+    if body.a.trim().is_empty() || body.b.trim().is_empty() {
+        return Err(bad_request("suggest requires components `a` and `b`"));
+    }
+    if body.a == body.b {
+        return Err(bad_request("a and b must be different components"));
+    }
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    // Resolve the pair (order-independent) so its relationship/cluster metadata
+    // comes from the real graph edges; require it to be actually connected.
+    let (a, b) = (body.a.clone(), body.b.clone());
+    let pair = super::connected_pairs(&graph).into_iter().find(|p| {
+        (p.a == a && p.b == b) || (p.a == b && p.b == a)
+    });
+    let Some(pair) = pair else {
+        return Err(bad_request(format!(
+            "{a} and {b} are not level-1 connected in the production graph"
+        )));
+    };
+
+    let context = {
+        let graph = graph.clone();
+        let root = root.clone();
+        let pair = pair.clone();
+        tokio::task::spawn_blocking(move || super::pair_context(&graph, &root, &pair))
+            .await
+            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    };
+    let context_tokens = crate::token_count::estimate_content_tokens(&context);
+
+    if body.dry_run {
+        return Ok(Json(json!({
+            "pair": pair,
+            "context_tokens": context_tokens,
+            "context": context,
+            "dry_run": true,
+        })));
+    }
+
+    require_session(&headers, &server)?;
+    let _assistant_guard = server.assistant_lock.lock().await;
+    let prompt = super::suggest_prompt(&context);
+    let (text, model, usage) = server
+        .assistant
+        .freeform(super::SUGGEST_SYSTEM, &prompt)
+        .await
+        .map_err(internal_error)?;
+    // Best-effort structured extraction — surface the parsed suggestions when the
+    // model returned valid JSON, always keep the raw text.
+    let suggestions = extract_json_object(&text);
+    Ok(Json(json!({
+        "pair": pair,
+        "model": model,
+        "usage": usage,
+        "context_tokens": context_tokens,
+        "suggestions": suggestions,
+        "raw": text,
+    })))
+}
+
+/// Pull the first balanced `{...}` JSON object out of model text and parse it,
+/// tolerating prose or code fences around it. Returns null on failure.
+fn extract_json_object(text: &str) -> Value {
+    let bytes = text.as_bytes();
+    let Some(start) = text.find('{') else {
+        return Value::Null;
+    };
+    let mut depth = 0usize;
+    let mut in_str = false;
+    let mut escaped = false;
+    for i in start..bytes.len() {
+        match bytes[i] {
+            b'"' if !escaped => in_str = !in_str,
+            b'\\' if in_str => {
+                escaped = !escaped;
+                continue;
+            }
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return serde_json::from_str(&text[start..=i]).unwrap_or(Value::Null);
+                }
+            }
+            _ => {}
+        }
+        escaped = false;
+    }
+    Value::Null
 }
 
 fn validate_requested_mode(

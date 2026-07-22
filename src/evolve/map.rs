@@ -88,6 +88,52 @@ pub fn orientation(graph: &Graph, root: &Path, include_map: bool) -> String {
     out
 }
 
+/// Build map cards for only the top-level components named in `want` (e.g.
+/// `{"agent", "tools"}`) — used to assemble a focused context for a component
+/// pair without reading the whole tree.
+pub fn component_cards(
+    graph: &Graph,
+    root: &Path,
+    want: &std::collections::BTreeSet<String>,
+) -> Vec<ComponentCard> {
+    let mut cards = Vec::new();
+    for node in graph.nodes.iter().filter(|n| n.layer == NodeLayer::Code) {
+        let component = crate::evolve::clusters::component_of(&node.id);
+        if !want.contains(&component) {
+            continue;
+        }
+        let Some(rel) = node.path.as_deref() else {
+            continue;
+        };
+        let Ok(src) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        cards.push(build_card(&node.id, rel, &src, node.tokens, node.lines));
+    }
+    cards.sort_by(|a, b| a.component.cmp(&b.component));
+    cards
+}
+
+/// Render a single card to the same text shape used in the full map body.
+pub fn render_card(card: &ComponentCard) -> String {
+    let mut out = format!(
+        "### {}  ({} · {} tok)\n",
+        card.component, card.path, card.tokens
+    );
+    if let Some(doc) = &card.doc {
+        out.push_str(doc);
+        out.push('\n');
+    }
+    push_symbols(&mut out, "fns", &card.fns);
+    push_symbols(&mut out, "types", &card.types);
+    push_symbols(&mut out, "traits", &card.traits);
+    push_symbols(&mut out, "consts", &card.consts);
+    if card.more > 0 {
+        out.push_str(&format!("(+{} more public symbols)\n", card.more));
+    }
+    out
+}
+
 /// Expand one component to real detail for the model. `full` returns the whole
 /// source with comments stripped; otherwise just the interface signatures.
 pub fn expand(graph: &Graph, root: &Path, component: &str, full: bool) -> Option<String> {
