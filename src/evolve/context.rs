@@ -1,7 +1,9 @@
 //! ContextComposer: manages which graph components are in the active context.
 //!
 //! Explicit loading tiers (smallest → largest), all over production code nodes:
-//! - `Lite`: interface signatures only (~18% of full) — the smallest tier.
+//! - `Map`: a component index — doc line + public symbol names per component,
+//!   with detail pulled on demand via `evolve::map::expand` (retrieval, not resident).
+//! - `Lite`: interface signatures only (~18% of full) — the smallest whole-code tier.
 //! - `Compact`: full code with comments stripped (~82%) — for smaller models.
 //! - `Full`: full production code.
 //! - `FullExtended`: production code plus test/example nodes.
@@ -15,6 +17,7 @@ const TOKENS_PER_LINE: usize = 10;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextMode {
+    Map,
     Lite,
     Compact,
     Full,
@@ -25,6 +28,7 @@ pub enum ContextMode {
 impl ContextMode {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Map => "map",
             Self::Lite => "lite",
             Self::Compact => "compact",
             Self::Full => "full",
@@ -98,7 +102,7 @@ impl ContextComposer {
     /// The node ids a given mode would include, without changing active state.
     fn included_for(&self, mode: &ContextMode) -> Vec<String> {
         match mode {
-            ContextMode::Lite | ContextMode::Compact | ContextMode::Full => self
+            ContextMode::Map | ContextMode::Lite | ContextMode::Compact | ContextMode::Full => self
                 .graph
                 .nodes
                 .iter()
@@ -267,6 +271,10 @@ fn estimate_context_node_tokens(node: &Node, mode: &ContextMode) -> usize {
     let total = estimate_node_tokens(node.tokens, node.lines);
     let code_tokens = total.saturating_sub(node.inline_test_tokens);
     match mode {
+        // Map: a compiled component-index artifact, not a per-node projection.
+        // Its real resident cost is measured by `evolve::map` and reported by the
+        // server; per node it contributes nothing to the composer estimate.
+        ContextMode::Map => 0,
         // Lite: interface signatures only — the smallest useful tier.
         ContextMode::Lite => ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize,
         // Compact: full code with comments stripped, for smaller models.

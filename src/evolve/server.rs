@@ -175,6 +175,8 @@ impl EvolveServer {
             .route("/api/context/mode", post(context_mode_handler))
             .route("/api/context/sizes", get(context_sizes_handler))
             .route("/api/context/select", get(context_select_handler))
+            .route("/api/context/map", get(context_map_handler))
+            .route("/api/context/expand", get(context_expand_handler))
             .route("/api/structure", get(structure_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
@@ -572,16 +574,84 @@ async fn context_select_handler(
 /// Node count and token size of every selectable context mode, so the picker
 /// can show the cost of each option. Read-only; does not change the active mode.
 async fn context_sizes_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
-    let sizes = {
+    let mut sizes = {
         let composer = server
             .composer
             .read()
             .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))?;
         composer.mode_sizes()
     };
+    // The Map tier is a compiled index, not a per-node projection, so its cost is
+    // measured from the rendered artifact and prepended as the smallest option.
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let map = tokio::task::spawn_blocking(move || super::build_map(&graph, &root))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+    sizes.insert(
+        0,
+        super::ContextModeSize {
+            mode: "map".to_string(),
+            nodes: map.components,
+            tokens: map.map_tokens,
+        },
+    );
     Ok(Json(json!({
         "sizes": sizes,
         "context_length": server.context_length,
+    })))
+}
+
+/// The component map — the smallest tier. Returns the rendered index plus the
+/// compression it achieves over full source.
+async fn context_map_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let map = tokio::task::spawn_blocking(move || super::build_map(&graph, &root))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+    let ratio = if map.map_tokens > 0 {
+        map.full_tokens as f64 / map.map_tokens as f64
+    } else {
+        0.0
+    };
+    Ok(Json(json!({
+        "components": map.components,
+        "map_tokens": map.map_tokens,
+        "full_tokens": map.full_tokens,
+        "compression_ratio": ratio,
+        "cards": map.cards,
+        "rendered": map.rendered,
+    })))
+}
+
+/// Expand one component from the map to real detail: interface signatures by
+/// default, or the full comment-stripped source with `?full=true`.
+async fn context_expand_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let component = params
+        .get("component")
+        .cloned()
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| bad_request("expand requires a `component` query parameter"))?;
+    let full = params
+        .get("full")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let target = component.clone();
+    let content = tokio::task::spawn_blocking(move || super::expand_component(&graph, &root, &target, full))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+        .ok_or_else(|| bad_request(format!("unknown component: {component}")))?;
+    Ok(Json(json!({
+        "component": component,
+        "mode": if full { "full" } else { "signatures" },
+        "tokens": crate::token_count::estimate_content_tokens(&content),
+        "content": content,
     })))
 }
 
@@ -593,7 +663,9 @@ async fn context_mode_handler(
     require_session(&headers, &server)?;
     let _assistant_guard = server.assistant_lock.lock().await;
     let mode = match body.mode.as_str() {
+        "map" => ContextMode::Map,
         "lite" => ContextMode::Lite,
+        "compact" | "skeleton" => ContextMode::Compact,
         "full" => ContextMode::Full,
         "full_extended" => ContextMode::FullExtended,
         "preset" => ContextMode::Preset(

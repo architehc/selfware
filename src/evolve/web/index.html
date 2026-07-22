@@ -27,7 +27,9 @@
             <div class="context-control" aria-label="Context mode">
                 <span class="context-picker-label"><i data-lucide="brain" aria-hidden="true"></i> AI Context:</span>
                 <div id="context-segments" class="segmented context-picker" role="radiogroup" aria-label="Context mode">
-                    <button type="button" data-context-mode="lite" role="radio" aria-checked="false" title="Minimal context for fast queries">Lite</button>
+                    <button type="button" data-context-mode="map" role="radio" aria-checked="false" title="Component index — doc line + public symbol names, full detail on demand (smallest; ideal for 8k-32k models)">Map</button>
+                    <button type="button" data-context-mode="lite" role="radio" aria-checked="false" title="Interface signatures only (ideal for 32k-64k models)">Lite</button>
+                    <button type="button" data-context-mode="compact" role="radio" aria-checked="false" title="Full code with comments stripped">Compact</button>
                     <button type="button" data-context-mode="full" role="radio" aria-checked="false" title="Full workspace code (excludes tests)">Full</button>
                     <button type="button" data-context-mode="full_extended" role="radio" aria-checked="false" title="Full workspace including tests">Full Extended</button>
                 </div>

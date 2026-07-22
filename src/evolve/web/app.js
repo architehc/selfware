@@ -488,13 +488,13 @@ async function loadWorkspace() {
 
 function normalizeContextMode(mode) {
     const value = String(mode || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
-    if (['lite', 'full', 'full_extended'].includes(value)) return value;
+    if (['lite', 'compact', 'skeleton', 'full', 'full_extended'].includes(value)) return value === 'skeleton' ? 'compact' : value;
     if (value === 'fullextended') return 'full_extended';
     return value || null;
 }
 
 function contextLabel(mode) {
-    return { lite: 'Lite', full: 'Full', full_extended: 'Full Extended' }[mode] || mode || 'Unknown';
+    return { map: 'Map', lite: 'Lite', compact: 'Compact', full: 'Full', full_extended: 'Full Extended' }[mode] || mode || 'Unknown';
 }
 
 function normalizeContext(payload) {
