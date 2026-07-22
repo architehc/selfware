@@ -297,6 +297,7 @@ function wireEvents() {
         if (state.structure) renderStructure(state.structure, event.target.value || '');
     });
     $('#graph-cluster-toggle')?.addEventListener('click', toggleGraphMode);
+    $('#graph-tests-toggle')?.addEventListener('click', toggleGraphTests);
 
     $$('.inspector-tab[data-inspector]').forEach((button) => {
         button.addEventListener('click', () => selectInspector(button.dataset.inspector));
@@ -1924,9 +1925,18 @@ async function loadGraph(force = false) {
     try {
         const url = state.graphMode === 'clusters' ? '/api/graph/clustered' : '/api/graph';
         const payload = await request(url);
-        const nodes = Array.isArray(payload) ? payload : payload?.nodes || [];
-        const edges = payload?.edges || payload?.links || [];
+        let nodes = Array.isArray(payload) ? payload : payload?.nodes || [];
+        let edges = payload?.edges || payload?.links || [];
         if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new Error('Graph response did not include node and edge arrays.');
+        // Reduce clutter: the raw graph is ~1,700 nodes (production + 700
+        // test/example + 500 repo-directory nodes). Default to production code
+        // only unless "Show tests" is on or we're in clustered mode.
+        if (state.graphMode !== 'clusters' && !state.graphShowTests) {
+            const edgeEnd = (v) => String(v?.id ?? v);
+            const keep = new Set(nodes.filter((n) => n.layer === 'Code').map((n) => n.id));
+            nodes = nodes.filter((n) => keep.has(n.id));
+            edges = edges.filter((e) => keep.has(edgeEnd(e.from ?? e.source)) && keep.has(edgeEnd(e.to ?? e.target)));
+        }
         state.graphData = { nodes, edges };
         state.graphLoaded = true;
         if (force) await loadWorkspace();
@@ -1960,6 +1970,15 @@ function toggleGraphMode() {
         const label = button.querySelector('span');
         if (label) label.textContent = clustered ? 'Components' : 'Clusters';
     }
+    state.graphLoaded = false;
+    loadGraph(true);
+}
+
+// Show/hide test & example nodes (hidden by default to cut clutter).
+function toggleGraphTests() {
+    state.graphShowTests = !state.graphShowTests;
+    const button = $('#graph-tests-toggle');
+    if (button) button.classList.toggle('active', state.graphShowTests);
     state.graphLoaded = false;
     loadGraph(true);
 }
