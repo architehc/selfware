@@ -112,33 +112,7 @@ impl VlmBenchLevel for L5Layout {
     }
 
     fn evaluate(&self, scenario: &BenchScenario, response: &str) -> LevelScore {
-        let (accuracy, details) = match &scenario.expected {
-            ExpectedAnswer::Keywords(keywords) => {
-                let acc = scoring::keyword_accuracy(response, keywords);
-                let details = keywords
-                    .iter()
-                    .map(|kw| {
-                        let found = response.to_lowercase().contains(&kw.to_lowercase());
-                        (kw.clone(), if found { 1.0 } else { 0.0 })
-                    })
-                    .collect();
-                (acc, details)
-            }
-            ExpectedAnswer::JsonFields(expected) => {
-                scoring::json_field_accuracy(response, expected)
-            }
-            _ => (0.0, vec![]),
-        };
-
-        let rating = Rating::from_accuracy(accuracy, PASS_THRESHOLD);
-
-        LevelScore {
-            accuracy,
-            detail_scores: details,
-            response_tokens: 0,
-            latency_ms: 0,
-            rating,
-        }
+        crate::vlm_bench::score_response(scenario, response, PASS_THRESHOLD)
     }
 }
 

@@ -635,6 +635,37 @@ pub struct ConsolidationResult {
     pub new_summaries: Vec<MemoryEntry>,
 }
 
+/// Whether a memory entry satisfies a query. Shared by the short- and long-term
+/// stores, which previously carried a verbatim copy of this predicate each.
+pub(crate) fn matches_query(entry: &MemoryEntry, query: &MemoryQuery) -> bool {
+    if !entry
+        .content
+        .to_lowercase()
+        .contains(&query.pattern.to_lowercase())
+    {
+        return false;
+    }
+    if let Some(tier) = query.tier {
+        if entry.tier != tier {
+            return false;
+        }
+    }
+    if !query.tags.is_empty() && !query.tags.iter().all(|t| entry.tags.contains(t)) {
+        return false;
+    }
+    if let Some(min_importance) = query.min_importance {
+        if entry.importance < min_importance {
+            return false;
+        }
+    }
+    if let Some(since) = query.since {
+        if entry.created_at < since {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 #[path = "../../../tests/unit/cognitive/memory_hierarchy/types/types_test.rs"]
 mod tests;

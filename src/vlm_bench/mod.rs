@@ -88,6 +88,40 @@ pub trait VlmBenchLevel: Send + Sync {
     fn evaluate(&self, scenario: &BenchScenario, response: &str) -> scoring::LevelScore;
 }
 
+/// Standard keyword / JSON-field scoring shared by the bench levels. The body
+/// was previously copied verbatim into each level's `evaluate`; the only thing
+/// that varied was the level's own `PASS_THRESHOLD`, now passed as a parameter
+/// so behavior is preserved while the duplication is removed.
+pub(crate) fn score_response(
+    scenario: &BenchScenario,
+    response: &str,
+    pass_threshold: f64,
+) -> scoring::LevelScore {
+    let (accuracy, details) = match &scenario.expected {
+        ExpectedAnswer::Keywords(keywords) => {
+            let acc = scoring::keyword_accuracy(response, keywords);
+            let details = keywords
+                .iter()
+                .map(|kw| {
+                    let found = response.to_lowercase().contains(&kw.to_lowercase());
+                    (kw.clone(), if found { 1.0 } else { 0.0 })
+                })
+                .collect();
+            (acc, details)
+        }
+        ExpectedAnswer::JsonFields(expected) => scoring::json_field_accuracy(response, expected),
+        _ => (0.0, vec![]),
+    };
+    let rating = scoring::Rating::from_accuracy(accuracy, pass_threshold);
+    scoring::LevelScore {
+        accuracy,
+        detail_scores: details,
+        response_tokens: 0,
+        latency_ms: 0,
+        rating,
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/vlm_bench/mod_test.rs"]
 mod tests;

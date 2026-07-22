@@ -61,7 +61,7 @@ impl LongTermMemory {
         let entries = self.entries.read().await;
         let mut results: Vec<MemoryEntry> = entries
             .values()
-            .filter(|e| self.matches_query(e, query))
+            .filter(|e| super::types::matches_query(e, query))
             .cloned()
             .collect();
 
@@ -132,40 +132,6 @@ impl LongTermMemory {
             entries_removed: removed,
             new_summaries: Vec::new(),
         }
-    }
-
-    fn matches_query(&self, entry: &MemoryEntry, query: &MemoryQuery) -> bool {
-        if !entry
-            .content
-            .to_lowercase()
-            .contains(&query.pattern.to_lowercase())
-        {
-            return false;
-        }
-
-        if let Some(tier) = query.tier {
-            if entry.tier != tier {
-                return false;
-            }
-        }
-
-        if !query.tags.is_empty() && !query.tags.iter().all(|t| entry.tags.contains(t)) {
-            return false;
-        }
-
-        if let Some(min_importance) = query.min_importance {
-            if entry.importance < min_importance {
-                return false;
-            }
-        }
-
-        if let Some(since) = query.since {
-            if entry.created_at < since {
-                return false;
-            }
-        }
-
-        true
     }
 
     async fn archive_oldest(
