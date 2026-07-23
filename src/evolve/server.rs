@@ -312,9 +312,31 @@ async fn graph_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Jso
 
 async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let summary = server.context_summary().map_err(internal_error)?;
-    Ok(Json(
-        context_json(&summary, server.context_length).map_err(internal_error)?,
-    ))
+    let mut value = context_json(&summary, server.context_length).map_err(internal_error)?;
+    // The Map tier's cost is a compiled artifact, not a per-node sum, so the
+    // composer reports 0. Report the real measured map size instead.
+    if matches!(summary.mode, ContextMode::Map) {
+        let graph = server.graph_snapshot().map_err(internal_error)?;
+        let root = server.project_root.as_ref().clone();
+        let map_tokens = tokio::task::spawn_blocking(move || super::build_map(&graph, &root).map_tokens)
+            .await
+            .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("estimated_tokens".into(), json!(map_tokens));
+            obj.insert(
+                "fits_context_window".into(),
+                json!(map_tokens <= server.context_length),
+            );
+            obj.insert(
+                "overflow_tokens".into(),
+                json!(map_tokens.saturating_sub(server.context_length)),
+            );
+            if let Some(prod) = obj.get_mut("production").and_then(|p| p.as_object_mut()) {
+                prod.insert("tokens".into(), json!(map_tokens));
+            }
+        }
+    }
+    Ok(Json(value))
 }
 
 #[derive(Deserialize)]
