@@ -100,7 +100,7 @@ const state = {
     graphData: null,
     graphLoaded: false,
     graphLoading: false,
-    graphMode: 'modules',
+    graphMode: 'logical',
     graphLens: 'layer',
     contextSelection: new Set(),
     graphRuntime: null,
@@ -1562,6 +1562,41 @@ function renderNodeInspector(node, path) {
     const inbound = edges.filter((edge) => String(edge.to ?? edge.target?.id ?? edge.target) === node.id);
     const outbound = edges.filter((edge) => String(edge.from ?? edge.source?.id ?? edge.source) === node.id);
     result.className = 'inspector-result';
+    // Capability nodes (logical layer) carry purpose + invariants — surface them
+    // first, since the invariants are the contract a change here must not break.
+    if (node.purpose || (Array.isArray(node.invariants) && node.invariants.length)) {
+        const cap = document.createElement('div');
+        cap.className = 'capability-card';
+        if (node.purpose) {
+            const p = document.createElement('p');
+            p.className = 'capability-purpose';
+            p.textContent = node.purpose;
+            cap.appendChild(p);
+        }
+        if (Array.isArray(node.invariants) && node.invariants.length) {
+            const h = document.createElement('div');
+            h.className = 'capability-invariants-head';
+            h.textContent = 'Invariants — must not break';
+            cap.appendChild(h);
+            const ul = document.createElement('ul');
+            ul.className = 'capability-invariants';
+            for (const inv of node.invariants) {
+                const li = document.createElement('li');
+                li.textContent = inv;
+                ul.appendChild(li);
+            }
+            cap.appendChild(ul);
+        }
+        if (Array.isArray(node.modules) && node.modules.length) {
+            const m = document.createElement('div');
+            m.className = 'capability-modules';
+            m.textContent = `Modules: ${node.modules.join(', ')}`;
+            cap.appendChild(m);
+        }
+        result.replaceChildren(cap);
+        refreshIcons();
+        return;
+    }
     result.replaceChildren(renderStructured({
         snapshot: {
             id: node.id,
@@ -2324,6 +2359,7 @@ async function loadGraph(force = false) {
     try {
         const url = state.graphMode === 'clusters' ? '/api/graph/clustered'
             : state.graphMode === 'components' ? '/api/graph'
+            : state.graphMode === 'logical' ? '/api/graph/logical'
             : '/api/graph/modules';
         const payload = await request(url);
         let nodes = Array.isArray(payload) ? payload : payload?.nodes || [];
@@ -2370,8 +2406,8 @@ async function loadGraph(force = false) {
 
 // Cycle the graph view: Modules (lib.rs declarations) -> Clusters (10) ->
 // Components (raw files) -> Modules. The button shows the CURRENT view.
-const GRAPH_MODES = ['modules', 'clusters', 'components'];
-const GRAPH_MODE_LABEL = { modules: 'Modules', clusters: 'Clusters', components: 'Components' };
+const GRAPH_MODES = ['logical', 'clusters', 'modules', 'components'];
+const GRAPH_MODE_LABEL = { logical: 'Logical', modules: 'Modules', clusters: 'Clusters', components: 'Components' };
 function toggleGraphMode() {
     const current = state.graphMode || 'modules';
     const next = GRAPH_MODES[(GRAPH_MODES.indexOf(current) + 1) % GRAPH_MODES.length];

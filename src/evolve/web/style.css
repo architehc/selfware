@@ -2174,3 +2174,35 @@ textarea:focus-visible,
 }
 .selection-chip:hover { border-color: var(--danger); color: var(--danger); }
 .command-button.compact.secondary { background: transparent; border-color: var(--border, #2c2c2c); }
+
+/* Logical layer — capability inspector card */
+.capability-card { padding: 4px 0; }
+.capability-purpose {
+    margin: 0 0 10px;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--text);
+}
+.capability-invariants-head {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--warning);
+    margin-bottom: 5px;
+}
+.capability-invariants {
+    margin: 0 0 10px;
+    padding-left: 16px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-soft);
+}
+.capability-invariants li { margin-bottom: 4px; }
+.capability-modules {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--muted);
+    border-top: 1px solid var(--border, #262626);
+    padding-top: 7px;
+}
