@@ -70,6 +70,7 @@ async fn test_persisted_ontology_keeps_semantic_edges_but_not_stale_derived_edge
         inline_test_ranges: 0,
         inline_test_lines: 0,
         inline_test_tokens: 0,
+        classification: "concept".to_string(),
     };
     let persisted = Graph {
         nodes: vec![

@@ -99,6 +99,7 @@ pub enum MouseButton {
 
 impl MouseButton {
     /// Return the xdotool button number.
+    #[allow(dead_code)]
     fn xdotool_button(&self) -> u8 {
         match self {
             MouseButton::Left => 1,
@@ -128,16 +129,19 @@ pub struct MouseController {
 }
 
 /// Build xdotool args for mouse move.
+#[allow(dead_code)]
 fn build_mousemove_args(x: i32, y: i32) -> Vec<String> {
     vec!["mousemove".to_string(), x.to_string(), y.to_string()]
 }
 
 /// Build xdotool args for a click.
+#[allow(dead_code)]
 fn build_click_args(button: u8) -> Vec<String> {
     vec!["click".to_string(), button.to_string()]
 }
 
 /// Build xdotool args for a double-click.
+#[allow(dead_code)]
 fn build_double_click_args() -> Vec<String> {
     vec![
         "click".to_string(),
@@ -150,6 +154,7 @@ fn build_double_click_args() -> Vec<String> {
 /// Build xdotool args for a scroll action.
 /// button 4 = scroll up, button 5 = scroll down.
 /// Repeats `amount` times for the given direction.
+#[allow(dead_code)]
 fn build_scroll_args(delta_x: i32, delta_y: i32) -> Vec<Vec<String>> {
     let mut commands = Vec::new();
 
@@ -175,6 +180,7 @@ fn build_scroll_args(delta_x: i32, delta_y: i32) -> Vec<Vec<String>> {
 }
 
 /// Build xdotool args for a drag operation.
+#[allow(dead_code)]
 fn build_drag_args(from: Point, to: Point, button: u8) -> Vec<String> {
     vec![
         "mousemove".to_string(),
@@ -196,6 +202,7 @@ fn build_drag_args(from: Point, to: Point, button: u8) -> Vec<String> {
 
 /// PowerShell script for mouse_event via Win32 P/Invoke.
 /// We `Add-Type` once with the necessary signatures.
+#[allow(dead_code)]
 const POWERSHELL_MOUSE_PREAMBLE: &str = r#"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
@@ -211,11 +218,13 @@ public class WinMouse {
     public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
     public const uint MOUSEEVENTF_MIDDLEUP   = 0x0040;
     public const uint MOUSEEVENTF_WHEEL      = 0x0800;
+    public const uint MOUSEEVENTF_HWHEEL     = 0x1000;
 }
 "@
 "#;
 
 /// Build a PowerShell script that moves the cursor to (x, y).
+#[allow(dead_code)]
 fn ps_move_to(x: i32, y: i32) -> String {
     format!(
         "{}\n[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({}, {})",
@@ -224,6 +233,7 @@ fn ps_move_to(x: i32, y: i32) -> String {
 }
 
 /// Build a PowerShell script for a mouse button click at the current position.
+#[allow(dead_code)]
 fn ps_click(button: &MouseButton) -> String {
     let (down, up) = match button {
         MouseButton::Left => (
@@ -250,6 +260,7 @@ fn ps_click(button: &MouseButton) -> String {
 }
 
 /// Build a PowerShell script for a double-click (left button).
+#[allow(dead_code)]
 fn ps_double_click() -> String {
     format!(
         "{}\n\
@@ -263,33 +274,33 @@ fn ps_double_click() -> String {
 }
 
 /// Build a PowerShell script for mouse wheel scrolling.
-/// Each WHEEL_DELTA unit is 120.  Positive = scroll up, negative = scroll down.
+#[allow(dead_code)]
 fn ps_scroll(delta_x: i32, delta_y: i32) -> String {
-    let mut lines = vec![POWERSHELL_MOUSE_PREAMBLE.to_string()];
+    let mut script = String::new();
+    script.push_str(POWERSHELL_MOUSE_PREAMBLE);
+    script.push('\n');
 
-    // Vertical scroll: positive delta_y = scroll down in our API, but Windows
-    // WHEEL uses positive = up, so we negate.
     if delta_y != 0 {
-        let wheel_amount = -delta_y * 120;
-        lines.push(format!(
-            "[WinMouse]::mouse_event([WinMouse]::MOUSEEVENTF_WHEEL, 0, 0, {}, [IntPtr]::Zero)",
-            wheel_amount
+        let dw_data = delta_y * -120;
+        script.push_str(&format!(
+            "[WinMouse]::mouse_event(0x0800, 0, 0, {}, [IntPtr]::Zero)\n",
+            dw_data
         ));
     }
 
-    // Horizontal scroll (MOUSEEVENTF_HWHEEL = 0x01000) is available but not
-    // commonly supported; skip for now and log a debug note.
     if delta_x != 0 {
-        lines.push(format!(
-            "# horizontal scroll delta_x={} not supported via mouse_event WHEEL",
-            delta_x
+        let dw_data = delta_x * 120;
+        script.push_str(&format!(
+            "[WinMouse]::mouse_event(0x1000, 0, 0, {}, [IntPtr]::Zero)\n",
+            dw_data
         ));
     }
 
-    lines.join("\n")
+    script
 }
 
-/// Build a PowerShell script for a drag operation.
+/// Build a PowerShell script for a click-and-drag operation.
+#[allow(dead_code)]
 fn ps_drag(from: Point, to: Point, button: &MouseButton) -> String {
     let (down, up) = match button {
         MouseButton::Left => ("MOUSEEVENTF_LEFTDOWN", "MOUSEEVENTF_LEFTUP"),

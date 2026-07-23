@@ -139,6 +139,7 @@ fn build_xdotool_combo(combo: &str) -> String {
 
 /// Build the command args for an xdotool invocation.
 /// Returns (program, args) tuple for testability.
+#[allow(dead_code)]
 fn build_xdotool_type_cmd(text: &str) -> (&'static str, Vec<String>) {
     (
         "xdotool",
@@ -151,19 +152,23 @@ fn build_xdotool_type_cmd(text: &str) -> (&'static str, Vec<String>) {
     )
 }
 
+#[allow(dead_code)]
 fn build_xdotool_key_cmd(key: &str) -> (&'static str, Vec<String>) {
     ("xdotool", vec!["key".to_string(), key.to_string()])
 }
 
+#[allow(dead_code)]
 fn build_xdotool_keydown_cmd(key: &str) -> (&'static str, Vec<String>) {
     ("xdotool", vec!["keydown".to_string(), key.to_string()])
 }
 
+#[allow(dead_code)]
 fn build_xdotool_keyup_cmd(key: &str) -> (&'static str, Vec<String>) {
     ("xdotool", vec!["keyup".to_string(), key.to_string()])
 }
 
 /// Map a key name to the PowerShell `SendKeys` notation.
+#[allow(dead_code)]
 fn map_key_to_sendkeys(key: &str) -> String {
     match key.to_lowercase().as_str() {
         "enter" | "return" => "{ENTER}".to_string(),
@@ -200,6 +205,7 @@ fn map_key_to_sendkeys(key: &str) -> String {
 }
 
 /// Escape characters that have special meaning in SendKeys.
+#[allow(dead_code)]
 fn escape_sendkeys_char(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for ch in s.chars() {
@@ -216,6 +222,7 @@ fn escape_sendkeys_char(s: &str) -> String {
 }
 
 /// Escape text for SendKeys (batch of printable characters).
+#[allow(dead_code)]
 fn escape_sendkeys_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 16);
     for ch in text.chars() {
@@ -235,6 +242,7 @@ fn escape_sendkeys_text(text: &str) -> String {
 
 /// Build a PowerShell SendKeys combo string from "ctrl+shift+t" style input.
 /// SendKeys modifiers: ^ = Ctrl, % = Alt, + = Shift.
+#[allow(dead_code)]
 fn build_sendkeys_combo(combo: &str) -> String {
     let mut prefix = String::new();
     let mut key_part = String::new();
@@ -390,7 +398,20 @@ impl KeyboardController {
             }
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            if !text.is_empty() {
+                let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
+                let script = format!("tell application \"System Events\" to keystroke \"{}\"", escaped);
+                let _ = tokio::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(&script)
+                    .output()
+                    .await;
+            }
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             if self.typing_profile.base_delay_ms > 0 {
                 for ch in text.chars() {
@@ -400,7 +421,7 @@ impl KeyboardController {
                 }
             } else {
                 debug!(
-                    "Typed {} chars instantly (stub — no xdotool on this platform)",
+                    "Typed {} chars instantly (stub — no keyboard backend on this platform)",
                     text.len()
                 );
             }

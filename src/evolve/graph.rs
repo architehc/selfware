@@ -72,13 +72,17 @@ impl GraphBuilder {
             // config, scripts, and vendored files — even under `src` — become
             // Auxiliary so they don't inflate the code token tiers.
             let is_code = matches!(source_set, SourceSet::Code) && file_class == "rust_source";
-            // Store a project-relative path (e.g. `src/errors.rs`), not the
-            // absolute scan path: the IDE read endpoint resolves paths against
-            // the project root and rejects absolute paths as traversal, which
-            // otherwise makes every node fail to open ("could not open").
             let mut node = match source_set {
-                SourceSet::Test | SourceSet::Example => Node::test(&id, &path_string(relative)),
-                SourceSet::Code if is_code => Node::code(&id, &path_string(relative)),
+                SourceSet::Test | SourceSet::Example => {
+                    let mut n = Node::test(&id, &path_string(relative));
+                    n.classification = file_class.to_string();
+                    n
+                }
+                SourceSet::Code if is_code => {
+                    let mut n = Node::code(&id, &path_string(relative));
+                    n.classification = file_class.to_string();
+                    n
+                }
                 SourceSet::Code | SourceSet::Tooling => {
                     Node::auxiliary(&id, &path_string(relative), file_class)
                 }
@@ -122,7 +126,8 @@ impl GraphBuilder {
             let Some(path) = node.path.as_deref() else {
                 continue;
             };
-            for imported in imported_modules(Path::new(path), &node.id) {
+            let full_path = project_root.join(path);
+            for imported in imported_modules(&full_path, &node.id) {
                 if let Some(target) = resolve_import(&imported, &node_ids) {
                     if target != node.id {
                         edges.push(Edge {
@@ -646,6 +651,12 @@ fn parent_node_id(id: &str, node_ids: &HashSet<String>) -> Option<String> {
         let candidate = parts.join("::");
         if node_ids.contains(&candidate) {
             return Some(candidate);
+        }
+        if candidate.starts_with("test::") {
+            let crate_candidate = format!("crate::{}", &candidate[6..]);
+            if node_ids.contains(&crate_candidate) {
+                return Some(crate_candidate);
+            }
         }
     }
     (id.starts_with("crate::") && id != "crate" && node_ids.contains("crate"))

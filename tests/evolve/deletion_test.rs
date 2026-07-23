@@ -110,6 +110,7 @@ fn test_deletion_preview_rejects_unknown_and_pathless_nodes() {
         inline_test_ranges: 0,
         inline_test_lines: 0,
         inline_test_tokens: 0,
+        classification: "concept".to_string(),
     });
 
     assert!(preview_deletion(&graph, &ide, "missing").is_err());

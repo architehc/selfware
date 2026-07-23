@@ -61,6 +61,7 @@ fn sample_graph() -> Graph {
                 inline_test_ranges: 0,
                 inline_test_lines: 0,
                 inline_test_tokens: 0,
+                classification: "concept".to_string(),
             },
         ],
         edges: vec![

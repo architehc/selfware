@@ -114,7 +114,7 @@ fn test_scan_is_deterministic_and_separates_production_from_tests() {
         .iter()
         .filter(|node| node.layer == NodeLayer::Code)
         .all(|node| {
-            node.path.as_deref().unwrap().contains("/src/") || node.id.starts_with("tool::")
+            node.path.as_deref().unwrap().contains("src/") || node.id.starts_with("tool::")
         }));
     assert!(first
         .nodes
