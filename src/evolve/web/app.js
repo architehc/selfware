@@ -98,7 +98,24 @@ function formatError(error) {
     return error instanceof Error ? error.message : String(error);
 }
 
-async function request(url, options = {}) {
+// Re-fetch the session token from the server. Returns true only if a *different*
+// token was obtained (i.e. the old one was genuinely stale, e.g. after a restart).
+async function refreshSession() {
+    try {
+        const ws = await request('/api/workspace');
+        const token = ws?.session_token || ws?.sessionToken || null;
+        if (token && token !== state.sessionToken) {
+            state.sessionToken = token;
+            state.workspace = ws;
+            return true;
+        }
+    } catch (_) {
+        // fall through — nothing we can do; original error will surface
+    }
+    return false;
+}
+
+async function request(url, options = {}, _retried = false) {
     const init = {
         method: options.method || 'GET',
         headers: { Accept: 'application/json', ...(options.headers || {}) },
@@ -116,6 +133,16 @@ async function request(url, options = {}) {
         response = await fetch(url, init);
     } catch (error) {
         throw new ApiError(`Could not reach ${url}: ${formatError(error)}`, 0, null);
+    }
+
+    // A stale session (typically the server restarted mid-loop) shows up as a 401.
+    // Transparently refresh the token once and retry so model actions don't fail
+    // silently until a manual reload.
+    if (response.status === 401 && !_retried && sessionToken && !url.includes('/api/workspace')) {
+        if (await refreshSession()) {
+            setGlobalStatus('Session refreshed', 'neutral');
+            return request(url, options, true);
+        }
     }
 
     const contentType = response.headers.get('content-type') || '';
