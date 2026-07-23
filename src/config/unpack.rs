@@ -183,10 +183,16 @@ fn is_multimodal_by_name(model: &str) -> bool {
     let lower = model.to_lowercase();
     lower.contains("vision")
         || lower.contains("-vl-")
+        || lower.contains("vl")
         || lower.ends_with("-vl")
         || lower.contains("llava")
         || lower.contains("onevision")
         || lower.contains("pixtral")
+        || lower.contains("kimi")
+        || lower.contains("gemini")
+        || lower.contains("gpt-4o")
+        || lower.contains("claude-3")
+        || lower.contains("qvq")
         || (lower.contains("gemma-3") && lower.contains("it"))
 }
 

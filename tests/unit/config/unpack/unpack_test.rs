@@ -22,6 +22,17 @@ fn test_discovered_endpoint_fields() {
 }
 
 #[test]
+fn test_is_multimodal_by_name_heuristic() {
+    assert!(is_multimodal_by_name("moonshotai/kimi-k3"));
+    assert!(is_multimodal_by_name("kimi-k3-vl"));
+    assert!(is_multimodal_by_name("qwen/qwen3.5-122b-vl"));
+    assert!(is_multimodal_by_name("google/gemini-2.5-flash"));
+    assert!(is_multimodal_by_name("openai/gpt-4o"));
+    assert!(is_multimodal_by_name("anthropic/claude-3-5-sonnet"));
+    assert!(!is_multimodal_by_name("meta-llama/llama-3-70b-instruct"));
+}
+
+#[test]
 fn test_discovered_endpoint_multimodal() {
     let ep = DiscoveredEndpoint {
         provider: "LM Studio".to_string(),

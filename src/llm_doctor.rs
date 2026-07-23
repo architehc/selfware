@@ -649,6 +649,11 @@ fn looks_multimodal(model: &str) -> bool {
         || l.contains("vision")
         || l.contains("llava")
         || l.contains("multimodal")
+        || l.contains("kimi")
+        || l.contains("gemini")
+        || l.contains("gpt-4o")
+        || l.contains("claude-3")
+        || l.contains("qvq")
         || l.contains("122b") // selfware-hosted Qwen3.5-VL family commonly uses this size tag
 }
 
