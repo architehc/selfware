@@ -212,6 +212,7 @@ impl EvolveServer {
             .route("/api/assistant/task", post(assistant_task_handler))
             .route("/api/assistant/orientation", get(assistant_orientation_handler))
             .route("/api/graph/logical", get(graph_logical_handler))
+            .route("/api/evolve/presets", get(evolve_presets_handler))
             .route("/api/graph/modules", get(graph_modules_handler))
             .route("/api/evolve/pairs", get(evolve_pairs_handler))
             .route("/api/evolve/pairs/suggest", post(evolve_pair_suggest_handler))
@@ -1423,6 +1424,27 @@ async fn assistant_orientation_handler(
         "included_map": include_map,
         "tokens": crate::token_count::estimate_content_tokens(&text),
         "text": text,
+    })))
+}
+
+/// The self-improvement preset library — the directions selfware can expand in,
+/// each with its task, invariants, context recipe, verification, and a ready
+/// run-prompt with the guardrails baked in. Local, no model call.
+async fn evolve_presets_handler(State(_server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let presets = super::presets();
+    let items: Vec<Value> = presets
+        .iter()
+        .map(|p| {
+            let mut v = serde_json::to_value(p).unwrap_or(Value::Null);
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("prompt".into(), json!(super::render_preset_prompt(p)));
+            }
+            v
+        })
+        .collect();
+    Ok(Json(json!({
+        "preset_count": items.len(),
+        "presets": items,
     })))
 }
 

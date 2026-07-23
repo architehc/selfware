@@ -28,6 +28,7 @@ pub mod map;
 pub mod module_graph;
 pub mod ontology;
 pub mod pair_suggest;
+pub mod presets;
 pub mod ontology_evolver;
 pub mod persona;
 pub mod quality;
@@ -66,6 +67,7 @@ pub use module_graph::{
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,
 };
+pub use presets::{preset, presets, render_prompt as render_preset_prompt, Preset};
 pub use graphrag::{GraphRag, GroundedFact};
 pub use ide::{DocumentSnapshot, FileClass, FileInfo, IdeEngine, WriteResult};
 pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
