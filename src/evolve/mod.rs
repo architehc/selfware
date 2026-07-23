@@ -23,6 +23,7 @@ pub mod graphrag;
 pub mod ide;
 pub mod r#loop;
 pub mod map;
+pub mod module_graph;
 pub mod ontology;
 pub mod pair_suggest;
 pub mod ontology_evolver;
@@ -52,6 +53,9 @@ pub use graph::GraphBuilder;
 pub use map::{
     build_map, expand as expand_component, orientation as workspace_orientation, ComponentCard,
     ContextMap,
+};
+pub use module_graph::{
+    from_lib_rs as parse_module_manifest, module_path, ModuleDecl, ModuleManifest, ReExport,
 };
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,

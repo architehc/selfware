@@ -210,6 +210,7 @@ impl EvolveServer {
             .route("/api/assistant/review", post(assistant_review_handler))
             .route("/api/assistant/task", post(assistant_task_handler))
             .route("/api/assistant/orientation", get(assistant_orientation_handler))
+            .route("/api/graph/modules", get(graph_modules_handler))
             .route("/api/evolve/pairs", get(evolve_pairs_handler))
             .route("/api/evolve/pairs/suggest", post(evolve_pair_suggest_handler))
             .route("/api/git/status", get(git_status_handler))
@@ -1363,6 +1364,87 @@ async fn assistant_orientation_handler(
         "included_map": include_map,
         "tokens": crate::token_count::estimate_content_tokens(&text),
         "text": text,
+    })))
+}
+
+/// The crate's module graph, seeded from `src/lib.rs`: one node per declared
+/// top-level module (with visibility, section, and cfg gate), metrics aggregated
+/// from the file graph, and module-level DependsOn edges. The clean entry graph.
+async fn graph_modules_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let root = server.project_root.as_ref().clone();
+    let manifest = super::parse_module_manifest(&root).map_err(internal_error)?;
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+
+    // Aggregate file-graph metrics per top-level module.
+    use std::collections::BTreeMap;
+    let mut metrics: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    for node in graph.nodes.iter().filter(|n| n.layer == super::NodeLayer::Code) {
+        let comp = super::clusters::component_of(&node.id);
+        let e = metrics.entry(comp).or_default();
+        e.0 += node.tokens;
+        e.1 += node.lines;
+        e.2 += node.files.max(1);
+    }
+
+    let declared: std::collections::BTreeSet<&str> =
+        manifest.modules.iter().map(|m| m.name.as_str()).collect();
+    let reexport_count = |name: &str| {
+        manifest
+            .reexports
+            .iter()
+            .filter(|r| r.module == name)
+            .count()
+    };
+
+    let nodes: Vec<Value> = manifest
+        .modules
+        .iter()
+        .map(|m| {
+            let (tokens, lines, files) = metrics.get(&m.name).copied().unwrap_or((0, 0, 0));
+            json!({
+                "id": m.name,
+                "label": m.name,
+                "layer": "Code",
+                "path": super::module_path(&root, &m.name),
+                "tokens": tokens,
+                "lines": lines,
+                "files": files,
+                "visibility": m.visibility,
+                "category": m.category,
+                "cfg_feature": m.cfg_feature,
+                "test_only": m.test_only,
+                "cluster": super::clusters::cluster_of(&m.name),
+                "reexports": reexport_count(&m.name),
+            })
+        })
+        .collect();
+
+    // Collapse file-graph DependsOn edges to module level, keeping only edges
+    // between two declared modules.
+    let mut weights: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for edge in &graph.edges {
+        if !matches!(edge.edge_type, super::EdgeType::DependsOn) {
+            continue;
+        }
+        let from = super::clusters::component_of(&edge.from);
+        let to = super::clusters::component_of(&edge.to);
+        if from == to || !declared.contains(from.as_str()) || !declared.contains(to.as_str()) {
+            continue;
+        }
+        *weights.entry((from, to)).or_default() += 1;
+    }
+    let edges: Vec<Value> = weights
+        .into_iter()
+        .map(|((from, to), weight)| json!({
+            "from": from, "to": to, "edge_type": "DependsOn", "weight": weight,
+        }))
+        .collect();
+
+    Ok(Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+        "module_count": manifest.modules.len(),
+        "reexport_count": manifest.reexports.len(),
     })))
 }
 

@@ -42,6 +42,7 @@ const state = {
     graphData: null,
     graphLoaded: false,
     graphLoading: false,
+    graphMode: 'modules',
     graphRuntime: null,
     selectedNode: null,
     astRequest: 0,
@@ -1824,6 +1825,19 @@ function renderPairSuggestions(payload) {
         tags.className = 'suggestion-tags';
         if (s.effort) { const e = document.createElement('span'); e.className = 'suggestion-tag'; e.textContent = `effort ${s.effort}`; tags.appendChild(e); }
         if (s.risk) { const rk = document.createElement('span'); rk.className = `suggestion-tag risk-${s.risk}`; rk.textContent = `risk ${s.risk}`; tags.appendChild(rk); }
+        // Action: turn a suggestion into a real isolated working branch to implement it.
+        const act = document.createElement('button');
+        act.type = 'button';
+        act.className = 'command-button compact';
+        act.innerHTML = '<i data-lucide="git-branch" aria-hidden="true"></i><span>Branch to implement</span>';
+        act.title = 'Create an isolated branch to implement this suggestion';
+        const pair = payload.pair || {};
+        act.addEventListener('click', () => {
+            const slug = [pair.a, pair.b, s.kind]
+                .filter(Boolean).join('-').toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[.-]+|[.-]+$/g, '');
+            openBranchDialog(`evolve/${slug || 'pair'}`);
+        });
+        tags.appendChild(act);
         card.appendChild(tags);
         wrap.appendChild(card);
     }
@@ -2215,15 +2229,17 @@ async function loadGraph(force = false) {
     setBusy($('#graph-refresh'), true);
 
     try {
-        const url = state.graphMode === 'clusters' ? '/api/graph/clustered' : '/api/graph';
+        const url = state.graphMode === 'clusters' ? '/api/graph/clustered'
+            : state.graphMode === 'components' ? '/api/graph'
+            : '/api/graph/modules';
         const payload = await request(url);
         let nodes = Array.isArray(payload) ? payload : payload?.nodes || [];
         let edges = payload?.edges || payload?.links || [];
         if (!Array.isArray(nodes) || !Array.isArray(edges)) throw new Error('Graph response did not include node and edge arrays.');
-        // Reduce clutter: the raw graph is ~1,700 nodes (production + 700
-        // test/example + 500 repo-directory nodes). Default to production code
-        // only unless "Show tests" is on or we're in clustered mode.
-        if (state.graphMode !== 'clusters' && !state.graphShowTests) {
+        // Reduce clutter: the raw components graph is ~1,700 nodes (production +
+        // 700 test/example + 500 repo-directory nodes). Modules and clusters
+        // views are already aggregated, so only filter the raw components view.
+        if (state.graphMode === 'components' && !state.graphShowTests) {
             const edgeEnd = (v) => String(v?.id ?? v);
             const keep = new Set(nodes.filter((n) => n.layer === 'Code').map((n) => n.id));
             nodes = nodes.filter((n) => keep.has(n.id));
@@ -2252,15 +2268,19 @@ async function loadGraph(force = false) {
     }
 }
 
-// Toggle the graph between the 10 architectural clusters and the 45 components.
+// Cycle the graph view: Modules (lib.rs declarations) -> Clusters (10) ->
+// Components (raw files) -> Modules. The button shows the CURRENT view.
+const GRAPH_MODES = ['modules', 'clusters', 'components'];
+const GRAPH_MODE_LABEL = { modules: 'Modules', clusters: 'Clusters', components: 'Components' };
 function toggleGraphMode() {
-    state.graphMode = state.graphMode === 'clusters' ? 'components' : 'clusters';
+    const current = state.graphMode || 'modules';
+    const next = GRAPH_MODES[(GRAPH_MODES.indexOf(current) + 1) % GRAPH_MODES.length];
+    state.graphMode = next;
     const button = $('#graph-cluster-toggle');
     if (button) {
-        const clustered = state.graphMode === 'clusters';
-        button.classList.toggle('active', clustered);
+        button.classList.toggle('active', next !== 'components');
         const label = button.querySelector('span');
-        if (label) label.textContent = clustered ? 'Components' : 'Clusters';
+        if (label) label.textContent = GRAPH_MODE_LABEL[next];
     }
     state.graphLoaded = false;
     loadGraph(true);
