@@ -179,6 +179,7 @@
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="grounding">Grounding</button>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="recommendations">Advice</button>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="orientation">Orientation</button>
+                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="pairs">Pairs</button>
                     <span class="inspector-group-label">Status</span>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="readiness">Readiness</button>
                     <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="context">Context</button>
@@ -283,6 +284,23 @@
                         </button>
                     </div>
                     <div id="orientation-result" class="inspector-result pane-state">Load to preview the taxonomy + map. This is exactly what a Task Review sends the model as background.</div>
+                </section>
+
+                <section id="inspector-pairs" class="inspector-view hidden" role="tabpanel">
+                    <p class="inspector-hint">Level-1 connected component pairs. Ask the model how a connected pair should evolve together — merge, extract shared code, fix the boundary, dedup, or decouple.</p>
+                    <div class="pairs-controls">
+                        <label class="orientation-toggle" title="Only pairs that include the selected graph node's component">
+                            <input id="pairs-node-only" type="checkbox" /><span>Selected node</span>
+                        </label>
+                        <label class="orientation-toggle" title="Only pairs that cross architectural clusters">
+                            <input id="pairs-cross-only" type="checkbox" checked /><span>Cross-cluster</span>
+                        </label>
+                        <button id="pairs-load" class="command-button" type="button" title="List level-1 connected pairs (local, no model call)">
+                            <i data-lucide="git-compare-arrows" aria-hidden="true"></i><span>Load Pairs</span>
+                        </button>
+                    </div>
+                    <div id="pairs-result" class="inspector-result pane-state">Load the connected pairs, then ask the model to suggest how a pair should evolve.</div>
+                    <ul id="pairs-list" class="pairs-list"></ul>
                 </section>
             </aside>
         </main>

@@ -2005,3 +2005,107 @@ textarea:focus-visible,
     color: var(--text-soft);
     white-space: pre-wrap;
 }
+
+/* Pairs inspector: level-1 connected pairs + evolution suggestions */
+.pairs-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+.pairs-controls .command-button { margin-left: auto; }
+.command-button.compact {
+    padding: 3px 9px;
+    font-size: 11px;
+}
+.pairs-list {
+    list-style: none;
+    margin: 10px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.pair-item {
+    border: 1px solid var(--border, #2a2a2a);
+    border-radius: 7px;
+    padding: 8px 10px;
+    background: var(--surface-2, #171717);
+}
+.pair-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.pair-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.pair-sep { color: var(--muted); }
+.pair-meta {
+    margin-top: 5px;
+    font-size: 10.5px;
+    color: var(--muted);
+}
+.pair-suggestions { margin-top: 8px; }
+.pair-suggestions:empty { margin-top: 0; }
+.pair-model-note {
+    font-size: 10.5px;
+    color: var(--faint);
+    margin-bottom: 6px;
+}
+.suggestion-card {
+    border-left: 2px solid var(--accent);
+    padding: 6px 0 6px 10px;
+    margin-bottom: 8px;
+}
+.suggestion-top {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    margin-bottom: 3px;
+}
+.suggestion-top strong { font-size: 12.5px; color: var(--text); }
+.suggestion-kind {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--accent-ink);
+    background: var(--accent);
+    border-radius: 4px;
+    padding: 1px 6px;
+    white-space: nowrap;
+}
+.suggestion-rationale {
+    margin: 2px 0 4px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-soft);
+}
+.suggestion-steps {
+    margin: 4px 0 4px 16px;
+    padding: 0;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-soft);
+}
+.suggestion-tags {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+}
+.suggestion-tag {
+    font-size: 10px;
+    color: var(--muted);
+    border: 1px solid var(--border, #2c2c2c);
+    border-radius: 999px;
+    padding: 1px 7px;
+}
+.suggestion-tag.risk-high { color: var(--danger); border-color: var(--danger); }
+.suggestion-tag.risk-medium { color: var(--warning); border-color: var(--warning); }
+.suggestion-tag.risk-low { color: var(--accent); border-color: var(--accent); }

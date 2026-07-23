@@ -334,6 +334,9 @@ function wireEvents() {
     $('#orientation-include-map')?.addEventListener('change', () => {
         if (state.orientationLoaded) loadOrientation();
     });
+    $('#pairs-load')?.addEventListener('click', loadPairs);
+    $('#pairs-node-only')?.addEventListener('change', renderPairsList);
+    $('#pairs-cross-only')?.addEventListener('change', renderPairsList);
 
     $('#clear-output')?.addEventListener('click', clearOutput);
     $('#toggle-bottom')?.addEventListener('click', toggleBottomPanel);
@@ -1384,6 +1387,7 @@ function selectInspector(name) {
         panel.classList.toggle('hidden', !active);
     });
     if (name === 'orientation' && !state.orientationLoaded) loadOrientation();
+    if (name === 'pairs' && !state.pairsLoaded) loadPairs();
 }
 
 function selectBottomView(name) {
@@ -1423,6 +1427,7 @@ function updateSelection(path, node) {
     $('#selection-name').textContent = node?.name || node?.label || (path ? basename(path) : 'No selection');
     $('#selection-path').textContent = path || node?.id || '';
     renderNodeInspector(node, path);
+    if (state.pairsLoaded && $('#pairs-node-only')?.checked) renderPairsList();
 }
 
 function selectedNodePath() {
@@ -1653,6 +1658,176 @@ function focusComponent(component) {
     selectView('graph');
     updateSelection(graphNodePath(match), match);
     selectInspector('node');
+}
+
+// Top-level component of a node id: crate::agent::execution -> agent.
+function componentOfId(id) {
+    return String(id || '').replace(/^crate::/, '').split('::')[0];
+}
+
+// Level-1 connected pairs: list them (local) and, per pair, ask the model how the
+// two components should evolve together (this click goes browser -> server -> model).
+async function loadPairs() {
+    const result = $('#pairs-result');
+    const button = $('#pairs-load');
+    setBusy(button, true);
+    result.className = 'inspector-result pane-state';
+    result.textContent = 'Listing level-1 connected pairs…';
+    try {
+        const payload = await request('/api/evolve/pairs');
+        state.pairs = payload.pairs || [];
+        state.pairsMeta = { total: payload.pair_count || 0, cross: payload.cross_cluster || 0 };
+        state.pairsLoaded = true;
+        renderPairsList();
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Pairs failed: ${formatError(error)}`;
+    } finally {
+        setBusy(button, false);
+        refreshIcons();
+    }
+}
+
+function renderPairsList() {
+    if (!state.pairsLoaded) return;
+    const result = $('#pairs-result');
+    const list = $('#pairs-list');
+    list.replaceChildren();
+    const nodeOnly = $('#pairs-node-only')?.checked;
+    const crossOnly = $('#pairs-cross-only')?.checked;
+    const comp = state.selectedNode ? componentOfId(state.selectedNode.id) : null;
+    let pairs = state.pairs;
+    if (crossOnly) pairs = pairs.filter((p) => p.cross_cluster);
+    if (nodeOnly && comp) pairs = pairs.filter((p) => p.a === comp || p.b === comp);
+    const shown = pairs.slice(0, 40);
+
+    result.className = 'inspector-result pane-state';
+    const filters = [crossOnly ? 'cross-cluster' : null, nodeOnly && comp ? comp : null]
+        .filter(Boolean).join(', ');
+    result.textContent = `${pairs.length} pairs${filters ? ` (${filters})` : ''} of `
+        + `${state.pairsMeta.total} total. Showing ${shown.length}.`;
+    if (nodeOnly && !comp) result.textContent = 'Select a graph node to filter its pairs.';
+
+    for (const pair of shown) {
+        const li = document.createElement('li');
+        li.className = 'pair-item';
+
+        const head = document.createElement('div');
+        head.className = 'pair-head';
+        const title = document.createElement('div');
+        title.className = 'pair-title';
+        for (const [i, comp] of [pair.a, pair.b].entries()) {
+            if (i) { const sep = document.createElement('span'); sep.className = 'pair-sep'; sep.textContent = '↔'; title.appendChild(sep); }
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'taxonomy-chip';
+            chip.textContent = comp;
+            chip.title = `Focus ${comp} in the graph`;
+            chip.addEventListener('click', () => focusComponent(comp));
+            title.appendChild(chip);
+        }
+        head.appendChild(title);
+        const suggest = document.createElement('button');
+        suggest.type = 'button';
+        suggest.className = 'command-button compact';
+        suggest.innerHTML = '<i data-lucide="sparkles" aria-hidden="true"></i><span>Suggest</span>';
+        head.appendChild(suggest);
+        li.appendChild(head);
+
+        const meta = document.createElement('div');
+        meta.className = 'pair-meta';
+        const cluster = pair.cross_cluster ? `${pair.cluster_a} ↔ ${pair.cluster_b}` : pair.cluster_a;
+        meta.textContent = `${cluster} · ${(pair.relations || []).join(', ')} · weight ${pair.weight}`;
+        li.appendChild(meta);
+
+        const slot = document.createElement('div');
+        slot.className = 'pair-suggestions';
+        li.appendChild(slot);
+
+        suggest.addEventListener('click', () => suggestPair(pair, slot, suggest));
+        list.appendChild(li);
+    }
+    refreshIcons();
+}
+
+async function suggestPair(pair, slot, button) {
+    setBusy(button, true);
+    slot.className = 'pair-suggestions pane-state';
+    slot.textContent = `Asking the model how ${pair.a} and ${pair.b} should evolve…`;
+    setGlobalStatus(`Pair suggest: ${pair.a} ↔ ${pair.b}`, 'working');
+    try {
+        const payload = await request('/api/evolve/pairs/suggest', {
+            method: 'POST',
+            body: { a: pair.a, b: pair.b },
+        });
+        slot.className = 'pair-suggestions';
+        slot.replaceChildren(renderPairSuggestions(payload));
+        appendOutput(`Pair suggest: ${pair.a} <-> ${pair.b}`, payload);
+        setGlobalStatus('Pair suggestions received', 'success');
+        refreshIcons();
+    } catch (error) {
+        slot.className = 'pair-suggestions pane-state error';
+        slot.textContent = `Suggest failed: ${formatError(error)}`;
+        setGlobalStatus('Pair suggest failed', 'error');
+    } finally {
+        setBusy(button, false);
+    }
+}
+
+function renderPairSuggestions(payload) {
+    const wrap = document.createElement('div');
+    const parsed = payload.suggestions;
+    const items = parsed && Array.isArray(parsed.suggestions) ? parsed.suggestions : [];
+    const note = document.createElement('div');
+    note.className = 'pair-model-note';
+    note.textContent = `${payload.model || 'model'} · context ${formatCount(payload.context_tokens || 0)} tok`
+        + `${items.length ? '' : ' · no structured suggestions'}`;
+    wrap.appendChild(note);
+
+    if (!items.length) {
+        // Model returned no parseable JSON — show the raw text so nothing is lost.
+        const pre = document.createElement('pre');
+        pre.className = 'orientation-map-text';
+        pre.textContent = String(payload.raw || '').trim() || 'No suggestions returned.';
+        wrap.appendChild(pre);
+        return wrap;
+    }
+    for (const s of items) {
+        const card = document.createElement('div');
+        card.className = 'suggestion-card';
+        const top = document.createElement('div');
+        top.className = 'suggestion-top';
+        const kind = document.createElement('span');
+        kind.className = 'suggestion-kind';
+        kind.textContent = s.kind || 'idea';
+        const title = document.createElement('strong');
+        title.textContent = s.title || '(untitled)';
+        top.append(kind, title);
+        card.appendChild(top);
+        if (s.rationale) {
+            const r = document.createElement('p');
+            r.className = 'suggestion-rationale';
+            r.textContent = s.rationale;
+            card.appendChild(r);
+        }
+        if (Array.isArray(s.steps) && s.steps.length) {
+            const ol = document.createElement('ol');
+            ol.className = 'suggestion-steps';
+            for (const step of s.steps) {
+                const li = document.createElement('li');
+                li.textContent = step;
+                ol.appendChild(li);
+            }
+            card.appendChild(ol);
+        }
+        const tags = document.createElement('div');
+        tags.className = 'suggestion-tags';
+        if (s.effort) { const e = document.createElement('span'); e.className = 'suggestion-tag'; e.textContent = `effort ${s.effort}`; tags.appendChild(e); }
+        if (s.risk) { const rk = document.createElement('span'); rk.className = `suggestion-tag risk-${s.risk}`; rk.textContent = `risk ${s.risk}`; tags.appendChild(rk); }
+        card.appendChild(tags);
+        wrap.appendChild(card);
+    }
+    return wrap;
 }
 
 function branchSelectedNode() {
