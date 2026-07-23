@@ -151,7 +151,9 @@ fn rules() -> &'static [Rule] {
 /// Characters that don't render but can smuggle instructions past a human reader.
 fn hidden_char_name(c: char) -> Option<&'static str> {
     match c {
-        '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}' => Some("zero-width character"),
+        // U+200D (ZWJ) is deliberately excluded: it is a legitimate part of emoji
+        // sequences (e.g. 🧑‍🎄) and flagging it produces constant false positives.
+        '\u{200B}' | '\u{200C}' | '\u{2060}' | '\u{FEFF}' => Some("zero-width character"),
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => Some("bidirectional override"),
         '\u{00AD}' => Some("soft hyphen"),
         _ => None,
@@ -194,14 +196,19 @@ pub fn scan_injection(content: &str, classification: &str) -> Vec<InjectionFindi
             }
         }
 
+        // First-party code legitimately discusses these patterns (safety modules,
+        // parsers, tests, doc comments). There the same match is informational,
+        // not an alarm — downgrade to low. On data/untrusted content it stays hot.
+        let is_code = matches!(classification, "rust_source" | "test");
         for rule in rules() {
             if rule.data_only && !is_data_like {
                 continue;
             }
             if rule.re.is_match(line) {
+                let severity = if is_code { "low" } else { rule.severity };
                 findings.push(InjectionFinding {
                     kind: rule.kind.to_string(),
-                    severity: rule.severity.to_string(),
+                    severity: severity.to_string(),
                     line: line_no,
                     excerpt: excerpt(line),
                     explanation: rule.explanation.to_string(),
