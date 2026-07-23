@@ -177,6 +177,7 @@ impl EvolveServer {
             .route("/api/context/select", get(context_select_handler))
             .route("/api/context/map", get(context_map_handler))
             .route("/api/context/expand", get(context_expand_handler))
+            .route("/api/context/trust", get(context_trust_handler))
             .route("/api/structure", get(structure_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
@@ -627,6 +628,41 @@ async fn context_sizes_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
         "sizes": sizes,
         "context_length": server.context_length,
     })))
+}
+
+/// Assess one context source for safety: its provenance-based trust level and any
+/// injection / pollution patterns (instruction-override, role-switch, hidden
+/// unicode, instructions-in-data, exfiltration hints). Local, no model call.
+/// `GET /api/context/trust?path=src/foo.rs[&source=workspace]`.
+async fn context_trust_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let path = required_path(&params)?;
+    let document = server
+        .ide
+        .read_document(path)
+        .map_err(document_read_error)?;
+    // Classification comes from the graph node when known, else inferred by ext.
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let classification = graph
+        .nodes
+        .iter()
+        .find(|n| n.path.as_deref() == Some(path))
+        .map(|n| n.classification.clone())
+        .unwrap_or_else(|| {
+            if path.ends_with(".rs") { "rust_source".into() } else { "other".into() }
+        });
+    let source = match params.get("source").map(String::as_str) {
+        Some("tool_output") => super::SourceKind::ToolOutput,
+        Some("model_output") => super::SourceKind::ModelOutput,
+        Some("external") => super::SourceKind::External,
+        Some("memory") => super::SourceKind::Memory,
+        Some("user") => super::SourceKind::User,
+        _ => super::SourceKind::Workspace,
+    };
+    let report = super::analyze_source(path, source, &classification, &document.content);
+    Ok(Json(serde_json::to_value(report).map_err(internal_error)?))
 }
 
 /// The component map — the smallest tier. Returns the rendered index plus the

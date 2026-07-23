@@ -10,6 +10,7 @@ pub mod ast;
 pub mod clusters;
 pub mod context;
 pub mod context_reduce;
+pub mod context_trust;
 pub mod context_selector;
 pub mod dead_code;
 pub mod dedup;
@@ -45,6 +46,9 @@ pub use context::{
 };
 pub use clusters::{cluster_of, clustered, ClusteredGraph};
 pub use context_reduce::strip_comments;
+pub use context_trust::{
+    analyze_source, scan_injection, InjectionFinding, SourceKind, TrustLevel, TrustReport,
+};
 pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
