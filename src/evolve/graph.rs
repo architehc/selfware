@@ -83,6 +83,8 @@ impl GraphBuilder {
                     n.classification = file_class.to_string();
                     n
                 }
+                // Non-Rust under src (web assets) and everything outside src
+                // (data, scripts, config, vendored) stay out of the code tiers.
                 SourceSet::Code | SourceSet::Tooling => {
                     Node::auxiliary(&id, &path_string(relative), file_class)
                 }
