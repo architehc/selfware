@@ -210,6 +210,7 @@ impl EvolveServer {
             .route("/api/assistant/review", post(assistant_review_handler))
             .route("/api/assistant/task", post(assistant_task_handler))
             .route("/api/assistant/orientation", get(assistant_orientation_handler))
+            .route("/api/graph/logical", get(graph_logical_handler))
             .route("/api/graph/modules", get(graph_modules_handler))
             .route("/api/evolve/pairs", get(evolve_pairs_handler))
             .route("/api/evolve/pairs/suggest", post(evolve_pair_suggest_handler))
@@ -1386,6 +1387,43 @@ async fn assistant_orientation_handler(
         "included_map": include_map,
         "tokens": crate::token_count::estimate_content_tokens(&text),
         "text": text,
+    })))
+}
+
+/// The logical layer — ~9 capabilities (what the system does) with their
+/// invariants, derived modules, and dependency edges. The top of the
+/// comprehension ladder, rendered in the D3 {nodes, edges} shape.
+async fn graph_logical_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let model = tokio::task::spawn_blocking(move || super::build_logical_model(&graph, &root))
+        .await
+        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+    let nodes: Vec<Value> = model
+        .capabilities
+        .iter()
+        .map(|c| json!({
+            "id": c.id,
+            "label": c.name,
+            "layer": "Code",
+            "purpose": c.purpose,
+            "invariants": c.invariants,
+            "clusters": c.clusters,
+            "modules": c.modules,
+            "depends_on": c.depends_on,
+            "tokens": c.tokens,
+            "module_count": c.modules.len(),
+        }))
+        .collect();
+    let edges: Vec<Value> = model
+        .edges
+        .iter()
+        .map(|e| json!({ "from": e.from, "to": e.to, "edge_type": "DependsOn", "weight": e.weight }))
+        .collect();
+    Ok(Json(json!({
+        "nodes": nodes,
+        "edges": edges,
+        "capability_count": model.capabilities.len(),
     })))
 }
 

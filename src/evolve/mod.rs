@@ -21,6 +21,7 @@ pub mod git;
 pub mod graph;
 pub mod graphrag;
 pub mod ide;
+pub mod logical;
 pub mod r#loop;
 pub mod map;
 pub mod module_graph;
@@ -50,6 +51,7 @@ pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
 pub use gate::{GateResult, Gatekeeper};
 pub use graph::GraphBuilder;
+pub use logical::{build_logical_model, Capability, LogicalEdge, LogicalModel};
 pub use map::{
     build_map, expand as expand_component, orientation as workspace_orientation, ComponentCard,
     ContextMap,
