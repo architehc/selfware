@@ -117,6 +117,15 @@ pub struct Node {
     pub inline_test_lines: usize,
     #[serde(default)]
     pub inline_test_tokens: usize,
+    /// Fine-grained content class for perspectives and honest token accounting:
+    /// `rust_source`, `test`, `data`, `config`, `script`, `markup`, `vendored`,
+    /// `generated`, or `other`. Defaults to `rust_source` for older graphs.
+    #[serde(default = "default_classification")]
+    pub classification: String,
+}
+
+fn default_classification() -> String {
+    "rust_source".to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -126,6 +135,9 @@ pub enum NodeLayer {
     Structure,
     Concept,
     Preset,
+    /// Non-source repository files (data, config, scripts, vendored, generated).
+    /// Excluded from code token tiers so counts reflect real source.
+    Auxiliary,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -162,12 +174,22 @@ impl Node {
             inline_test_ranges: 0,
             inline_test_lines: 0,
             inline_test_tokens: 0,
+            classification: default_classification(),
         }
     }
 
     pub fn test(id: &str, path: &str) -> Self {
         let mut node = Self::code(id, path);
         node.layer = NodeLayer::Test;
+        node.classification = "test".to_string();
+        node
+    }
+
+    /// A non-source repository file (data, config, script, vendored, generated).
+    pub fn auxiliary(id: &str, path: &str, classification: &str) -> Self {
+        let mut node = Self::code(id, path);
+        node.layer = NodeLayer::Auxiliary;
+        node.classification = classification.to_string();
         node
     }
 
@@ -175,6 +197,7 @@ impl Node {
         let mut node = Self::code(id, "");
         node.layer = NodeLayer::Structure;
         node.path = None;
+        node.classification = "structure".to_string();
         node
     }
 }
