@@ -2109,3 +2109,68 @@ textarea:focus-visible,
 .suggestion-tag.risk-high { color: var(--danger); border-color: var(--danger); }
 .suggestion-tag.risk-medium { color: var(--warning); border-color: var(--warning); }
 .suggestion-tag.risk-low { color: var(--accent); border-color: var(--accent); }
+
+/* Graph perspective (lens) selector */
+.graph-lens-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--muted);
+}
+.graph-lens-label select {
+    background: var(--surface-2, #1c1c1c);
+    color: var(--text-soft);
+    border: 1px solid var(--border, #2c2c2c);
+    border-radius: 5px;
+    font-size: 11px;
+    padding: 2px 6px;
+}
+/* Selected (context) node ring in any lens */
+.graph-node.selected {
+    stroke: var(--accent-strong, #8aceaa);
+    stroke-width: 3px;
+    paint-order: stroke;
+}
+
+/* Context selection panel (dynamic sub-graph accounting) */
+.context-selection-panel {
+    padding: 10px;
+    border-bottom: 1px solid var(--border, #262626);
+    background: rgba(105, 184, 141, 0.05);
+}
+.context-selection-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+.context-selection-head strong { font-size: 12px; color: var(--accent-strong); }
+.context-selection-actions { display: flex; gap: 6px; }
+.context-selection-bar {
+    height: 5px;
+    border-radius: 3px;
+    background: var(--surface-2, #1c1c1c);
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+.context-selection-bar > span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width 0.2s ease;
+}
+.context-selection-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.selection-chip {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-soft);
+    background: var(--surface-2, #1c1c1c);
+    border: 1px solid var(--border, #2c2c2c);
+    border-radius: 999px;
+    padding: 2px 8px;
+    cursor: pointer;
+}
+.selection-chip:hover { border-color: var(--danger); color: var(--danger); }
+.command-button.compact.secondary { background: transparent; border-color: var(--border, #2c2c2c); }

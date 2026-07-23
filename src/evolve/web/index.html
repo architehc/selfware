@@ -143,6 +143,20 @@
                             <button id="graph-tests-toggle" class="tool-button" type="button" title="Show/hide test & example nodes (hidden by default)">
                                 <i data-lucide="flask-conical" aria-hidden="true"></i><span>Tests</span>
                             </button>
+                            <label class="graph-lens-label" title="Perspective: recolor the graph by a chosen dimension">
+                                <i data-lucide="palette" aria-hidden="true"></i>
+                                <select id="graph-lens" aria-label="Graph perspective">
+                                    <option value="layer">Layer</option>
+                                    <option value="classification">Classification</option>
+                                    <option value="cluster">Cluster</option>
+                                    <option value="category">Category</option>
+                                    <option value="visibility">Visibility</option>
+                                    <option value="size">Size</option>
+                                </select>
+                            </label>
+                            <button id="graph-selection-toggle" class="tool-button" type="button" title="Show only your context selection as a sub-graph">
+                                <i data-lucide="layers" aria-hidden="true"></i><span id="graph-selection-label">Selection (0)</span>
+                            </button>
                             <input id="graph-search" type="search" autocomplete="off" placeholder="Find node" aria-label="Find graph node">
                             <button id="graph-zoom-in" class="icon-button" type="button" title="Zoom in" aria-label="Zoom in"><i data-lucide="zoom-in" aria-hidden="true"></i></button>
                             <button id="graph-zoom-out" class="icon-button" type="button" title="Zoom out" aria-label="Zoom out"><i data-lucide="zoom-out" aria-hidden="true"></i></button>
@@ -195,6 +209,21 @@
                 </section>
 
                 <section id="inspector-context" class="inspector-view hidden" role="tabpanel">
+                    <div id="context-selection-panel" class="context-selection-panel hidden">
+                        <div class="context-selection-head">
+                            <strong id="context-selection-total">0 components · 0 tokens</strong>
+                            <div class="context-selection-actions">
+                                <button id="context-selection-isolate" class="command-button compact" type="button" title="Show only the selection as a sub-graph">
+                                    <i data-lucide="layers" aria-hidden="true"></i><span>Graph</span>
+                                </button>
+                                <button id="context-selection-clear" class="command-button compact secondary" type="button" title="Clear the selection">
+                                    <i data-lucide="x" aria-hidden="true"></i><span>Clear</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="context-selection-bar" class="context-selection-bar"><span></span></div>
+                        <div id="context-selection-chips" class="context-selection-chips"></div>
+                    </div>
                     <div id="context-state" class="pane-state">Context is loading...</div>
                     <div id="context-list-result" class="inspector-result pane-state hidden" style="padding: 0; display: block; overflow-y: auto;">
                         <ul id="context-files-list" class="context-files-list" style="list-style: none; margin: 0; padding: 0;"></ul>
@@ -215,6 +244,9 @@
                         </button>
                         <button id="node-delete-preview-action" class="command-button danger" type="button" title="Preview deletion impact without changing source">
                             <i data-lucide="trash-2" aria-hidden="true"></i><span>Deletion Preview</span>
+                        </button>
+                        <button id="node-context-action" class="command-button" type="button" title="Add or remove this node from your context selection">
+                            <i data-lucide="plus-circle" aria-hidden="true"></i><span>Add to Context</span>
                         </button>
                     </div>
                     <form id="node-task" class="node-task">

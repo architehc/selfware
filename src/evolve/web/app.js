@@ -18,6 +18,64 @@ const EDGE_COLORS = {
     SimilarTo: '#e5c07b',
 };
 
+// Graph perspectives ("lenses"): each recolors nodes by a different dimension so
+// the same graph can be read from multiple angles.
+const CLASSIFICATION_COLORS = {
+    rust_source: '#56b6c2', test: '#e06c75', data: '#e5a06b', config: '#e5c07b',
+    script: '#c678dd', markup: '#8aceaa', vendored: '#98a2ad', generated: '#7f8c9a',
+    structure: '#4b5766', other: '#6b7480',
+};
+const CLUSTER_COLORS = {
+    'Loop Core': '#6fb6c8', 'Reasoning': '#c678dd', 'Action': '#e5a06b',
+    'Cognition': '#8aceaa', 'Safety & Verify': '#e06c75', 'Evolution': '#69b88d',
+    'Interface': '#e5c07b', 'Observability': '#7fb0e0', 'Eval / Bench': '#b19bd2',
+    'Foundation': '#98a2ad',
+};
+const CATEGORY_COLORS = { core: '#56b6c2', domain: '#8aceaa', feature: '#e5c07b', utility: '#98a2ad' };
+const VISIBILITY_COLORS = { pub: '#69b88d', 'pub(crate)': '#e5a06b' };
+const SIZE_BUCKETS = [
+    { max: 2000, color: '#2c5a4a', label: '<2K' },
+    { max: 8000, color: '#3f8060', label: '2–8K' },
+    { max: 20000, color: '#69b88d', label: '8–20K' },
+    { max: Infinity, color: '#e5c07b', label: '>20K' },
+];
+
+const GRAPH_LENSES = ['layer', 'classification', 'cluster', 'category', 'visibility', 'size'];
+
+function sizeBucket(tokens) {
+    return SIZE_BUCKETS.find((b) => (Number(tokens) || 0) < b.max) || SIZE_BUCKETS[SIZE_BUCKETS.length - 1];
+}
+
+// The fill color for a node under the active lens.
+function nodeFill(item) {
+    switch (state.graphLens) {
+        case 'classification': return CLASSIFICATION_COLORS[item.classification] || '#6b7480';
+        case 'cluster': return CLUSTER_COLORS[item.cluster || clusterForNode(item)] || '#98a2ad';
+        case 'category': return CATEGORY_COLORS[item.category] || '#4b5766';
+        case 'visibility': return VISIBILITY_COLORS[item.visibility] || '#4b5766';
+        case 'size': return sizeBucket(item.tokens).color;
+        default: return LAYER_COLORS[item.layer] || '#98c379';
+    }
+}
+
+// Best-effort cluster for a node that doesn't carry one (components view): map
+// the top-level component to its cluster via the same table the backend uses.
+const NODE_CLUSTER_MAP = {
+    agent: 'Loop Core', orchestration: 'Loop Core', cli: 'Loop Core', input: 'Loop Core', interview: 'Loop Core',
+    api: 'Reasoning', tokens: 'Reasoning', token_count: 'Reasoning', tool_parser: 'Reasoning', llm_doctor: 'Reasoning',
+    tools: 'Action', computer: 'Action', mcp: 'Action', lsp: 'Action',
+    cognitive: 'Cognition', memory: 'Cognition', consolidation: 'Cognition', session: 'Cognition',
+    safety: 'Safety & Verify', testing: 'Safety & Verify', self_healing: 'Safety & Verify', supervision: 'Safety & Verify',
+    evolve: 'Evolution', evolution: 'Evolution', swl: 'Evolution', analysis: 'Evolution',
+    ui: 'Interface', output: 'Interface', templates: 'Interface',
+    observability: 'Observability', doctor: 'Observability', devops: 'Observability',
+    bench_harness: 'Eval / Bench', vlm_bench: 'Eval / Bench', test_support: 'Eval / Bench', bin: 'Eval / Bench',
+};
+function clusterForNode(item) {
+    const comp = String(item.id || '').replace(/^crate::/, '').split('::')[0];
+    return NODE_CLUSTER_MAP[comp] || 'Foundation';
+}
+
 const ANALYSIS_LABELS = {
     cargo_check: 'Cargo Check',
     clippy: 'Clippy',
@@ -43,6 +101,8 @@ const state = {
     graphLoaded: false,
     graphLoading: false,
     graphMode: 'modules',
+    graphLens: 'layer',
+    contextSelection: new Set(),
     graphRuntime: null,
     selectedNode: null,
     astRequest: 0,
@@ -326,6 +386,11 @@ function wireEvents() {
     });
     $('#graph-cluster-toggle')?.addEventListener('click', toggleGraphMode);
     $('#graph-tests-toggle')?.addEventListener('click', toggleGraphTests);
+    $('#graph-lens')?.addEventListener('change', (event) => setGraphLens(event.target.value));
+    $('#graph-selection-toggle')?.addEventListener('click', toggleSelectionView);
+    $('#node-context-action')?.addEventListener('click', toggleSelectedNodeContext);
+    $('#context-selection-isolate')?.addEventListener('click', toggleSelectionView);
+    $('#context-selection-clear')?.addEventListener('click', clearContextSelection);
 
     $$('.inspector-tab[data-inspector]').forEach((button) => {
         button.addEventListener('click', () => selectInspector(button.dataset.inspector));
@@ -1455,6 +1520,7 @@ function updateSelection(path, node) {
     $('#selection-name').textContent = node?.name || node?.label || (path ? basename(path) : 'No selection');
     $('#selection-path').textContent = path || node?.id || '';
     renderNodeInspector(node, path);
+    updateContextActionButton();
     if (state.pairsLoaded && $('#pairs-node-only')?.checked) renderPairsList();
 }
 
@@ -2272,6 +2338,13 @@ async function loadGraph(force = false) {
             nodes = nodes.filter((n) => keep.has(n.id));
             edges = edges.filter((e) => keep.has(edgeEnd(e.from ?? e.source)) && keep.has(edgeEnd(e.to ?? e.target)));
         }
+        // Context sub-graph: show only the selected nodes and the edges among them.
+        if (state.graphSelectionOnly && state.contextSelection.size) {
+            const edgeEnd = (v) => String(v?.id ?? v);
+            const sel = state.contextSelection;
+            nodes = nodes.filter((n) => sel.has(n.id));
+            edges = edges.filter((e) => sel.has(edgeEnd(e.from ?? e.source)) && sel.has(edgeEnd(e.to ?? e.target)));
+        }
         state.graphData = { nodes, edges };
         state.graphLoaded = true;
         if (force) await loadWorkspace();
@@ -2320,6 +2393,111 @@ function toggleGraphTests() {
     if (button) button.classList.toggle('active', state.graphShowTests);
     state.graphLoaded = false;
     loadGraph(true);
+}
+
+// --- Perspectives (lenses) ------------------------------------------------
+
+// Recolor the graph by a chosen dimension. Cheap re-render of the loaded data.
+function setGraphLens(lens) {
+    if (!GRAPH_LENSES.includes(lens)) return;
+    state.graphLens = lens;
+    const select = $('#graph-lens');
+    if (select && select.value !== lens) select.value = lens;
+    if (state.graphData) renderGraph(state.graphData);
+}
+
+// --- Context selection ----------------------------------------------------
+
+// Sum of full-code tokens of the currently selected nodes.
+function contextSelectionTokens() {
+    const byId = new Map((state.graphData?.nodes || []).map((n) => [n.id, n]));
+    let total = 0;
+    for (const id of state.contextSelection) total += Number(byId.get(id)?.tokens || 0);
+    return total;
+}
+
+function toggleContextNode(id) {
+    if (!id) return;
+    if (state.contextSelection.has(id)) state.contextSelection.delete(id);
+    else state.contextSelection.add(id);
+    renderContextSelection();
+    updateContextActionButton();
+    if (state.graphSelectionOnly) { state.graphLoaded = false; loadGraph(true); }
+    else if (state.graphData) renderGraph(state.graphData);
+}
+
+function toggleSelectedNodeContext() {
+    if (state.selectedNode) toggleContextNode(state.selectedNode.id);
+}
+
+function clearContextSelection() {
+    state.contextSelection.clear();
+    state.graphSelectionOnly = false;
+    renderContextSelection();
+    updateContextActionButton();
+    state.graphLoaded = false;
+    loadGraph(true);
+}
+
+// Toggle the graph to show ONLY the selected nodes (the dynamic context sub-graph).
+function toggleSelectionView() {
+    if (!state.contextSelection.size) {
+        toast('Add nodes to your context selection first (Node tab → Add to Context).', 'warning');
+        return;
+    }
+    state.graphSelectionOnly = !state.graphSelectionOnly;
+    $('#graph-selection-toggle')?.classList.toggle('active', state.graphSelectionOnly);
+    selectView('graph');
+    state.graphLoaded = false;
+    loadGraph(true);
+}
+
+function updateContextActionButton() {
+    const button = $('#node-context-action');
+    if (!button) return;
+    const inSel = state.selectedNode && state.contextSelection.has(state.selectedNode.id);
+    const label = button.querySelector('span');
+    if (label) label.textContent = inSel ? 'Remove from Context' : 'Add to Context';
+    button.classList.toggle('active', Boolean(inSel));
+}
+
+// The live selection panel: running token total vs the model window + chips.
+function renderContextSelection() {
+    const label = $('#graph-selection-label');
+    if (label) label.textContent = `Selection (${state.contextSelection.size})`;
+    const panel = $('#context-selection-panel');
+    if (!panel) return;
+    if (!state.contextSelection.size) { hide(panel); return; }
+    show(panel);
+    const tokens = contextSelectionTokens();
+    const limit = Number(state.workspace?.context_length) || 0;
+    const totalEl = $('#context-selection-total');
+    const pct = limit ? Math.min(100, Math.round((tokens / limit) * 100)) : 0;
+    if (totalEl) {
+        totalEl.textContent = `${state.contextSelection.size} components · ${formatCount(tokens)} tokens`
+            + (limit ? ` · ${pct}% of window` : '');
+    }
+    const bar = $('#context-selection-bar')?.firstElementChild;
+    if (bar) {
+        bar.style.width = `${pct}%`;
+        bar.style.background = pct > 90 ? 'var(--danger)' : pct > 60 ? 'var(--warning)' : 'var(--accent)';
+    }
+    const chips = $('#context-selection-chips');
+    if (chips) {
+        chips.replaceChildren();
+        const byId = new Map((state.graphData?.nodes || []).map((n) => [n.id, n]));
+        for (const id of state.contextSelection) {
+            const node = byId.get(id);
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'selection-chip';
+            chip.title = 'Remove from selection';
+            const name = node?.label || node?.name || id.replace(/^crate::/, '');
+            chip.textContent = `${name} ✕`;
+            chip.addEventListener('click', () => toggleContextNode(id));
+            chips.appendChild(chip);
+        }
+    }
 }
 
 function graphNodeId(node) {
@@ -2377,10 +2555,11 @@ function renderGraph(data) {
         .attr('class', (item) => {
             const isolated = item.graph_status === 'isolated' ? ' isolated' : '';
             const inContext = state.context.includedIds?.includes(item.id) ? ' in-context' : '';
-            return `graph-node${isolated}${inContext}`;
+            const selected = state.contextSelection?.has(item.id) ? ' selected' : '';
+            return `graph-node${isolated}${inContext}${selected}`;
         })
         .attr('r', (item) => Math.max(6, Math.min(15, 6 + Math.sqrt(Number(item.weight || item.lines || item.tokens || 1)) * 0.25)))
-        .attr('fill', (item) => LAYER_COLORS[item.layer] || '#98c379')
+        .attr('fill', (item) => nodeFill(item))
         .attr('tabindex', 0)
         .attr('role', 'button')
         .attr('aria-label', (item) => item.name || item.label || item.id)
@@ -2494,10 +2673,31 @@ function openFirstGraphSearchResult() {
     }
 }
 
+const LENS_LEGENDS = {
+    layer: () => Object.entries(LAYER_COLORS),
+    classification: () => Object.entries(CLASSIFICATION_COLORS),
+    cluster: () => Object.entries(CLUSTER_COLORS),
+    category: () => Object.entries(CATEGORY_COLORS),
+    visibility: () => Object.entries(VISIBILITY_COLORS),
+    size: () => SIZE_BUCKETS.map((b) => [b.label, b.color]),
+};
+
 function renderGraphLegend() {
     const legend = $('#graph-legend');
     legend.replaceChildren();
-    Object.entries(LAYER_COLORS).forEach(([label, color]) => {
+    // Only show the swatches that actually appear in the current graph.
+    const present = new Set();
+    const lens = state.graphLens || 'layer';
+    for (const n of state.graphData?.nodes || []) {
+        if (lens === 'layer') present.add(n.layer);
+        else if (lens === 'classification') present.add(n.classification);
+        else if (lens === 'cluster') present.add(n.cluster || clusterForNode(n));
+        else if (lens === 'category') present.add(n.category);
+        else if (lens === 'visibility') present.add(n.visibility);
+        else if (lens === 'size') present.add(sizeBucket(n.tokens).label);
+    }
+    (LENS_LEGENDS[lens] || LENS_LEGENDS.layer)().forEach(([label, color]) => {
+        if (lens !== 'layer' && !present.has(label)) return;
         const entry = document.createElement('div');
         entry.className = 'legend-entry';
         const swatch = document.createElement('span');

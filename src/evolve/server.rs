@@ -1435,6 +1435,7 @@ async fn graph_modules_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
                 "category": m.category,
                 "cfg_feature": m.cfg_feature,
                 "test_only": m.test_only,
+                "classification": if m.test_only { "test" } else { "rust_source" },
                 "cluster": super::clusters::cluster_of(&m.name),
                 "reexports": reexport_count(&m.name),
             })
