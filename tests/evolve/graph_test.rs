@@ -225,13 +225,15 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
         .unwrap();
     let by_id = |id: &str| graph.nodes.iter().find(|node| node.id == id).unwrap();
 
+    // Vendored extensions and non-src tooling are covered as nodes but classified
+    // Auxiliary so they stay out of the Rust code token tiers.
     assert_eq!(
         by_id("tool::vscode-selfware::src::extension.ts").layer,
-        NodeLayer::Code
+        NodeLayer::Auxiliary
     );
     assert_eq!(
         by_id("tool::zed-extension::src::lib").layer,
-        NodeLayer::Code
+        NodeLayer::Auxiliary
     );
     assert_eq!(
         by_id("test::fuzz::fuzz_targets::parser").layer,
@@ -239,7 +241,7 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
     );
     assert_eq!(
         by_id("tool::workflows::code_review.swl").layer,
-        NodeLayer::Code
+        NodeLayer::Auxiliary
     );
     assert!(graph
         .nodes
