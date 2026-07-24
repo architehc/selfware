@@ -104,6 +104,17 @@ Merge arbitrary fields into every chat-completion API request. Useful for backen
 chat_template_kwargs = { enable_thinking = false }
 ```
 
+### `context_mode`
+
+Evolve workspace context tier. `"auto"` (default) measures each tier and picks
+the richest one fitting `context_fit_ratio` of the usable window; or pin a tier:
+`"map"`, `"lite"`, `"compact"`, `"full"`, `"full_extended"`.
+
+### `context_fit_ratio`
+
+Fraction of the usable window (`context_length` minus output reserve) the
+composed context may occupy in `auto` mode. Default `0.70`, range `0.1..=1.0`.
+
 ## `[agent]` -- Agent Behavior
 
 ```toml
@@ -412,17 +423,6 @@ Profile fields:
 - `modalities` -- `["text"]` or `["text", "vision"]` (default: `["text"]`)
 - `context_length` -- context window in tokens (default: 1048576)
 - `extra_body` -- per-profile extra request fields
-
-### `context_mode`
-
-Evolve workspace context tier. `"auto"` (default) measures each tier and picks
-the richest one fitting `context_fit_ratio` of the usable window; or pin a tier:
-`"map"`, `"lite"`, `"compact"`, `"full"`, `"full_extended"`.
-
-### `context_fit_ratio`
-
-Fraction of the usable window (`context_length` minus output reserve) the
-composed context may occupy in `auto` mode. Default `0.70`, range `0.1..=1.0`.
 
 ## `[resources]` -- Resource Limits
 

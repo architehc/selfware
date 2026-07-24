@@ -118,7 +118,11 @@ impl EvolveServer {
                 config.context_fit_ratio
             );
         }
-        let fit_budget = FitBudget::new(config.context_length, config.max_tokens, config.context_fit_ratio);
+        let fit_budget = FitBudget::new(
+            config.context_length,
+            config.max_tokens,
+            config.context_fit_ratio,
+        );
         let mut composer = ContextComposer::new(graph.clone());
         composer.set_mode(fit_mode(&requested, &graph, &project_root, &fit_budget));
         let endpoint_host = url::Url::parse(&config.endpoint)
@@ -283,7 +287,12 @@ impl EvolveServer {
             .write()
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))?;
         let mut composer = ContextComposer::new(refreshed.clone());
-        composer.set_mode(fit_mode(&requested, &refreshed, &self.project_root, &self.fit_budget));
+        composer.set_mode(fit_mode(
+            &requested,
+            &refreshed,
+            &self.project_root,
+            &self.fit_budget,
+        ));
         *current = composer;
         self.save_graph()?;
         Ok(revision)
@@ -332,8 +341,12 @@ async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("selfware");
-    let context_value = context_json(&context, server.context_length, &server.requested_mode().map_err(internal_error)?)
-        .map_err(internal_error)?;
+    let context_value = context_json(
+        &context,
+        server.context_length,
+        &server.requested_mode().map_err(internal_error)?,
+    )
+    .map_err(internal_error)?;
     Ok(Json(json!({
         "name": workspace_name,
         "root": server.project_root.to_string_lossy(),
@@ -370,8 +383,12 @@ async fn graph_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Jso
 
 async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let summary = server.context_summary().map_err(internal_error)?;
-    let mut value = context_json(&summary, server.context_length, &server.requested_mode().map_err(internal_error)?)
-        .map_err(internal_error)?;
+    let mut value = context_json(
+        &summary,
+        server.context_length,
+        &server.requested_mode().map_err(internal_error)?,
+    )
+    .map_err(internal_error)?;
     // The Map tier's cost is a compiled artifact, not a per-node sum, so the
     // composer reports 0. Report the real measured map size instead.
     if matches!(summary.mode, ContextMode::Map) {
