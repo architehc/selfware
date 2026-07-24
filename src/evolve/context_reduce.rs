@@ -131,6 +131,152 @@ pub fn reduce_source(src: &str) -> String {
     strip_cfg_test_blocks(&strip_comments(src))
 }
 
+/// One `fn NAME { .. }` span, as byte offsets of the body braces.
+struct FnBody {
+    name: String,
+    /// Offset of the opening `{`.
+    open: usize,
+    /// Offset just past the closing `}`.
+    close: usize,
+}
+
+/// Locate function bodies in (comment-free) source. Brace matching skips string
+/// literals so a `}` in a string can't close a body early. Intended to run on the
+/// output of `reduce_source`, where comments are already gone.
+fn scan_fn_bodies(content: &str) -> Vec<FnBody> {
+    let b = content.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 3 <= b.len() {
+        // Byte-wise keyword check: slicing the str here can panic when the
+        // window lands inside a multi-byte char (e.g. an em-dash in a literal).
+        let is_fn_kw = b[i] == b'f'
+            && b[i + 1] == b'n'
+            && b[i + 2] == b' '
+            && (i == 0 || matches!(b[i - 1], b' ' | b'\t' | b'\n' | b'(' | b'<'));
+        if !is_fn_kw {
+            i += 1;
+            continue;
+        }
+        let after = i + 3;
+        let name: String = content[after..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        if name.is_empty() {
+            i += 3;
+            continue;
+        }
+        // Find the opening brace; a `;` first means a bodyless declaration.
+        let mut j = after + name.len();
+        let mut open = None;
+        while j < b.len() {
+            match b[j] {
+                b'{' => {
+                    open = Some(j);
+                    break;
+                }
+                b';' => break,
+                _ => j += 1,
+            }
+        }
+        let Some(open) = open else {
+            i = (j + 1).max(i + 3);
+            continue;
+        };
+        // Match the closing brace, ignoring string literals.
+        let (mut depth, mut k) = (0i32, open);
+        let (mut in_str, mut escaped) = (false, false);
+        let close = loop {
+            if k >= b.len() {
+                break b.len();
+            }
+            let c = b[k];
+            if in_str {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == b'"' {
+                    in_str = false;
+                }
+            } else {
+                match c {
+                    b'"' => in_str = true,
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break k + 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            k += 1;
+        };
+        out.push(FnBody { name, open, close });
+        i = close;
+    }
+    out
+}
+
+/// Normalize a body for exact-duplicate comparison: trim each line, drop blanks.
+fn normalize_body(body: &str) -> String {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Deduplicate identical function bodies across an assembled multi-file context.
+/// The first occurrence of a body is canonical; later identical bodies are
+/// replaced with a one-line reference stub. Returns the deduped files and the
+/// number of bodies elided. Run on `reduce_source` output.
+pub fn dedup_context(files: &[(String, String)]) -> (Vec<(String, String)>, usize) {
+    use std::collections::HashMap;
+    let mut canonical: HashMap<String, String> = HashMap::new(); // body -> "path::fn"
+    let mut deduped = Vec::with_capacity(files.len());
+    let mut elided = 0usize;
+
+    for (path, content) in files {
+        let bodies = scan_fn_bodies(content);
+        // Only bodies of a meaningful size are worth deduping.
+        let mut cursor = 0usize;
+        let mut out = String::with_capacity(content.len());
+        for f in &bodies {
+            let body = &content[f.open..f.close];
+            let key = normalize_body(body);
+            if key.lines().count() < 3 {
+                continue; // trivial body — not worth a stub
+            }
+            match canonical.get(&key) {
+                Some(src) => {
+                    let stub = format!("{{ /* deduped: identical to {src} */ }}");
+                    // Eliding must actually shrink the context. Stubs tokenize
+                    // worse than code (path-dense, ~3 chars/token vs ~4.8), so
+                    // require the body to be at least twice the stub's size —
+                    // marginal elisions are net-negative in tokens.
+                    if stub.len() * 2 >= body.len() {
+                        continue;
+                    }
+                    out.push_str(&content[cursor..f.open]);
+                    out.push_str(&stub);
+                    cursor = f.close;
+                    elided += 1;
+                }
+                None => {
+                    canonical.insert(key, format!("{path}::{}", f.name));
+                }
+            }
+        }
+        out.push_str(&content[cursor..]);
+        deduped.push((path.clone(), out));
+    }
+    (deduped, elided)
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/evolve/context_reduce_test.rs"]
 mod context_reduce_test;

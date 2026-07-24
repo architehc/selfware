@@ -171,7 +171,9 @@ fn consolidate_files(root: &Path) -> Result<Vec<SelectedFile>> {
     Ok(by_path
         .into_iter()
         .map(|(path, n)| SelectedFile {
-            path,
+            // fn_dedup paths are relative to src/; readers resolve against the
+            // project root, so emit project-relative paths.
+            path: format!("src/{path}"),
             role: "finding".to_string(),
             reason: format!("{n} duplicate-function pair(s)"),
         })
@@ -187,7 +189,8 @@ fn cleanup_files(root: &Path) -> Result<Vec<SelectedFile>> {
     Ok(by_path
         .into_iter()
         .map(|(path, n)| SelectedFile {
-            path,
+            // dead_code paths are relative to src/ as well.
+            path: format!("src/{path}"),
             role: "finding".to_string(),
             reason: format!("{n} dead symbol(s)"),
         })

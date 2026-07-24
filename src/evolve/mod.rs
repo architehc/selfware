@@ -46,7 +46,9 @@ pub use context::{
     ContextSummary,
 };
 pub use clusters::{cluster_of, clustered, ClusteredGraph};
-pub use context_reduce::{reduce_source, strip_cfg_test_blocks, strip_comments};
+pub use context_reduce::{
+    dedup_context, reduce_source, strip_cfg_test_blocks, strip_comments,
+};
 pub use context_trust::{
     analyze_source, scan_injection, InjectionFinding, SourceKind, TrustLevel, TrustReport,
 };

@@ -179,6 +179,7 @@ impl EvolveServer {
             .route("/api/context/expand", get(context_expand_handler))
             .route("/api/context/trust", get(context_trust_handler))
             .route("/api/context/reduce", get(context_reduce_handler))
+            .route("/api/context/dedup", get(context_dedup_handler))
             .route("/api/structure", get(structure_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
@@ -630,6 +631,55 @@ async fn context_sizes_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
         "sizes": sizes,
         "context_length": server.context_length,
     })))
+}
+
+/// The full context-reduction pipeline for a task: select the files a task needs,
+/// strip comments + inline tests, then elide duplicate function bodies across
+/// them — reporting tokens saved at each stage. `GET /api/context/dedup?kind=..&target=..`.
+async fn context_dedup_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let kind = super::TaskKind::parse(params.get("kind").map(String::as_str).unwrap_or("understand"))
+        .map_err(|e| bad_request(e.to_string()))?;
+    let target = params.get("target").cloned().unwrap_or_default();
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let ide = server.ide.clone();
+
+    let report = tokio::task::spawn_blocking(move || -> anyhow::Result<Value> {
+        let selection = super::select_context(kind, &target, &graph, &root)?;
+        let tok = crate::token_count::estimate_content_tokens;
+        let mut original = 0usize;
+        let mut reduced_files = Vec::new();
+        for file in selection.files.iter().take(20) {
+            let Ok(doc) = ide.read_document(&file.path) else {
+                continue;
+            };
+            original += tok(&doc.content);
+            reduced_files.push((file.path.clone(), super::reduce_source(&doc.content)));
+        }
+        let after_reduce: usize = reduced_files.iter().map(|(_, c)| tok(c)).sum();
+        let (deduped, elided) = super::dedup_context(&reduced_files);
+        let after_dedup: usize = deduped.iter().map(|(_, c)| tok(c)).sum();
+        Ok(json!({
+            "files": reduced_files.len(),
+            "original_tokens": original,
+            "after_reduce_tokens": after_reduce,
+            "after_dedup_tokens": after_dedup,
+            "reduce_saved": original.saturating_sub(after_reduce),
+            "dedup_saved": after_reduce.saturating_sub(after_dedup),
+            "total_saved": original.saturating_sub(after_dedup),
+            "functions_deduped": elided,
+            "total_saved_pct": if original > 0 {
+                ((original.saturating_sub(after_dedup) as f64 / original as f64) * 1000.0).round() / 10.0
+            } else { 0.0 },
+        }))
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .map_err(internal_error)?;
+    Ok(Json(report))
 }
 
 /// Reduce a source file to its losslessly-droppable core (comments + inline test
