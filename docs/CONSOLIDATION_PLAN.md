@@ -65,6 +65,14 @@ the dead lib.rs shims container/sandbox/threat_modeling.
   `src/devops/process_manager.rs` (3.3k), `src/tokens.rs` (3.1k).
 - Split by responsibility when next touched for a feature; no bulk rewrite.
 
+## 8. ContextGuard pruned (2026-07-24)
+
+`src/safety/context_guard.rs` (620 lines, heuristic substring scanner) had zero
+production call sites — only its own tests. Deleted along with the
+`safety::context_guard` re-exports. If injection defense is needed later
+(roadmap Rec 2), rebuild it against a real ingestion path (web search / MCP
+payloads entering the agent loop) rather than resurrecting the heuristic scanner.
+
 ## Open items carried over from the 2026-07-16 cleanup plan
 
 The 2026-07-16 repo-cleanup program (plan/spec under `docs/superpowers/`) is

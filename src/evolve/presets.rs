@@ -100,24 +100,6 @@ const SEEDS: &[Seed] = &[
         context_recipe: "full (target file) + dependents' signatures",
         verify: "cargo build && cargo test green at each step; git diff shows moves, not rewrites.",
     },
-    Seed {
-        id: "unify-safety-gate-context",
-        title: "Unify safety engines + gate context",
-        direction: "safety",
-        capability: "safety",
-        summary: "Merge evolve::context_trust into safety::context_guard and gate context before send.",
-        task: "Consolidate src/evolve/context_trust.rs into src/safety/context_guard.rs (keep the \
-               richer provenance/taint model), expose one API, and gate the assistant flow: every \
-               assembled context block is scanned and any high-severity finding from an untrusted \
-               source blocks the send (or requires explicit override) before it reaches the model.",
-        invariants: &[
-            "Untrusted content never reaches the model unflagged.",
-            "A high-severity pollution finding from an untrusted source blocks the send by default.",
-            "The gate is auditable — every decision is logged to the JSONL trail.",
-        ],
-        context_recipe: "signatures of both modules + the assistant flow",
-        verify: "Tests: poisoned untrusted input is blocked; clean workspace source passes; audit entry written.",
-    },
     // ---- Expansion directions (templates) ------------------------------------
     Seed {
         id: "add-tool",

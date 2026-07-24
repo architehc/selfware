@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn every_preset_is_complete() {
     let all = presets();
-    assert!(all.len() >= 8, "expected a real library, got {}", all.len());
+    assert!(all.len() >= 7, "expected a real library, got {}", all.len());
     for p in &all {
         assert!(!p.id.is_empty());
         assert!(!p.task.is_empty(), "{} needs a task", p.id);
@@ -16,12 +16,11 @@ fn every_preset_is_complete() {
 }
 
 #[test]
-fn the_four_selected_targets_are_present() {
+fn the_three_selected_targets_are_present() {
     for id in [
         "symbol-context-selection",
         "dedup-clutter-strip",
         "split-giant-files",
-        "unify-safety-gate-context",
     ] {
         assert!(preset(id).is_some(), "missing selected target: {id}");
     }
@@ -31,7 +30,7 @@ fn the_four_selected_targets_are_present() {
 fn directions_span_expansion_space() {
     let dirs: std::collections::BTreeSet<_> =
         presets().into_iter().map(|p| p.direction).collect();
-    for d in ["context", "refactor", "safety", "capability", "automation", "comprehension"] {
+    for d in ["context", "refactor", "capability", "automation", "comprehension"] {
         assert!(dirs.contains(d), "expansion space missing direction: {d}");
     }
 }
