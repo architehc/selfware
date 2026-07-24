@@ -34,6 +34,7 @@ pub mod persona;
 pub mod quality;
 pub mod readiness;
 pub mod server;
+pub mod skeleton;
 pub mod structure;
 pub mod summary;
 pub mod xray;
@@ -79,6 +80,7 @@ pub use quality::QualityAnalyzer;
 pub use r#loop::{EvolutionLoop, LoopResult};
 pub use readiness::{GateState, ReadinessGate, ReadinessReport};
 pub use server::EvolveServer;
+pub use skeleton::{extract_rust_skeleton, FileSkeleton, SkeletonItem};
 pub use structure::{ClassEntry, FileStructure, Method, StructureAnalyzer};
 pub use xray::{ConceptIndex, ConceptRef, ConceptXray, DefinitionSite, RelatedConcept};
 
