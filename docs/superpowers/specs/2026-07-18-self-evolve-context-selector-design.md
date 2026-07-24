@@ -1,5 +1,10 @@
 # Self-Evolve Context Selector — Design Spec
 
+> **2026-07-24 update:** §5 "Context Loading Modes" predates the `Map`/`Compact`
+> tiers and the auto-fitting ladder. See
+> `2026-07-24-lean-context-consolidation-design.md` for the current tier model
+> (Map/Lite/Compact/Full/FullExtended + `auto`).
+
 **Date:** 2026-07-18  
 **Status:** Draft — pending user review  
 **Feature:** Autonomous self-evolution graph with context selection, IDE integration, and ontology evolution
