@@ -12,7 +12,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::evolve::ast::AstAnalyzer;
-use crate::evolve::context_reduce::strip_comments;
+use crate::evolve::context_reduce::reduce_source;
 use crate::evolve::{Graph, NodeLayer};
 
 /// Cap on symbol names listed per component so one huge file cannot dominate the
@@ -144,7 +144,7 @@ pub fn expand(graph: &Graph, root: &Path, component: &str, full: bool) -> Option
     let rel = node.path.as_deref()?;
     let src = std::fs::read_to_string(root.join(rel)).ok()?;
     if full {
-        return Some(strip_comments(&src));
+        return Some(reduce_source(&src));
     }
     let ast = AstAnalyzer::new().parse_source(&src).ok()?;
     Some(crate::evolve::summary::compile_summary(&ast, &src))

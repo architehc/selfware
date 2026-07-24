@@ -178,6 +178,7 @@ impl EvolveServer {
             .route("/api/context/map", get(context_map_handler))
             .route("/api/context/expand", get(context_expand_handler))
             .route("/api/context/trust", get(context_trust_handler))
+            .route("/api/context/reduce", get(context_reduce_handler))
             .route("/api/structure", get(structure_handler))
             .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
             .route("/api/analysis/dead-code", get(dead_code_handler))
@@ -628,6 +629,38 @@ async fn context_sizes_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     Ok(Json(json!({
         "sizes": sizes,
         "context_length": server.context_length,
+    })))
+}
+
+/// Reduce a source file to its losslessly-droppable core (comments + inline test
+/// blocks removed) and report the token savings. `GET /api/context/reduce?path=..`.
+/// Local, no model call.
+async fn context_reduce_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let path = required_path(&params)?;
+    let document = server
+        .ide
+        .read_document(path)
+        .map_err(document_read_error)?;
+    let original = &document.content;
+    let reduced = super::reduce_source(original);
+    let original_tokens = crate::token_count::estimate_content_tokens(original);
+    let reduced_tokens = crate::token_count::estimate_content_tokens(&reduced);
+    let saved = original_tokens.saturating_sub(reduced_tokens);
+    let pct = if original_tokens > 0 {
+        (saved as f64 / original_tokens as f64) * 100.0
+    } else {
+        0.0
+    };
+    Ok(Json(json!({
+        "path": path,
+        "original_tokens": original_tokens,
+        "reduced_tokens": reduced_tokens,
+        "saved_tokens": saved,
+        "saved_pct": (pct * 10.0).round() / 10.0,
+        "reduced": reduced,
     })))
 }
 
