@@ -161,7 +161,7 @@ async fn test_api_context_endpoint_separates_code_from_non_code_layers() {
     let server = EvolveServer::new(sample_graph());
     let (status, json) = get_json(&server, "/api/context").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["mode"], "full");
+    assert_eq!(json["mode"], "full_extended");
     assert_eq!(json["production"]["nodes"], 1);
     assert_eq!(json["tests"]["nodes"], 0);
     assert_eq!(json["included"].as_array().unwrap(), &[json!("agent")]);
@@ -181,7 +181,7 @@ async fn test_workspace_bootstraps_session_and_grounded_capabilities() {
     assert!(json["endpoint_host"].is_string());
     assert_eq!(json["graph"]["nodes"], 2);
     assert_eq!(json["graph"]["edges"], 2);
-    assert_eq!(json["context"]["mode"], "full");
+    assert_eq!(json["context"]["mode"], "full_extended");
     assert_eq!(json["capabilities"]["checked_writes"], true);
     assert_eq!(json["capabilities"]["ast"], true);
     assert_eq!(
@@ -206,7 +206,7 @@ async fn test_context_mode_requires_session_and_preserves_state_when_rejected() 
     assert!(json["error"].as_str().unwrap().contains("session token"));
     let (status, context) = get_json(&server, "/api/context").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(context["mode"], "full");
+    assert_eq!(context["mode"], "full_extended");
 }
 
 #[tokio::test]
@@ -305,7 +305,7 @@ async fn test_grounded_review_rejects_stale_context_mode_before_model_call() {
             "path": "src/evolve/actions.rs",
             "question": "Review this file",
             "expected_hash": expected_hash,
-            "mode": "full_extended",
+            "mode": "full",
             "scope": "selected_document"
         }),
     )
@@ -324,7 +324,7 @@ async fn test_evidence_preview_is_model_free_and_reports_exact_scope() {
         json!({
             "path": "src/evolve/actions.rs",
             "expected_hash": expected_hash,
-            "mode": "full",
+            "mode": "full_extended",
             "scope": "selected_document"
         }),
     )
@@ -368,6 +368,11 @@ async fn test_active_context_preview_rejects_selected_test_excluded_by_full_mode
     let (status, document) = get_json(&server, "/api/ide/document?path=tests/live_test.rs").await;
     assert_eq!(status, StatusCode::OK);
 
+    // Pin the full tier: the default `auto` resolves this tiny fixture to
+    // full_extended, which includes test files.
+    let (status, _) = post_json(&server, "/api/context/mode", json!({ "mode": "full" })).await;
+    assert_eq!(status, StatusCode::OK);
+
     let (status, body) = post_json(
         &server,
         "/api/assistant/evidence/preview",
@@ -394,7 +399,7 @@ async fn test_evidence_preview_rejects_stale_graph_revision() {
         json!({
             "path": "src/evolve/actions.rs",
             "expected_hash": expected_hash,
-            "mode": "full",
+            "mode": "full_extended",
             "graph_revision": "stale-revision",
             "scope": "selected_document"
         }),
@@ -413,7 +418,7 @@ async fn test_evidence_preview_rejects_stale_document_hash() {
         json!({
             "path": "src/evolve/actions.rs",
             "expected_hash": "stale-document-hash",
-            "mode": "full",
+            "mode": "full_extended",
             "scope": "selected_document"
         }),
     )
@@ -432,7 +437,7 @@ async fn test_grounded_review_rejects_stale_document_hash_before_model_call() {
             "path": "src/evolve/actions.rs",
             "question": "Review this file",
             "expected_hash": "stale-document-hash",
-            "mode": "full",
+            "mode": "full_extended",
             "scope": "selected_document"
         }),
     )

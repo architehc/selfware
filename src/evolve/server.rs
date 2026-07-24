@@ -22,6 +22,7 @@ use tower_http::services::ServeDir;
 use super::assistant::{
     evidence_from_document, evidence_from_document_excluding_ranges, GroundedAssistant,
 };
+use super::context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer};
 use super::deletion::preview_deletion;
 use super::diagnostics::{AnalysisKind, DiagnosticsEngine};
 use super::git::GitEngine;
@@ -59,6 +60,8 @@ pub struct EvolveServer {
     configured_model: Arc<String>,
     endpoint_host: Arc<String>,
     context_length: usize,
+    requested_mode: Arc<RwLock<RequestedMode>>,
+    fit_budget: FitBudget,
     evidence_char_budget: usize,
     session_token: Arc<String>,
     write_lock: Arc<AsyncMutex<()>>,
@@ -108,8 +111,16 @@ impl EvolveServer {
         } else {
             derived_graph
         };
+        let requested = RequestedMode::parse(&config.context_mode).map_err(anyhow::Error::msg)?;
+        if !(0.1..=1.0).contains(&config.context_fit_ratio) {
+            anyhow::bail!(
+                "context_fit_ratio must be within 0.1..=1.0, got {}",
+                config.context_fit_ratio
+            );
+        }
+        let fit_budget = FitBudget::new(config.context_length, config.max_tokens, config.context_fit_ratio);
         let mut composer = ContextComposer::new(graph.clone());
-        composer.set_mode(ContextMode::Full);
+        composer.set_mode(fit_mode(&requested, &graph, &project_root, &fit_budget));
         let endpoint_host = url::Url::parse(&config.endpoint)
             .ok()
             .and_then(|url| url.host_str().map(str::to_string))
@@ -143,6 +154,8 @@ impl EvolveServer {
             configured_model: Arc::new(config.model.clone()),
             endpoint_host: Arc::new(endpoint_host),
             context_length: config.context_length,
+            requested_mode: Arc::new(RwLock::new(requested)),
+            fit_budget,
             evidence_char_budget,
             session_token: Arc::new(uuid::Uuid::new_v4().to_string()),
             write_lock: Arc::new(AsyncMutex::new(())),
@@ -247,6 +260,13 @@ impl EvolveServer {
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))
     }
 
+    fn requested_mode(&self) -> Result<RequestedMode> {
+        self.requested_mode
+            .read()
+            .map(|requested| requested.clone())
+            .map_err(|_| anyhow::anyhow!("context lock poisoned"))
+    }
+
     fn refresh_graph(&self) -> Result<String> {
         let derived = GraphBuilder::new(self.project_root.join("src")).scan_src()?;
         let existing = self.graph_snapshot()?;
@@ -257,16 +277,48 @@ impl EvolveServer {
             .graph
             .write()
             .map_err(|_| anyhow::anyhow!("graph lock poisoned"))? = refreshed.clone();
+        let requested = self.requested_mode()?;
         let mut current = self
             .composer
             .write()
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))?;
-        let current_mode = current.mode().clone();
-        let mut composer = ContextComposer::new(refreshed);
-        composer.set_mode(current_mode);
+        let mut composer = ContextComposer::new(refreshed.clone());
+        composer.set_mode(fit_mode(&requested, &refreshed, &self.project_root, &self.fit_budget));
         *current = composer;
         self.save_graph()?;
         Ok(revision)
+    }
+}
+
+/// Resolve a requested mode against the current graph. `Auto` measures the
+/// tier ladder and logs the decision — a warning when even Map overflows.
+fn fit_mode(
+    requested: &RequestedMode,
+    graph: &Graph,
+    root: &Path,
+    budget: &FitBudget,
+) -> ContextMode {
+    match requested {
+        RequestedMode::Fixed(mode) => mode.clone(),
+        RequestedMode::Auto => {
+            let outcome: FitOutcome = fit_tier(&TierMeasurer::new(graph, root), budget);
+            if outcome.fits {
+                tracing::info!(
+                    "auto context tier: {} ({} <= {} tokens)",
+                    outcome.mode.name(),
+                    outcome.measured_tokens,
+                    outcome.budget_tokens
+                );
+            } else {
+                tracing::warn!(
+                    "auto context tier: even map tier ({} tokens) exceeds the {}-token \
+                     budget; selecting map and relying on the overflow backstop",
+                    outcome.measured_tokens,
+                    outcome.budget_tokens
+                );
+            }
+            outcome.mode
+        }
     }
 }
 
@@ -280,7 +332,8 @@ async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("selfware");
-    let context_value = context_json(&context, server.context_length).map_err(internal_error)?;
+    let context_value = context_json(&context, server.context_length, &server.requested_mode().map_err(internal_error)?)
+        .map_err(internal_error)?;
     Ok(Json(json!({
         "name": workspace_name,
         "root": server.project_root.to_string_lossy(),
@@ -317,7 +370,8 @@ async fn graph_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Jso
 
 async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let summary = server.context_summary().map_err(internal_error)?;
-    let mut value = context_json(&summary, server.context_length).map_err(internal_error)?;
+    let mut value = context_json(&summary, server.context_length, &server.requested_mode().map_err(internal_error)?)
+        .map_err(internal_error)?;
     // The Map tier's cost is a compiled artifact, not a per-node sum, so the
     // composer reports 0. Report the real measured map size instead.
     if matches!(summary.mode, ContextMode::Map) {
@@ -809,18 +863,30 @@ async fn context_mode_handler(
 ) -> ApiResult<Json<Value>> {
     require_session(&headers, &server)?;
     let _assistant_guard = server.assistant_lock.lock().await;
-    let mode = match body.mode.as_str() {
-        "map" => ContextMode::Map,
-        "lite" => ContextMode::Lite,
-        "compact" | "skeleton" => ContextMode::Compact,
-        "full" => ContextMode::Full,
-        "full_extended" => ContextMode::FullExtended,
-        "preset" => ContextMode::Preset(
+    let requested = match body.mode.as_str() {
+        "auto" => RequestedMode::Auto,
+        "map" => RequestedMode::Fixed(ContextMode::Map),
+        "lite" => RequestedMode::Fixed(ContextMode::Lite),
+        "compact" | "skeleton" => RequestedMode::Fixed(ContextMode::Compact),
+        "full" => RequestedMode::Fixed(ContextMode::Full),
+        "full_extended" => RequestedMode::Fixed(ContextMode::FullExtended),
+        "preset" => RequestedMode::Fixed(ContextMode::Preset(
             body.preset
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| bad_request("preset mode requires a preset name"))?,
-        ),
+        )),
         _ => return Err(bad_request("unknown context mode")),
+    };
+    *server
+        .requested_mode
+        .write()
+        .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))? = requested.clone();
+    let mode = match &requested {
+        RequestedMode::Fixed(mode) => mode.clone(),
+        RequestedMode::Auto => {
+            let graph = server.graph_snapshot().map_err(internal_error)?;
+            fit_mode(&requested, &graph, &server.project_root, &server.fit_budget)
+        }
     };
     let summary = {
         let mut composer = server
@@ -831,14 +897,19 @@ async fn context_mode_handler(
         composer.summary()
     };
     Ok(Json(
-        context_json(&summary, server.context_length).map_err(internal_error)?,
+        context_json(&summary, server.context_length, &requested).map_err(internal_error)?,
     ))
 }
 
-fn context_json(summary: &super::ContextSummary, context_length: usize) -> Result<Value> {
+fn context_json(
+    summary: &super::ContextSummary,
+    context_length: usize,
+    requested: &RequestedMode,
+) -> Result<Value> {
     let mut value = serde_json::to_value(summary)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("context_length".to_string(), json!(context_length));
+        object.insert("requested_mode".to_string(), json!(requested.name()));
         object.insert(
             "fits_context_window".to_string(),
             json!(summary.estimated_tokens <= context_length),

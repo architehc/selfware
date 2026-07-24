@@ -14,6 +14,7 @@ use selfware::evolve::{Edge, EdgeType, EvolveServer, Graph, Node, NodeLayer};
 mod actions_test;
 mod assistant_test;
 mod ast_test;
+mod auto_context_fit_test;
 mod context_test;
 mod dedup_test;
 mod deletion_test;
