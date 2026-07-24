@@ -312,12 +312,13 @@ impl Agent {
     /// For Review modality: auto-load L2 skeletons for all source files
     /// so the model can see the codebase structure without reading every file.
     pub(super) async fn auto_load_skeletons_for_review(&mut self) {
-        use super::context_map::{extract_rust_skeleton, ContextLevel};
+        use super::context_map::extract_rust_skeleton;
+        use crate::evolve::ContextMode;
 
         let root = super::current_project_root();
         let files_at_tree: Vec<std::path::PathBuf> = self
             .context_map
-            .files_at_level(ContextLevel::Tree)
+            .files_at_level(ContextMode::Map)
             .iter()
             .filter(|p| p.to_string_lossy().ends_with(".rs"))
             .map(|p| p.to_path_buf())
@@ -343,7 +344,7 @@ impl Agent {
             // Check budget before loading.
             let estimate = self
                 .context_map
-                .can_load(&path, ContextLevel::Skeleton)
+                .can_load(&path, ContextMode::Lite)
                 .await;
             if !estimate.fits {
                 tracing::info!(
@@ -381,7 +382,7 @@ impl Agent {
             );
             let skeleton_paths: Vec<std::path::PathBuf> = self
                 .context_map
-                .files_at_level(ContextLevel::Skeleton)
+                .files_at_level(ContextMode::Lite)
                 .iter()
                 .map(|p| p.to_path_buf())
                 .collect();
@@ -415,7 +416,7 @@ impl Agent {
         // Estimate before loading.
         let estimate = self
             .context_map
-            .can_load(p, super::context_map::ContextLevel::Full)
+            .can_load(p, crate::evolve::ContextMode::Full)
             .await;
         if !estimate.fits {
             // Auto-compress to make room.
@@ -440,7 +441,7 @@ impl Agent {
         &mut self,
         paths: Vec<std::path::PathBuf>,
     ) -> (usize, usize, usize) {
-        use super::context_map::ContextLevel;
+        use crate::evolve::ContextMode;
         use tokio::task::JoinSet;
 
         let root = super::current_project_root();
@@ -466,13 +467,13 @@ impl Agent {
         while let Some(result) = join_set.join_next().await {
             if let Ok(Some((path, content))) = result {
                 // Skip if already at L3.
-                if self.context_map.level_of(&path) == Some(ContextLevel::Full) {
+                if self.context_map.level_of(&path) == Some(ContextMode::Full) {
                     skipped += 1;
                     continue;
                 }
 
                 // Check budget.
-                let estimate = self.context_map.can_load(&path, ContextLevel::Full).await;
+                let estimate = self.context_map.can_load(&path, ContextMode::Full).await;
                 if !estimate.fits {
                     // Try to compress existing content to make room.
                     let needed = estimate
@@ -507,20 +508,20 @@ impl Agent {
     /// Groups files by directory and produces a compact summary for each module
     /// that fits in the available context window.
     pub(super) fn generate_structured_summary(&self) -> String {
-        use super::context_map::ContextLevel;
+        use crate::evolve::ContextMode;
         use std::collections::BTreeMap;
 
         // Group files by top-level module directory.
-        let mut modules: BTreeMap<String, Vec<(&std::path::Path, ContextLevel, usize)>> =
+        let mut modules: BTreeMap<String, Vec<(&std::path::Path, ContextMode, usize)>> =
             BTreeMap::new();
 
         let stats = self.context_map.stats();
         for level in [
-            ContextLevel::Full,
-            ContextLevel::Skeleton,
-            ContextLevel::Tree,
+            ContextMode::Full,
+            ContextMode::Lite,
+            ContextMode::Map,
         ] {
-            for path in self.context_map.files_at_level(level) {
+            for path in self.context_map.files_at_level(level.clone()) {
                 let module = path
                     .components()
                     .take(2) // e.g., "src/agent" or "src/tools"
@@ -528,7 +529,7 @@ impl Agent {
                     .to_string_lossy()
                     .to_string();
 
-                modules.entry(module).or_default().push((path, level, 0));
+                modules.entry(module).or_default().push((path, level.clone(), 0));
             }
         }
 
@@ -543,11 +544,11 @@ impl Agent {
             let file_count = files.len();
             let l3_count = files
                 .iter()
-                .filter(|(_, l, _)| *l == ContextLevel::Full)
+                .filter(|(_, l, _)| *l == ContextMode::Full)
                 .count();
             let l2_count = files
                 .iter()
-                .filter(|(_, l, _)| *l == ContextLevel::Skeleton)
+                .filter(|(_, l, _)| *l == ContextMode::Lite)
                 .count();
 
             summary.push_str(&format!(
@@ -557,7 +558,7 @@ impl Agent {
 
             // List key items from skeletons.
             for (path, level, _) in files {
-                if *level == ContextLevel::Skeleton {
+                if *level == ContextMode::Lite {
                     if let Some(skel) = self.context_map.skeleton(path) {
                         let fn_count = skel
                             .items
@@ -583,7 +584,7 @@ impl Agent {
                             ));
                         }
                     }
-                } else if *level == ContextLevel::Full {
+                } else if *level == ContextMode::Full {
                     summary.push_str(&format!("  - {} [FULL]\n", path.display()));
                 }
             }
@@ -615,7 +616,7 @@ impl Agent {
         // Downgrade all L3 files to L2 to free context map space.
         let l3_files: Vec<std::path::PathBuf> = self
             .context_map
-            .files_at_level(super::context_map::ContextLevel::Full)
+            .files_at_level(crate::evolve::ContextMode::Full)
             .iter()
             .map(|p| p.to_path_buf())
             .collect();

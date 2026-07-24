@@ -16,7 +16,7 @@ fn test_register_tree_entry() {
     assert_eq!(map.file_count(), 1);
     assert_eq!(
         map.level_of(Path::new("src/main.rs")),
-        Some(ContextLevel::Tree)
+        Some(ContextMode::Map)
     );
     assert!(map.total_tokens() > 0);
 }
@@ -40,7 +40,7 @@ fn test_load_skeleton_upgrades_from_tree() {
 
     assert_eq!(
         map.level_of(Path::new("src/main.rs")),
-        Some(ContextLevel::Skeleton)
+        Some(ContextMode::Lite)
     );
     assert!(map.total_tokens() > before);
 }
@@ -65,7 +65,7 @@ fn test_load_full_and_downgrade() {
     );
     assert_eq!(
         map.level_of(Path::new("src/main.rs")),
-        Some(ContextLevel::Full)
+        Some(ContextMode::Full)
     );
     let full_tokens = map.total_tokens();
 
@@ -74,7 +74,7 @@ fn test_load_full_and_downgrade() {
     assert!(freed > 0);
     assert_eq!(
         map.level_of(Path::new("src/main.rs")),
-        Some(ContextLevel::Skeleton)
+        Some(ContextMode::Lite)
     );
     assert!(map.total_tokens() < full_tokens);
 }
@@ -124,7 +124,7 @@ fn test_compress_to_fit_frees_oldest() {
     // old.rs should be downgraded first (it was accessed earlier).
     assert_eq!(
         map.level_of(Path::new("old.rs")),
-        Some(ContextLevel::Skeleton)
+        Some(ContextMode::Lite)
     );
 }
 
@@ -140,7 +140,7 @@ async fn test_can_load_estimate() {
 
     // Now try to load another file — should not fit.
     map.register_tree_entry("new.rs".into(), 9000);
-    let estimate = map.can_load(Path::new("new.rs"), ContextLevel::Full).await;
+    let estimate = map.can_load(Path::new("new.rs"), ContextMode::Full).await;
     assert!(estimate.estimated_tokens > 0);
     // Budget mostly consumed + new file estimate → should not fit.
     assert!(estimate.usage_pct > 0.5, "should show significant usage");
@@ -296,41 +296,43 @@ fn test_loading_plan_review() {
 }
 
 // =========================================================================
-// ContextLevel tests
+// ContextMode tests
 // =========================================================================
 
 #[test]
-fn test_context_level_ordering() {
-    assert!(ContextLevel::Tree < ContextLevel::Skeleton);
-    assert!(ContextLevel::Skeleton < ContextLevel::Full);
-    assert!(ContextLevel::Tree < ContextLevel::Full);
+fn test_context_mode_tier_names() {
+    // The agent's L1/L2/L3 tiers map onto the shared evolve vocabulary.
+    assert_eq!(ContextMode::Map.name(), "map");
+    assert_eq!(ContextMode::Lite.name(), "lite");
+    assert_eq!(ContextMode::Full.name(), "full");
 }
 
 #[test]
 fn test_context_level_equality() {
-    assert_eq!(ContextLevel::Tree, ContextLevel::Tree);
-    assert_eq!(ContextLevel::Skeleton, ContextLevel::Skeleton);
-    assert_eq!(ContextLevel::Full, ContextLevel::Full);
-    assert_ne!(ContextLevel::Tree, ContextLevel::Full);
+    assert_eq!(ContextMode::Map, ContextMode::Map);
+    assert_eq!(ContextMode::Lite, ContextMode::Lite);
+    assert_eq!(ContextMode::Full, ContextMode::Full);
+    assert_ne!(ContextMode::Map, ContextMode::Full);
 }
 
 #[test]
-fn test_context_level_hash() {
-    use std::collections::HashSet;
-    let mut set = HashSet::new();
-    set.insert(ContextLevel::Tree);
-    set.insert(ContextLevel::Skeleton);
-    set.insert(ContextLevel::Full);
-    set.insert(ContextLevel::Tree); // duplicate
-    assert_eq!(set.len(), 3);
+fn test_context_mode_preset_equality() {
+    // Preset carries a name; equality is by variant + payload.
+    assert_eq!(
+        ContextMode::Preset("coding".to_string()),
+        ContextMode::Preset("coding".to_string())
+    );
+    assert_ne!(
+        ContextMode::Preset("coding".to_string()),
+        ContextMode::Preset("review".to_string())
+    );
+    assert_ne!(ContextMode::Preset("full".to_string()), ContextMode::Full);
 }
 
 #[test]
-fn test_context_level_clone_copy() {
-    let level = ContextLevel::Skeleton;
-    let copied = level;
-    let cloned = level;
-    assert_eq!(level, copied);
+fn test_context_level_clone() {
+    let level = ContextMode::Lite;
+    let cloned = level.clone();
     assert_eq!(level, cloned);
 }
 
@@ -407,7 +409,7 @@ fn test_level_of_nonexistent() {
 fn test_level_of_tree_entry() {
     let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
     map.register_tree_entry("test.rs".into(), 100);
-    assert_eq!(map.level_of(Path::new("test.rs")), Some(ContextLevel::Tree));
+    assert_eq!(map.level_of(Path::new("test.rs")), Some(ContextMode::Map));
 }
 
 // =========================================================================

@@ -8,8 +8,9 @@
 use std::path::Path;
 
 use selfware::agent::context_map::{
-    extract_rust_skeleton, ContextLevel, ContextMap, ContextModality,
+    extract_rust_skeleton, ContextMap, ContextModality,
 };
+use selfware::evolve::ContextMode;
 use selfware::token_count::estimate_content_tokens;
 
 // ─── Skeleton Extraction on Real Codebase ───────────────────────────────────
@@ -87,7 +88,7 @@ fn test_context_map_budget_with_real_files() {
         let before = map.total_tokens();
         map.load_full(lib_path, content);
         assert!(map.total_tokens() > before);
-        assert_eq!(map.level_of(lib_path), Some(ContextLevel::Full));
+        assert_eq!(map.level_of(lib_path), Some(ContextMode::Full));
     }
 }
 
@@ -106,24 +107,24 @@ fn test_skeleton_load_downgrade_cycle() {
 
     // Register at L1.
     map.register_tree_entry(path.to_path_buf(), content.len() as u64);
-    assert_eq!(map.level_of(path), Some(ContextLevel::Tree));
+    assert_eq!(map.level_of(path), Some(ContextMode::Map));
 
     // Load skeleton (L2).
     let skeleton = extract_rust_skeleton(path, &content);
     map.load_skeleton(path, skeleton);
-    assert_eq!(map.level_of(path), Some(ContextLevel::Skeleton));
+    assert_eq!(map.level_of(path), Some(ContextMode::Lite));
     let l2_tokens = map.total_tokens();
 
     // Load full (L3).
     map.load_full(path, content);
-    assert_eq!(map.level_of(path), Some(ContextLevel::Full));
+    assert_eq!(map.level_of(path), Some(ContextMode::Full));
     let l3_tokens = map.total_tokens();
     assert!(l3_tokens > l2_tokens, "L3 should use more tokens than L2");
 
     // Downgrade back to L2.
     let freed = map.downgrade_to_skeleton(path);
     assert!(freed > 0, "should free tokens on downgrade");
-    assert_eq!(map.level_of(path), Some(ContextLevel::Skeleton));
+    assert_eq!(map.level_of(path), Some(ContextMode::Lite));
     assert!(map.total_tokens() < l3_tokens);
 }
 
@@ -207,12 +208,12 @@ fn test_auto_optimize_evicts_stale() {
     map.register_tree_entry(path.to_path_buf(), content.len() as u64);
     map.load_skeleton(path, skeleton);
     map.load_full(path, content);
-    assert_eq!(map.level_of(path), Some(ContextLevel::Full));
+    assert_eq!(map.level_of(path), Some(ContextMode::Full));
 
     // With 0 staleness, everything is stale immediately.
     let freed = map.auto_optimize(0);
     assert!(freed > 0, "should free stale L3 content");
-    assert_ne!(map.level_of(path), Some(ContextLevel::Full));
+    assert_ne!(map.level_of(path), Some(ContextMode::Full));
 }
 
 // ─── Live Endpoint Tests ────────────────────────────────────────────────────

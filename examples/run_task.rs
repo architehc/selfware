@@ -103,6 +103,8 @@ async fn main() -> Result<()> {
         concurrency: Default::default(),
         evolution: Default::default(),
         models: Default::default(),
+        context_mode: Default::default(),
+        context_fit_ratio: Default::default(),
 
         // CLI-only flags (not persisted in config)
         compact_mode: false,

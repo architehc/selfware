@@ -1643,7 +1643,7 @@ To call a tool, use this EXACT XML structure:
         // Try Full level first, then fall back to Skeleton (signatures).
         for path in self
             .context_map
-            .files_at_level(context_map::ContextLevel::Full)
+            .files_at_level(crate::evolve::ContextMode::Full)
         {
             if let Some(content) = self.context_map.full_content(path) {
                 file_context.push_str(&format!("\n--- {} ---\n{}\n", path.display(), content));
@@ -1654,7 +1654,7 @@ To call a tool, use this EXACT XML structure:
         if file_context.is_empty() {
             for path in self
                 .context_map
-                .files_at_level(context_map::ContextLevel::Skeleton)
+                .files_at_level(crate::evolve::ContextMode::Lite)
             {
                 if let Some(skeleton) = self.context_map.skeleton(path) {
                     file_context.push_str(&format!(

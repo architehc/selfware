@@ -1,9 +1,10 @@
 //! Hierarchical context map for token-aware codebase ingestion.
 //!
-//! Manages a three-level view of the codebase:
-//! - **L1**: Project tree (directory names, file names, sizes) — always loaded
-//! - **L2**: File skeletons (function/struct/trait signatures, no bodies) — on demand
-//! - **L3**: Full file content — on demand, auto-downgradable
+//! Manages a three-level view of the codebase (tiers from the shared
+//! `crate::evolve::ContextMode` vocabulary):
+//! - **L1**: Project tree (directory names, file names, sizes) — `ContextMode::Map`, always loaded
+//! - **L2**: File skeletons (function/struct/trait signatures, no bodies) — `ContextMode::Lite`, on demand
+//! - **L3**: Full file content — `ContextMode::Full`, on demand, auto-downgradable
 //!
 //! Each entry tracks its token cost so the agent can make budget-aware decisions
 //! about what to load, upgrade, or evict.
@@ -14,23 +15,11 @@ use std::time::Instant;
 
 use tracing::{debug, info};
 
+use crate::evolve::ContextMode;
 use crate::token_count::estimate_content_tokens;
 use crate::tools::codemap::{
     update_context_map_tokens, update_files_in_context, update_total_budget,
 };
-
-// ─── Context Levels ─────────────────────────────────────────────────────────
-
-/// The three levels of detail at which a file can be represented in context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ContextLevel {
-    /// L1: Just the file path + size in the project tree.
-    Tree,
-    /// L2: Skeleton — function/struct/trait signatures, no bodies.
-    Skeleton,
-    /// L3: Full file content.
-    Full,
-}
 
 // ─── Skeleton Types ─────────────────────────────────────────────────────────
 
@@ -224,16 +213,16 @@ pub struct LoadingPlan {
 #[derive(Debug, Clone)]
 struct FileEntry {
     path: PathBuf,
-    level: ContextLevel,
+    level: ContextMode,
     /// Token cost at the currently loaded level.
     current_tokens: usize,
     /// Known costs at each level (0 if not yet computed).
     costs: LevelCosts,
     /// When this entry was last accessed (for LRU eviction).
     last_accessed: Instant,
-    /// Skeleton (populated when level >= Skeleton).
+    /// Skeleton (populated when level is Lite or Full).
     skeleton: Option<FileSkeleton>,
-    /// Full content (populated when level == Full).
+    /// Full content (populated when level is Full).
     full_content: Option<String>,
     /// File size in bytes (for L1 display).
     file_size: u64,
@@ -361,7 +350,7 @@ impl ContextMap {
     // ── Pre-load estimation ─────────────────────────────────────────────
 
     /// Check if loading a file at the given level fits in budget.
-    pub async fn can_load(&self, path: &Path, level: ContextLevel) -> LoadEstimate {
+    pub async fn can_load(&self, path: &Path, level: ContextMode) -> LoadEstimate {
         let estimated = self.estimate_level_tokens(path, level).await;
         // Subtract current cost if already loaded (upgrade scenario).
         let current_cost = self
@@ -384,13 +373,13 @@ impl ContextMap {
     }
 
     /// Estimate token cost for a file at a given level without loading it.
-    async fn estimate_level_tokens(&self, path: &Path, level: ContextLevel) -> usize {
+    async fn estimate_level_tokens(&self, path: &Path, level: ContextMode) -> usize {
         // If we already have cached costs, use them.
         if let Some(entry) = self.entries.get(path) {
             match level {
-                ContextLevel::Tree => return entry.costs.l1,
-                ContextLevel::Skeleton if entry.costs.l2 > 0 => return entry.costs.l2,
-                ContextLevel::Full if entry.costs.l3 > 0 => return entry.costs.l3,
+                ContextMode::Map => return entry.costs.l1,
+                ContextMode::Lite if entry.costs.l2 > 0 => return entry.costs.l2,
+                ContextMode::Full if entry.costs.l3 > 0 => return entry.costs.l3,
                 _ => {}
             }
         }
@@ -408,15 +397,18 @@ impl ContextMap {
             .unwrap_or(0);
 
         match level {
-            ContextLevel::Tree => 10, // single line entry
-            ContextLevel::Skeleton => {
+            ContextMode::Map => 10, // single line entry
+            ContextMode::Lite => {
                 // Signatures are ~5-15% of full file for code
                 (file_size as usize / 3 / 10).max(20) // chars/3 for tokens, /10 for skeleton ratio
             }
-            ContextLevel::Full => {
+            ContextMode::Full => {
                 // Code: ~chars/3 tokens
                 (file_size as usize / 3).max(1)
             }
+            // Compact/FullExtended/Preset never occur as agent runtime levels;
+            // estimate them like full content.
+            _ => (file_size as usize / 3).max(1),
         }
     }
 
@@ -435,7 +427,7 @@ impl ContextMap {
             path.clone(),
             FileEntry {
                 path,
-                level: ContextLevel::Tree,
+                level: ContextMode::Map,
                 current_tokens: l1_cost,
                 costs: LevelCosts {
                     l1: l1_cost,
@@ -459,7 +451,7 @@ impl ContextMap {
         // Get or create the entry first.
         let entry = self.entries.entry(path_buf).or_insert_with(|| FileEntry {
             path: path.to_path_buf(),
-            level: ContextLevel::Tree,
+            level: ContextMode::Map,
             current_tokens: 10,
             costs: LevelCosts {
                 l1: 10,
@@ -473,7 +465,7 @@ impl ContextMap {
 
         // Update token accounting.
         self.total_tokens = self.total_tokens.saturating_sub(entry.current_tokens);
-        entry.level = ContextLevel::Skeleton;
+        entry.level = ContextMode::Lite;
         entry.current_tokens = token_cost;
         entry.costs.l2 = token_cost;
         entry.last_accessed = Instant::now();
@@ -502,7 +494,7 @@ impl ContextMap {
             .entry(path.to_path_buf())
             .or_insert_with(|| FileEntry {
                 path: path.to_path_buf(),
-                level: ContextLevel::Tree,
+                level: ContextMode::Map,
                 current_tokens: 10,
                 costs: LevelCosts {
                     l1: 10,
@@ -515,7 +507,7 @@ impl ContextMap {
             });
 
         self.total_tokens = self.total_tokens.saturating_sub(entry.current_tokens);
-        entry.level = ContextLevel::Full;
+        entry.level = ContextMode::Full;
         entry.current_tokens = token_cost;
         entry.costs.l3 = token_cost;
         entry.full_content = Some(content);
@@ -536,7 +528,7 @@ impl ContextMap {
     /// Returns how many tokens were freed, or 0 if no skeleton available.
     pub fn downgrade_to_skeleton(&mut self, path: &Path) -> usize {
         let entry = match self.entries.get_mut(path) {
-            Some(e) if e.level == ContextLevel::Full => e,
+            Some(e) if e.level == ContextMode::Full => e,
             _ => return 0,
         };
 
@@ -547,7 +539,7 @@ impl ContextMap {
             return 0;
         }
 
-        entry.level = ContextLevel::Skeleton;
+        entry.level = ContextMode::Lite;
         entry.current_tokens = skeleton_cost;
         entry.full_content = None;
         let freed = old_cost.saturating_sub(skeleton_cost);
@@ -568,13 +560,13 @@ impl ContextMap {
     /// Evict a file entirely (back to L1/tree).
     pub fn evict_to_tree(&mut self, path: &Path) -> usize {
         let entry = match self.entries.get_mut(path) {
-            Some(e) if e.level != ContextLevel::Tree => e,
+            Some(e) if e.level != ContextMode::Map => e,
             _ => return 0,
         };
 
         let old_cost = entry.current_tokens;
         let tree_cost = entry.costs.l1.max(10);
-        entry.level = ContextLevel::Tree;
+        entry.level = ContextMode::Map;
         entry.current_tokens = tree_cost;
         entry.skeleton = None;
         entry.full_content = None;
@@ -596,11 +588,11 @@ impl ContextMap {
         let mut freed = 0usize;
 
         // Collect paths sorted by last_accessed (oldest first).
-        let mut candidates: Vec<(PathBuf, Instant, ContextLevel)> = self
+        let mut candidates: Vec<(PathBuf, Instant, ContextMode)> = self
             .entries
             .values()
-            .filter(|e| e.level != ContextLevel::Tree)
-            .map(|e| (e.path.clone(), e.last_accessed, e.level))
+            .filter(|e| e.level != ContextMode::Map)
+            .map(|e| (e.path.clone(), e.last_accessed, e.level.clone()))
             .collect();
         candidates.sort_by_key(|(_, t, _)| *t);
 
@@ -609,7 +601,7 @@ impl ContextMap {
             if freed >= deficit {
                 break;
             }
-            if *level == ContextLevel::Full {
+            if *level == ContextMode::Full {
                 freed += self.downgrade_to_skeleton(path);
             }
         }
@@ -620,7 +612,7 @@ impl ContextMap {
                 if freed >= deficit {
                     break;
                 }
-                if *level == ContextLevel::Skeleton {
+                if *level == ContextMode::Lite {
                     freed += self.evict_to_tree(path);
                 }
             }
@@ -656,9 +648,10 @@ impl ContextMap {
 
         // Show loaded/skeleton files first (more relevant), then tree-only up to cap
         sorted.sort_by_key(|e| match e.level {
-            ContextLevel::Full => 0,
-            ContextLevel::Skeleton => 1,
-            ContextLevel::Tree => 2,
+            ContextMode::Full => 0,
+            ContextMode::Lite => 1,
+            // Map and any non-agent tier sort last (tree-only).
+            _ => 2,
         });
 
         for (shown, entry) in sorted.iter().enumerate() {
@@ -670,9 +663,10 @@ impl ContextMap {
                 break;
             }
             let level_marker = match entry.level {
-                ContextLevel::Tree => "·",
-                ContextLevel::Skeleton => "◆",
-                ContextLevel::Full => "█",
+                ContextMode::Lite => "◆",
+                ContextMode::Full => "█",
+                // Map (tree-only) and any non-agent tier.
+                _ => "·",
             };
             let size_str = if entry.file_size > 1024 {
                 format!("{}K", entry.file_size / 1024)
@@ -703,22 +697,22 @@ impl ContextMap {
         let l1_count = self
             .entries
             .values()
-            .filter(|e| e.level == ContextLevel::Tree)
+            .filter(|e| e.level == ContextMode::Map)
             .count();
         let l2_count = self
             .entries
             .values()
-            .filter(|e| e.level == ContextLevel::Skeleton)
+            .filter(|e| e.level == ContextMode::Lite)
             .count();
         let l3_count = self
             .entries
             .values()
-            .filter(|e| e.level == ContextLevel::Full)
+            .filter(|e| e.level == ContextMode::Full)
             .count();
         let l3_files: Vec<String> = self
             .entries
             .values()
-            .filter(|e| e.level == ContextLevel::Full)
+            .filter(|e| e.level == ContextMode::Full)
             .map(|e| e.path.display().to_string())
             .collect();
 
@@ -748,12 +742,12 @@ impl ContextMap {
     // ── Queries ─────────────────────────────────────────────────────────
 
     /// Get the current level of a file.
-    pub fn level_of(&self, path: &Path) -> Option<ContextLevel> {
-        self.entries.get(path).map(|e| e.level)
+    pub fn level_of(&self, path: &Path) -> Option<ContextMode> {
+        self.entries.get(path).map(|e| e.level.clone())
     }
 
     /// Get all files at a given level.
-    pub fn files_at_level(&self, level: ContextLevel) -> Vec<&Path> {
+    pub fn files_at_level(&self, level: ContextMode) -> Vec<&Path> {
         self.entries
             .values()
             .filter(|e| e.level == level)
@@ -798,8 +792,8 @@ impl ContextMap {
         for entry in self.entries.values() {
             if entry.last_accessed < cutoff {
                 match entry.level {
-                    ContextLevel::Full => stale_l3.push(entry.path.clone()),
-                    ContextLevel::Skeleton => stale_l2.push(entry.path.clone()),
+                    ContextMode::Full => stale_l3.push(entry.path.clone()),
+                    ContextMode::Lite => stale_l2.push(entry.path.clone()),
                     _ => {}
                 }
             }
@@ -842,7 +836,7 @@ impl ContextMap {
             .entry(virtual_path.clone())
             .or_insert_with(|| FileEntry {
                 path: virtual_path,
-                level: ContextLevel::Tree,
+                level: ContextMode::Map,
                 current_tokens: 10,
                 costs: LevelCosts {
                     l1: 10,
@@ -855,7 +849,7 @@ impl ContextMap {
             });
 
         self.total_tokens = self.total_tokens.saturating_sub(entry.current_tokens);
-        entry.level = ContextLevel::Full;
+        entry.level = ContextMode::Full;
         entry.current_tokens = token_cost;
         entry.costs.l3 = token_cost;
         entry.full_content = Some(format!("// Source: {}\n{}", source, content));
@@ -933,14 +927,14 @@ impl ContextMap {
 
         for (path, _score) in relevant.into_iter().take(max_promote) {
             let current_level = self.level_of(&path);
-            if current_level == Some(ContextLevel::Full) {
+            if current_level == Some(ContextMode::Full) {
                 self.touch(&path);
                 promoted.push(path);
                 continue;
             }
 
             // Estimate cost and ensure headroom.
-            let estimate = self.can_load(&path, ContextLevel::Full).await;
+            let estimate = self.can_load(&path, ContextMode::Full).await;
             if !estimate.fits {
                 let needed = estimate.estimated_tokens.saturating_sub(self.remaining());
                 self.compress_to_fit(needed);
@@ -1004,11 +998,11 @@ impl ContextMap {
             });
 
             if in_l3_plan || relevance >= 3.0 {
-                if entry.level != ContextLevel::Full {
+                if entry.level != ContextMode::Full {
                     promote.push(ContextSuggestion {
                         path: entry.path.clone(),
-                        current_level: entry.level,
-                        suggested_level: ContextLevel::Full,
+                        current_level: entry.level.clone(),
+                        suggested_level: ContextMode::Full,
                         relevance,
                         reason: if in_l3_plan {
                             "In loading plan for task modality".into()
@@ -1016,7 +1010,7 @@ impl ContextMap {
                             format!("High relevance score ({:.1})", relevance)
                         },
                         estimated_tokens: entry.costs.l3.max(
-                            self.estimate_level_tokens(&entry.path, ContextLevel::Full)
+                            self.estimate_level_tokens(&entry.path, ContextMode::Full)
                                 .await,
                         ),
                     });
@@ -1024,12 +1018,12 @@ impl ContextMap {
                     keep.push(entry.path.clone());
                 }
             } else if in_l2_plan || relevance >= 1.0 {
-                if entry.level == ContextLevel::Full {
+                if entry.level == ContextMode::Full {
                     // Could downgrade to save tokens
                     evict.push(ContextSuggestion {
                         path: entry.path.clone(),
-                        current_level: entry.level,
-                        suggested_level: ContextLevel::Skeleton,
+                        current_level: entry.level.clone(),
+                        suggested_level: ContextMode::Lite,
                         relevance,
                         reason: "Moderate relevance — skeleton sufficient".into(),
                         estimated_tokens: entry.costs.l2,
@@ -1037,11 +1031,11 @@ impl ContextMap {
                 } else {
                     keep.push(entry.path.clone());
                 }
-            } else if entry.level != ContextLevel::Tree && relevance < 0.5 {
+            } else if entry.level != ContextMode::Map && relevance < 0.5 {
                 evict.push(ContextSuggestion {
                     path: entry.path.clone(),
-                    current_level: entry.level,
-                    suggested_level: ContextLevel::Tree,
+                    current_level: entry.level.clone(),
+                    suggested_level: ContextMode::Map,
                     relevance,
                     reason: "Low relevance for current task".into(),
                     estimated_tokens: 10, // tree cost
@@ -1086,18 +1080,20 @@ impl ContextMap {
         let mut stats = ContextMapStats::default();
         for entry in self.entries.values() {
             match entry.level {
-                ContextLevel::Tree => {
+                ContextMode::Map => {
                     stats.l1_count += 1;
                     stats.l1_tokens += entry.current_tokens;
                 }
-                ContextLevel::Skeleton => {
+                ContextMode::Lite => {
                     stats.l2_count += 1;
                     stats.l2_tokens += entry.current_tokens;
                 }
-                ContextLevel::Full => {
+                ContextMode::Full => {
                     stats.l3_count += 1;
                     stats.l3_tokens += entry.current_tokens;
                 }
+                // Compact/FullExtended/Preset never occur as agent runtime levels.
+                _ => {}
             }
         }
         stats.total_tokens = self.total_tokens;
@@ -1124,8 +1120,8 @@ pub struct ContextMapStats {
 #[derive(Debug, Clone)]
 pub struct ContextSuggestion {
     pub path: PathBuf,
-    pub current_level: ContextLevel,
-    pub suggested_level: ContextLevel,
+    pub current_level: ContextMode,
+    pub suggested_level: ContextMode,
     pub relevance: f32,
     pub reason: String,
     pub estimated_tokens: usize,

@@ -806,7 +806,7 @@ Try ONE of these strategies:\
         // Try to extract a file path the model mentioned wanting to read.
         if let Some(path) = extract_mentioned_path(&stripped) {
             let p = std::path::Path::new(&path);
-            if self.context_map.level_of(p) != Some(super::context_map::ContextLevel::Full) {
+            if self.context_map.level_of(p) != Some(crate::evolve::ContextMode::Full) {
                 return (
                     "file_read".to_string(),
                     serde_json::json!({"path": path}).to_string(),
@@ -820,11 +820,11 @@ Try ONE of these strategies:\
         for ext in &source_extensions {
             let unread: Vec<_> = self
                 .context_map
-                .files_at_level(super::context_map::ContextLevel::Tree)
+                .files_at_level(crate::evolve::ContextMode::Map)
                 .into_iter()
                 .chain(
                     self.context_map
-                        .files_at_level(super::context_map::ContextLevel::Skeleton),
+                        .files_at_level(crate::evolve::ContextMode::Lite),
                 )
                 .filter(|p| p.to_string_lossy().ends_with(ext))
                 .filter(|p| p.to_string_lossy().starts_with("src/"))
