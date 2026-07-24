@@ -199,6 +199,11 @@ pub use ui::demo;
 #[cfg(feature = "tui")]
 pub use ui::tui;
 
+// Let `#[path]`-included unit tests address this crate as `selfware::...`,
+// matching how the `tests/unit` integration target sees it.
+#[cfg(test)]
+extern crate self as selfware;
+
 #[cfg(test)]
 #[path = "../tests/unit/_crate/lib_test.rs"]
 mod tests;

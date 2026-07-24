@@ -9,6 +9,7 @@ pub mod assistant;
 pub mod ast;
 pub mod clusters;
 pub mod context;
+pub mod context_fit;
 pub mod context_reduce;
 pub mod context_trust;
 pub mod context_selector;
@@ -45,6 +46,9 @@ pub use ast::{AstAnalyzer, AstNode};
 pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,
     ContextSummary,
+};
+pub use context_fit::{
+    fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer, TIER_LADDER,
 };
 pub use clusters::{cluster_of, clustered, ClusteredGraph};
 pub use context_reduce::{
