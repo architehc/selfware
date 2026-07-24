@@ -351,6 +351,8 @@ fn test_config_full_roundtrip() {
         model: "test-model".to_string(),
         max_tokens: 4096,
         context_length: 131072,
+        context_mode: default_context_mode(),
+        context_fit_ratio: default_context_fit_ratio(),
         temperature: 0.7,
         api_key: Some(RedactedString::new("test-key")),
         safety: SafetyConfig {
@@ -4412,4 +4414,21 @@ fn test_check_generated_context_fit() {
     );
 
     assert!(Config::default().check_generated_context_fit().is_ok());
+}
+
+#[test]
+fn context_mode_defaults_to_auto_and_fit_ratio_to_070() {
+    let config: Config = toml::from_str("").unwrap();
+    assert_eq!(config.context_mode, "auto");
+    assert!((config.context_fit_ratio - 0.70).abs() < f64::EPSILON);
+}
+
+#[test]
+fn context_mode_and_fit_ratio_parse_from_toml() {
+    let config: Config = toml::from_str(
+        "context_mode = \"compact\"\ncontext_fit_ratio = 0.5\n",
+    )
+    .unwrap();
+    assert_eq!(config.context_mode, "compact");
+    assert!((config.context_fit_ratio - 0.5).abs() < f64::EPSILON);
 }

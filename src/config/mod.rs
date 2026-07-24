@@ -81,6 +81,13 @@ pub fn default_context_length() -> usize {
     1048576
 }
 
+pub fn default_context_mode() -> String {
+    "auto".to_string()
+}
+pub fn default_context_fit_ratio() -> f64 {
+    0.70
+}
+
 /// Conservative context window (tokens) assumed for a model NO built-in
 /// profile recognizes and the user did not configure explicitly. The 1M
 /// `default_context_length()` describes the shipped default model; applying
@@ -122,6 +129,13 @@ pub struct Config {
     /// Context window length in tokens (must match vLLM --max-model-len)
     #[serde(default = "default_context_length")]
     pub context_length: usize,
+    /// Evolve context tier: "auto" (fit to the model window) or a pinned tier
+    /// (map|lite|compact|full|full_extended).
+    #[serde(default = "default_context_mode")]
+    pub context_mode: String,
+    /// Fraction of the usable window a composed context may occupy in auto mode.
+    #[serde(default = "default_context_fit_ratio")]
+    pub context_fit_ratio: f64,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     /// API authentication key (can also be set via `SELFWARE_API_KEY` env var).
@@ -373,6 +387,8 @@ impl Default for Config {
             model: default_model(),
             max_tokens: default_max_tokens(),
             context_length: default_context_length(),
+            context_mode: default_context_mode(),
+            context_fit_ratio: default_context_fit_ratio(),
             temperature: default_temperature(),
             api_key: None,
             safety: SafetyConfig::default(),
