@@ -30,7 +30,9 @@ callers are its own unit tests — and is pruned as part of the decluttering.
 ## 2. Decisions (locked with user)
 
 - **Winner system**: `evolve/context.rs` `ContextComposer` / `ContextMode` becomes
-  the single canonical tier model. The agent-side `ContextMap` is retired onto it.
+  the single canonical tier model. The agent-side runtime engine
+  (`agent/context_map.rs`) is unified onto the shared `ContextMode` vocabulary;
+  the engine itself stays (revised after deeper exploration — see §5).
 - **ContextGuard**: deleted, decision recorded in `docs/CONSOLIDATION_PLAN.md`.
   Semantic guardrails (roadmap Rec 2) are explicitly out of scope and may be
   rebuilt later against a real ingestion path.
@@ -39,13 +41,19 @@ callers are its own unit tests — and is pruned as part of the decluttering.
 
 ## 3. Architecture & Components
 
-### 3.1 `ContextMode::Auto`
+### 3.1 Auto mode (request-level, not a `ContextMode` variant)
 
-- Add `Auto` to the `ContextMode` enum in `src/evolve/context.rs`.
+- `Auto` is **not** added to the `ContextMode` enum — that would force
+  unreachable arms into every `match` on the enum (`included_for`,
+  `estimate_context_node_tokens`, `name`). Instead a request-level wrapper
+  `RequestedMode { Auto, Fixed(ContextMode) }` (new `src/evolve/context_fit.rs`)
+  is what config and the HTTP API parse `"auto"` into. The composer only ever
+  holds a concrete, resolved tier.
 - Ladder order (richest to leanest): `FullExtended → Full → Compact → Lite → Map`.
-- `ContextComposer::set_mode` remains as a manual override. When mode is `Auto`,
-  the effective tier is resolved at compose time against the active
-  `ModelProfile` (`src/config/model.rs:139`, `context_length` at :156).
+- `ContextComposer::set_mode` remains as a manual override. When the requested
+  mode is `Auto`, the server resolves the effective tier at build time and on
+  graph refresh against the configured `context_length` / `max_tokens`
+  (`src/config/mod.rs:115-124`).
 
 ### 3.2 Budget computation — `fit_to_model`
 
@@ -95,8 +103,10 @@ fallback):
 
 ### 3.5 Picker/UI
 
-- `mode_sizes()` (`src/evolve/context.rs:126`) gains the missing `Map` entry
-  (current omission) and reports the resolved tier when mode is `Auto`.
+- The picker already includes `Map`: `context_sizes_handler`
+  (`src/evolve/server.rs:607-634`) prepends the measured map cost to
+  `mode_sizes()`. No composer change needed; the resolved tier is reported
+  alongside the requested mode when the request is `Auto`.
 
 ## 4. Data Flow
 
@@ -107,24 +117,31 @@ fallback):
 3. Model switch: re-fit against the new profile if `Auto`; manual tiers are
    left untouched.
 
-## 5. ContextMap Retirement
+## 5. ContextMap Vocabulary Unification
 
-Mechanical mapping, no behavior change intended in the live agent loop:
+Deeper exploration revised the original "retire `agent/context_map.rs`" plan:
+`ContextMap` is the agent's **live runtime context engine** (~1570 lines: budget
+tracking, LRU eviction, skeleton extraction, task modalities), used by
+`agent/mod.rs`, `agent/context_management.rs`, `agent/recovery.rs`, and two test
+suites. Its token accounting already routes through the shared
+`token_count::estimate_content_tokens`. The actual duplication is the parallel
+tier vocabulary, not the engine. Therefore:
 
-- `ContextLevel::Tree` → `ContextMode::Map`
-- `ContextLevel::Skeleton` → `ContextMode::Lite`
-- `ContextLevel::Full` → `ContextMode::Full`
-
-Steps:
-
-1. Replace uses of `ContextLevel` in `src/agent/context_management.rs` and
-   `src/tools/context.rs` with the shared `ContextMode` enum.
-2. Move per-file token accounting onto `token_count.rs` (per
-   `docs/CONSOLIDATION_PLAN.md` item 4: `tokens.rs` + `token_count.rs` are the
-   winners; everything else delegates).
-3. Keep the existing auto-downgrade/eviction policy in
-   `context_management.rs`; it just speaks `ContextMode` now.
-4. Delete `src/agent/context_map.rs`.
+1. Replace the `ContextLevel` enum (`Tree`/`Skeleton`/`Full`) with the shared
+   `crate::evolve::ContextMode` across `src/agent/context_map.rs`,
+   `src/agent/context_management.rs`, `src/agent/mod.rs`, `src/agent/recovery.rs`
+   and their tests, mapping:
+   - `ContextLevel::Tree` → `ContextMode::Map`
+   - `ContextLevel::Skeleton` → `ContextMode::Lite`
+   - `ContextLevel::Full` → `ContextMode::Full`
+2. Move skeleton extraction (`extract_rust_skeleton`, `SkeletonItem`,
+   `FileSkeleton`) from `agent/context_map.rs` into a new shared
+   `src/evolve/skeleton.rs`; `agent/context_map.rs` re-exports it so existing
+   call sites keep working. This gives the `Lite` tier a real measured
+   projection (§3.3) from the same code the agent's L2 uses — one skeleton
+   implementation instead of two.
+3. Keep the `ContextMap` engine and its file in place. The auto-downgrade /
+   eviction policy is untouched; it just speaks `ContextMode` now.
 
 ## 6. ContextGuard Pruning
 
@@ -159,8 +176,12 @@ Steps:
   result); `Full`-fits short-circuit performs no reduction work.
 - **Integration test**: synthetic repo + `Auto` ⇒ composed context token count
   ≤ budget for each tested profile.
-- **Regression**: full existing test suite green after ContextMap and
-  ContextGuard removal.
+- **Regression**: full existing test suite green after the ContextMap vocabulary
+  unification and ContextGuard removal.
+- **Live smoke test**: run the evolve server against OpenRouter with a
+  Kimi-class model — large `context_length` resolves to `full` with
+  `fits_context_window: true`; an 8k `context_length` degrades to `map`/`lite`
+  with a warning instead of an overflow.
 - **Docs**: update stale §5 ("Context Loading Modes") of
   `docs/superpowers/specs/2026-07-18-self-evolve-context-selector-design.md`,
   which predates the Map/Compact tiers.
