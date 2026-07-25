@@ -20,6 +20,13 @@ curl -s https://openrouter.ai/api/v1/embeddings \
   -d '{"model":"qwen/qwen3-vl-embedding-8b","input":["test"]}'
 # "does not exist"  → still blocked
 # embedding vector  → unblocked, start Task 1
+
+# Reranker variant (Task 4) would surface as a chat model, not /embeddings:
+curl -s https://openrouter.ai/api/v1/chat/completions \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{"model":"qwen/qwen3-vl-reranker-8b","max_tokens":4,"messages":[{"role":"user","content":"ping"}]}'
+# "not a valid model ID" → blocked (verified 2026-07-25); a completion → unblocked
 ```
 
 ## Background (verified 2026-07-25)
