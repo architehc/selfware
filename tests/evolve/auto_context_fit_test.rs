@@ -27,6 +27,13 @@ async fn post_mode(server: &EvolveServer, mode: &str) -> Value {
     serde_json::from_str(&body).unwrap()
 }
 
+/// POST /api/context/mode and return the raw status + JSON body, so tests can
+/// assert on non-200 responses (e.g. the over-budget 422).
+async fn post_mode_raw(server: &EvolveServer, mode: &str) -> (StatusCode, Value) {
+    let (status, body) = post_json(server, "/api/context/mode", json!({ "mode": mode })).await;
+    (status, serde_json::from_str(&body).unwrap())
+}
+
 #[tokio::test]
 async fn auto_mode_resolves_full_on_large_window_and_degrades_on_small() {
     let (dir, graph) = fixture(20_000);
@@ -97,12 +104,14 @@ async fn auto_mode_reports_fit_and_pinned_mode_clears_it() {
 }
 
 /// Temp project with two real Rust files and matching graph nodes.
+/// Sized so the verbatim (full tier) payload is ~20k tokens — comfortably over
+/// the usable budget of an 8k context window.
 fn fixture_two_files() -> (tempfile::TempDir, Graph) {
     let dir = tempfile::tempdir().unwrap();
     let src_dir = dir.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
-    let a = "pub fn a() {}\n".repeat(100);
-    let b = "pub fn b() {}\n".repeat(200);
+    let a = "pub fn a() {}\n".repeat(1_000);
+    let b = "pub fn b() {}\n".repeat(2_000);
     fs::write(src_dir.join("a.rs"), &a).unwrap();
     fs::write(src_dir.join("b.rs"), &b).unwrap();
     let mut node_a = Node::code("crate::a", "src/a.rs");
@@ -189,4 +198,42 @@ async fn post_mode_auto_refits_and_pinned_mode_sticks() {
     let json = post_mode(&server, "lite").await;
     assert_eq!(json["mode"].as_str().unwrap(), "lite");
     assert_eq!(json["requested_mode"].as_str().unwrap(), "lite");
+}
+
+#[tokio::test]
+async fn context_json_reports_envelope_fields() {
+    let (dir, graph) = fixture_two_files();
+    let mut config = Config::default();
+    config.context_length = 1_000_000;
+    let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
+    let (status, json) = get_json(&server, "/api/context").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["envelope_hash"].is_string());
+    assert!(json["envelope_tokens"].as_u64().unwrap() > 0);
+    // Auto on a huge window resolves to full/full_extended: envelope tokens
+    // must equal the composer's own estimate (verbatim source).
+    assert!(
+        json["envelope_tokens"].as_u64().unwrap()
+            >= json["production"]["tokens"].as_u64().unwrap() / 2
+    );
+}
+
+#[tokio::test]
+async fn pinned_over_budget_mode_is_rejected_with_422() {
+    let (dir, graph) = fixture_two_files();
+    let mut config = Config::default();
+    config.context_length = 8_192; // usable budget = 0.7 * (8192 - 2048) = 4300 tokens
+    config.context_mode = "auto".to_string();
+    let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
+
+    let (status, body) = post_mode_raw(&server, "full").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"], "context_over_budget");
+    assert!(
+        body["measured_tokens"].as_u64().unwrap() > body["budget_tokens"].as_u64().unwrap()
+    );
+
+    // Auto remains accepted on the same server.
+    let (status, _) = post_mode_raw(&server, "auto").await;
+    assert_eq!(status, StatusCode::OK);
 }

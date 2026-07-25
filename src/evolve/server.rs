@@ -25,6 +25,7 @@ use super::assistant::{
 use super::context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer};
 use super::deletion::preview_deletion;
 use super::diagnostics::{AnalysisKind, DiagnosticsEngine};
+use super::envelope::{build_envelope_with_root, ContextEnvelope};
 use super::git::GitEngine;
 use super::readiness::ReadinessEngine;
 use super::{
@@ -63,6 +64,7 @@ pub struct EvolveServer {
     requested_mode: Arc<RwLock<RequestedMode>>,
     fit_budget: FitBudget,
     last_fit: Arc<RwLock<Option<FitOutcome>>>,
+    envelope: Arc<RwLock<Option<ContextEnvelope>>>,
     evidence_char_budget: usize,
     session_token: Arc<String>,
     write_lock: Arc<AsyncMutex<()>>,
@@ -142,7 +144,7 @@ impl EvolveServer {
         let concept_index = super::ConceptIndex::build(project_root.join("src"))
             .unwrap_or_else(|_| super::ConceptIndex::empty());
 
-        Ok(Self {
+        let server = Self {
             graph: Arc::new(RwLock::new(graph)),
             composer: Arc::new(RwLock::new(composer)),
             actions: Arc::new(ActionEngine::new()),
@@ -163,13 +165,16 @@ impl EvolveServer {
             requested_mode: Arc::new(RwLock::new(requested)),
             fit_budget,
             last_fit: Arc::new(RwLock::new(initial_fit)),
+            envelope: Arc::new(RwLock::new(None)),
             evidence_char_budget,
             session_token: Arc::new(uuid::Uuid::new_v4().to_string()),
             write_lock: Arc::new(AsyncMutex::new(())),
             analysis_lock: Arc::new(AsyncMutex::new(())),
             assistant_lock: Arc::new(AsyncMutex::new(())),
             git_lock: Arc::new(AsyncMutex::new(())),
-        })
+        };
+        server.rebuild_envelope()?;
+        Ok(server)
     }
 
     pub fn session_token(&self) -> &str {
@@ -292,6 +297,43 @@ impl EvolveServer {
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))
     }
 
+    /// Clone of the cached ContextEnvelope (`None` until the first rebuild).
+    fn cached_envelope(&self) -> Result<Option<ContextEnvelope>> {
+        self.envelope
+            .read()
+            .map(|envelope| envelope.clone())
+            .map_err(|_| anyhow::anyhow!("context lock poisoned"))
+    }
+
+    /// Rebuild the cached ContextEnvelope for the composer's current mode and
+    /// included set. Returns the fresh envelope (also stored on the server).
+    fn rebuild_envelope(&self) -> Result<ContextEnvelope> {
+        let graph = self.graph_snapshot()?;
+        let revision = graph_revision(&graph)?;
+        let (mode, included) = {
+            let composer = self
+                .composer
+                .read()
+                .map_err(|_| anyhow::anyhow!("context lock poisoned"))?;
+            (composer.mode().clone(), composer.included_nodes())
+        };
+        let root = self.project_root.as_ref().clone();
+        let read_root = root.clone();
+        let envelope = build_envelope_with_root(
+            &graph,
+            &mode,
+            &included,
+            &revision,
+            &root,
+            move |rel| std::fs::read_to_string(read_root.join(rel)).ok(),
+        );
+        *self
+            .envelope
+            .write()
+            .map_err(|_| anyhow::anyhow!("context lock poisoned"))? = Some(envelope.clone());
+        Ok(envelope)
+    }
+
     fn refresh_graph(&self) -> Result<String> {
         let derived = GraphBuilder::new(self.project_root.join("src")).scan_src()?;
         let existing = self.graph_snapshot()?;
@@ -312,7 +354,9 @@ impl EvolveServer {
             fit_mode(&requested, &refreshed, &self.project_root, &self.fit_budget);
         composer.set_mode(mode);
         *current = composer;
+        drop(current);
         self.record_fit(outcome)?;
+        self.rebuild_envelope()?;
         self.save_graph()?;
         Ok(revision)
     }
@@ -352,6 +396,40 @@ fn fit_mode(
     }
 }
 
+/// Budget gate for pinned (non-auto) tiers: build the envelope the candidate
+/// selection would produce on a throwaway composer and reject with a typed
+/// 422 when it overflows the usable budget. The live composer is untouched,
+/// so a rejected pin leaves the server's context state unchanged.
+fn reject_over_budget(
+    server: &EvolveServer,
+    apply: impl FnOnce(&mut ContextComposer),
+) -> ApiResult<()> {
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let revision = graph_revision(&graph).map_err(internal_error)?;
+    let mut composer = ContextComposer::new(graph.clone());
+    apply(&mut composer);
+    let root = server.project_root.as_ref().clone();
+    let read_root = root.clone();
+    let candidate = build_envelope_with_root(
+        &graph,
+        composer.mode(),
+        &composer.included_nodes(),
+        &revision,
+        &root,
+        move |rel| std::fs::read_to_string(read_root.join(rel)).ok(),
+    );
+    let budget = server.fit_budget.usable();
+    if candidate.total_tokens > budget {
+        return Err(unprocessable(json!({
+            "error": "context_over_budget",
+            "mode": candidate.mode.name(),
+            "measured_tokens": candidate.total_tokens,
+            "budget_tokens": budget,
+        })));
+    }
+    Ok(())
+}
+
 async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let context = server.context_summary().map_err(internal_error)?;
@@ -363,11 +441,13 @@ async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
         .and_then(|name| name.to_str())
         .unwrap_or("selfware");
     let fit = server.last_fit().map_err(internal_error)?;
+    let envelope = server.cached_envelope().map_err(internal_error)?;
     let context_value = context_json(
         &context,
         server.context_length,
         &server.requested_mode().map_err(internal_error)?,
         fit.as_ref(),
+        envelope.as_ref(),
     )
     .map_err(internal_error)?;
     Ok(Json(json!({
@@ -407,11 +487,13 @@ async fn graph_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Jso
 async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let summary = server.context_summary().map_err(internal_error)?;
     let fit = server.last_fit().map_err(internal_error)?;
+    let envelope = server.cached_envelope().map_err(internal_error)?;
     let mut value = context_json(
         &summary,
         server.context_length,
         &server.requested_mode().map_err(internal_error)?,
         fit.as_ref(),
+        envelope.as_ref(),
     )
     .map_err(internal_error)?;
     // The Map tier's cost is a compiled artifact, not a per-node sum, so the
@@ -924,17 +1006,20 @@ async fn context_mode_handler(
         )),
         _ => return Err(bad_request("unknown context mode")),
     };
-    *server
-        .requested_mode
-        .write()
-        .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))? = requested.clone();
     let (mode, outcome) = match &requested {
-        RequestedMode::Fixed(mode) => (mode.clone(), None),
+        RequestedMode::Fixed(mode) => {
+            reject_over_budget(&server, |composer| composer.set_mode(mode.clone()))?;
+            (mode.clone(), None)
+        }
         RequestedMode::Auto => {
             let graph = server.graph_snapshot().map_err(internal_error)?;
             fit_mode(&requested, &graph, &server.project_root, &server.fit_budget)
         }
     };
+    *server
+        .requested_mode
+        .write()
+        .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))? = requested.clone();
     server.record_fit(outcome).map_err(internal_error)?;
     let summary = {
         let mut composer = server
@@ -944,10 +1029,17 @@ async fn context_mode_handler(
         composer.set_mode(mode);
         composer.summary()
     };
+    let envelope = server.rebuild_envelope().map_err(internal_error)?;
     let fit = server.last_fit().map_err(internal_error)?;
     Ok(Json(
-        context_json(&summary, server.context_length, &requested, fit.as_ref())
-            .map_err(internal_error)?,
+        context_json(
+            &summary,
+            server.context_length,
+            &requested,
+            fit.as_ref(),
+            Some(&envelope),
+        )
+        .map_err(internal_error)?,
     ))
 }
 
@@ -966,6 +1058,10 @@ async fn context_custom_handler(
     } else {
         RequestedMode::Fixed(ContextMode::Custom)
     };
+    if !body.components.is_empty() {
+        let components = body.components.clone();
+        reject_over_budget(&server, |composer| composer.set_custom(components))?;
+    }
     *server
         .requested_mode
         .write()
@@ -991,10 +1087,17 @@ async fn context_custom_handler(
         composer.set_custom(body.components);
         composer.summary()
     };
+    let envelope = server.rebuild_envelope().map_err(internal_error)?;
     let fit = server.last_fit().map_err(internal_error)?;
     Ok(Json(
-        context_json(&summary, server.context_length, &requested, fit.as_ref())
-            .map_err(internal_error)?,
+        context_json(
+            &summary,
+            server.context_length,
+            &requested,
+            fit.as_ref(),
+            Some(&envelope),
+        )
+        .map_err(internal_error)?,
     ))
 }
 
@@ -1003,6 +1106,7 @@ fn context_json(
     context_length: usize,
     requested: &RequestedMode,
     auto_fit: Option<&FitOutcome>,
+    envelope: Option<&ContextEnvelope>,
 ) -> Result<Value> {
     let mut value = serde_json::to_value(summary)?;
     if let Some(object) = value.as_object_mut() {
@@ -1017,6 +1121,12 @@ fn context_json(
             _ => Value::Null,
         };
         object.insert("auto_fit".to_string(), fit_value);
+        let (env_tokens, env_hash) = match envelope {
+            Some(env) => (json!(env.total_tokens), json!(env.content_hash)),
+            None => (Value::Null, Value::Null),
+        };
+        object.insert("envelope_tokens".to_string(), env_tokens);
+        object.insert("envelope_hash".to_string(), env_hash);
         object.insert(
             "fits_context_window".to_string(),
             json!(summary.estimated_tokens <= context_length),
@@ -2282,6 +2392,10 @@ fn bad_request(message: impl Into<String>) -> ApiError {
         StatusCode::BAD_REQUEST,
         Json(json!({ "error": message.into() })),
     )
+}
+
+fn unprocessable(value: Value) -> ApiError {
+    (StatusCode::UNPROCESSABLE_ENTITY, Json(value))
 }
 
 fn conflict(message: impl Into<String>) -> ApiError {
