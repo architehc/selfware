@@ -7,6 +7,7 @@
 //! - `Compact`: full code with comments stripped (~82%) — for smaller models.
 //! - `Full`: full production code.
 //! - `FullExtended`: production code plus test/example nodes.
+//! - `Custom`: a hand-picked component selection, loaded at Lite/skeleton detail.
 //! - `Preset(name)`: a single named preset loaded.
 
 use super::{Graph, Node, NodeLayer};
@@ -22,6 +23,7 @@ pub enum ContextMode {
     Compact,
     Full,
     FullExtended,
+    Custom,
     Preset(String),
 }
 
@@ -33,6 +35,7 @@ impl ContextMode {
             Self::Compact => "compact",
             Self::Full => "full",
             Self::FullExtended => "full_extended",
+            Self::Custom => "custom",
             Self::Preset(_) => "preset",
         }
     }
@@ -99,6 +102,22 @@ impl ContextComposer {
         self.mode = mode;
     }
 
+    /// Apply a hand-picked component selection as the active context.
+    /// Unknown ids are dropped; the mode becomes `Custom` (even when empty).
+    pub fn set_custom(&mut self, ids: Vec<String>) {
+        let known: std::collections::HashSet<&str> = self
+            .graph
+            .nodes
+            .iter()
+            .map(|n| n.id.as_str())
+            .collect();
+        self.included = ids
+            .into_iter()
+            .filter(|id| known.contains(id.as_str()))
+            .collect();
+        self.mode = ContextMode::Custom;
+    }
+
     /// The node ids a given mode would include, without changing active state.
     fn included_for(&self, mode: &ContextMode) -> Vec<String> {
         match mode {
@@ -117,6 +136,9 @@ impl ContextComposer {
                 .map(|node| node.id.clone())
                 .collect(),
             ContextMode::Preset(name) => vec![name.clone()],
+            // Custom: the composer's current hand-picked list is the source of
+            // truth — there is no rule to recompute it from.
+            ContextMode::Custom => self.included.clone(),
         }
     }
 
@@ -276,10 +298,17 @@ fn estimate_context_node_tokens(node: &Node, mode: &ContextMode) -> usize {
         // server; per node it contributes nothing to the composer estimate.
         ContextMode::Map => 0,
         // Lite: interface signatures only — the smallest useful tier.
-        ContextMode::Lite => ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize,
+        // Custom selections also load at skeleton detail, so they cost the same.
+        ContextMode::Lite | ContextMode::Custom => {
+            ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize
+        }
         // Compact: full code with comments stripped, for smaller models.
         ContextMode::Compact => ((code_tokens as f64) * COMMENT_STRIPPED_FRACTION).round() as usize,
         ContextMode::Full => code_tokens,
         _ => total,
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/evolve/context_custom_test.rs"]
+mod context_custom_test;

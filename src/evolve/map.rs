@@ -33,6 +33,11 @@ pub struct ComponentCard {
     pub more: usize,
     /// Full-code tokens of the component (what expanding it in full would cost).
     pub tokens: usize,
+    /// Skeleton (signature-only) tokens — what loading the component at Lite
+    /// detail (e.g. as part of a custom selection) would cost. Non-Rust sources
+    /// have no skeleton extractor, so this falls back to the full token count
+    /// (no reduction is promised for them).
+    pub lite_tokens: usize,
     pub lines: usize,
 }
 
@@ -175,6 +180,11 @@ fn build_card(id: &str, path: &str, src: &str, tokens: usize, lines: usize) -> C
         budget = budget.saturating_sub(bucket.len());
     }
     let kept = fns.len() + types.len() + traits.len() + consts.len();
+    let lite_tokens = if path.ends_with(".rs") {
+        crate::evolve::skeleton::extract_rust_skeleton(Path::new(path), src).token_count
+    } else {
+        tokens
+    };
     ComponentCard {
         component: id.to_string(),
         path: path.to_string(),
@@ -185,6 +195,7 @@ fn build_card(id: &str, path: &str, src: &str, tokens: usize, lines: usize) -> C
         consts,
         more: total.saturating_sub(kept),
         tokens,
+        lite_tokens,
         lines,
     }
 }

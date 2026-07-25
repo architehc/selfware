@@ -193,6 +193,7 @@ impl EvolveServer {
             .route("/api/graph", get(graph_handler))
             .route("/api/context", get(context_handler))
             .route("/api/context/mode", post(context_mode_handler))
+            .route("/api/context/custom", post(context_custom_handler))
             .route("/api/context/sizes", get(context_sizes_handler))
             .route("/api/context/select", get(context_select_handler))
             .route("/api/context/map", get(context_map_handler))
@@ -443,6 +444,11 @@ async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<J
 struct ContextModeRequest {
     mode: String,
     preset: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ContextCustomRequest {
+    components: Vec<String>,
 }
 
 /// Function-level duplicate/near-duplicate clones across the source tree —
@@ -936,6 +942,53 @@ async fn context_mode_handler(
             .write()
             .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))?;
         composer.set_mode(mode);
+        composer.summary()
+    };
+    let fit = server.last_fit().map_err(internal_error)?;
+    Ok(Json(
+        context_json(&summary, server.context_length, &requested, fit.as_ref())
+            .map_err(internal_error)?,
+    ))
+}
+
+/// Apply a hand-picked component selection as the active context (Custom mode).
+/// An empty `components` list clears the custom selection and returns the
+/// workspace to the auto-fitted tier.
+async fn context_custom_handler(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<ContextCustomRequest>,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let _assistant_guard = server.assistant_lock.lock().await;
+    let requested = if body.components.is_empty() {
+        RequestedMode::Auto
+    } else {
+        RequestedMode::Fixed(ContextMode::Custom)
+    };
+    *server
+        .requested_mode
+        .write()
+        .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))? = requested.clone();
+    let summary = if body.components.is_empty() {
+        // Clearing: re-fit the tier ladder like the `auto` branch of the mode handler.
+        let graph = server.graph_snapshot().map_err(internal_error)?;
+        let (mode, outcome) =
+            fit_mode(&requested, &graph, &server.project_root, &server.fit_budget);
+        server.record_fit(outcome).map_err(internal_error)?;
+        let mut composer = server
+            .composer
+            .write()
+            .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))?;
+        composer.set_mode(mode);
+        composer.summary()
+    } else {
+        server.record_fit(None).map_err(internal_error)?;
+        let mut composer = server
+            .composer
+            .write()
+            .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))?;
+        composer.set_custom(body.components);
         composer.summary()
     };
     let fit = server.last_fit().map_err(internal_error)?;

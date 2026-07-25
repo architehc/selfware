@@ -131,7 +131,7 @@ impl<'a> TierMeasurer<'a> {
             ContextMode::Compact => self.cached("compact", Self::measure_compact),
             ContextMode::Lite => self.cached("lite", Self::measure_lite),
             ContextMode::Map => self.cached("map", Self::measure_map),
-            ContextMode::Preset(_) => self.measured_full(),
+            ContextMode::Preset(_) | ContextMode::Custom => self.measured_full(),
         }
     }
 
