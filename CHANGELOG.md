@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-25
+
+### Added
+- Auto context tiers: `context_mode = "auto"` (default) + `context_fit_ratio` measure each tier and pick the richest that fits the model window — validated live from 8k to 1M windows
+- ContextEnvelope: evidence paths ship tier-projected content (Map=cards, Lite=skeletons, Compact=reduced source) bound by a shared `content_hash`; pinned over-budget tiers rejected with typed `422 context_over_budget`
+- Custom context mode: per-component hand-picked selection (`POST /api/context/custom`) with a filterable checklist UI showing per-component lite/full token breakdown
+- Review protocol: typed outcomes (`model_output_invalid`/`empty`/`ungrounded` 422s with retained model/latency/usage telemetry), one budgeted repair retry, and computed `trust_state` (`structural`/`degraded`/`verified`) end-to-end into the UI status
+- Auto-tier picker UI with measured budget bar; deep-linkable inspector tabs (`#inspector=context`)
+- `HttpEmbeddingProvider` bearer auth + `[models.embedding]` profile support (verified with OpenRouter `qwen/qwen3-embedding-8b`)
+- Benchmarks: `examples/tier_bench.rs` (tier perf/accuracy), `scripts/model_matrix_bench.sh` (14-model declared+measured capability matrix incl. vision probes), `scripts/context_quality_bench.sh` (retrieval-quality per tier)
+- `ComponentCard.lite_tokens` per-component skeleton cost
+
+### Changed
+- Agent `ContextLevel` unified onto the shared `evolve::ContextMode` vocabulary; skeleton extraction shared in `evolve::skeleton`
+- `endpoint_smoke` probe: larger token budget + reasoning-chunk visibility for thinking models
+- Context reduction: comment/inline-test stripping and duplicate function-body elision across assembled context
+
+### Removed
+- Dead `safety::context_guard` heuristic scanner (620 lines, zero production callers) — see `docs/CONSOLIDATION_PLAN.md` §8
+
 ## [0.3.1-beta.1] - 2026-07-17
 
 ### Added
@@ -125,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.3.1-beta.1...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/architehc/selfware/compare/v0.3.1-beta.1...v0.6.0
 [0.3.1-beta.1]: https://github.com/architehc/selfware/compare/v0.3.0...v0.3.1-beta.1
 [0.1.0]: https://github.com/architehc/selfware/releases/tag/v0.1.0
