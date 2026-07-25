@@ -16,6 +16,7 @@ pub mod context_selector;
 pub mod dead_code;
 pub mod dedup;
 pub mod deletion;
+pub mod envelope;
 pub mod fn_dedup;
 pub mod diagnostics;
 pub mod gate;
@@ -60,6 +61,7 @@ pub use context_trust::{
 pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
+pub use envelope::{build_envelope, ContextEnvelope, ProjectedDocument};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
 pub use gate::{GateResult, Gatekeeper};
 pub use graph::GraphBuilder;
