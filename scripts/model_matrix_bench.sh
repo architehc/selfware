@@ -27,6 +27,7 @@ DEFAULT_MODELS=(
   "nvidia/nemotron-3-ultra-550b-a55b:free"
   "stepfun/step-3.7-flash"
   "minimax/minimax-m3"
+  "qwen/qwen3.7-max"
 )
 
 # All 7 checks emitted by endpoint_smoke (multimodal only runs with --image).
