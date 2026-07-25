@@ -7,9 +7,15 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::time::Instant;
 
 use crate::api::{ApiClient, Message, ThinkingMode, Usage};
 use crate::config::Config;
+
+/// Repair instruction appended as a user message after one malformed reply
+/// (spec §2.1). The original system + user messages and the assistant's
+/// malformed reply are kept as context.
+pub const REVIEW_REPAIR_PROMPT: &str = "Your previous reply was not valid JSON matching the required schema. Respond with ONLY the JSON object.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundingEvidence {
@@ -72,6 +78,97 @@ impl From<Usage> for ReviewUsage {
         }
     }
 }
+
+/// Typed protocol failure of the grounded review path (spec §2.1). Every
+/// variant keeps the model telemetry from the last chat response — telemetry
+/// is never dropped, even when the model output itself is unusable.
+///
+/// `GroundedAssistant::review` keeps its `anyhow::Result` signature and
+/// returns this as the (downcastable) error, so HTTP handlers can recover the
+/// typed outcome via `err.downcast_ref::<ReviewProtocolError>()` and map it
+/// to a 422 with [`ReviewProtocolError::body`].
+#[derive(Debug)]
+pub enum ReviewProtocolError {
+    /// Output was not parseable as the review schema after one repair.
+    Invalid {
+        detail: String,
+        model: String,
+        latency_ms: u128,
+        usage: ReviewUsage,
+    },
+    /// Parseable, but zero claims, zero recommendations, zero rejections.
+    Empty {
+        model: String,
+        latency_ms: u128,
+        usage: ReviewUsage,
+    },
+    /// Every item was rejected by grounding: zero surviving, some rejected.
+    Ungrounded {
+        rejected_items: usize,
+        model: String,
+        latency_ms: u128,
+        usage: ReviewUsage,
+    },
+}
+
+impl ReviewProtocolError {
+    /// The exact 422 JSON body per spec §2.1.
+    pub fn body(&self) -> serde_json::Value {
+        match self {
+            Self::Invalid {
+                detail,
+                model,
+                latency_ms,
+                usage,
+            } => serde_json::json!({
+                "error": "model_output_invalid",
+                "detail": detail,
+                "model": model,
+                "latency_ms": latency_ms,
+                "usage": usage,
+            }),
+            Self::Empty {
+                model,
+                latency_ms,
+                usage,
+            } => serde_json::json!({
+                "error": "model_output_empty",
+                "model": model,
+                "latency_ms": latency_ms,
+                "usage": usage,
+            }),
+            Self::Ungrounded {
+                rejected_items,
+                model,
+                latency_ms,
+                usage,
+            } => serde_json::json!({
+                "error": "model_output_ungrounded",
+                "rejected_items": rejected_items,
+                "model": model,
+                "latency_ms": latency_ms,
+                "usage": usage,
+            }),
+        }
+    }
+}
+
+impl std::fmt::Display for ReviewProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid { detail, .. } => {
+                write!(f, "model output invalid after one repair: {detail}")
+            }
+            Self::Empty { .. } => write!(f, "model returned an empty review"),
+            Self::Ungrounded { rejected_items, .. } => write!(
+                f,
+                "model review fully ungrounded: {rejected_items} item(s) rejected"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReviewProtocolError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundedReview {
@@ -197,18 +294,67 @@ impl GroundedAssistant {
             ),
         });
 
-        let response = self
-            .client
-            .chat(vec![system, user], None, ThinkingMode::Disabled)
-            .await
-            .context("grounded model review failed")?;
-        let text = response
-            .choices
-            .first()
-            .map(|choice| choice.message.content.text_all())
-            .ok_or_else(|| anyhow!("model returned no review choice"))?;
-        let payload = parse_model_review(&text)?;
+        let started = Instant::now();
+        let mut messages = vec![system, user];
+        // One budgeted repair, no loops: attempt 0 is the original call;
+        // attempt 1 reuses the same token budget with the malformed reply and
+        // the repair instruction appended. A second parse failure is final.
+        let (payload, response) = loop {
+            let response = self
+                .client
+                .chat(messages.clone(), None, ThinkingMode::Disabled)
+                .await
+                .context("grounded model review failed")?;
+            let parsed = response
+                .choices
+                .first()
+                .map(|choice| choice.message.content.text_all())
+                .ok_or_else(|| anyhow!("model returned no review choice"))
+                .and_then(|text| parse_model_review(&text));
+            match parsed {
+                Ok(payload) => break (payload, response),
+                Err(error) => {
+                    if messages.len() > 2 {
+                        // Already repaired once — report the typed failure with
+                        // telemetry from this last chat response.
+                        return Err(ReviewProtocolError::Invalid {
+                            detail: format!("{error:#}"),
+                            model: response.model,
+                            latency_ms: started.elapsed().as_millis(),
+                            usage: response.usage.into(),
+                        }
+                        .into());
+                    }
+                    let previous = response
+                        .choices
+                        .first()
+                        .map(|choice| choice.message.content.text_all())
+                        .unwrap_or_default();
+                    messages.push(Message::assistant(previous));
+                    messages.push(Message::user(REVIEW_REPAIR_PROMPT));
+                }
+            }
+        };
         let (claims, recommendations, rejected_items) = validate_grounding(payload, &evidence);
+        if claims.is_empty() && recommendations.is_empty() {
+            let latency_ms = started.elapsed().as_millis();
+            let usage: ReviewUsage = response.usage.into();
+            return Err(if rejected_items == 0 {
+                ReviewProtocolError::Empty {
+                    model: response.model,
+                    latency_ms,
+                    usage,
+                }
+            } else {
+                ReviewProtocolError::Ungrounded {
+                    rejected_items,
+                    model: response.model,
+                    latency_ms,
+                    usage,
+                }
+            }
+            .into());
+        }
 
         Ok(GroundedReview {
             model: response.model,
