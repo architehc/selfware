@@ -260,6 +260,25 @@ textarea:focus-visible,
     white-space: nowrap;
 }
 
+/* Six modes fit one row — override the default 3-column segmented grid. */
+.segmented.context-picker {
+    grid-template-columns: none;
+    grid-auto-flow: column;
+}
+
+.segmented.context-picker button {
+    white-space: nowrap;
+    padding: 0 8px;
+}
+
+.segmented.context-picker button .mode-size {
+    margin-left: 3px;
+}
+
+.context-picker-label {
+    white-space: nowrap;
+}
+
 .context-picker button.resolved {
     position: relative;
 }
@@ -1682,6 +1701,13 @@ textarea:focus-visible,
     .segmented {
         width: 100%;
         grid-template-columns: repeat(3, 1fr);
+    }
+
+    /* Small screens: let the context picker fall back to the 3-column grid. */
+    .segmented.context-picker {
+        grid-auto-flow: row;
+        grid-template-columns: repeat(3, 1fr);
+        height: auto;
     }
 
     .segmented button {
