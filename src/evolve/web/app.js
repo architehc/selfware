@@ -594,12 +594,12 @@ function normalizeContextMode(mode) {
 }
 
 function contextLabel(mode) {
-    return { map: 'Map', lite: 'Lite', compact: 'Compact', full: 'Full', full_extended: 'Full Extended' }[mode] || mode || 'Unknown';
+    return { auto: 'Auto', map: 'Map', lite: 'Lite', compact: 'Compact', full: 'Full', full_extended: 'Full Extended' }[mode] || mode || 'Unknown';
 }
 
 function normalizeContext(payload) {
     if (typeof payload === 'string') {
-        return { mode: normalizeContextMode(payload), files: null, tokens: null };
+        return { mode: normalizeContextMode(payload), requestedMode: null, autoFit: null, files: null, tokens: null };
     }
     const data = payload?.context && typeof payload.context === 'object' ? payload.context : payload || {};
     const included = Array.isArray(data.included) ? data.included : null;
@@ -609,6 +609,8 @@ function normalizeContext(payload) {
         .reduce((total, summary) => total + Number(summary.files), 0);
     return {
         mode: normalizeContextMode(data.mode || payload?.mode),
+        requestedMode: normalizeContextMode(data.requested_mode),
+        autoFit: data.auto_fit && typeof data.auto_fit === 'object' ? data.auto_fit : null,
         files: data.file_count ?? filesValue ?? data.stats?.files ?? (summarizedFiles || null) ?? included?.length ?? null,
         tokens: data.estimated_tokens ?? data.tokens ?? data.token_count ?? data.stats?.tokens ?? null,
         mixedFiles: Number(data.production_files_with_inline_tests || 0),
@@ -618,10 +620,13 @@ function normalizeContext(payload) {
 }
 
 function renderContext(previous = null) {
+    const activeMode = state.context.requestedMode || state.context.mode;
     $$('#context-segments [data-context-mode]').forEach((button) => {
-        const selected = button.dataset.contextMode === state.context.mode;
+        const selected = button.dataset.contextMode === activeMode;
         button.setAttribute('aria-checked', String(selected));
     });
+    markAutoResolvedTier();
+    renderContextBudget();
 
     const metrics = $('#context-metrics');
     if (!metrics) return;
@@ -672,6 +677,58 @@ function renderContext(previous = null) {
     }
 
     renderContextInspector();
+}
+
+// When the requested mode is 'auto', light the Auto button as active and mark
+// the concrete tier the server resolved to with a dot + title suffix.
+function markAutoResolvedTier() {
+    const buttons = $$('#context-segments [data-context-mode]');
+    buttons.forEach((button) => {
+        button.classList.remove('resolved');
+        button.title = button.title.replace(' · resolved by auto', '');
+    });
+    if (state.context.requestedMode !== 'auto' || !state.context.mode) return;
+    const resolved = buttons.find((button) => button.dataset.contextMode === state.context.mode);
+    if (resolved && resolved.dataset.contextMode !== state.context.requestedMode) {
+        resolved.classList.add('resolved');
+        resolved.title += ' · resolved by auto';
+    }
+}
+
+// Budget bar under the picker: in auto mode it shows the fit outcome (measured
+// tier size against the usable budget); pinned modes show the estimated size
+// against the full model window.
+function renderContextBudget() {
+    const bar = $('#context-budget');
+    if (!bar) return;
+    const fill = bar.querySelector('.context-budget-fill');
+    const label = bar.querySelector('.context-budget-label');
+    const autoFit = state.context.autoFit;
+    const contextLimit = Number(state.workspace?.context_length);
+    let used = null;
+    let total = null;
+    let over = false;
+
+    if (state.context.requestedMode === 'auto' && autoFit) {
+        used = Number(autoFit.measured_tokens);
+        total = Number(autoFit.budget_tokens);
+        over = autoFit.fits === false;
+    } else if (state.context.tokens !== null && Number.isFinite(contextLimit) && contextLimit > 0) {
+        used = Number(state.context.tokens);
+        total = contextLimit;
+    }
+
+    if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
+        bar.setAttribute('aria-hidden', 'true');
+        return;
+    }
+
+    const ratio = used / total;
+    fill.style.backgroundSize = `${Math.min(ratio, 1) * 100}% 100%`;
+    fill.classList.toggle('warn', !over && ratio >= 0.9);
+    fill.classList.toggle('over', over);
+    label.textContent = `${formatTokensShort(used)} / ${formatTokensShort(total)}${over ? ' — over budget, using smallest tier' : ''}`;
+    bar.setAttribute('aria-hidden', 'false');
 }
 
 function renderContextInspector() {
@@ -808,11 +865,12 @@ function renderContextSizes() {
         badge.textContent = `${formatTokensShort(size.tokens)} tok`;
         button.title = `${button.title.split(' — ')[0]} — ${formatCount(size.nodes)} nodes · ${formatCount(size.tokens)} tokens`;
     });
+    markAutoResolvedTier();
 }
 
 async function setContextMode(mode) {
     const canonicalMode = normalizeContextMode(mode);
-    if (!canonicalMode || canonicalMode === state.context.mode) return;
+    if (!canonicalMode || canonicalMode === (state.context.requestedMode || state.context.mode)) return;
     const previous = { ...state.context };
     const buttons = $$('#context-segments [data-context-mode]');
     buttons.forEach((button) => { button.disabled = true; });

@@ -54,6 +54,49 @@ async fn auto_mode_resolves_full_on_large_window_and_degrades_on_small() {
 }
 
 #[tokio::test]
+async fn auto_mode_reports_fit_and_pinned_mode_clears_it() {
+    let (dir, graph) = fixture(20_000);
+    let mut config = Config::default();
+    config.context_length = 1_000_000;
+    config.context_mode = "auto".to_string();
+    let server = EvolveServer::with_config(graph.clone(), dir.path(), &config).unwrap();
+
+    // Auto: the fit outcome rides along with the context payload.
+    let (status, json) = get_json(&server, "/api/context").await;
+    assert_eq!(status, StatusCode::OK);
+    let fit = &json["auto_fit"];
+    let expected_budget = (0.7
+        * (config.context_length - config.max_tokens.min(config.context_length / 4)) as f64)
+        as usize;
+    assert_eq!(
+        fit["budget_tokens"].as_u64().unwrap() as usize,
+        expected_budget
+    );
+    assert_eq!(fit["fits"].as_bool().unwrap(), true);
+    // The resolved tier is measured, so its size matches the fixture exactly.
+    let tier_tokens: usize = graph.nodes.iter().map(|n| n.tokens).sum();
+    assert_eq!(
+        fit["measured_tokens"].as_u64().unwrap() as usize,
+        tier_tokens
+    );
+    assert!(fit["measured_tokens"].as_u64().unwrap() as usize <= expected_budget);
+
+    // Pinned: auto_fit clears to null.
+    let json = post_mode(&server, "lite").await;
+    assert!(json["auto_fit"].is_null());
+    let (status, json) = get_json(&server, "/api/context").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["auto_fit"].is_null());
+
+    // Back to auto: the fit outcome is reported again.
+    let json = post_mode(&server, "auto").await;
+    assert!(json["auto_fit"].is_object());
+    let (status, json) = get_json(&server, "/api/context").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["auto_fit"].is_object());
+}
+
+#[tokio::test]
 async fn invalid_context_mode_in_config_is_an_error() {
     let (dir, graph) = fixture(1_000);
     let mut config = Config::default();

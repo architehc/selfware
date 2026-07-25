@@ -62,6 +62,7 @@ pub struct EvolveServer {
     context_length: usize,
     requested_mode: Arc<RwLock<RequestedMode>>,
     fit_budget: FitBudget,
+    last_fit: Arc<RwLock<Option<FitOutcome>>>,
     evidence_char_budget: usize,
     session_token: Arc<String>,
     write_lock: Arc<AsyncMutex<()>>,
@@ -124,7 +125,8 @@ impl EvolveServer {
             config.context_fit_ratio,
         );
         let mut composer = ContextComposer::new(graph.clone());
-        composer.set_mode(fit_mode(&requested, &graph, &project_root, &fit_budget));
+        let (initial_mode, initial_fit) = fit_mode(&requested, &graph, &project_root, &fit_budget);
+        composer.set_mode(initial_mode);
         let endpoint_host = url::Url::parse(&config.endpoint)
             .ok()
             .and_then(|url| url.host_str().map(str::to_string))
@@ -160,6 +162,7 @@ impl EvolveServer {
             context_length: config.context_length,
             requested_mode: Arc::new(RwLock::new(requested)),
             fit_budget,
+            last_fit: Arc::new(RwLock::new(initial_fit)),
             evidence_char_budget,
             session_token: Arc::new(uuid::Uuid::new_v4().to_string()),
             write_lock: Arc::new(AsyncMutex::new(())),
@@ -271,6 +274,23 @@ impl EvolveServer {
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))
     }
 
+    /// Record the latest auto-fit outcome (`None` for a pinned tier) so the
+    /// workspace UI can render the budget bar.
+    fn record_fit(&self, outcome: Option<FitOutcome>) -> Result<()> {
+        *self
+            .last_fit
+            .write()
+            .map_err(|_| anyhow::anyhow!("context lock poisoned"))? = outcome;
+        Ok(())
+    }
+
+    fn last_fit(&self) -> Result<Option<FitOutcome>> {
+        self.last_fit
+            .read()
+            .map(|fit| fit.clone())
+            .map_err(|_| anyhow::anyhow!("context lock poisoned"))
+    }
+
     fn refresh_graph(&self) -> Result<String> {
         let derived = GraphBuilder::new(self.project_root.join("src")).scan_src()?;
         let existing = self.graph_snapshot()?;
@@ -287,13 +307,11 @@ impl EvolveServer {
             .write()
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))?;
         let mut composer = ContextComposer::new(refreshed.clone());
-        composer.set_mode(fit_mode(
-            &requested,
-            &refreshed,
-            &self.project_root,
-            &self.fit_budget,
-        ));
+        let (mode, outcome) =
+            fit_mode(&requested, &refreshed, &self.project_root, &self.fit_budget);
+        composer.set_mode(mode);
         *current = composer;
+        self.record_fit(outcome)?;
         self.save_graph()?;
         Ok(revision)
     }
@@ -301,14 +319,16 @@ impl EvolveServer {
 
 /// Resolve a requested mode against the current graph. `Auto` measures the
 /// tier ladder and logs the decision — a warning when even Map overflows.
+/// Returns the resolved mode plus the fit outcome (`Some` for `Auto`, `None`
+/// for a pinned tier) so callers can surface the budget in the UI.
 fn fit_mode(
     requested: &RequestedMode,
     graph: &Graph,
     root: &Path,
     budget: &FitBudget,
-) -> ContextMode {
+) -> (ContextMode, Option<FitOutcome>) {
     match requested {
-        RequestedMode::Fixed(mode) => mode.clone(),
+        RequestedMode::Fixed(mode) => (mode.clone(), None),
         RequestedMode::Auto => {
             let outcome: FitOutcome = fit_tier(&TierMeasurer::new(graph, root), budget);
             if outcome.fits {
@@ -326,7 +346,7 @@ fn fit_mode(
                     outcome.budget_tokens
                 );
             }
-            outcome.mode
+            (outcome.mode.clone(), Some(outcome))
         }
     }
 }
@@ -341,10 +361,12 @@ async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("selfware");
+    let fit = server.last_fit().map_err(internal_error)?;
     let context_value = context_json(
         &context,
         server.context_length,
         &server.requested_mode().map_err(internal_error)?,
+        fit.as_ref(),
     )
     .map_err(internal_error)?;
     Ok(Json(json!({
@@ -383,10 +405,12 @@ async fn graph_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Jso
 
 async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let summary = server.context_summary().map_err(internal_error)?;
+    let fit = server.last_fit().map_err(internal_error)?;
     let mut value = context_json(
         &summary,
         server.context_length,
         &server.requested_mode().map_err(internal_error)?,
+        fit.as_ref(),
     )
     .map_err(internal_error)?;
     // The Map tier's cost is a compiled artifact, not a per-node sum, so the
@@ -898,13 +922,14 @@ async fn context_mode_handler(
         .requested_mode
         .write()
         .map_err(|_| internal_error(anyhow::anyhow!("context lock poisoned")))? = requested.clone();
-    let mode = match &requested {
-        RequestedMode::Fixed(mode) => mode.clone(),
+    let (mode, outcome) = match &requested {
+        RequestedMode::Fixed(mode) => (mode.clone(), None),
         RequestedMode::Auto => {
             let graph = server.graph_snapshot().map_err(internal_error)?;
             fit_mode(&requested, &graph, &server.project_root, &server.fit_budget)
         }
     };
+    server.record_fit(outcome).map_err(internal_error)?;
     let summary = {
         let mut composer = server
             .composer
@@ -913,8 +938,10 @@ async fn context_mode_handler(
         composer.set_mode(mode);
         composer.summary()
     };
+    let fit = server.last_fit().map_err(internal_error)?;
     Ok(Json(
-        context_json(&summary, server.context_length, &requested).map_err(internal_error)?,
+        context_json(&summary, server.context_length, &requested, fit.as_ref())
+            .map_err(internal_error)?,
     ))
 }
 
@@ -922,11 +949,21 @@ fn context_json(
     summary: &super::ContextSummary,
     context_length: usize,
     requested: &RequestedMode,
+    auto_fit: Option<&FitOutcome>,
 ) -> Result<Value> {
     let mut value = serde_json::to_value(summary)?;
     if let Some(object) = value.as_object_mut() {
         object.insert("context_length".to_string(), json!(context_length));
         object.insert("requested_mode".to_string(), json!(requested.name()));
+        let fit_value = match (requested, auto_fit) {
+            (RequestedMode::Auto, Some(fit)) => json!({
+                "measured_tokens": fit.measured_tokens,
+                "budget_tokens": fit.budget_tokens,
+                "fits": fit.fits,
+            }),
+            _ => Value::Null,
+        };
+        object.insert("auto_fit".to_string(), fit_value);
         object.insert(
             "fits_context_window".to_string(),
             json!(summary.estimated_tokens <= context_length),

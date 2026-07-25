@@ -220,6 +220,62 @@ textarea:focus-visible,
     opacity: 0.55;
 }
 
+.context-budget {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+    width: 160px;
+    min-width: 96px;
+}
+
+.context-budget[aria-hidden="true"] {
+    visibility: hidden;
+}
+
+.context-budget-fill {
+    width: 100%;
+    height: 4px;
+    border-radius: 2px;
+    background-color: var(--border);
+    background-image: linear-gradient(var(--accent), var(--accent));
+    background-repeat: no-repeat;
+    background-size: 0% 100%;
+    transition: background-size 0.2s ease;
+}
+
+.context-budget-fill.warn {
+    background-image: linear-gradient(var(--warning), var(--warning));
+}
+
+.context-budget-fill.over {
+    background-image: linear-gradient(var(--danger), var(--danger));
+}
+
+.context-budget-label {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-align: right;
+    white-space: nowrap;
+}
+
+.context-picker button.resolved {
+    position: relative;
+}
+
+.context-picker button.resolved::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 3px;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--accent);
+    transform: translateX(-50%);
+}
+
 .context-metrics {
     max-width: 430px;
     overflow: hidden;
