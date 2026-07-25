@@ -73,6 +73,17 @@ production call sites — only its own tests. Deleted along with the
 (roadmap Rec 2), rebuild it against a real ingestion path (web search / MCP
 payloads entering the agent loop) rather than resurrecting the heuristic scanner.
 
+## 9. ContextEnvelope (2026-07-25)
+
+Evidence paths now ship tier-projected content (Map=cards, Lite=skeletons,
+Compact=reduced source) from a content-hashed `ContextEnvelope`; preview and
+outbound responses share `content_hash`, and pinned over-budget tiers are
+rejected with typed 422. The composer manifest / chat system prompt / expand
+remain on the old path — candidates for the fast-follow unification.
+Follow-up: /api/assistant/task evidence is not yet tier-projected (it selects
+via task-aware neighborhoods with its own compact flag; extending the envelope
+there is a separate design).
+
 ## Open items carried over from the 2026-07-16 cleanup plan
 
 The 2026-07-16 repo-cleanup program (plan/spec under `docs/superpowers/`) is

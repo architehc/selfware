@@ -1,7 +1,13 @@
 # ContextEnvelope — Real Tier Projections for Evidence Paths — Design
 
 Date: 2026-07-25
-Status: Draft (awaiting user review)
+Status: Implemented (2026-07-25)
+
+Landed: `ContextEnvelope` (`src/evolve/envelope.rs`) ships tier-projected
+documents (Map=cards, Lite=skeletons, Compact=reduced source) to the review /
+preview evidence paths, bound by a shared `content_hash`; pinned over-budget
+tiers are rejected with typed 422; the measured==shipped invariant is pinned
+by `lite_envelope_tokens_match_tier_measurer`.
 Origin: External review P0 #1 (verified TRUE 2026-07-25): `Map`/`Lite`/`Compact`/`Full`
 select the same nodes and `select_review_evidence` serializes full document content
 regardless of tier — tiers only changed estimated numbers, not shipped bytes.

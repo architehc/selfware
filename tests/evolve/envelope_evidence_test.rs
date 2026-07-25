@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use selfware::config::Config;
-use selfware::evolve::{EvolveServer, Graph, Node};
+use selfware::evolve::{build_envelope, ContextMode, EvolveServer, Graph, Node, TierMeasurer};
 
 use crate::{edge, get_json, post_json};
 
@@ -211,6 +211,29 @@ fn review_chars(review: &Value) -> usize {
         .iter()
         .map(|item| item["excerpt"].as_str().unwrap().len())
         .sum()
+}
+
+/// Invariant: the Lite tier the TierMeasurer budgets for is exactly what the
+/// ContextEnvelope ships. Both project readable `.rs` sources through
+/// `extract_rust_skeleton`, and the skeleton's `token_count` is defined as
+/// `estimate_content_tokens(render())` — the same call the envelope makes per
+/// document — so the sums must match token-for-token. Non-`.rs` nodes are the
+/// documented fallback gap (measurer: 0.18 signature fraction; envelope:
+/// skips them); this fixture is all-`.rs` with readable sources, so neither
+/// fallback fires and the equality is exact.
+#[test]
+fn lite_envelope_tokens_match_tier_measurer() {
+    let (dir, graph) = fixture();
+    let included_ids: Vec<String> = graph.nodes.iter().map(|n| n.id.clone()).collect();
+
+    let measurer = TierMeasurer::new(&graph, dir.path());
+    let measured = measurer.measure(&ContextMode::Lite);
+    let envelope = build_envelope(&graph, &ContextMode::Lite, &included_ids, "rev", |rel| {
+        std::fs::read_to_string(dir.path().join(rel)).ok()
+    });
+
+    assert_eq!(envelope.documents.len(), included_ids.len());
+    assert_eq!(envelope.total_tokens, measured);
 }
 
 #[tokio::test]
