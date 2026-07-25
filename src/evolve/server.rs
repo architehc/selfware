@@ -25,7 +25,7 @@ use super::assistant::{
 use super::context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer};
 use super::deletion::preview_deletion;
 use super::diagnostics::{AnalysisKind, DiagnosticsEngine};
-use super::envelope::{build_envelope_with_root, ContextEnvelope};
+use super::envelope::{build_envelope_with_root, ContextEnvelope, ProjectedDocument};
 use super::git::GitEngine;
 use super::readiness::ReadinessEngine;
 use super::{
@@ -1571,10 +1571,12 @@ async fn assistant_evidence_preview_handler(
             })
         })
         .collect::<Vec<_>>();
+    let content_hash = envelope_content_hash(&server)?;
     Ok(Json(json!({
         "scope": body.scope.name(),
         "selected_document_hash": body.expected_hash,
         "graph_revision": selection.graph_revision,
+        "content_hash": content_hash,
         "indexed_mode": context.mode,
         "indexed_tokens": context.estimated_tokens,
         "context_length": server.context_length,
@@ -1629,12 +1631,14 @@ async fn assistant_review_handler(
         .review(&body.question, selection.evidence, selection.complete)
         .await
         .map_err(internal_error)?;
+    let content_hash = envelope_content_hash(&server)?;
     Ok(Json(json!({
         "review": review,
         "context": {
             "requested_mode": body.mode,
             "selected_document_hash": body.expected_hash,
             "graph_revision": selection.graph_revision,
+            "content_hash": content_hash,
             "indexed_mode": context.mode,
             "indexed_tokens": context.estimated_tokens,
             "included_nodes": context.included.len(),
@@ -1762,9 +1766,11 @@ async fn assistant_task_handler(
         .review_with_orientation(&body.question, evidence, complete, orientation.as_deref())
         .await
         .map_err(internal_error)?;
+    let content_hash = envelope_content_hash(&server)?;
     Ok(Json(json!({
         "task_kind": body.kind,
         "target": body.target,
+        "content_hash": content_hash,
         "selected_files": selected,
         "orientation": {
             "enabled": orientation.is_some(),
@@ -2180,6 +2186,29 @@ fn select_review_evidence(
         .map(|document| document.path.clone())
         .collect();
     let mut read_failures = Vec::new();
+    // Tier-projected context: neighborhood documents ship the cached
+    // envelope's projected content instead of a fresh full read, but only
+    // when the envelope was built from this exact graph revision. The
+    // reviewed document already leads `documents` (fresh full read, hash
+    // validated by the caller); the `logical_paths` dedup drops its envelope
+    // twin below.
+    let envelope = server.cached_envelope()?;
+    let envelope_docs: HashMap<&str, &ProjectedDocument> = match envelope.as_ref() {
+        Some(envelope) if envelope.graph_revision == selection_revision => envelope
+            .documents
+            .iter()
+            .map(|doc| (doc.id.as_str(), doc))
+            .collect(),
+        Some(envelope) => {
+            tracing::debug!(
+                "evidence: cached envelope revision {} != current {}; using fresh reads",
+                envelope.graph_revision,
+                selection_revision
+            );
+            HashMap::new()
+        }
+        None => HashMap::new(),
+    };
     for id in priority_ids {
         let Some(path) = graph
             .nodes
@@ -2189,6 +2218,22 @@ fn select_review_evidence(
         else {
             continue;
         };
+        if let Some(projected) = envelope_docs.get(id.as_str()) {
+            let document = DocumentSnapshot {
+                path: projected.path.clone(),
+                content: projected.content.clone(),
+                hash: format!("{:x}", Sha256::digest(projected.content.as_bytes())),
+                lines: projected.content.lines().count(),
+                language: language_for_projected(&projected.path),
+            };
+            if logical_paths.insert(document.path.clone()) {
+                documents.push(document);
+            }
+            continue;
+        }
+        if !envelope_docs.is_empty() {
+            tracing::debug!("evidence: node {id} missing from cached envelope; using fresh read");
+        }
         match server.ide.read_graph_document(path) {
             Ok(document) if logical_paths.insert(document.path.clone()) => documents.push(document),
             Ok(_) => {}
@@ -2273,6 +2318,26 @@ fn renumber_evidence(evidence: &mut [super::assistant::GroundingEvidence]) {
     for (index, item) in evidence.iter_mut().enumerate() {
         item.id = format!("E{}", index + 1);
     }
+}
+
+/// Language tag for an envelope-projected document. Only `rust` is load
+/// bearing downstream (Full-mode cfg(test) exclusion); everything else is
+/// chunked without exclusions either way.
+fn language_for_projected(path: &str) -> String {
+    if path.ends_with(".rs") {
+        "rust".to_string()
+    } else {
+        "plaintext".to_string()
+    }
+}
+
+/// The cached envelope's content hash for response payloads (`null` when no
+/// envelope has been built yet).
+fn envelope_content_hash(server: &EvolveServer) -> ApiResult<Value> {
+    Ok(match server.cached_envelope().map_err(internal_error)? {
+        Some(envelope) => json!(envelope.content_hash),
+        None => Value::Null,
+    })
 }
 
 async fn git_status_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {

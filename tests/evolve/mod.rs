@@ -19,6 +19,7 @@ mod context_test;
 mod dedup_test;
 mod deletion_test;
 mod diagnostics_test;
+mod envelope_evidence_test;
 mod gate_test;
 mod git_test;
 mod graph_test;
