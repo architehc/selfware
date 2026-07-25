@@ -29,6 +29,7 @@ DEFAULT_MODELS=(
   "minimax/minimax-m3"
   "qwen/qwen3.7-max"
   "qwen/qwen3.6-27b"
+  "google/gemma-4-31b-it"
 )
 
 # All 7 checks emitted by endpoint_smoke (multimodal only runs with --image).
