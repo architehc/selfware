@@ -30,6 +30,7 @@ DEFAULT_MODELS=(
   "qwen/qwen3.7-max"
   "qwen/qwen3.6-27b"
   "google/gemma-4-31b-it"
+  "google/gemma-4-26b-a4b-it:free"
 )
 
 # All 7 checks emitted by endpoint_smoke (multimodal only runs with --image).
