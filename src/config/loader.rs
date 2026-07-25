@@ -11,6 +11,8 @@ const TOP_LEVEL_CONFIG_KEYS: &[&str] = &[
     "model",
     "max_tokens",
     "context_length",
+    "context_mode",
+    "context_fit_ratio",
     "temperature",
     "api_key",
     "execution_mode",
