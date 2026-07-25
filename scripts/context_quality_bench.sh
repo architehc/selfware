@@ -29,7 +29,7 @@ SYSTEM_PROMPT="You answer questions about a codebase using only the provided con
 # question|expected_substring (case-insensitive match on the response)
 QUESTIONS=(
   "Which function resolves the auto context mode to a concrete tier?|fit_tier"
-  "What type does that function return?|FitOutcome"
+  "What type does the fit_tier function return?|FitOutcome"
   "Which struct measures the real token cost of each context tier?|TierMeasurer"
   "Which module strips comments and cfg(test) blocks to reduce source?|context_reduce"
   "What does the Map tier emit for each component?|card"
@@ -80,7 +80,7 @@ ask() {
     --arg q "$question" \
     '{
        model: $model,
-       max_tokens: 200,
+       max_tokens: 2048,
        temperature: 0,
        messages: [
          {role: "system", content: $sys},
@@ -165,11 +165,15 @@ elif [ "$CORRECT_LITE" -gt "$CORRECT_MAP" ]; then
 else
   takeaway="Map outperforms Lite (${CORRECT_MAP}/${n_questions} vs ${CORRECT_LITE}/${n_questions}) — the component index alone preserves answer quality better than raw source."
 fi
+error_count="$(printf '%s\n' "${ROWS[@]}" | grep -c 'ERROR' || true)"
+if [ "$error_count" -gt 0 ]; then
+  takeaway="WARNING: ${error_count} call(s) errored — results incomplete, re-run before trusting them. ${takeaway}"
+fi
 
 {
   echo "# Context Quality Bench — 2026-07-25"
   echo
-  echo "Judge model: \`${JUDGE_MODEL}\` (max_tokens=200, temperature=0)."
+  echo "Judge model: \`${JUDGE_MODEL}\` (max_tokens=2048, temperature=0)."
   echo "Artifacts: \`$TIER_DIR/{map,lite}.txt\` from \`examples/tier_bench.rs --dump\`."
   echo
   echo "## Per-tier score"
