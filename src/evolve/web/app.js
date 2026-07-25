@@ -3244,14 +3244,18 @@ async function runReview() {
         result.className = 'inspector-result';
         result.replaceChildren(renderStructured(payload));
         appendOutput(`Grounded review: ${path}`, payload);
-        const evidenceComplete = payload?.review?.evidence_complete === true
-            && payload?.context?.evidence_complete !== false;
-        setGlobalStatus(
-            evidenceComplete ? 'Grounded review response received' : 'Grounded review used partial evidence',
-            evidenceComplete ? 'success' : 'warning',
-        );
-        if (!evidenceComplete) {
-            toast('Grounded review completed with explicitly partial evidence.', 'warning');
+        const trust = payload?.review?.trust_state
+            || payload?.trust_state
+            || ((payload?.review?.evidence_complete === true
+                && payload?.context?.evidence_complete !== false) ? 'structural' : 'degraded');
+        if (trust === 'degraded') {
+            setGlobalStatus('Grounded review degraded (partial evidence or rejected items)', 'warning');
+            toast('Grounded review degraded — check trust_state.', 'warning');
+        } else {
+            setGlobalStatus(
+                trust === 'verified' ? 'Grounded review (verified)' : 'Grounded review (structural only)',
+                'success',
+            );
         }
     } catch (error) {
         if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
