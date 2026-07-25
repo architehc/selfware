@@ -109,6 +109,11 @@ const state = {
     summaryRequest: 0,
     context: { mode: null, files: null, tokens: null },
     contextSizes: null,
+    contextCards: null,
+    contextCardsLoading: false,
+    componentChecked: new Set(),
+    componentChecksSeeded: false,
+    componentFilter: '',
     git: null,
     branchPreview: null,
     problems: [],
@@ -371,6 +376,12 @@ async function initialize() {
     } else {
         setGlobalStatus(`${failures.length} workspace request${failures.length === 1 ? '' : 's'} failed`, 'error');
     }
+
+    // Deep-link: open a specific inspector tab, e.g. index.html#inspector=context
+    const inspectorMatch = location.hash.match(/^#inspector=(\w+)$/);
+    if (inspectorMatch && $(`.inspector-tab[data-inspector="${inspectorMatch[1]}"]`)) {
+        selectInspector(inspectorMatch[1]);
+    }
 }
 
 function wireEvents() {
@@ -391,6 +402,12 @@ function wireEvents() {
     $('#node-context-action')?.addEventListener('click', toggleSelectedNodeContext);
     $('#context-selection-isolate')?.addEventListener('click', toggleSelectionView);
     $('#context-selection-clear')?.addEventListener('click', clearContextSelection);
+    $('#component-filter')?.addEventListener('input', (event) => {
+        state.componentFilter = event.target.value || '';
+        renderComponentChecklist();
+    });
+    $('#component-apply')?.addEventListener('click', () => applyComponentContext([...state.componentChecked]));
+    $('#component-clear')?.addEventListener('click', () => applyComponentContext([]));
 
     $$('.inspector-tab[data-inspector]').forEach((button) => {
         button.addEventListener('click', () => selectInspector(button.dataset.inspector));
@@ -594,7 +611,7 @@ function normalizeContextMode(mode) {
 }
 
 function contextLabel(mode) {
-    return { auto: 'Auto', map: 'Map', lite: 'Lite', compact: 'Compact', full: 'Full', full_extended: 'Full Extended' }[mode] || mode || 'Unknown';
+    return { auto: 'Auto', map: 'Map', lite: 'Lite', compact: 'Compact', full: 'Full', full_extended: 'Full Extended', custom: 'Custom' }[mode] || mode || 'Unknown';
 }
 
 function normalizeContext(payload) {
@@ -677,6 +694,7 @@ function renderContext(previous = null) {
     }
 
     renderContextInspector();
+    if (state.contextCards) renderComponentChecklist();
 }
 
 // When the requested mode is 'auto', light the Auto button as active and mark
@@ -810,10 +828,180 @@ function renderContextInspector() {
     }
 }
 
+// --- Per-component context selection (custom mode) -------------------------
+
+// Lazily fetch the component cards (name, path, lite/full token sizes) once;
+// the map payload is large, so we only pull it when the Context tab opens.
+async function ensureContextCards() {
+    if (state.contextCards || state.contextCardsLoading) return;
+    state.contextCardsLoading = true;
+    try {
+        const payload = await request('/api/context/map');
+        state.contextCards = Array.isArray(payload?.cards) ? payload.cards : [];
+        renderComponentChecklist();
+    } catch (error) {
+        appendOutput('Context map unavailable', formatError(error));
+        renderComponentChecklist();
+    } finally {
+        state.contextCardsLoading = false;
+    }
+}
+
+// When the server reports a custom selection, the checklist mirrors it.
+// Called after every /api/context load and after Apply/Clear responses.
+function syncComponentChecksWithServer() {
+    if (state.context.mode !== 'custom') return;
+    state.componentChecked = new Set(state.context.includedIds || []);
+    state.componentChecksSeeded = true;
+    if (state.contextCards) renderComponentChecklist();
+}
+
+// First render only: adopt the server's custom set if active, otherwise carry
+// over the graph "Add to Context" selection. Independent afterwards.
+function seedComponentChecks() {
+    if (state.componentChecksSeeded) return;
+    state.componentChecksSeeded = true;
+    if (state.context.mode === 'custom') {
+        state.componentChecked = new Set(state.context.includedIds || []);
+        return;
+    }
+    const cardIds = new Set((state.contextCards || []).map((card) => String(card.component || '')));
+    state.componentChecked = new Set([...state.contextSelection].filter((id) => cardIds.has(id)));
+}
+
+function renderComponentChecklist() {
+    const list = $('#component-list');
+    if (!list) return;
+    const badge = $('#component-custom-badge');
+    badge?.classList.toggle('hidden', state.context.mode !== 'custom');
+
+    list.replaceChildren();
+    if (!state.contextCards) {
+        const note = document.createElement('div');
+        note.className = 'pane-state';
+        note.textContent = state.contextCardsLoading ? 'Loading component map...' : 'Component map unavailable.';
+        list.appendChild(note);
+    } else {
+        seedComponentChecks();
+        const filter = (state.componentFilter || '').trim().toLowerCase();
+        const cards = [...state.contextCards]
+            .filter((card) => card && card.component)
+            .sort((a, b) => {
+                // Checked components float to the top so the active selection
+                // is always visible; within each group, cheapest-first order
+                // is replaced by lite-cost descending for scannability.
+                const aChecked = state.componentChecked.has(a.component) ? 0 : 1;
+                const bChecked = state.componentChecked.has(b.component) ? 0 : 1;
+                if (aChecked !== bChecked) return aChecked - bChecked;
+                return (Number(b.lite_tokens) || 0) - (Number(a.lite_tokens) || 0);
+            });
+        for (const card of cards) {
+            const id = String(card.component);
+            const path = String(card.path || '');
+            if (filter && !id.toLowerCase().includes(filter) && !path.toLowerCase().includes(filter)) continue;
+
+            const row = document.createElement('label');
+            row.className = 'component-row';
+            row.title = path ? `${id} — ${path}` : id;
+
+            const box = document.createElement('input');
+            box.type = 'checkbox';
+            box.checked = state.componentChecked.has(id);
+            box.addEventListener('change', () => {
+                if (box.checked) state.componentChecked.add(id);
+                else state.componentChecked.delete(id);
+                updateComponentTotals();
+                updateComponentButtons();
+            });
+
+            const name = document.createElement('span');
+            name.className = 'component-name';
+            name.textContent = id.replace(/^crate::/, '');
+
+            const tokens = document.createElement('span');
+            tokens.className = 'component-tokens';
+            tokens.textContent = `${formatTokensShort(card.lite_tokens)} lite · ${formatTokensShort(card.tokens)} full`;
+
+            row.append(box, name, tokens);
+            list.appendChild(row);
+        }
+        if (!list.children.length) {
+            const note = document.createElement('div');
+            note.className = 'pane-state';
+            note.textContent = 'No components match the filter.';
+            list.appendChild(note);
+        }
+    }
+    updateComponentTotals();
+    updateComponentButtons();
+}
+
+function updateComponentTotals() {
+    const el = $('#component-totals');
+    if (!el) return;
+    const byId = new Map((state.contextCards || []).map((card) => [String(card.component || ''), card]));
+    let count = 0;
+    let lite = 0;
+    let full = 0;
+    for (const id of state.componentChecked) {
+        const card = byId.get(id);
+        if (!card) continue;
+        count += 1;
+        lite += Number(card.lite_tokens) || 0;
+        full += Number(card.tokens) || 0;
+    }
+    let text = `${count} component${count === 1 ? '' : 's'} · ${formatTokensShort(lite)} lite · ${formatTokensShort(full)} full`;
+    const limit = Number(state.workspace?.context_length) || 0;
+    if (limit > 0) text += ` · ${Math.round((lite / limit) * 100)}% of window`;
+    el.textContent = text;
+}
+
+function updateComponentButtons() {
+    const apply = $('#component-apply');
+    const clear = $('#component-clear');
+    if (!apply) return;
+    const isCustom = state.context.mode === 'custom';
+    const serverSet = new Set(isCustom ? (state.context.includedIds || []) : []);
+    const matchesServer = state.componentChecked.size === serverSet.size
+        && [...state.componentChecked].every((id) => serverSet.has(id));
+    apply.disabled = matchesServer || (state.componentChecked.size === 0 && !isCustom);
+    clear?.classList.toggle('hidden', !isCustom);
+}
+
+// Apply (or clear, with an empty list) the checked set as the active context.
+async function applyComponentContext(components) {
+    const apply = $('#component-apply');
+    const clear = $('#component-clear');
+    if (apply) apply.disabled = true;
+    if (clear) clear.disabled = true;
+    const previous = { ...state.context };
+    setGlobalStatus(components.length ? 'Applying custom context' : 'Clearing custom context', 'working');
+    try {
+        const response = await request('/api/context/custom', {
+            method: 'POST',
+            body: { components },
+        });
+        state.context = normalizeContext(response);
+        syncComponentChecksWithServer();
+        renderContext(previous);
+        renderComponentChecklist();
+        appendOutput(components.length ? 'Custom context applied' : 'Custom context cleared', response);
+        setGlobalStatus(`Context: ${contextLabel(state.context.mode)}`, 'success');
+    } catch (error) {
+        appendOutput('Custom context change failed', formatError(error));
+        toast(`Custom context failed: ${formatError(error)}`, 'error');
+        setGlobalStatus('Custom context change failed', 'error');
+    } finally {
+        if (clear) clear.disabled = false;
+        updateComponentButtons();
+    }
+}
+
 async function loadContext() {
     try {
         const payload = await request('/api/context');
         state.context = normalizeContext(payload);
+        syncComponentChecksWithServer();
         renderContext();
         loadContextSizes();
         return payload;
@@ -1539,6 +1727,10 @@ function selectInspector(name) {
     });
     if (name === 'orientation' && !state.orientationLoaded) loadOrientation();
     if (name === 'pairs' && !state.pairsLoaded) loadPairs();
+    if (name === 'context') {
+        ensureContextCards();
+        renderComponentChecklist();
+    }
 }
 
 function selectBottomView(name) {

@@ -2257,6 +2257,99 @@ textarea:focus-visible,
 .selection-chip:hover { border-color: var(--danger); color: var(--danger); }
 .command-button.compact.secondary { background: transparent; border-color: var(--border, #2c2c2c); }
 
+/* Per-component context selection checklist (Context inspector tab) */
+.component-selection {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border, #262626);
+}
+.component-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.component-head strong { font-size: 12px; color: var(--accent-strong); }
+.component-badge {
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: var(--surface-active);
+    color: var(--accent);
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+.component-filter {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    padding: 0 8px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 12px;
+}
+.component-filter::placeholder { color: var(--faint); }
+.component-totals {
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.component-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+}
+.component-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 26px;
+    padding: 0 8px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+    font-size: 12px;
+}
+.component-row:last-child { border-bottom: 0; }
+.component-row:hover { background: var(--surface-hover); }
+.component-row input[type="checkbox"] {
+    flex: 0 0 auto;
+    margin: 0;
+    accent-color: var(--accent);
+}
+.component-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+.component-tokens {
+    flex: 0 0 auto;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.component-actions {
+    display: flex;
+    gap: 6px;
+}
+.component-actions .command-button { margin-top: 0; }
+
 /* Logical layer — capability inspector card */
 .capability-card { padding: 4px 0; }
 .capability-purpose {

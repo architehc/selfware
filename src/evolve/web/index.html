@@ -211,6 +211,19 @@
                 </section>
 
                 <section id="inspector-context" class="inspector-view hidden" role="tabpanel">
+                    <div id="component-selection" class="component-selection">
+                        <div class="component-head">
+                            <strong>Components</strong>
+                            <span id="component-custom-badge" class="component-badge hidden">custom active</span>
+                            <input id="component-filter" class="component-filter" type="text" placeholder="Filter components..." aria-label="Filter components by name or path">
+                        </div>
+                        <div id="component-totals" class="component-totals">0 components · 0 lite · 0 full</div>
+                        <div id="component-list" class="component-list" role="group" aria-label="Context components"></div>
+                        <div class="component-actions">
+                            <button id="component-apply" class="command-button compact primary" type="button" disabled title="Use the checked components as the active context">Apply as context</button>
+                            <button id="component-clear" class="command-button compact secondary hidden" type="button" title="Clear the custom selection and return to auto context">Clear</button>
+                        </div>
+                    </div>
                     <div id="context-selection-panel" class="context-selection-panel hidden">
                         <div class="context-selection-head">
                             <strong id="context-selection-total">0 components · 0 tokens</strong>
