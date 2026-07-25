@@ -76,6 +76,20 @@ macro_rules! cli_println {
     };
 }
 
+/// Like [`cli_println!`] but without a trailing newline and with an immediate
+/// flush — for inline prompts (`Execute? [...]: `). Takes the same output lock
+/// so the prompt can never interleave with concurrent managed output.
+macro_rules! cli_prompt {
+    ($($arg:tt)*) => {
+        if !crate::output::should_suppress_output() {
+            let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            print!($($arg)*);
+            use std::io::Write as _;
+            let _ = std::io::stdout().flush();
+        }
+    };
+}
+
 mod assistant_response;
 mod checkpointing;
 pub mod compression;

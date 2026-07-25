@@ -48,6 +48,12 @@ pub(super) async fn read_line_pausing_esc_with_deadline(
     while !esc_pause_ack.load(Ordering::Acquire) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
     }
+    // The ack wait can time out with raw mode still active; reading then means
+    // the user's keystrokes are not echoed and Enter never prints a newline, so
+    // the next output glues onto the prompt line ("Execute? ...: ✓ ..."). Force
+    // cooked mode before reading — idempotent, and the listener re-enables raw
+    // mode itself after unpause.
+    let _ = crossterm::terminal::disable_raw_mode();
 
     let mut response = String::new();
     let stdin = tokio::io::stdin();
