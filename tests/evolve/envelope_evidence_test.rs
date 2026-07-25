@@ -286,3 +286,63 @@ async fn selected_document_stays_full_fidelity_in_lite_mode() {
         "the neighbor's body lines must be skeletonized away in lite mode"
     );
 }
+
+/// Regression: graph node paths may be absolute (the selected-node lookup and
+/// the fresh-read branch both normalize via `graph_logical_path`, but the
+/// envelope stores the raw node path). Without normalizing the projected
+/// document's path, the selected document's envelope twin bypasses the
+/// `logical_paths` dedup and the reviewed file ships twice.
+#[tokio::test]
+async fn absolute_node_path_envelope_twin_does_not_duplicate_selected_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("reviewed.rs"), REVIEWED_RS).unwrap();
+    std::fs::write(src.join("neighbor.rs"), NEIGHBOR_RS).unwrap();
+    let mut reviewed = Node::code(
+        "crate::reviewed",
+        src.join("reviewed.rs").to_string_lossy().as_ref(),
+    );
+    reviewed.tokens = selfware::token_count::estimate_content_tokens(REVIEWED_RS);
+    let mut neighbor = Node::code("crate::neighbor", "src/neighbor.rs");
+    neighbor.tokens = selfware::token_count::estimate_content_tokens(NEIGHBOR_RS);
+    let graph = Graph {
+        nodes: vec![reviewed, neighbor],
+        edges: vec![edge("crate::reviewed", "crate::neighbor")],
+    };
+    let mut config = Config::default();
+    config.context_length = 1_000_000;
+    config.context_mode = "full".to_string();
+    let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
+    let expected_hash = reviewed_document_hash(&server).await;
+
+    let (status, body) = post_json(
+        &server,
+        "/api/assistant/evidence/preview",
+        json!({
+            "path": "src/reviewed.rs",
+            "expected_hash": expected_hash,
+            "mode": "full",
+            "scope": "active_context"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {body}");
+    let preview: Value = serde_json::from_str(&body).unwrap();
+
+    assert_eq!(
+        preview["candidate_files"].as_u64().unwrap(),
+        2,
+        "the selected document's envelope twin must dedup, not ship twice: {preview}"
+    );
+    let absolute_path = src.join("reviewed.rs").to_string_lossy().to_string();
+    assert!(
+        preview["manifest"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["path"].as_str() != Some(absolute_path.as_str())),
+        "evidence chunks must emit the normalized logical path, not the raw node path: {preview}"
+    );
+}

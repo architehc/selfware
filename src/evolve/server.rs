@@ -1512,6 +1512,10 @@ struct EvidenceSelection {
     excluded_test_ranges: usize,
     excluded_test_lines: usize,
     graph_revision: String,
+    /// True only when the cached envelope passed the revision gate and
+    /// actually backed the selected evidence; responses must report
+    /// `content_hash: null` otherwise.
+    envelope_authoritative: bool,
 }
 
 #[derive(Deserialize)]
@@ -1571,7 +1575,13 @@ async fn assistant_evidence_preview_handler(
             })
         })
         .collect::<Vec<_>>();
-    let content_hash = envelope_content_hash(&server)?;
+    // Only claim the envelope hash when the envelope actually backed the
+    // evidence (revision gate passed); otherwise report null.
+    let content_hash = if selection.envelope_authoritative {
+        envelope_content_hash(&server)?
+    } else {
+        Value::Null
+    };
     Ok(Json(json!({
         "scope": body.scope.name(),
         "selected_document_hash": body.expected_hash,
@@ -1626,12 +1636,19 @@ async fn assistant_review_handler(
         ));
     }
     revalidate_document_hash(&server, &body.path, &body.expected_hash)?;
+    let envelope_authoritative = selection.envelope_authoritative;
     let review = server
         .assistant
         .review(&body.question, selection.evidence, selection.complete)
         .await
         .map_err(internal_error)?;
-    let content_hash = envelope_content_hash(&server)?;
+    // Only claim the envelope hash when the envelope actually backed the
+    // evidence (revision gate passed); otherwise report null.
+    let content_hash = if envelope_authoritative {
+        envelope_content_hash(&server)?
+    } else {
+        Value::Null
+    };
     Ok(Json(json!({
         "review": review,
         "context": {
@@ -1766,11 +1783,12 @@ async fn assistant_task_handler(
         .review_with_orientation(&body.question, evidence, complete, orientation.as_deref())
         .await
         .map_err(internal_error)?;
-    let content_hash = envelope_content_hash(&server)?;
+    // Task evidence ships fresh reads only; the cached envelope never backs
+    // it, so the response must not claim the envelope's content hash.
     Ok(Json(json!({
         "task_kind": body.kind,
         "target": body.target,
-        "content_hash": content_hash,
+        "content_hash": Value::Null,
         "selected_files": selected,
         "orientation": {
             "enabled": orientation.is_some(),
@@ -2132,6 +2150,9 @@ fn select_review_evidence(
             excluded_test_ranges: 0,
             excluded_test_lines: 0,
             graph_revision: selection_revision,
+            // Selected-document scope ships only the fresh read; the envelope
+            // backs nothing here.
+            envelope_authoritative: false,
         });
     }
 
@@ -2193,6 +2214,9 @@ fn select_review_evidence(
     // validated by the caller); the `logical_paths` dedup drops its envelope
     // twin below.
     let envelope = server.cached_envelope()?;
+    let envelope_authoritative = envelope
+        .as_ref()
+        .is_some_and(|envelope| envelope.graph_revision == selection_revision);
     let envelope_docs: HashMap<&str, &ProjectedDocument> = match envelope.as_ref() {
         Some(envelope) if envelope.graph_revision == selection_revision => envelope
             .documents
@@ -2207,7 +2231,10 @@ fn select_review_evidence(
             );
             HashMap::new()
         }
-        None => HashMap::new(),
+        None => {
+            tracing::debug!("evidence: no cached envelope; using fresh reads");
+            HashMap::new()
+        }
     };
     for id in priority_ids {
         let Some(path) = graph
@@ -2219,19 +2246,32 @@ fn select_review_evidence(
             continue;
         };
         if let Some(projected) = envelope_docs.get(id.as_str()) {
-            let document = DocumentSnapshot {
-                path: projected.path.clone(),
-                content: projected.content.clone(),
-                hash: format!("{:x}", Sha256::digest(projected.content.as_bytes())),
-                lines: projected.content.lines().count(),
-                language: language_for_projected(&projected.path),
-            };
-            if logical_paths.insert(document.path.clone()) {
-                documents.push(document);
+            // Normalize through the same logical-path mapping the fresh-read
+            // branch gets from `read_graph_document`, so the selected
+            // document's envelope twin dedups against it. If the envelope path
+            // cannot be normalized, fall back to a fresh full read (same as a
+            // per-doc envelope miss).
+            match server.ide.graph_logical_path(&projected.path) {
+                Ok(path) => {
+                    let document = DocumentSnapshot {
+                        language: language_for_projected(&path),
+                        lines: projected.content.lines().count(),
+                        hash: format!("{:x}", Sha256::digest(projected.content.as_bytes())),
+                        content: projected.content.clone(),
+                        path,
+                    };
+                    if logical_paths.insert(document.path.clone()) {
+                        documents.push(document);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        "evidence: node {id} envelope path failed to normalize ({error}); using fresh read"
+                    );
+                }
             }
-            continue;
-        }
-        if !envelope_docs.is_empty() {
+        } else if !envelope_docs.is_empty() {
             tracing::debug!("evidence: node {id} missing from cached envelope; using fresh read");
         }
         match server.ide.read_graph_document(path) {
@@ -2311,6 +2351,7 @@ fn select_review_evidence(
         excluded_test_ranges,
         excluded_test_lines,
         graph_revision: selection_revision,
+        envelope_authoritative,
     })
 }
 
