@@ -1243,3 +1243,86 @@ async fn test_vector_store_search_filter_does_not_starve() {
         );
     }
 }
+
+// ─── HttpEmbeddingProvider auth ─────────────────────────────────────────────
+
+/// Fake /embeddings endpoint that requires `Bearer secret-key` and returns a
+/// fixed 3-dim vector. Returns the base URL (server runs on a spawned task).
+async fn fake_embedding_server() -> String {
+    use axum::http::HeaderMap;
+    use axum::{routing::post, Json, Router};
+
+    async fn handler(
+        headers: HeaderMap,
+    ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+        let authed = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            == Some("Bearer secret-key");
+        if !authed {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
+        Ok(Json(serde_json::json!({
+            "data": [{"embedding": [0.1, 0.2, 0.3]}]
+        })))
+    }
+
+    let app = Router::new().route("/embeddings", post(handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn http_provider_sends_bearer_key_and_reads_vector() {
+    let base = fake_embedding_server().await;
+    let provider = HttpEmbeddingProvider::new(&base, "test-model", 3)
+        .with_api_key(Some("secret-key".to_string()));
+    let v = provider.embed("hello").await.unwrap();
+    assert_eq!(v, vec![0.1, 0.2, 0.3]);
+}
+
+#[tokio::test]
+async fn http_provider_without_key_gets_auth_error() {
+    let base = fake_embedding_server().await;
+    let provider = HttpEmbeddingProvider::new(&base, "test-model", 3);
+    let err = provider.embed("hello").await.unwrap_err();
+    assert!(err.to_string().contains("401"), "unexpected error: {err}");
+}
+
+#[tokio::test]
+#[ignore = "live OpenRouter call; run with OPENROUTER_API_KEY set"]
+async fn live_openrouter_qwen3_embedding() {
+    let key = std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY");
+    let provider = HttpEmbeddingProvider::new(
+        "https://openrouter.ai/api/v1",
+        "qwen/qwen3-embedding-8b",
+        4096,
+    )
+    .with_api_key(Some(key));
+    let add = provider
+        .embed("fn add(a: i32, b: i32) -> i32 { a + b }")
+        .await
+        .unwrap();
+    let sum = provider
+        .embed("pub fn sum(x: i32, y: i32) -> i32 { x + y }")
+        .await
+        .unwrap();
+    let weather = provider.embed("sunny with a chance of rain").await.unwrap();
+    assert_eq!(add.len(), 4096);
+    let cos = |a: &[f32], b: &[f32]| {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        dot / (na * nb)
+    };
+    assert!(
+        cos(&add, &sum) > 0.8,
+        "semantically equivalent code should cluster"
+    );
+    assert!(
+        cos(&add, &weather) < 0.5,
+        "unrelated text should be far from code"
+    );
+}

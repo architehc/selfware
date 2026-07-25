@@ -3516,12 +3516,20 @@ impl Agent {
         let provider = if let Some(profile) = self.config.resolve_model(Some("embedding")) {
             // Use HTTP embedding backend from [models.embedding] config
             let dim = profile.context_length.min(4096); // context_length doubles as dimension hint
+            // Profile key wins; fall back to the top-level api_key (e.g. the
+            // same OpenRouter key usually serves both chat and embeddings).
+            let api_key = profile
+                .api_key
+                .as_ref()
+                .or(self.config.api_key.as_ref())
+                .map(|k| k.expose().to_string());
             Arc::new(EmbeddingBackend::Http(
                 crate::analysis::vector_store::HttpEmbeddingProvider::new(
                     &profile.endpoint,
                     &profile.model,
                     if dim > 0 && dim <= 4096 { dim } else { 768 },
-                ),
+                )
+                .with_api_key(api_key),
             ))
         } else {
             Arc::new(EmbeddingBackend::TfIdf(TfIdfEmbeddingProvider::default()))

@@ -414,6 +414,25 @@ context_length = 32768
 
 A `"default"` profile is auto-generated from the top-level `endpoint`/`model`/`api_key` fields if not explicitly defined.
 
+### `[models.embedding]` -- Vector Search Embeddings
+
+The RAG index (`/rag` in chat) embeds code chunks with an OpenAI-compatible
+`/v1/embeddings` endpoint when an `[models.embedding]` profile is defined,
+falling back to offline TF-IDF otherwise. `context_length` doubles as the
+embedding dimension hint (clamped to ≤ 4096). The profile's `api_key` is sent
+as a bearer token; if unset, the top-level `api_key` is used (e.g. the same
+OpenRouter key usually serves both chat and embeddings).
+
+```toml
+[models.embedding]
+endpoint = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3-embedding-8b"
+context_length = 4096   # embedding dimension
+```
+
+Verified against OpenRouter `qwen/qwen3-embedding-8b` (4096-dim): semantically
+equivalent code clusters at cos ≈ 0.88 vs ≈ 0.27 for unrelated text.
+
 Profile fields:
 - `endpoint` -- API endpoint URL
 - `model` -- model identifier

@@ -1336,6 +1336,7 @@ pub struct HttpEmbeddingProvider {
     endpoint: String,
     model: String,
     dimension: usize,
+    api_key: Option<String>,
     client: reqwest::Client,
 }
 
@@ -1350,7 +1351,23 @@ impl HttpEmbeddingProvider {
             endpoint: endpoint.into(),
             model: model.into(),
             dimension,
+            api_key: None,
             client: reqwest::Client::new(),
+        }
+    }
+
+    /// Attach a bearer token for endpoints that require auth (e.g. OpenRouter).
+    pub fn with_api_key(mut self, api_key: Option<String>) -> Self {
+        self.api_key = api_key;
+        self
+    }
+
+    fn request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+        let url = format!("{}/embeddings", self.endpoint.trim_end_matches('/'));
+        let req = self.client.post(&url).json(body);
+        match &self.api_key {
+            Some(key) => req.bearer_auth(key),
+            None => req,
         }
     }
 }
@@ -1358,33 +1375,25 @@ impl HttpEmbeddingProvider {
 #[async_trait::async_trait]
 impl EmbeddingProvider for HttpEmbeddingProvider {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let url = format!("{}/embeddings", self.endpoint.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,
             "input": text,
         });
         let resp = self
-            .client
-            .post(&url)
-            .json(&body)
+            .request(&body)
             .send()
             .await
             .context("HTTP embedding request failed")?;
         let status = resp.status();
-        let json: serde_json::Value = resp
-            .json()
+        let body_text = resp
+            .text()
             .await
-            .context("Failed to parse embedding response")?;
+            .context("Failed to read embedding response")?;
         if !status.is_success() {
-            anyhow::bail!(
-                "Embedding endpoint returned {}: {}",
-                status,
-                json.get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("unknown error")
-            );
+            anyhow::bail!("Embedding endpoint returned {}: {}", status, body_text);
         }
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text).context("Failed to parse embedding response")?;
         let embedding = json["data"][0]["embedding"]
             .as_array()
             .context("Missing embedding array in response")?
@@ -1402,33 +1411,25 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     }
 
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let url = format!("{}/embeddings", self.endpoint.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.model,
             "input": texts,
         });
         let resp = self
-            .client
-            .post(&url)
-            .json(&body)
+            .request(&body)
             .send()
             .await
             .context("HTTP batch embedding request failed")?;
         let status = resp.status();
-        let json: serde_json::Value = resp
-            .json()
+        let body_text = resp
+            .text()
             .await
-            .context("Failed to parse batch embedding response")?;
+            .context("Failed to read batch embedding response")?;
         if !status.is_success() {
-            anyhow::bail!(
-                "Embedding endpoint returned {}: {}",
-                status,
-                json.get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("unknown error")
-            );
+            anyhow::bail!("Embedding endpoint returned {}: {}", status, body_text);
         }
+        let json: serde_json::Value = serde_json::from_str(&body_text)
+            .context("Failed to parse batch embedding response")?;
         let data = json["data"]
             .as_array()
             .context("Missing data array in batch embedding response")?;
