@@ -185,6 +185,12 @@ pub struct GroundedReview {
     pub semantic_validation: String,
     pub hallucination_free_guarantee: bool,
     pub rejected_items: usize,
+    /// Derived trust state (spec §3.1), computed once at construction:
+    /// "verified" (citation-valid, complete evidence, semantic validation
+    /// performed — unreachable while semantic validation is unimplemented),
+    /// "structural" (citation-valid, complete evidence, structural checks
+    /// only), or "degraded" (anything else still returning 200).
+    pub trust_state: String,
     pub usage: ReviewUsage,
 }
 
@@ -356,6 +362,8 @@ impl GroundedAssistant {
             .into());
         }
 
+        let citation_valid = rejected_items == 0;
+        let semantic_validation = "not_performed";
         Ok(GroundedReview {
             model: response.model,
             claims,
@@ -363,13 +371,35 @@ impl GroundedAssistant {
             evidence,
             evidence_complete,
             grounding_valid: rejected_items == 0,
-            citation_valid: rejected_items == 0,
+            citation_valid,
             grounding_scope: "snapshot_and_citation_integrity_only".to_string(),
-            semantic_validation: "not_performed".to_string(),
+            semantic_validation: semantic_validation.to_string(),
             hallucination_free_guarantee: false,
             rejected_items,
+            trust_state: trust_state(citation_valid, evidence_complete, semantic_validation)
+                .to_string(),
             usage: response.usage.into(),
         })
+    }
+}
+
+/// The spec §3.1 trust-state table. `verified` is reserved: it needs semantic
+/// validation, which nothing performs today, so reachable states are
+/// `structural` (clean, complete, structural checks only) and `degraded`
+/// (rejected items or incomplete evidence on an otherwise successful review).
+fn trust_state(
+    citation_valid: bool,
+    evidence_complete: bool,
+    semantic_validation: &str,
+) -> &'static str {
+    if citation_valid && evidence_complete {
+        if semantic_validation == "performed" {
+            "verified"
+        } else {
+            "structural"
+        }
+    } else {
+        "degraded"
     }
 }
 

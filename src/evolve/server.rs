@@ -21,6 +21,7 @@ use tower_http::services::ServeDir;
 
 use super::assistant::{
     evidence_from_document, evidence_from_document_excluding_ranges, GroundedAssistant,
+    ReviewProtocolError,
 };
 use super::context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer};
 use super::deletion::preview_deletion;
@@ -1679,7 +1680,7 @@ async fn assistant_review_handler(
         .assistant
         .review(&body.question, selection.evidence, selection.complete)
         .await
-        .map_err(internal_error)?;
+        .map_err(review_error)?;
     // Only claim the envelope hash when the envelope actually backed the
     // evidence (revision gate passed); otherwise report null.
     let content_hash = if envelope_authoritative {
@@ -1820,7 +1821,7 @@ async fn assistant_task_handler(
         .assistant
         .review_with_orientation(&body.question, evidence, complete, orientation.as_deref())
         .await
-        .map_err(internal_error)?;
+        .map_err(review_error)?;
     // Task evidence ships fresh reads only; the cached envelope never backs
     // it, so the response must not claim the envelope's content hash.
     Ok(Json(json!({
@@ -2554,6 +2555,15 @@ fn bad_request(message: impl Into<String>) -> ApiError {
 
 fn unprocessable(value: Value) -> ApiError {
     (StatusCode::UNPROCESSABLE_ENTITY, Json(value))
+}
+
+/// Map a grounded-review failure: typed protocol failures (spec §2.1) become
+/// 422 with the spec body verbatim; anything else stays an untyped 500.
+fn review_error(error: anyhow::Error) -> ApiError {
+    match error.downcast_ref::<ReviewProtocolError>() {
+        Some(protocol) => unprocessable(protocol.body()),
+        None => internal_error(error),
+    }
 }
 
 fn conflict(message: impl Into<String>) -> ApiError {
