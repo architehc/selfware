@@ -610,7 +610,7 @@ fn build_config(
         endpoint: endpoint.to_string(),
         model: model.to_string(),
         api_key: api_key.map(RedactedString::new),
-        max_tokens: 256,
+        max_tokens: 1024,
         context_length: 32_768,
         temperature: 0.0,
         agent: AgentConfig {
@@ -711,6 +711,7 @@ async fn check_streaming(
 
     let mut rx = stream.into_channel().await;
     let mut content_chunks = 0usize;
+    let mut reasoning_chunks = 0usize;
     let mut total_chunks = 0usize;
     let mut accumulated = String::new();
     let mut got_done = false;
@@ -721,6 +722,9 @@ async fn check_streaming(
             StreamChunk::Content(text) => {
                 content_chunks += 1;
                 accumulated.push_str(&text);
+            }
+            StreamChunk::Reasoning(_) => {
+                reasoning_chunks += 1;
             }
             StreamChunk::Done => {
                 got_done = true;
@@ -736,17 +740,19 @@ async fn check_streaming(
     }
     if !contains_ci(&accumulated, "pong") {
         anyhow::bail!(
-            "streamed text missing 'pong' (chunks={}, accumulated={})",
+            "streamed text missing 'pong' (chunks={}, reasoning_chunks={}, accumulated={})",
             total_chunks,
+            reasoning_chunks,
             truncate(&accumulated, 200)
         );
     }
     Ok((
         elapsed,
         format!(
-            "{} chunk(s) total, {} content chunk(s), final='{}'{}",
+            "{} chunk(s) total, {} content + {} reasoning, final='{}'{}",
             total_chunks,
             content_chunks,
+            reasoning_chunks,
             truncate(accumulated.trim(), 60),
             if got_done { "" } else { " (no [DONE])" },
         ),

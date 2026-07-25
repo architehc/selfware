@@ -28,6 +28,7 @@ DEFAULT_MODELS=(
   "stepfun/step-3.7-flash"
   "minimax/minimax-m3"
   "qwen/qwen3.7-max"
+  "qwen/qwen3.6-27b"
 )
 
 # All 7 checks emitted by endpoint_smoke (multimodal only runs with --image).
