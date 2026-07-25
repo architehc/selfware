@@ -696,7 +696,6 @@ impl LspClient {
         .await
     }
 
-
     /// Go to the definition of the symbol at the given position.
     pub async fn goto_definition(&self, file: &str, line: u32, col: u32) -> Result<Vec<Location>> {
         let lang = Language::from_path(file)

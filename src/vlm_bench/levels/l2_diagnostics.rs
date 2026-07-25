@@ -30,7 +30,6 @@ impl L2Diagnostics {
             fixtures_dir: PathBuf::from("vlm_fixtures/l2_diagnostics"),
         }
     }
-
 }
 
 #[async_trait]

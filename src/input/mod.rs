@@ -254,12 +254,10 @@ impl SelfwareEditor {
         }
     }
 
-
     /// Update the prompt with full context including token usage
     pub fn set_prompt_full_context(&mut self, model: &str, step: usize, context_pct: f64) {
         self.prompt = SelfwarePrompt::with_full_context(model, step, context_pct);
     }
-
 
     /// Toggle between Emacs and Vi mode, returns the new mode
     pub fn toggle_vim_mode(&mut self) -> Result<InputMode> {

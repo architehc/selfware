@@ -96,7 +96,6 @@ impl ShortTermCollector {
             .collect()
     }
 
-
     /// Assemble a batch from multiple sources.
     pub fn assemble_batch(&self, items: Vec<CollectedItem>) -> CollectedBatch {
         let mut source_counts: HashMap<SourceType, usize> = HashMap::new();

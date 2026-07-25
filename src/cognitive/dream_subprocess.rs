@@ -78,7 +78,6 @@ impl AutoDreamConfig {
         self
     }
 
-
     /// Set the API key
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());

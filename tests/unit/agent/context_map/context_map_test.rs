@@ -122,10 +122,7 @@ fn test_compress_to_fit_frees_oldest() {
     assert!(freed > 0, "should have freed tokens by downgrading");
     assert!(map.total_tokens() < before);
     // old.rs should be downgraded first (it was accessed earlier).
-    assert_eq!(
-        map.level_of(Path::new("old.rs")),
-        Some(ContextMode::Lite)
-    );
+    assert_eq!(map.level_of(Path::new("old.rs")), Some(ContextMode::Lite));
 }
 
 #[tokio::test]

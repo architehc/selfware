@@ -503,7 +503,6 @@ pub async fn run_go_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageRes
     results
 }
 
-
 #[cfg(test)]
 #[path = "../../tests/unit/testing/language_qa/language_qa_test.rs"]
 mod tests;

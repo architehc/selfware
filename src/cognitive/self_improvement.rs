@@ -244,7 +244,6 @@ impl PromptOptimizer {
         self.patterns.insert(pattern.id.clone(), pattern);
     }
 
-
     /// Get best patterns for a task type
     pub fn best_patterns_for(&self, task_type: &str) -> Vec<&PromptPattern> {
         let mut patterns: Vec<_> = self
@@ -264,7 +263,6 @@ impl PromptOptimizer {
 
         patterns.into_iter().take(5).collect()
     }
-
 
     /// Suggest prompt improvements based on patterns
     pub fn suggest_improvements(&self, prompt: &str, task_type: &str) -> Vec<PromptSuggestion> {
@@ -989,7 +987,6 @@ impl ErrorPatternLearner {
     pub fn get_pattern(&self, pattern_id: &str) -> Option<&ErrorPattern> {
         self.patterns.get(pattern_id)
     }
-
 
     /// Check if action might trigger known error
     pub fn might_trigger_error(&self, action: &str, context: &str) -> Vec<ErrorWarning> {

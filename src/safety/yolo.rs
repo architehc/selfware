@@ -505,7 +505,6 @@ impl YoloManager {
             elapsed_hours: self.elapsed_hours(),
         }
     }
-
 }
 
 /// Decision from YOLO mode check

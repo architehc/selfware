@@ -654,7 +654,6 @@ impl ToolRegistry {
         }
     }
 
-
     /// Return references to all registered tools (both critical and deferred).
     pub fn list(&self) -> Vec<&dyn Tool> {
         self.all_tools
@@ -777,8 +776,6 @@ impl ToolRegistry {
         self.activated_tools.len()
     }
 
-
-
     /// Return only read-only tools (tools that don't modify files or state).
     /// This is used in plan mode to restrict available tools.
     pub fn filter_by_readonly(&self) -> Vec<&dyn Tool> {
@@ -787,7 +784,6 @@ impl ToolRegistry {
             .filter(|tool| tool.is_readonly())
             .collect()
     }
-
 }
 
 impl Default for ToolRegistry {

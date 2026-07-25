@@ -304,7 +304,6 @@ impl VisualVerifier {
         parse_diff_response(&raw)
     }
 
-
     /// Verify that specific UI elements are present and visible.
     pub async fn verify_ui_elements(
         &self,
@@ -317,13 +316,9 @@ impl VisualVerifier {
         parse_elements_response(&raw, elements)
     }
 
-
     // -----------------------------------------------------------------------
     // Convenience methods
     // -----------------------------------------------------------------------
-
-
-
 
     // -----------------------------------------------------------------------
     // Integration with VerificationGate
@@ -1190,7 +1185,6 @@ pub fn compute_perceptual_hash(screenshot_path: &Path) -> Result<String> {
     Ok(hex_string)
 }
 
-
 /// Compare two perceptual hashes using Hamming distance
 /// Returns similarity score 0.0-1.0 where 1.0 is identical
 pub fn compute_hash_similarity(hash1: &str, hash2: &str) -> f32 {
@@ -1274,7 +1268,6 @@ impl VisualLoopConfig {
         )
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Tests

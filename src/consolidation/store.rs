@@ -194,7 +194,6 @@ impl LongTermStore {
             .collect())
     }
 
-
     /// Index all persisted records from disk into the in-memory vector index.
     ///
     /// Call this after creating a new `LongTermStore` (e.g. after a restart)

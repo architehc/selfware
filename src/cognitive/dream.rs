@@ -99,7 +99,6 @@ impl DreamState {
         Self::default()
     }
 
-
     /// Get the path to the dream state file
     fn state_file_path(base_dir: &Path) -> PathBuf {
         base_dir.join("dream_state.json")
@@ -181,7 +180,6 @@ impl DreamState {
     pub fn record_session_end(&mut self) {
         self.sessions_since_last_dream += 1;
     }
-
 
     /// Check if the state indicates a dream should run (without checking lock)
     pub fn should_run_dream_check_gates(&self, trigger: &DreamTrigger) -> bool {

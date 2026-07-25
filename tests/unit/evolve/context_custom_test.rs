@@ -7,7 +7,10 @@ fn fixture() -> Graph {
     a.tokens = 1_000;
     let mut b = Node::code("crate::b", "src/b.rs");
     b.tokens = 2_000;
-    Graph { nodes: vec![a, b], edges: vec![] }
+    Graph {
+        nodes: vec![a, b],
+        edges: vec![],
+    }
 }
 
 #[test]

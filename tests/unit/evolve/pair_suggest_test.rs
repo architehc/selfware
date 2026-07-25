@@ -24,15 +24,31 @@ fn connected_pairs_are_undirected_deduped_and_component_level() {
             code("crate::agent::mod", "src/agent/mod.rs"),
         ],
         edges: vec![
-            edge("crate::agent::execution", "crate::tools::shell", EdgeType::DependsOn),
+            edge(
+                "crate::agent::execution",
+                "crate::tools::shell",
+                EdgeType::DependsOn,
+            ),
             // Reverse direction between the same components — must dedup, not double.
-            edge("crate::tools::shell", "crate::agent::mod", EdgeType::DependsOn),
+            edge(
+                "crate::tools::shell",
+                "crate::agent::mod",
+                EdgeType::DependsOn,
+            ),
             // Intra-component edge — must be excluded (agent <-> agent).
-            edge("crate::agent::execution", "crate::agent::mod", EdgeType::DependsOn),
+            edge(
+                "crate::agent::execution",
+                "crate::agent::mod",
+                EdgeType::DependsOn,
+            ),
         ],
     };
     let pairs = connected_pairs(&graph);
-    assert_eq!(pairs.len(), 1, "agent<->tools collapses to one undirected pair");
+    assert_eq!(
+        pairs.len(),
+        1,
+        "agent<->tools collapses to one undirected pair"
+    );
     let p = &pairs[0];
     assert_eq!((p.a.as_str(), p.b.as_str()), ("agent", "tools"));
     assert_eq!(p.weight, 2, "two node-edges collapse into the pair");
@@ -47,8 +63,16 @@ fn structural_and_context_edges_are_not_evolution_connections() {
             code("crate::tools::shell", "src/tools/shell.rs"),
         ],
         edges: vec![
-            edge("crate::agent::execution", "crate::tools::shell", EdgeType::Contains),
-            edge("crate::agent::execution", "crate::tools::shell", EdgeType::ContextIncluded),
+            edge(
+                "crate::agent::execution",
+                "crate::tools::shell",
+                EdgeType::Contains,
+            ),
+            edge(
+                "crate::agent::execution",
+                "crate::tools::shell",
+                EdgeType::ContextIncluded,
+            ),
         ],
     };
     assert!(connected_pairs(&graph).is_empty());
@@ -64,7 +88,11 @@ fn cross_cluster_pairs_sort_first() {
         ],
         edges: vec![
             // Same cluster (Loop Core): agent <-> orchestration.
-            edge("crate::agent::a", "crate::orchestration::b", EdgeType::DependsOn),
+            edge(
+                "crate::agent::a",
+                "crate::orchestration::b",
+                EdgeType::DependsOn,
+            ),
             // Cross cluster: agent (Loop Core) <-> tools (Action).
             edge("crate::agent::a", "crate::tools::c", EdgeType::DependsOn),
         ],
@@ -72,7 +100,10 @@ fn cross_cluster_pairs_sort_first() {
     let pairs = connected_pairs(&graph);
     assert_eq!(pairs.len(), 2);
     assert!(pairs[0].cross_cluster, "cross-cluster pair ranks first");
-    assert_eq!((pairs[0].a.as_str(), pairs[0].b.as_str()), ("agent", "tools"));
+    assert_eq!(
+        (pairs[0].a.as_str(), pairs[0].b.as_str()),
+        ("agent", "tools")
+    );
 }
 
 #[test]

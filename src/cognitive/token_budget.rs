@@ -189,7 +189,6 @@ impl TokenBudgetAllocator {
         &self.allocation
     }
 
-
     /// Change task type and reallocate
     pub fn set_task_type(&mut self, task_type: TaskType) {
         if self.task_type != task_type {

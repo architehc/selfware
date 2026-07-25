@@ -110,11 +110,19 @@ fn section_fit_windows(graph: &selfware::evolve::Graph) {
     println!("== Section 2: tier ladder resolution per context window (auto) ==");
     println!(
         "{:>9} {:>13} {:<13} {:>13} {:>5} {:>10} {:>13}",
-        "window", "usable budget", "resolved tier", "measured tok", "fits", "time ms", "cum io reads"
+        "window",
+        "usable budget",
+        "resolved tier",
+        "measured tok",
+        "fits",
+        "time ms",
+        "cum io reads"
     );
     println!("{}", "-".repeat(82));
 
-    for context_length in [8192usize, 32768, 131072, 262144, 1048576, 3_000_000, 4_500_000] {
+    for context_length in [
+        8192usize, 32768, 131072, 262144, 1048576, 3_000_000, 4_500_000,
+    ] {
         let budget = FitBudget::new(context_length, 4096, 0.70);
         // Fresh measurer per window so the I/O cost of one resolution is visible.
         let measurer = TierMeasurer::new(graph, Path::new("."));
@@ -170,8 +178,7 @@ fn section_dump(graph: &selfware::evolve::Graph, dir: &Path) -> Result<()> {
 
 fn write_artifact(dir: &Path, name: &str, content: &str) -> Result<()> {
     let path = dir.join(name);
-    std::fs::write(&path, content)
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    std::fs::write(&path, content).with_context(|| format!("cannot write {}", path.display()))?;
     println!(
         "  {:<12} {:>9} bytes  {:>9} tokens",
         name,

@@ -25,8 +25,10 @@ fn type_re() -> &'static Regex {
 fn impl_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"^\s*impl(?:<[^>]*>)?\s+(?:([A-Za-z_][\w:]*)(?:<[^>]*>)?\s+for\s+)?([A-Za-z_]\w*)")
-            .expect("impl regex")
+        Regex::new(
+            r"^\s*impl(?:<[^>]*>)?\s+(?:([A-Za-z_][\w:]*)(?:<[^>]*>)?\s+for\s+)?([A-Za-z_]\w*)",
+        )
+        .expect("impl regex")
     })
 }
 fn fn_re() -> &'static Regex {
@@ -67,7 +69,9 @@ pub struct StructureAnalyzer {
 
 impl StructureAnalyzer {
     pub fn new(root: impl AsRef<Path>) -> Self {
-        Self { root: root.as_ref().to_path_buf() }
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
     }
 
     /// Extract the module → class → method outline for every source file that
@@ -76,9 +80,15 @@ impl StructureAnalyzer {
         let mut out = Vec::new();
         for entry in WalkDir::new(&self.root).into_iter().filter_map(|e| e.ok()) {
             let p = entry.path();
-            if p.extension().map_or(false, |e| e == "rs") && !p.to_string_lossy().ends_with("_test.rs") {
+            if p.extension().map_or(false, |e| e == "rs")
+                && !p.to_string_lossy().ends_with("_test.rs")
+            {
                 if let Ok(text) = std::fs::read_to_string(p) {
-                    let rel = p.strip_prefix(&self.root).unwrap_or(p).to_string_lossy().replace('\\', "/");
+                    let rel = p
+                        .strip_prefix(&self.root)
+                        .unwrap_or(p)
+                        .to_string_lossy()
+                        .replace('\\', "/");
                     if let Some(fs) = file_structure(&rel, &text) {
                         out.push(fs);
                     }
@@ -93,8 +103,15 @@ impl StructureAnalyzer {
 fn module_of(path: &str) -> String {
     let p = path.strip_prefix("src/").unwrap_or(path);
     let p = p.strip_suffix(".rs").unwrap_or(p);
-    let parts: Vec<&str> = p.split('/').filter(|s| !s.is_empty() && *s != "mod").collect();
-    if parts.is_empty() { "crate".into() } else { parts.join("::") }
+    let parts: Vec<&str> = p
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "mod")
+        .collect();
+    if parts.is_empty() {
+        "crate".into()
+    } else {
+        parts.join("::")
+    }
 }
 
 /// Parse one file: types → classes, `impl` bodies → methods on the target type,
@@ -163,7 +180,10 @@ fn file_structure(rel_path: &str, text: &str) -> Option<FileStructure> {
     Some(FileStructure {
         module: module_of(rel_path),
         path: rel_path.to_string(),
-        classes: classes.into_values().filter(|c| !c.methods.is_empty() || c.kind != "impl").collect(),
+        classes: classes
+            .into_values()
+            .filter(|c| !c.methods.is_empty() || c.kind != "impl")
+            .collect(),
         free_functions: free,
     })
 }

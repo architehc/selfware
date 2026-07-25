@@ -156,8 +156,7 @@ fn extract_functions(text: &str, rel_path: &str, out: &mut Vec<FnBody>) {
         };
         let idx = search + rel;
         // Require `fn` to start a token (preceded by whitespace or start).
-        let ok_prefix = idx == 0
-            || matches!(bytes[idx - 1], b' ' | b'\t' | b'\n' | b'(' | b'<');
+        let ok_prefix = idx == 0 || matches!(bytes[idx - 1], b' ' | b'\t' | b'\n' | b'(' | b'<');
         // Find the function name after `fn `.
         let after = idx + 3;
         let name: String = text[after..]

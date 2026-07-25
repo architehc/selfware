@@ -14,4 +14,3 @@ mod test_git;
 mod test_regex_check;
 mod test_safety;
 mod test_tools;
-

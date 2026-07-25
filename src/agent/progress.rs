@@ -206,7 +206,6 @@ impl StderrProgressEmitter {
         }
     }
 
-
     fn timestamp(&self) -> String {
         if self.use_system_clock {
             // Use chrono so we don't pull in extra deps.

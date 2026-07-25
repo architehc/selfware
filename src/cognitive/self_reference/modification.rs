@@ -27,7 +27,6 @@ impl ModificationEngine {
         }
     }
 
-
     /// Propose a modification
     pub async fn propose(
         &self,
@@ -148,7 +147,6 @@ impl ModificationEngine {
     pub fn protect(&mut self, target: &str) {
         self.protected_targets.insert(target.to_string());
     }
-
 
     /// Check if a target is protected
     pub fn is_protected(&self, target: &str) -> bool {

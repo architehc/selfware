@@ -106,7 +106,6 @@ pub fn extract_tool_calls_from_text(content: &str) -> Vec<ToolCall> {
         .collect()
 }
 
-
 #[cfg(test)]
 #[path = "../../tests/unit/api/tool_calling/tool_calling_test.rs"]
 mod tests;

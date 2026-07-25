@@ -273,7 +273,6 @@ impl CognitiveSystem {
         Ok(())
     }
 
-
     /// Adapt token budget based on usage
     pub async fn adapt_budget(&self) -> Result<AdaptationResult> {
         let mut budget = self.budget.write().await;
@@ -292,7 +291,6 @@ impl CognitiveSystem {
 
         Ok(result)
     }
-
 
     /// Read own source code
     #[allow(clippy::await_holding_lock)]

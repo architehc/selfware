@@ -819,7 +819,6 @@ impl ContextMap {
         freed
     }
 
-
     /// Add a web search result or external reference to the context.
     /// These are tracked as virtual files at L3 with the given content.
     pub fn add_external_context(&mut self, key: &str, content: String, source: &str) {
@@ -862,7 +861,6 @@ impl ContextMap {
         );
         self.sync_budget();
     }
-
 
     /// Get the most relevant files for a query using simple keyword matching.
     /// Returns paths sorted by relevance score (highest first).
@@ -1073,7 +1071,6 @@ impl ContextMap {
             modality_description: plan.description,
         }
     }
-
 
     /// Summary stats for logging/display.
     pub fn stats(&self) -> ContextMapStats {

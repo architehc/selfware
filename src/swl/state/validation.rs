@@ -205,7 +205,6 @@ fn yaml_to_json(value: &serde_yaml::Value) -> std::result::Result<Value, serde_j
     serde_json::to_value(value)
 }
 
-
 /// Get a summary of validation issues
 pub fn get_validation_issues(
     state: &HashMap<String, Value>,

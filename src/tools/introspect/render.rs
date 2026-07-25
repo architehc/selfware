@@ -229,9 +229,7 @@ impl OutputRenderer {
             files_included, files_total, coverage, tokens_used, tokens_remaining
         )
     }
-
 }
-
 
 /// Truncate output to fit within token budget
 pub fn truncate_output(output: &str, max_tokens: usize) -> String {

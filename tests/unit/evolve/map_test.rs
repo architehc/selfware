@@ -9,32 +9,65 @@ fn sym_name(line: &str) -> Option<String> {
 
 #[test]
 fn parses_each_public_item_kind() {
-    assert_eq!(sym_name("pub fn run_task(&self) {").as_deref(), Some("run_task"));
+    assert_eq!(
+        sym_name("pub fn run_task(&self) {").as_deref(),
+        Some("run_task")
+    );
     assert_eq!(sym_name("pub struct Agent {").as_deref(), Some("Agent"));
     assert_eq!(sym_name("pub struct Marker;").as_deref(), Some("Marker"));
     assert_eq!(sym_name("pub enum State {").as_deref(), Some("State"));
     assert_eq!(sym_name("pub trait Tool {").as_deref(), Some("Tool"));
     assert_eq!(sym_name("pub type Result = ();").as_deref(), Some("Result"));
-    assert_eq!(sym_name("pub const MAX: usize = 4;").as_deref(), Some("MAX"));
-    assert_eq!(sym_name("pub static FLAG: bool = true;").as_deref(), Some("FLAG"));
+    assert_eq!(
+        sym_name("pub const MAX: usize = 4;").as_deref(),
+        Some("MAX")
+    );
+    assert_eq!(
+        sym_name("pub static FLAG: bool = true;").as_deref(),
+        Some("FLAG")
+    );
     assert_eq!(sym_name("pub union Raw {").as_deref(), Some("Raw"));
 }
 
 #[test]
 fn parses_modifiers_and_generics() {
-    assert_eq!(sym_name("pub async fn fetch<T>(x: T) {").as_deref(), Some("fetch"));
+    assert_eq!(
+        sym_name("pub async fn fetch<T>(x: T) {").as_deref(),
+        Some("fetch")
+    );
     assert_eq!(sym_name("pub unsafe fn poke() {").as_deref(), Some("poke"));
-    assert_eq!(sym_name("pub const fn size() -> usize {").as_deref(), Some("size"));
-    assert_eq!(sym_name("pub extern \"C\" fn c_abi() {").as_deref(), Some("c_abi"));
+    assert_eq!(
+        sym_name("pub const fn size() -> usize {").as_deref(),
+        Some("size")
+    );
+    assert_eq!(
+        sym_name("pub extern \"C\" fn c_abi() {").as_deref(),
+        Some("c_abi")
+    );
 }
 
 #[test]
 fn classifies_symbol_kinds() {
-    assert!(matches!(public_symbol("pub fn f() {"), Some((SymKind::Fn, _))));
-    assert!(matches!(public_symbol("pub struct S;"), Some((SymKind::Type, _))));
-    assert!(matches!(public_symbol("pub enum E {"), Some((SymKind::Type, _))));
-    assert!(matches!(public_symbol("pub trait T {"), Some((SymKind::Trait, _))));
-    assert!(matches!(public_symbol("pub const C: u8 = 0;"), Some((SymKind::Const, _))));
+    assert!(matches!(
+        public_symbol("pub fn f() {"),
+        Some((SymKind::Fn, _))
+    ));
+    assert!(matches!(
+        public_symbol("pub struct S;"),
+        Some((SymKind::Type, _))
+    ));
+    assert!(matches!(
+        public_symbol("pub enum E {"),
+        Some((SymKind::Type, _))
+    ));
+    assert!(matches!(
+        public_symbol("pub trait T {"),
+        Some((SymKind::Trait, _))
+    ));
+    assert!(matches!(
+        public_symbol("pub const C: u8 = 0;"),
+        Some((SymKind::Const, _))
+    ));
 }
 
 #[test]
@@ -134,7 +167,8 @@ fn orientation_always_has_taxonomy_and_gates_the_map() {
 #[test]
 fn build_map_and_expand_round_trip() {
     let dir = tempfile::tempdir().unwrap();
-    let src = "//! Errors for the crate.\npub struct MyError;\npub fn boom() -> MyError { MyError }\n";
+    let src =
+        "//! Errors for the crate.\npub struct MyError;\npub fn boom() -> MyError { MyError }\n";
     std::fs::write(dir.path().join("errors.rs"), src).unwrap();
 
     let graph = Graph {

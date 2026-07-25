@@ -88,7 +88,6 @@ impl MessageFlow {
         self
     }
 
-
     pub fn looping(mut self, looping: bool) -> Self {
         self.looping = looping;
         self

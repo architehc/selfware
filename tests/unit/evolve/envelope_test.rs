@@ -158,7 +158,10 @@ fn full_envelope_ships_verbatim_source_and_hash_is_deterministic() {
         "rev2",
         &reader,
     );
-    assert_ne!(a.content_hash, c.content_hash, "revision must feed the hash");
+    assert_ne!(
+        a.content_hash, c.content_hash,
+        "revision must feed the hash"
+    );
 }
 
 #[test]
@@ -173,7 +176,10 @@ fn map_envelope_ships_card_text_not_source() {
         reader,
     );
     let content = &env.documents[0].content;
-    assert!(content.contains("add_one"), "card lists public symbol names");
+    assert!(
+        content.contains("add_one"),
+        "card lists public symbol names"
+    );
     assert!(!content.contains("x + 1"), "card must not ship bodies");
 }
 

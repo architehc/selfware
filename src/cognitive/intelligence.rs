@@ -322,7 +322,6 @@ impl SymbolIndex {
         results
     }
 
-
     /// Get symbols by exact name
     pub fn get(&self, name: &str) -> Option<&Vec<Symbol>> {
         self.by_name.get(name)

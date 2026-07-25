@@ -252,7 +252,6 @@ impl DebtMetrics {
             avg_priority,
         }
     }
-
 }
 
 // ============================================================================
@@ -468,7 +467,6 @@ impl RefactoringRoadmap {
         self.phases.push(phase);
     }
 
-
     pub fn payback_months(&self) -> f64 {
         if self.annual_savings == 0.0 {
             f64::INFINITY
@@ -499,7 +497,6 @@ impl RoadmapGenerator {
         self.max_hours_per_phase = hours;
         self
     }
-
 
     pub fn generate(&self, title: &str, prioritized: &[PrioritizedItem]) -> RefactoringRoadmap {
         let mut roadmap = RefactoringRoadmap::new(title);
@@ -621,7 +618,6 @@ impl FileStats {
     pub fn hotspot_score(&self) -> f64 {
         self.churn_rate() * (1.0 + self.instability_index()) * (self.unique_authors as f64 / 2.0)
     }
-
 }
 
 /// Correlation analysis result
@@ -657,7 +653,6 @@ impl CorrelationResult {
             interpretation: interpretation.to_string(),
         }
     }
-
 }
 
 /// Churn analyzer
@@ -702,7 +697,6 @@ impl ChurnAnalyzer {
             .filter(|f| f.churn_rate() > threshold)
             .collect()
     }
-
 
     pub fn correlate_age_debt(&self) -> CorrelationResult {
         // Simplified correlation calculation
@@ -852,7 +846,6 @@ impl DebtTracker {
         self.items.push(item);
     }
 
-
     pub fn metrics(&self) -> DebtMetrics {
         DebtMetrics::calculate(&self.items)
     }
@@ -887,7 +880,6 @@ impl DebtTracker {
             .filter(|i| i.debt_type == DebtType::Security)
             .collect()
     }
-
 
     /// Save tracker state to a JSON file.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {

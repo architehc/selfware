@@ -1,8 +1,6 @@
 use std::fs;
 
-use selfware::evolve::context_fit::{
-    fit_tier, FitBudget, RequestedMode, TierMeasurer,
-};
+use selfware::evolve::context_fit::{fit_tier, FitBudget, RequestedMode, TierMeasurer};
 use selfware::evolve::{ContextMode, Graph, Node};
 
 /// One Rust file whose Full > Compact > Lite, with an inline test block so
@@ -98,12 +96,22 @@ fn fixture() -> (tempfile::TempDir, Graph) {
     test_node.layer = selfware::evolve::NodeLayer::Test;
     test_node.tokens = code.inline_test_tokens;
 
-    (dir, Graph { nodes: vec![code, test_node], edges: vec![] })
+    (
+        dir,
+        Graph {
+            nodes: vec![code, test_node],
+            edges: vec![],
+        },
+    )
 }
 
 fn budget_for(tokens: usize) -> FitBudget {
     // fit_ratio 1.0 and zero reserve so `usable()` is exactly `tokens`.
-    FitBudget { context_length: tokens, output_reserve: 0, fit_ratio: 1.0 }
+    FitBudget {
+        context_length: tokens,
+        output_reserve: 0,
+        fit_ratio: 1.0,
+    }
 }
 
 #[test]

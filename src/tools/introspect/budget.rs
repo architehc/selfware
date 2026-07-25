@@ -228,7 +228,6 @@ impl TokenBudget {
         Ok(Depth::Overview)
     }
 
-
     /// Get budget utilization percentage
     pub fn utilization_pct(&self) -> f64 {
         if self.total == 0 {
@@ -236,7 +235,6 @@ impl TokenBudget {
         }
         (self.used as f64 / self.total as f64) * 100.0
     }
-
 }
 
 /// Metadata about a file for depth suggestion
@@ -277,7 +275,6 @@ impl PlanBudget {
     pub fn next_iteration(&mut self) {
         self.current_iteration += 1;
     }
-
 }
 
 #[cfg(test)]

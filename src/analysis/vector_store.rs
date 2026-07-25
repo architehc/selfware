@@ -1428,8 +1428,8 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
         if !status.is_success() {
             anyhow::bail!("Embedding endpoint returned {}: {}", status, body_text);
         }
-        let json: serde_json::Value = serde_json::from_str(&body_text)
-            .context("Failed to parse batch embedding response")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&body_text).context("Failed to parse batch embedding response")?;
         let data = json["data"]
             .as_array()
             .context("Missing data array in batch embedding response")?;
@@ -1524,7 +1524,6 @@ impl VectorStore {
         self.storage_path = Some(path.into());
         self
     }
-
 
     /// Create or get collection
     pub fn collection(&mut self, name: &str, scope: CollectionScope) -> &mut VectorCollection {
@@ -2092,7 +2091,6 @@ impl BoundedVectorStore {
     pub fn inner(&self) -> &VectorStore {
         &self.inner
     }
-
 
     /// Delegate: create or get a collection.
     pub fn collection(&mut self, name: &str, scope: CollectionScope) -> &mut VectorCollection {

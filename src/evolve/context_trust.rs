@@ -177,7 +177,10 @@ pub fn scan_injection(content: &str, classification: &str) -> Vec<InjectionFindi
                     severity: "high".to_string(),
                     line: line_no,
                     excerpt: excerpt(line),
-                    explanation: format!("Contains a {name} (U+{:04X}) that can hide text from a human reviewer.", c as u32),
+                    explanation: format!(
+                        "Contains a {name} (U+{:04X}) that can hide text from a human reviewer.",
+                        c as u32
+                    ),
                 });
                 break;
             }
@@ -265,7 +268,9 @@ fn verdict_for(risk: u32, findings: &[InjectionFinding]) -> String {
     }
     let has_high = findings.iter().any(|f| f.severity == "high");
     match (risk, has_high) {
-        (r, true) if r >= 50 => "quarantine — high-severity injection patterns; do not send unreviewed".to_string(),
+        (r, true) if r >= 50 => {
+            "quarantine — high-severity injection patterns; do not send unreviewed".to_string()
+        }
         (_, true) => "review — high-severity pattern present; confirm before including".to_string(),
         _ => "caution — low-severity signals; likely benign but traceable".to_string(),
     }

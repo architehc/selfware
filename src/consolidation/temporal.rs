@@ -137,7 +137,6 @@ impl TemporalRecord {
         let max = self.source_timestamps.iter().max().copied()?;
         Some((min, max))
     }
-
 }
 
 /// Report from a consolidation cycle.

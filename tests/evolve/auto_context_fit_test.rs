@@ -17,7 +17,13 @@ fn fixture(tokens: usize) -> (tempfile::TempDir, Graph) {
     fs::write(src_dir.join("a.rs"), &body).unwrap();
     let mut node = Node::code("crate::a", "src/a.rs");
     node.tokens = selfware::token_count::estimate_content_tokens(&body);
-    (dir, Graph { nodes: vec![node], edges: vec![] })
+    (
+        dir,
+        Graph {
+            nodes: vec![node],
+            edges: vec![],
+        },
+    )
 }
 
 /// POST /api/context/mode with the session header and return the JSON body.
@@ -118,13 +124,23 @@ fn fixture_two_files() -> (tempfile::TempDir, Graph) {
     node_a.tokens = selfware::token_count::estimate_content_tokens(&a);
     let mut node_b = Node::code("crate::b", "src/b.rs");
     node_b.tokens = selfware::token_count::estimate_content_tokens(&b);
-    (dir, Graph { nodes: vec![node_a, node_b], edges: vec![] })
+    (
+        dir,
+        Graph {
+            nodes: vec![node_a, node_b],
+            edges: vec![],
+        },
+    )
 }
 
 /// POST /api/context/custom with the session header and return the JSON body.
 async fn post_custom(server: &EvolveServer, components: Vec<&str>) -> Value {
-    let (status, body) =
-        post_json(server, "/api/context/custom", json!({ "components": components })).await;
+    let (status, body) = post_json(
+        server,
+        "/api/context/custom",
+        json!({ "components": components }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     serde_json::from_str(&body).unwrap()
 }
@@ -229,9 +245,7 @@ async fn pinned_over_budget_mode_is_rejected_with_422() {
     let (status, body) = post_mode_raw(&server, "full").await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"], "context_over_budget");
-    assert!(
-        body["measured_tokens"].as_u64().unwrap() > body["budget_tokens"].as_u64().unwrap()
-    );
+    assert!(body["measured_tokens"].as_u64().unwrap() > body["budget_tokens"].as_u64().unwrap());
 
     // Auto remains accepted on the same server.
     let (status, _) = post_mode_raw(&server, "auto").await;

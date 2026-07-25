@@ -469,7 +469,6 @@ impl GuardedSwlRuntime {
         let enforcer = self.enforcer.lock().await;
         enforcer.get_telemetry_events().await
     }
-
 }
 
 /// Evaluate an agent's condition output for a conditional workflow.
@@ -562,7 +561,6 @@ impl GuardedRuntimeBuilder {
             dry_run: false,
         }
     }
-
 
     /// Set the tool registry
     pub fn with_tool_registry(mut self, registry: Arc<ToolRegistry>) -> Self {

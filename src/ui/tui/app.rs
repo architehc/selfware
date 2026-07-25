@@ -135,7 +135,6 @@ impl App {
         }
     }
 
-
     /// Add a user message
     pub fn add_user_message(&mut self, content: &str) {
         self.messages.push(ChatMessage {
@@ -472,9 +471,6 @@ impl App {
         self.status_line.connected = self.connected;
         self.status_line.status_message = Some(self.status.clone());
     }
-
-
-
 
     /// Render command palette overlay
     fn render_palette(&self, frame: &mut Frame, area: Rect) {

@@ -104,7 +104,6 @@ impl ReferenceState {
         self.counter.fetch_add(1, Ordering::Relaxed)
     }
 
-
     pub async fn get_reference(&self, key: &str) -> Option<SelfReference> {
         let refs = self.references.read().await;
         refs.get(key).cloned()

@@ -372,10 +372,6 @@ pub fn render_box(title: &str, content: &str) -> String {
     result
 }
 
-
-
-
-
 #[cfg(test)]
 #[path = "../../tests/unit/ui/components/components_test.rs"]
 mod tests;

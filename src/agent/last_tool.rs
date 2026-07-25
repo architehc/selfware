@@ -56,7 +56,6 @@ impl super::Agent {
     pub fn retrieve_last_tool_output(&self) -> Option<LastToolOutput> {
         self.last_tool_output.clone()
     }
-
 }
 
 #[cfg(test)]

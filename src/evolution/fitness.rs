@@ -89,7 +89,6 @@ pub struct VisualScenario {
     pub capture_method: CaptureMethod,
 }
 
-
 /// Run the full SAB benchmark and return structured results
 pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, FitnessError> {
     let start = Instant::now();

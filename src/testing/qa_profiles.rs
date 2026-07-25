@@ -134,11 +134,9 @@ pub struct QaConfig {
     pub test_retry_iterations: u32,
 }
 
-impl QaConfig {
-}
+impl QaConfig {}
 
-impl QaWeights {
-}
+impl QaWeights {}
 
 fn default_auto_fix_iterations() -> u32 {
     3

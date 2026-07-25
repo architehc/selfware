@@ -31,7 +31,6 @@ impl L1TuiState {
             fixtures_dir: PathBuf::from("vlm_fixtures/l1_tui_state"),
         }
     }
-
 }
 
 #[async_trait]

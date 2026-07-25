@@ -467,7 +467,6 @@ impl FocusMode {
         self
     }
 
-
     /// Enable distraction hiding
     pub fn hide_distractions(mut self) -> Self {
         self.hide_distractions = true;
@@ -624,7 +623,6 @@ impl FocusItem {
         self
     }
 
-
     /// Add tag
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
@@ -723,7 +721,6 @@ impl CognitiveLoadReducer {
     pub fn focus_mode(&self) -> &FocusMode {
         &self.focus_mode
     }
-
 
     /// Check if content should be shown
     pub fn should_show(&self, item: &FocusItem) -> bool {

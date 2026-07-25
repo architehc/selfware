@@ -124,7 +124,6 @@ impl ParticleSystem {
         }
     }
 
-
     /// Add a particle to the system
     pub fn add(&mut self, particle: Particle) {
         if self.particles.len() < self.max_particles {

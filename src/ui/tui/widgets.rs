@@ -219,8 +219,6 @@ impl Widget for ToolOutput {
     }
 }
 
-
-
 #[cfg(test)]
 #[path = "../../../tests/unit/ui/tui/widgets/widgets_test.rs"]
 mod tests;

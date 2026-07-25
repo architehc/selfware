@@ -41,7 +41,6 @@ impl RiskLevel {
             RiskLevel::High => "\x1b[31m",   // Red
         }
     }
-
 }
 
 impl std::fmt::Display for RiskLevel {
@@ -221,8 +220,6 @@ impl PermissionChecker {
             allow_network: true,
         }
     }
-
-
 
     /// Get the current execution mode
     pub fn mode(&self) -> ExecutionMode {

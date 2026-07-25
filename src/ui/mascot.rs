@@ -155,7 +155,6 @@ pub fn render_inline_mascot(mood: MascotMood) -> String {
     format!("{} {}", icon, FoxMascot::INLINE.custom_color(color))
 }
 
-
 /// Get a thinking animation frame
 pub fn thinking_frame(tick: usize) -> &'static [&'static str] {
     let idx = tick % FoxMascot::THINKING_FRAMES.len();

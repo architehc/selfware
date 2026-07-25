@@ -228,7 +228,6 @@ pub fn ensure_fixture_dir(base: &Path, level: &str) -> std::io::Result<PathBuf> 
     Ok(dir)
 }
 
-
 #[cfg(test)]
 #[path = "../../tests/unit/vlm_bench/fixtures/fixtures_test.rs"]
 mod tests;

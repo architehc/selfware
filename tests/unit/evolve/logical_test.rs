@@ -17,7 +17,11 @@ fn every_seed_capability_is_present_with_invariants() {
         assert!(!cap.clusters.is_empty(), "{} needs clusters", cap.id);
     }
     // The task loop is the spine.
-    let task = model.capabilities.iter().find(|c| c.id == "task_loop").unwrap();
+    let task = model
+        .capabilities
+        .iter()
+        .find(|c| c.id == "task_loop")
+        .unwrap();
     assert_eq!(task.name, "Task Loop");
     assert!(task.invariants.iter().any(|i| i.contains("budget")));
 }
@@ -33,10 +37,18 @@ fn modules_and_tokens_derive_from_the_graph() {
 
     let model = build_logical_model(&g, std::path::Path::new("."));
     // agent -> Loop Core -> task_loop ; tools -> Action -> tool_dispatch
-    let task = model.capabilities.iter().find(|c| c.id == "task_loop").unwrap();
+    let task = model
+        .capabilities
+        .iter()
+        .find(|c| c.id == "task_loop")
+        .unwrap();
     assert!(task.modules.contains(&"agent".to_string()));
     assert_eq!(task.tokens, 1000);
-    let dispatch = model.capabilities.iter().find(|c| c.id == "tool_dispatch").unwrap();
+    let dispatch = model
+        .capabilities
+        .iter()
+        .find(|c| c.id == "tool_dispatch")
+        .unwrap();
     assert!(dispatch.modules.contains(&"tools".to_string()));
     assert_eq!(dispatch.tokens, 500);
 }
@@ -56,6 +68,10 @@ fn dependency_edges_collapse_to_capability_level() {
         .edges
         .iter()
         .any(|e| e.from == "task_loop" && e.to == "tool_dispatch"));
-    let task = model.capabilities.iter().find(|c| c.id == "task_loop").unwrap();
+    let task = model
+        .capabilities
+        .iter()
+        .find(|c| c.id == "task_loop")
+        .unwrap();
     assert!(task.depends_on.contains(&"tool_dispatch".to_string()));
 }

@@ -11,14 +11,14 @@ pub mod clusters;
 pub mod context;
 pub mod context_fit;
 pub mod context_reduce;
-pub mod context_trust;
 pub mod context_selector;
+pub mod context_trust;
 pub mod dead_code;
 pub mod dedup;
 pub mod deletion;
+pub mod diagnostics;
 pub mod envelope;
 pub mod fn_dedup;
-pub mod diagnostics;
 pub mod gate;
 pub mod git;
 pub mod graph;
@@ -29,10 +29,10 @@ pub mod r#loop;
 pub mod map;
 pub mod module_graph;
 pub mod ontology;
-pub mod pair_suggest;
-pub mod presets;
 pub mod ontology_evolver;
+pub mod pair_suggest;
 pub mod persona;
+pub mod presets;
 pub mod quality;
 pub mod readiness;
 pub mod server;
@@ -44,27 +44,25 @@ pub mod xray;
 pub use actions::{Action, ActionEngine, ActionResult};
 pub use apply::{ApplyRegistry, ApplyRun, ApplyStatus};
 pub use ast::{AstAnalyzer, AstNode};
+pub use clusters::{cluster_of, clustered, ClusteredGraph};
 pub use context::{
     ContextComposer, ContextLayerSummary, ContextMode, ContextModeSize, ContextSourceSummary,
     ContextSummary,
 };
-pub use context_fit::{
-    fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer, TIER_LADDER,
-};
-pub use clusters::{cluster_of, clustered, ClusteredGraph};
-pub use context_reduce::{
-    dedup_context, reduce_source, strip_cfg_test_blocks, strip_comments,
-};
+pub use context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasurer, TIER_LADDER};
+pub use context_reduce::{dedup_context, reduce_source, strip_cfg_test_blocks, strip_comments};
+pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use context_trust::{
     analyze_source, scan_injection, InjectionFinding, SourceKind, TrustLevel, TrustReport,
 };
-pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
 pub use envelope::{build_envelope, ContextEnvelope, ProjectedDocument};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
 pub use gate::{GateResult, Gatekeeper};
 pub use graph::GraphBuilder;
+pub use graphrag::{GraphRag, GroundedFact};
+pub use ide::{DocumentSnapshot, FileClass, FileInfo, IdeEngine, WriteResult};
 pub use logical::{build_logical_model, Capability, LogicalEdge, LogicalModel};
 pub use map::{
     build_map, expand as expand_component, orientation as workspace_orientation, ComponentCard,
@@ -73,15 +71,13 @@ pub use map::{
 pub use module_graph::{
     from_lib_rs as parse_module_manifest, module_path, ModuleDecl, ModuleManifest, ReExport,
 };
+pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
+pub use ontology_evolver::{OntologyEvolver, OntologyOperation, OntologyProposal, OntologyVersion};
 pub use pair_suggest::{
     connected_pairs, pair_context, suggest_prompt, ComponentPair, SUGGEST_SYSTEM,
 };
-pub use presets::{preset, presets, render_prompt as render_preset_prompt, Preset};
-pub use graphrag::{GraphRag, GroundedFact};
-pub use ide::{DocumentSnapshot, FileClass, FileInfo, IdeEngine, WriteResult};
-pub use ontology::{validate_graph, DanglingEdge, OntologyStore, ValidationReport};
-pub use ontology_evolver::{OntologyEvolver, OntologyOperation, OntologyProposal, OntologyVersion};
 pub use persona::ComponentPersona;
+pub use presets::{preset, presets, render_prompt as render_preset_prompt, Preset};
 pub use quality::QualityAnalyzer;
 pub use r#loop::{EvolutionLoop, LoopResult};
 pub use readiness::{GateState, ReadinessGate, ReadinessReport};

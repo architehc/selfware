@@ -342,10 +342,7 @@ impl Agent {
             }
 
             // Check budget before loading.
-            let estimate = self
-                .context_map
-                .can_load(&path, ContextMode::Lite)
-                .await;
+            let estimate = self.context_map.can_load(&path, ContextMode::Lite).await;
             if !estimate.fits {
                 tracing::info!(
                     "Skeleton budget exhausted after {} files ({:.0}% used)",
@@ -516,11 +513,7 @@ impl Agent {
             BTreeMap::new();
 
         let stats = self.context_map.stats();
-        for level in [
-            ContextMode::Full,
-            ContextMode::Lite,
-            ContextMode::Map,
-        ] {
+        for level in [ContextMode::Full, ContextMode::Lite, ContextMode::Map] {
             for path in self.context_map.files_at_level(level.clone()) {
                 let module = path
                     .components()
@@ -529,7 +522,10 @@ impl Agent {
                     .to_string_lossy()
                     .to_string();
 
-                modules.entry(module).or_default().push((path, level.clone(), 0));
+                modules
+                    .entry(module)
+                    .or_default()
+                    .push((path, level.clone(), 0));
             }
         }
 

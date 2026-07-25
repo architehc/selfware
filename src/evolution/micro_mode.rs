@@ -185,7 +185,6 @@ fn patch_len(hypothesis: &Hypothesis) -> usize {
     hypothesis.patch.len()
 }
 
-
 #[cfg(test)]
 #[path = "../../tests/unit/evolution/micro_mode/micro_mode_test.rs"]
 mod tests;

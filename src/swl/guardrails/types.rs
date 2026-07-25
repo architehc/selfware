@@ -257,7 +257,6 @@ impl GuardrailContext {
         self
     }
 
-
     /// Add workflow input
     pub fn with_workflow_input(
         mut self,

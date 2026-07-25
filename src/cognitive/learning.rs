@@ -568,7 +568,6 @@ impl Curriculum {
         self.concepts.get(id)
     }
 
-
     pub fn suggested_order(&self) -> Vec<&Lesson> {
         let mut sorted: Vec<_> = self.lessons.iter().collect();
         sorted.sort_by_key(|l| l.order);
@@ -915,7 +914,6 @@ impl Quiz {
     pub fn question_count(&self) -> usize {
         self.questions.len()
     }
-
 }
 
 /// Quiz attempt result

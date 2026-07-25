@@ -4425,10 +4425,8 @@ fn context_mode_defaults_to_auto_and_fit_ratio_to_070() {
 
 #[test]
 fn context_mode_and_fit_ratio_parse_from_toml() {
-    let config: Config = toml::from_str(
-        "context_mode = \"compact\"\ncontext_fit_ratio = 0.5\n",
-    )
-    .unwrap();
+    let config: Config =
+        toml::from_str("context_mode = \"compact\"\ncontext_fit_ratio = 0.5\n").unwrap();
     assert_eq!(config.context_mode, "compact");
     assert!((config.context_fit_ratio - 0.5).abs() < f64::EPSILON);
 }

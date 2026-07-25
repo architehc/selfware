@@ -841,7 +841,6 @@ impl AnimatedStatus {
     pub fn elapsed(&self) -> Duration {
         self.start_time.elapsed()
     }
-
 }
 
 impl Animation for AnimatedStatus {

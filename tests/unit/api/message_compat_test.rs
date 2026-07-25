@@ -23,16 +23,66 @@ struct ModelProfile {
 }
 
 const MATRIX: &[ModelProfile] = &[
-    ModelProfile { model: "moonshotai/kimi-k3", provider: "Moonshot", requires_nonempty_assistant: true, native_tool_calls: true },
-    ModelProfile { model: "moonshotai/kimi-k2", provider: "Moonshot", requires_nonempty_assistant: true, native_tool_calls: true },
-    ModelProfile { model: "z-ai/glm-5.2", provider: "Z.ai", requires_nonempty_assistant: false, native_tool_calls: true },
-    ModelProfile { model: "openai/gpt-4o", provider: "OpenAI", requires_nonempty_assistant: false, native_tool_calls: true },
-    ModelProfile { model: "anthropic/claude-3.7", provider: "Anthropic", requires_nonempty_assistant: false, native_tool_calls: true },
-    ModelProfile { model: "deepseek/deepseek-v4", provider: "DeepSeek", requires_nonempty_assistant: true, native_tool_calls: true },
-    ModelProfile { model: "qwen/qwen3-235b", provider: "vLLM", requires_nonempty_assistant: false, native_tool_calls: true },
-    ModelProfile { model: "mistral/mistral-large", provider: "Mistral", requires_nonempty_assistant: false, native_tool_calls: true },
-    ModelProfile { model: "google/gemini-2.5", provider: "Google", requires_nonempty_assistant: false, native_tool_calls: true },
-    ModelProfile { model: "meta/llama-4", provider: "Meta", requires_nonempty_assistant: true, native_tool_calls: true },
+    ModelProfile {
+        model: "moonshotai/kimi-k3",
+        provider: "Moonshot",
+        requires_nonempty_assistant: true,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "moonshotai/kimi-k2",
+        provider: "Moonshot",
+        requires_nonempty_assistant: true,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "z-ai/glm-5.2",
+        provider: "Z.ai",
+        requires_nonempty_assistant: false,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "openai/gpt-4o",
+        provider: "OpenAI",
+        requires_nonempty_assistant: false,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "anthropic/claude-3.7",
+        provider: "Anthropic",
+        requires_nonempty_assistant: false,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "deepseek/deepseek-v4",
+        provider: "DeepSeek",
+        requires_nonempty_assistant: true,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "qwen/qwen3-235b",
+        provider: "vLLM",
+        requires_nonempty_assistant: false,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "mistral/mistral-large",
+        provider: "Mistral",
+        requires_nonempty_assistant: false,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "google/gemini-2.5",
+        provider: "Google",
+        requires_nonempty_assistant: false,
+        native_tool_calls: true,
+    },
+    ModelProfile {
+        model: "meta/llama-4",
+        provider: "Meta",
+        requires_nonempty_assistant: true,
+        native_tool_calls: true,
+    },
 ];
 
 fn tool_call(name: &str, args: &str) -> ToolCall {

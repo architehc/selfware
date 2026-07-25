@@ -144,9 +144,6 @@ pub fn get_description() -> String {
     GrepSearchPrompt::new().description()
 }
 
-
-
-
 #[cfg(test)]
 #[path = "../../../tests/unit/tools/grep_search/prompt/prompt_test.rs"]
 mod tests;

@@ -96,7 +96,6 @@ impl HarnessConfig {
         self
     }
 
-
     /// Validate that the configuration is sane.
     pub fn validate(&self) -> Result<(), String> {
         if self.endpoint.is_empty() {

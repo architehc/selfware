@@ -40,7 +40,8 @@ struct Seed {
     verify: &'static str,
 }
 
-const VERIFY_DEFAULT: &str = "cargo build && cargo test; no clippy regressions; public API unchanged unless intended.";
+const VERIFY_DEFAULT: &str =
+    "cargo build && cargo test; no clippy regressions; public API unchanged unless intended.";
 
 const SEEDS: &[Seed] = &[
     // ---- The four selected targets -------------------------------------------

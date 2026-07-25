@@ -207,7 +207,10 @@ impl EvolveServer {
             .route("/api/context/reduce", get(context_reduce_handler))
             .route("/api/context/dedup", get(context_dedup_handler))
             .route("/api/structure", get(structure_handler))
-            .route("/api/analysis/duplicate-functions", get(duplicate_fns_handler))
+            .route(
+                "/api/analysis/duplicate-functions",
+                get(duplicate_fns_handler),
+            )
             .route("/api/analysis/dead-code", get(dead_code_handler))
             .route("/api/graph/findings", get(graph_findings_handler))
             .route("/api/graph/clustered", get(graph_clustered_handler))
@@ -238,12 +241,18 @@ impl EvolveServer {
             )
             .route("/api/assistant/review", post(assistant_review_handler))
             .route("/api/assistant/task", post(assistant_task_handler))
-            .route("/api/assistant/orientation", get(assistant_orientation_handler))
+            .route(
+                "/api/assistant/orientation",
+                get(assistant_orientation_handler),
+            )
             .route("/api/graph/logical", get(graph_logical_handler))
             .route("/api/evolve/presets", get(evolve_presets_handler))
             .route("/api/graph/modules", get(graph_modules_handler))
             .route("/api/evolve/pairs", get(evolve_pairs_handler))
-            .route("/api/evolve/pairs/suggest", post(evolve_pair_suggest_handler))
+            .route(
+                "/api/evolve/pairs/suggest",
+                post(evolve_pair_suggest_handler),
+            )
             .route("/api/git/status", get(git_status_handler))
             .route("/api/git/branch", post(git_branch_handler))
             .with_state(Arc::new(self.clone()))
@@ -319,14 +328,10 @@ impl EvolveServer {
         };
         let root = self.project_root.as_ref().clone();
         let read_root = root.clone();
-        let envelope = build_envelope_with_root(
-            &graph,
-            &mode,
-            &included,
-            &revision,
-            &root,
-            move |rel| std::fs::read_to_string(read_root.join(rel)).ok(),
-        );
+        let envelope =
+            build_envelope_with_root(&graph, &mode, &included, &revision, &root, move |rel| {
+                std::fs::read_to_string(read_root.join(rel)).ok()
+            });
         *self
             .envelope
             .write()
@@ -501,9 +506,10 @@ async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<J
     if matches!(summary.mode, ContextMode::Map) {
         let graph = server.graph_snapshot().map_err(internal_error)?;
         let root = server.project_root.as_ref().clone();
-        let map_tokens = tokio::task::spawn_blocking(move || super::build_map(&graph, &root).map_tokens)
-            .await
-            .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+        let map_tokens =
+            tokio::task::spawn_blocking(move || super::build_map(&graph, &root).map_tokens)
+                .await
+                .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert("estimated_tokens".into(), json!(map_tokens));
             obj.insert(
@@ -553,7 +559,9 @@ async fn duplicate_fns_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
 /// The code graph aggregated into the 10 architectural clusters (loop-role
 /// super-nodes) with inter-cluster dependency edges — same shape as /api/graph,
 /// so the D3 view can default to 10 nodes and expand on demand.
-async fn graph_clustered_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+async fn graph_clustered_handler(
+    State(server): State<Arc<EvolveServer>>,
+) -> ApiResult<Json<Value>> {
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let clustered = super::clustered(&graph);
     Ok(Json(json!({
@@ -594,9 +602,17 @@ async fn graph_findings_handler(State(server): State<Arc<EvolveServer>>) -> ApiR
             "kind": p.kind, "similarity": p.similarity,
             "first": p.first, "second": p.second,
         });
-        nodes.entry(p.first.path.clone()).or_default().1.push(entry.clone());
+        nodes
+            .entry(p.first.path.clone())
+            .or_default()
+            .1
+            .push(entry.clone());
         if p.second.path != p.first.path {
-            nodes.entry(p.second.path.clone()).or_default().1.push(entry);
+            nodes
+                .entry(p.second.path.clone())
+                .or_default()
+                .1
+                .push(entry);
         }
     }
 
@@ -691,7 +707,9 @@ async fn apply_action_handler(
     let id = super::apply::spawn(prompt.clone(), root, server.apply_runs.clone())
         .await
         .map_err(internal_error)?;
-    Ok(Json(json!({ "id": id, "status": "running", "prompt": prompt })))
+    Ok(Json(
+        json!({ "id": id, "status": "running", "prompt": prompt }),
+    ))
 }
 
 /// Poll an apply run's status + streamed output. GET /api/actions/apply/status?id=X
@@ -739,9 +757,15 @@ async fn structure_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
     let (mut class_total, mut method_total) = (0usize, 0usize);
     for f in &files {
         class_total += f.classes.len();
-        method_total += f.classes.iter().map(|c| c.methods.len()).sum::<usize>()
-            + f.free_functions.len();
-        let component = f.path.trim_start_matches("src/").split('/').next().unwrap_or("").replace(".rs", "");
+        method_total +=
+            f.classes.iter().map(|c| c.methods.len()).sum::<usize>() + f.free_functions.len();
+        let component = f
+            .path
+            .trim_start_matches("src/")
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .replace(".rs", "");
         by_component
             .entry(component)
             .or_default()
@@ -765,17 +789,21 @@ async fn context_select_handler(
     State(server): State<Arc<EvolveServer>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    let kind = super::TaskKind::parse(params.get("kind").map(String::as_str).unwrap_or("understand"))
-        .map_err(|e| bad_request(e.to_string()))?;
+    let kind = super::TaskKind::parse(
+        params
+            .get("kind")
+            .map(String::as_str)
+            .unwrap_or("understand"),
+    )
+    .map_err(|e| bad_request(e.to_string()))?;
     let target = params.get("target").cloned().unwrap_or_default();
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let root = server.project_root.as_ref().clone();
-    let selection = tokio::task::spawn_blocking(move || {
-        super::select_context(kind, &target, &graph, &root)
-    })
-    .await
-    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
-    .map_err(internal_error)?;
+    let selection =
+        tokio::task::spawn_blocking(move || super::select_context(kind, &target, &graph, &root))
+            .await
+            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+            .map_err(internal_error)?;
     Ok(Json(json!({
         "task_kind": selection.task_kind,
         "target": selection.target,
@@ -823,8 +851,13 @@ async fn context_dedup_handler(
     State(server): State<Arc<EvolveServer>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult<Json<Value>> {
-    let kind = super::TaskKind::parse(params.get("kind").map(String::as_str).unwrap_or("understand"))
-        .map_err(|e| bad_request(e.to_string()))?;
+    let kind = super::TaskKind::parse(
+        params
+            .get("kind")
+            .map(String::as_str)
+            .unwrap_or("understand"),
+    )
+    .map_err(|e| bad_request(e.to_string()))?;
     let target = params.get("target").cloned().unwrap_or_default();
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let root = server.project_root.as_ref().clone();
@@ -918,7 +951,11 @@ async fn context_trust_handler(
         .find(|n| n.path.as_deref() == Some(path))
         .map(|n| n.classification.clone())
         .unwrap_or_else(|| {
-            if path.ends_with(".rs") { "rust_source".into() } else { "other".into() }
+            if path.ends_with(".rs") {
+                "rust_source".into()
+            } else {
+                "other".into()
+            }
         });
     let source = match params.get("source").map(String::as_str) {
         Some("tool_output") => super::SourceKind::ToolOutput,
@@ -973,10 +1010,11 @@ async fn context_expand_handler(
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let root = server.project_root.as_ref().clone();
     let target = component.clone();
-    let content = tokio::task::spawn_blocking(move || super::expand_component(&graph, &root, &target, full))
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?
-        .ok_or_else(|| bad_request(format!("unknown component: {component}")))?;
+    let content =
+        tokio::task::spawn_blocking(move || super::expand_component(&graph, &root, &target, full))
+            .await
+            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+            .ok_or_else(|| bad_request(format!("unknown component: {component}")))?;
     Ok(Json(json!({
         "component": component,
         "mode": if full { "full" } else { "signatures" },
@@ -1733,7 +1771,8 @@ async fn assistant_task_handler(
         tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             // Whole-tree navigation context (taxonomy + optional component map),
             // built once and shared as non-citeable background for the review.
-            let orientation = orient.then(|| super::workspace_orientation(&graph, &root, include_map));
+            let orientation =
+                orient.then(|| super::workspace_orientation(&graph, &root, include_map));
             let selection = super::select_context(kind, &target, &graph, &root)?;
             let mut files = selection.files;
             // Seeds first, then findings, then dependents/dependencies.
@@ -1756,8 +1795,7 @@ async fn assistant_task_handler(
                 } else {
                     doc.content.clone()
                 };
-                let (ev, is_complete) =
-                    evidence_from_document(&doc.path, &content, &doc.hash, 120);
+                let (ev, is_complete) = evidence_from_document(&doc.path, &content, &doc.hash, 120);
                 complete &= is_complete;
                 evidence.extend(ev);
                 used.push(file);
@@ -1812,9 +1850,11 @@ async fn assistant_orientation_handler(
         .unwrap_or(true);
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let root = server.project_root.as_ref().clone();
-    let text = tokio::task::spawn_blocking(move || super::workspace_orientation(&graph, &root, include_map))
-        .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+    let text = tokio::task::spawn_blocking(move || {
+        super::workspace_orientation(&graph, &root, include_map)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
     Ok(Json(json!({
         "included_map": include_map,
         "tokens": crate::token_count::estimate_content_tokens(&text),
@@ -1825,7 +1865,9 @@ async fn assistant_orientation_handler(
 /// The self-improvement preset library — the directions selfware can expand in,
 /// each with its task, invariants, context recipe, verification, and a ready
 /// run-prompt with the guardrails baked in. Local, no model call.
-async fn evolve_presets_handler(State(_server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
+async fn evolve_presets_handler(
+    State(_server): State<Arc<EvolveServer>>,
+) -> ApiResult<Json<Value>> {
     let presets = super::presets();
     let items: Vec<Value> = presets
         .iter()
@@ -1855,23 +1897,27 @@ async fn graph_logical_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     let nodes: Vec<Value> = model
         .capabilities
         .iter()
-        .map(|c| json!({
-            "id": c.id,
-            "label": c.name,
-            "layer": "Code",
-            "purpose": c.purpose,
-            "invariants": c.invariants,
-            "clusters": c.clusters,
-            "modules": c.modules,
-            "depends_on": c.depends_on,
-            "tokens": c.tokens,
-            "module_count": c.modules.len(),
-        }))
+        .map(|c| {
+            json!({
+                "id": c.id,
+                "label": c.name,
+                "layer": "Code",
+                "purpose": c.purpose,
+                "invariants": c.invariants,
+                "clusters": c.clusters,
+                "modules": c.modules,
+                "depends_on": c.depends_on,
+                "tokens": c.tokens,
+                "module_count": c.modules.len(),
+            })
+        })
         .collect();
     let edges: Vec<Value> = model
         .edges
         .iter()
-        .map(|e| json!({ "from": e.from, "to": e.to, "edge_type": "DependsOn", "weight": e.weight }))
+        .map(
+            |e| json!({ "from": e.from, "to": e.to, "edge_type": "DependsOn", "weight": e.weight }),
+        )
         .collect();
     Ok(Json(json!({
         "nodes": nodes,
@@ -1891,7 +1937,11 @@ async fn graph_modules_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     // Aggregate file-graph metrics per top-level module.
     use std::collections::BTreeMap;
     let mut metrics: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
-    for node in graph.nodes.iter().filter(|n| n.layer == super::NodeLayer::Code) {
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|n| n.layer == super::NodeLayer::Code)
+    {
         let comp = super::clusters::component_of(&node.id);
         let e = metrics.entry(comp).or_default();
         e.0 += node.tokens;
@@ -1949,9 +1999,11 @@ async fn graph_modules_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     }
     let edges: Vec<Value> = weights
         .into_iter()
-        .map(|((from, to), weight)| json!({
-            "from": from, "to": to, "edge_type": "DependsOn", "weight": weight,
-        }))
+        .map(|((from, to), weight)| {
+            json!({
+                "from": from, "to": to, "edge_type": "DependsOn", "weight": weight,
+            })
+        })
         .collect();
 
     Ok(Json(json!({
@@ -2003,9 +2055,9 @@ async fn evolve_pair_suggest_handler(
     // Resolve the pair (order-independent) so its relationship/cluster metadata
     // comes from the real graph edges; require it to be actually connected.
     let (a, b) = (body.a.clone(), body.b.clone());
-    let pair = super::connected_pairs(&graph).into_iter().find(|p| {
-        (p.a == a && p.b == b) || (p.a == b && p.b == a)
-    });
+    let pair = super::connected_pairs(&graph)
+        .into_iter()
+        .find(|p| (p.a == a && p.b == b) || (p.a == b && p.b == a));
     let Some(pair) = pair else {
         return Err(bad_request(format!(
             "{a} and {b} are not level-1 connected in the production graph"

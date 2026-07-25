@@ -464,7 +464,6 @@ impl PatternDetector {
         self.threshold
     }
 
-
     /// Get top patterns
     pub fn top_patterns(&self, n: usize) -> Vec<LogPattern> {
         self.patterns
@@ -736,7 +735,6 @@ impl AnomalyDetector {
     pub fn error_baseline(&self) -> f32 {
         self.error_baseline.read().map(|b| *b).unwrap_or(0.05)
     }
-
 
     /// Get recent anomalies
     pub fn recent_anomalies(&self, count: usize) -> Vec<Anomaly> {

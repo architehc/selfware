@@ -44,8 +44,8 @@ pub struct ModuleManifest {
 /// Parse `src/lib.rs` under `root` into its module manifest.
 pub fn from_lib_rs(root: &Path) -> Result<ModuleManifest> {
     let lib = root.join("src").join("lib.rs");
-    let source = std::fs::read_to_string(&lib)
-        .with_context(|| format!("reading {}", lib.display()))?;
+    let source =
+        std::fs::read_to_string(&lib).with_context(|| format!("reading {}", lib.display()))?;
     Ok(parse(&source))
 }
 
@@ -110,10 +110,7 @@ pub fn parse(source: &str) -> ModuleManifest {
         }
     }
 
-    ModuleManifest {
-        modules,
-        reexports,
-    }
+    ModuleManifest { modules, reexports }
 }
 
 /// Extract a feature name from `#[cfg(feature = "name")]`.

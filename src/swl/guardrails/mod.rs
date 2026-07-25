@@ -43,7 +43,6 @@ pub use types::{
 use crate::errors::SelfwareError;
 use crate::swl::parser::ast::SwlDocument;
 
-
 /// Quick check if a guardrail would pass
 pub async fn quick_check(
     condition: &str,
@@ -132,8 +131,6 @@ pub mod patterns {
     pub fn max_output_length(max_chars: usize) -> Condition {
         Condition::Inline(format!("agent_output.len() <= {}", max_chars))
     }
-
-
 
     /// Create a condition for safe shell commands
     pub fn safe_shell_command() -> Condition {

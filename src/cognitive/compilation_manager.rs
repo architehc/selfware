@@ -94,7 +94,6 @@ impl CompilationSandbox {
         self.parse_output(output)
     }
 
-
     /// Run tests (cargo test)
     pub fn test(&self) -> Result<CompileResult> {
         info!("Running 'cargo test' in sandbox");

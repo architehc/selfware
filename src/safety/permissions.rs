@@ -55,7 +55,6 @@ impl PermissionGrant {
         self
     }
 
-
     /// Check if this grant has expired.
     pub fn is_expired(&self) -> bool {
         self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
@@ -137,7 +136,6 @@ impl PermissionStore {
             .iter()
             .any(|g| g.matches(tool_name, resource_path))
     }
-
 
     /// Number of active (non-expired) grants.
     pub fn active_count(&self) -> usize {

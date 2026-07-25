@@ -18,7 +18,6 @@ impl IntrospectionEngine {
         Self { state, config }
     }
 
-
     /// Perform introspection on a target
     pub async fn introspect(
         &self,
@@ -114,9 +113,6 @@ impl IntrospectionEngine {
         let diff = target as i32 - current as i32;
         diff <= self.config.max_reflection_depth as i32
     }
-
-
-
 }
 
 /// A reflection result
@@ -137,5 +133,4 @@ impl Reflection {
             ReferenceLevel::Reflective => 3,
         }
     }
-
 }

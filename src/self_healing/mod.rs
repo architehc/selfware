@@ -578,7 +578,6 @@ impl StateManager {
         id
     }
 
-
     /// Restore from checkpoint
     pub fn restore(&self, checkpoint_id: Option<&str>) -> Option<StateCheckpoint> {
         self.stats
@@ -1349,7 +1348,6 @@ impl SelfHealingEngine {
             if healthy { 0 } else { 1 },
         );
     }
-
 
     /// Reset retry state for a pattern after a successful operation,
     /// so the next failure starts with fresh backoff.

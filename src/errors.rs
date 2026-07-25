@@ -375,7 +375,6 @@ pub fn is_no_action_error(e: &anyhow::Error) -> bool {
         || error_string.contains("Agent failed to take action")
 }
 
-
 #[derive(Error, Debug)]
 pub enum ResourceError {
     #[error("Memory exhausted: {0}")]

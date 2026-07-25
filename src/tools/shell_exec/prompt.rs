@@ -123,9 +123,6 @@ pub fn get_description() -> String {
     ShellExecPrompt::new().description()
 }
 
-
-
-
 #[cfg(test)]
 #[path = "../../../tests/unit/tools/shell_exec/prompt/prompt_test.rs"]
 mod tests;

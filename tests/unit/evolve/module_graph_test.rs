@@ -55,7 +55,10 @@ fn captures_cfg_test_and_feature_gates() {
     assert_eq!(by("test_support").visibility, "pub(crate)");
     assert!(!by("agent").test_only);
 
-    assert_eq!(by("evolution").cfg_feature.as_deref(), Some("self-improvement"));
+    assert_eq!(
+        by("evolution").cfg_feature.as_deref(),
+        Some("self-improvement")
+    );
     assert_eq!(by("agent").cfg_feature, None);
     // The feature gate must not leak onto the next declaration.
     assert_eq!(by("evolve").cfg_feature, None);
@@ -64,8 +67,14 @@ fn captures_cfg_test_and_feature_gates() {
 #[test]
 fn collects_reexports_with_owning_module() {
     let m = parse(SAMPLE);
-    assert!(m.reexports.iter().any(|r| r.path == "safety::redact" && r.module == "safety"));
-    assert!(m.reexports.iter().any(|r| r.path == "analysis::bm25" && r.module == "analysis"));
+    assert!(m
+        .reexports
+        .iter()
+        .any(|r| r.path == "safety::redact" && r.module == "safety"));
+    assert!(m
+        .reexports
+        .iter()
+        .any(|r| r.path == "analysis::bm25" && r.module == "analysis"));
     // `pub mod` lines are not re-exports.
     assert!(!m.reexports.iter().any(|r| r.path == "agent"));
 }
@@ -76,6 +85,16 @@ fn module_count_is_stable() {
     let names: Vec<_> = m.modules.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(
         names,
-        ["agent", "api", "test_support", "tools", "analysis", "session", "evolution", "evolve", "token_count"]
+        [
+            "agent",
+            "api",
+            "test_support",
+            "tools",
+            "analysis",
+            "session",
+            "evolution",
+            "evolve",
+            "token_count"
+        ]
     );
 }

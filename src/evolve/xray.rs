@@ -104,7 +104,10 @@ fn module_of(path: &str) -> String {
         .or_else(|| norm.strip_prefix("src/"))
         .unwrap_or(&norm);
     let rel = rel.strip_suffix(".rs").unwrap_or(rel);
-    let parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty() && *s != "mod").collect();
+    let parts: Vec<&str> = rel
+        .split('/')
+        .filter(|s| !s.is_empty() && *s != "mod")
+        .collect();
     if parts.is_empty() {
         "crate".to_string()
     } else {
@@ -130,7 +133,10 @@ impl ConceptIndex {
         let mut impls: Vec<(Option<String>, String)> = Vec::new();
         let mut files: Vec<FileEntry> = Vec::new();
 
-        for entry in WalkDir::new(root.as_ref()).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(root.as_ref())
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             let p = entry.path();
             if p.extension().map_or(false, |e| e == "rs") {
                 let text = match std::fs::read_to_string(p) {
@@ -141,24 +147,37 @@ impl ConceptIndex {
                 let module = module_of(&path);
                 for (i, line) in text.lines().enumerate() {
                     if let Some(c) = def_re().captures(line) {
-                        defs.entry(c[2].to_string()).or_default().push(DefinitionSite {
-                            kind: c[1].to_string(),
-                            path: path.clone(),
-                            line: i + 1,
-                        });
+                        defs.entry(c[2].to_string())
+                            .or_default()
+                            .push(DefinitionSite {
+                                kind: c[1].to_string(),
+                                path: path.clone(),
+                                line: i + 1,
+                            });
                     }
                     if let Some(c) = impl_re().captures(line) {
                         let tr = c.get(1).map(|m| m.as_str().to_string());
                         impls.push((tr, c[2].to_string()));
                     }
                 }
-                let idents: HashSet<String> =
-                    ident_re().find_iter(&text).map(|m| m.as_str().to_string()).collect();
-                files.push(FileEntry { module, idents, text });
+                let idents: HashSet<String> = ident_re()
+                    .find_iter(&text)
+                    .map(|m| m.as_str().to_string())
+                    .collect();
+                files.push(FileEntry {
+                    module,
+                    idents,
+                    text,
+                });
             }
         }
         let concept_names: HashSet<String> = defs.keys().cloned().collect();
-        Ok(Self { defs, impls, files, concept_names })
+        Ok(Self {
+            defs,
+            impls,
+            files,
+            concept_names,
+        })
     }
 
     /// Number of distinct concepts in the vocabulary.
@@ -178,15 +197,20 @@ impl ConceptIndex {
         }
         let mut ranked: Vec<_> = counts.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        ranked.into_iter().take(limit).map(|(name, n)| RelatedConcept {
-            name: name.to_string(),
-            kind: self.kind_of(name),
-            cooccurring_files: n,
-        }).collect()
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(name, n)| RelatedConcept {
+                name: name.to_string(),
+                kind: self.kind_of(name),
+                cooccurring_files: n,
+            })
+            .collect()
     }
 
     fn kind_of(&self, name: &str) -> String {
-        self.defs.get(name)
+        self.defs
+            .get(name)
             .and_then(|v| v.first())
             .map(|d| d.kind.clone())
             .unwrap_or_default()
@@ -217,28 +241,45 @@ impl ConceptIndex {
             }
         }
 
-        let implemented_traits: Vec<String> = self.impls.iter()
+        let implemented_traits: Vec<String> = self
+            .impls
+            .iter()
             .filter(|(t, target)| target == concept && t.is_some())
             .filter_map(|(t, _)| t.clone())
             .collect();
-        let implementors: Vec<String> = self.impls.iter()
+        let implementors: Vec<String> = self
+            .impls
+            .iter()
             .filter(|(t, _)| t.as_deref() == Some(concept))
             .map(|(_, target)| target.clone())
-            .collect::<HashSet<_>>().into_iter().collect();
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
 
-        let mut references: Vec<ConceptRef> = refs.into_iter()
-            .map(|(module, mentions)| ConceptRef { module, mentions }).collect();
+        let mut references: Vec<ConceptRef> = refs
+            .into_iter()
+            .map(|(module, mentions)| ConceptRef { module, mentions })
+            .collect();
         references.sort_by(|a, b| b.mentions.cmp(&a.mentions).then(a.module.cmp(&b.module)));
-        let footprint_modules = references.iter()
+        let footprint_modules = references
+            .iter()
             .map(|r| r.module.split("::").next().unwrap_or("").to_string())
-            .collect::<HashSet<_>>().len();
+            .collect::<HashSet<_>>()
+            .len();
 
-        let mut related: Vec<RelatedConcept> = cooccur.into_iter().map(|(name, n)| RelatedConcept {
-            name: name.to_string(),
-            kind: self.kind_of(name),
-            cooccurring_files: n,
-        }).collect();
-        related.sort_by(|a, b| b.cooccurring_files.cmp(&a.cooccurring_files).then(a.name.cmp(&b.name)));
+        let mut related: Vec<RelatedConcept> = cooccur
+            .into_iter()
+            .map(|(name, n)| RelatedConcept {
+                name: name.to_string(),
+                kind: self.kind_of(name),
+                cooccurring_files: n,
+            })
+            .collect();
+        related.sort_by(|a, b| {
+            b.cooccurring_files
+                .cmp(&a.cooccurring_files)
+                .then(a.name.cmp(&b.name))
+        });
 
         Some(ConceptXray {
             concept: concept.to_string(),

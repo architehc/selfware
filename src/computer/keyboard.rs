@@ -402,7 +402,10 @@ impl KeyboardController {
         {
             if !text.is_empty() {
                 let escaped = text.replace('\\', "\\\\").replace('"', "\\\"");
-                let script = format!("tell application \"System Events\" to keystroke \"{}\"", escaped);
+                let script = format!(
+                    "tell application \"System Events\" to keystroke \"{}\"",
+                    escaped
+                );
                 let _ = tokio::process::Command::new("osascript")
                     .arg("-e")
                     .arg(&script)

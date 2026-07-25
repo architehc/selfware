@@ -235,7 +235,6 @@ impl MemorySystem {
         }
         parts.join("\n\n")
     }
-
 }
 
 impl DreamIntegratedMemorySystem {
@@ -260,7 +259,6 @@ impl DreamIntegratedMemorySystem {
         self
     }
 
-
     /// Load consolidated MEMORY.md for the project.
     pub fn load_consolidated_memory(&self) -> Option<ConsolidatedMemory> {
         let memory_path = self.dream_config.memory_file_path(&self.project_key);
@@ -281,7 +279,6 @@ impl DreamIntegratedMemorySystem {
             }
         }
     }
-
 
     /// Get dream status for display.
     pub async fn dream_status(&self) -> crate::cognitive::dream::DreamStatus {

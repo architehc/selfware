@@ -226,7 +226,6 @@ impl GpuManager {
         // This would communicate with the LLM engine to reduce batch size
     }
 
-
     /// Allocate GPU memory for a model
     pub async fn allocate_memory(
         &self,

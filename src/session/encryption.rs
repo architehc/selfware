@@ -221,7 +221,6 @@ impl EncryptionManager {
         }
     }
 
-
     /// Create an EncryptionManager directly (test only, bypasses OnceLock)
     #[cfg(test)]
     pub fn new_for_test(password: &str) -> Self {

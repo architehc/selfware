@@ -199,7 +199,6 @@ impl ConsolidationEngine {
         Ok(report)
     }
 
-
     /// Start periodic consolidation in the background.
     pub fn start_periodic(self, interval: Duration) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {

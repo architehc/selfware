@@ -200,7 +200,6 @@ impl MemoryManager {
         self.allocated.load(Ordering::Relaxed)
     }
 
-
     /// Estimate memory for operation
     pub fn estimate_for_tokens(&self, tokens: usize, bytes_per_token: usize) -> u64 {
         (tokens * bytes_per_token) as u64

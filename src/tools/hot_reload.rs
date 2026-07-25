@@ -213,7 +213,6 @@ impl HotReloadTool {
             manager: Arc::new(Mutex::new(HotReloadManager::new())),
         }
     }
-
 }
 
 impl Default for HotReloadTool {

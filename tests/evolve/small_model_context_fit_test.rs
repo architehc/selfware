@@ -29,7 +29,11 @@ fn test_task_aware_selection_fits_within_8k_small_model_window() {
     let selection = select_context(TaskKind::Refactor, "module_42", &graph, temp.path()).unwrap();
 
     // Verify only relevant neighborhood files selected (not all 100 files)
-    assert!(selection.files.len() < 10, "Selected files should be focused: {}", selection.files.len());
+    assert!(
+        selection.files.len() < 10,
+        "Selected files should be focused: {}",
+        selection.files.len()
+    );
 
     // Calculate token cost for selected files
     let selected_tokens: usize = selection
@@ -95,7 +99,8 @@ fn test_context_mode_auto_downgrade_recommendation() {
 
     assert!(
         fitting_modes.contains(&"lite"),
-        "Lite mode should fit in 16k window, available: {:?}", fitting_modes
+        "Lite mode should fit in 16k window, available: {:?}",
+        fitting_modes
     );
     assert!(
         !fitting_modes.contains(&"full"),

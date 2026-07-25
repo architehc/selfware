@@ -71,14 +71,14 @@ pub fn select(
     project_root: &Path,
 ) -> Result<ContextSelection> {
     let files = match kind {
-        TaskKind::Extend | TaskKind::Refactor | TaskKind::Understand => {
-            neighborhood(graph, target)
-        }
+        TaskKind::Extend | TaskKind::Refactor | TaskKind::Understand => neighborhood(graph, target),
         TaskKind::Consolidate => consolidate_files(project_root)?,
         TaskKind::Cleanup => cleanup_files(project_root)?,
     };
     let rationale = match kind {
-        TaskKind::Extend => "target source + dependents (callers to preserve) + dependency interfaces",
+        TaskKind::Extend => {
+            "target source + dependents (callers to preserve) + dependency interfaces"
+        }
         TaskKind::Refactor => "target source + full dependent set (the blast radius to keep green)",
         TaskKind::Understand => "target source + its immediate graph neighborhood",
         TaskKind::Consolidate => "files sharing duplicate functions — the consolidation surface",
@@ -101,7 +101,9 @@ fn neighborhood(graph: &Graph, target: &str) -> Vec<SelectedFile> {
         .iter()
         .filter(|n| {
             n.id.to_lowercase().contains(&t)
-                || n.path.as_deref().is_some_and(|p| p.to_lowercase().contains(&t))
+                || n.path
+                    .as_deref()
+                    .is_some_and(|p| p.to_lowercase().contains(&t))
         })
         .map(|n| n.id.as_str())
         .collect();
@@ -152,10 +154,18 @@ fn neighborhood(graph: &Graph, target: &str) -> Vec<SelectedFile> {
             continue;
         }
         if seeds.contains(edge.to.as_str()) {
-            add(&edge.from, "dependent", format!("depends on {} — must stay green", edge.to));
+            add(
+                &edge.from,
+                "dependent",
+                format!("depends on {} — must stay green", edge.to),
+            );
         }
         if seeds.contains(edge.from.as_str()) {
-            add(&edge.to, "dependency", format!("used by {} — needed as context", edge.from));
+            add(
+                &edge.to,
+                "dependency",
+                format!("used by {} — needed as context", edge.from),
+            );
         }
     }
     out.into_values().collect()

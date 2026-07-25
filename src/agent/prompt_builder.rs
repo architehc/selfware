@@ -86,7 +86,6 @@ impl SystemPromptBuilder {
         }
     }
 
-
     /// Build the full prompt by combining static and dynamic sections
     ///
     /// The output format is:
@@ -205,7 +204,6 @@ pub fn split_at_boundary(prompt: &str) -> (&str, &str) {
         None => (prompt.trim(), ""),
     }
 }
-
 
 /// Check if a prompt contains the dynamic boundary marker
 pub fn has_boundary(prompt: &str) -> bool {

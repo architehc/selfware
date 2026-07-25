@@ -30,7 +30,6 @@ impl L3Architecture {
             fixtures_dir: PathBuf::from("vlm_fixtures/l3_architecture"),
         }
     }
-
 }
 
 #[async_trait]

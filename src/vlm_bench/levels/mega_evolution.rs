@@ -30,7 +30,6 @@ impl MegaEvolution {
             fixtures_dir: PathBuf::from("vlm_fixtures/mega_evolution"),
         }
     }
-
 }
 
 #[async_trait]

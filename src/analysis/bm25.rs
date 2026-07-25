@@ -240,7 +240,6 @@ impl BM25Index {
             .collect()
     }
 
-
     /// Compute BM25 score for a document given query tokens
     fn score_document(&self, doc: &Document, query_tokens: &[String]) -> f32 {
         let mut score = 0.0;

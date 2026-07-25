@@ -23,7 +23,10 @@ fn strips_doc_and_block_comments() {
 fn preserves_slashes_inside_string_literals() {
     let src = r#"let url = "http://x//y"; // real comment"#;
     let out = strip_comments(src);
-    assert!(out.contains(r#""http://x//y""#), "string content must survive: {out}");
+    assert!(
+        out.contains(r#""http://x//y""#),
+        "string content must survive: {out}"
+    );
     assert!(!out.contains("real comment"));
 }
 
@@ -66,7 +69,11 @@ fn dedup_elides_identical_body_keeps_canonical() {
     // Canonical (first) file keeps the real body.
     assert!(out[0].1.contains("for x in items"));
     // Second file's body is replaced with a stub referencing the canonical.
-    assert!(out[1].1.contains("deduped: identical to a.rs::sum_a"), "got: {}", out[1].1);
+    assert!(
+        out[1].1.contains("deduped: identical to a.rs::sum_a"),
+        "got: {}",
+        out[1].1
+    );
     assert!(!out[1].1.contains("for x in items"));
 }
 
@@ -77,7 +84,10 @@ fn dedup_skips_marginal_bodies_where_stub_would_not_shrink() {
     let a = format!("pub fn f() -> i32 {{{body}}}\n");
     let b = format!("pub fn g() -> i32 {{{body}}}\n");
     let (out, elided) = dedup_context(&[("a.rs".into(), a), ("b.rs".into(), b)]);
-    assert_eq!(elided, 0, "marginal elision would be net-negative in tokens");
+    assert_eq!(
+        elided, 0,
+        "marginal elision would be net-negative in tokens"
+    );
     assert!(out[1].1.contains("a + b"));
 }
 
@@ -106,7 +116,8 @@ fn dedup_survives_multibyte_chars() {
 
 #[test]
 fn strip_cfg_test_handles_brace_in_string() {
-    let src = "#[cfg(test)]\nmod tests {\n    let s = \"}\";\n    fn t() {}\n}\npub fn after() {}\n";
+    let src =
+        "#[cfg(test)]\nmod tests {\n    let s = \"}\";\n    fn t() {}\n}\npub fn after() {}\n";
     let out = strip_cfg_test_blocks(src);
     // The `}` inside the string must not prematurely close the block, so `after`
     // survives and the test module is fully removed.

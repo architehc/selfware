@@ -385,7 +385,6 @@ impl Pattern {
         }
     }
 
-
     /// Set confidence
     pub fn with_confidence(mut self, confidence: f32) -> Self {
         self.confidence = confidence.clamp(0.0, 1.0);

@@ -30,7 +30,6 @@ impl L4Profiling {
             fixtures_dir: PathBuf::from("vlm_fixtures/l4_profiling"),
         }
     }
-
 }
 
 #[async_trait]

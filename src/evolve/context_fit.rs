@@ -171,12 +171,15 @@ impl<'a> TierMeasurer<'a> {
 
     fn measure_compact(&self) -> usize {
         let mut total = 0usize;
-        for node in self.graph.nodes.iter().filter(|n| n.layer == NodeLayer::Code) {
+        for node in self
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.layer == NodeLayer::Code)
+        {
             let code_tokens = node.tokens.saturating_sub(node.inline_test_tokens);
             total += match self.read_node_source(node) {
-                Some((_, src)) => {
-                    crate::token_count::estimate_content_tokens(&reduce_source(&src))
-                }
+                Some((_, src)) => crate::token_count::estimate_content_tokens(&reduce_source(&src)),
                 None => (code_tokens as f64 * COMMENT_STRIPPED_FRACTION).round() as usize,
             };
         }
@@ -185,7 +188,12 @@ impl<'a> TierMeasurer<'a> {
 
     fn measure_lite(&self) -> usize {
         let mut total = 0usize;
-        for node in self.graph.nodes.iter().filter(|n| n.layer == NodeLayer::Code) {
+        for node in self
+            .graph
+            .nodes
+            .iter()
+            .filter(|n| n.layer == NodeLayer::Code)
+        {
             let code_tokens = node.tokens.saturating_sub(node.inline_test_tokens);
             total += match self.read_node_source(node) {
                 Some((rel, src)) if rel.ends_with(".rs") => {

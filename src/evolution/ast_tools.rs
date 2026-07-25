@@ -210,7 +210,6 @@ fn parse_diagnostic(msg: &serde_json::Value) -> Option<CompilerDiagnostic> {
     })
 }
 
-
 fn uuid_short() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()

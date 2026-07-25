@@ -52,7 +52,11 @@ const MAX_OUTPUT: usize = 200_000;
 /// Spawn `selfware run "<prompt>" --yolo` in `project_root`, streaming stdout +
 /// stderr into the run's output buffer. Returns the run id immediately; the run
 /// continues in the background.
-pub async fn spawn(prompt: String, project_root: PathBuf, registry: ApplyRegistry) -> Result<String> {
+pub async fn spawn(
+    prompt: String,
+    project_root: PathBuf,
+    registry: ApplyRegistry,
+) -> Result<String> {
     let exe = std::env::current_exe()?;
     let id = format!("apply-{}", uuid::Uuid::new_v4().simple());
     registry.lock().await.insert(

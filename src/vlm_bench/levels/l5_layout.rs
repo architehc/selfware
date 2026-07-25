@@ -30,7 +30,6 @@ impl L5Layout {
             fixtures_dir: PathBuf::from("vlm_fixtures/l5_layout"),
         }
     }
-
 }
 
 #[async_trait]

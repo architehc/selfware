@@ -28,9 +28,14 @@ fn the_three_selected_targets_are_present() {
 
 #[test]
 fn directions_span_expansion_space() {
-    let dirs: std::collections::BTreeSet<_> =
-        presets().into_iter().map(|p| p.direction).collect();
-    for d in ["context", "refactor", "capability", "automation", "comprehension"] {
+    let dirs: std::collections::BTreeSet<_> = presets().into_iter().map(|p| p.direction).collect();
+    for d in [
+        "context",
+        "refactor",
+        "capability",
+        "automation",
+        "comprehension",
+    ] {
         assert!(dirs.contains(d), "expansion space missing direction: {d}");
     }
 }

@@ -108,7 +108,6 @@ impl StateManager {
         self
     }
 
-
     /// Load state from the backend
     pub async fn load(&mut self) -> Result<()> {
         debug!("Loading state for workflow: {}", self.workflow_name);
@@ -183,7 +182,6 @@ impl StateManager {
 
         Ok(())
     }
-
 
     /// Delete a state value
     pub fn delete(&mut self, key: &str) -> bool {

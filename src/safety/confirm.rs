@@ -156,7 +156,6 @@ pub fn requires_confirmation(
     }
 }
 
-
 /// Non-interactive confirmation (for testing or automation)
 pub fn auto_confirm(operation: &DestructiveOperation, config: &ConfirmConfig) -> ConfirmResult {
     if config.auto_approve_non_interactive {

@@ -229,7 +229,6 @@ impl ResourceManager {
         self.usage.read().await.clone()
     }
 
-
     /// Check if operation is within quotas
     pub async fn check_quotas(&self, required: &ResourceRequest) -> Result<(), ResourceError> {
         let quotas = self.quotas.read().await;

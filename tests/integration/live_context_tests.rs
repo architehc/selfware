@@ -7,9 +7,7 @@
 
 use std::path::Path;
 
-use selfware::agent::context_map::{
-    extract_rust_skeleton, ContextMap, ContextModality,
-};
+use selfware::agent::context_map::{extract_rust_skeleton, ContextMap, ContextModality};
 use selfware::evolve::ContextMode;
 use selfware::token_count::estimate_content_tokens;
 

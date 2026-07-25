@@ -501,7 +501,6 @@ impl Usage {
         }
         Ok(())
     }
-
 }
 
 /// Definition of a tool available to the model.

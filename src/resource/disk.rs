@@ -168,7 +168,6 @@ impl DiskManager {
         ))
     }
 
-
     /// Perform maintenance tasks
     async fn perform_maintenance(&self) -> Result<(), ResourceError> {
         debug!("Starting disk maintenance");
@@ -405,7 +404,6 @@ impl DiskManager {
         let usage = self.get_usage().await?;
         Ok(usage.available)
     }
-
 }
 
 #[cfg(test)]

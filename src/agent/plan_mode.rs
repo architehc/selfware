@@ -68,7 +68,6 @@ impl PlanStep {
         self
     }
 
-
     /// Set additional context for this step
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
@@ -169,7 +168,6 @@ impl Plan {
             .iter()
             .find(|s| !matches!(s.status, StepStatus::Done))
     }
-
 
     /// Format the plan as a human-readable string
     pub fn format(&self) -> String {
@@ -307,7 +305,6 @@ impl PlanModeManager {
         self.plan.as_ref()
     }
 
-
     /// Store plan text during the planning phase
     pub fn store_plan_text(&mut self, text: impl Into<String>) {
         if let PlanModeState::Planning { plan_text } = &mut self.state {
@@ -356,7 +353,6 @@ impl PlanModeManager {
 
 /// Thread-safe shared plan mode manager
 pub type SharedPlanModeManager = Arc<RwLock<PlanModeManager>>;
-
 
 /// List of tool names that are read-only and safe to use in plan mode
 pub const READONLY_TOOLS: &[&str] = &[

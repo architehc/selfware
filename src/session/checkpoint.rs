@@ -614,8 +614,6 @@ impl TaskCheckpoint {
         self.touch();
     }
 
-
-
     /// Add an error log entry
     pub fn log_error(&mut self, step: usize, error: String, recovered: bool) {
         self.errors.push(ErrorLog {

@@ -75,7 +75,6 @@ const EXTRA_BODY_WARN: &[&str] = &["logit_bias", "stop", "response_format"];
 /// tool definitions, or streaming flag, which is a security risk.
 const EXTRA_BODY_BLOCKED: &[&str] = &["model", "messages", "tools", "stream"];
 
-
 // Re-export default functions used by other config submodules via `super::`.
 pub fn default_context_length() -> usize {
     1048576
