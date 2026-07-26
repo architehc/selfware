@@ -299,6 +299,48 @@ fn test_evolution_result_fields() {
     assert!(result.improvements.is_empty());
 }
 
+// ─── Winner test-count gate (evolution daemon hardening) ───
+
+fn make_metrics(tests_passed: usize, tests_total: usize) -> FitnessMetrics {
+    FitnessMetrics {
+        sab_score: 100.0,
+        tokens_used: 0,
+        token_budget: DEFAULT_TOKEN_BUDGET,
+        wall_clock_secs: 1.0,
+        timeout_secs: DEFAULT_TIMEOUT_SECS,
+        test_coverage_pct: 100.0,
+        binary_size_mb: 10.0,
+        max_binary_size_mb: 50.0,
+        tests_passed,
+        tests_total,
+        visual_score: 0.0,
+    }
+}
+
+#[test]
+fn test_winner_gate_rejects_test_count_regression() {
+    let baseline = make_metrics(100, 100);
+    let winner = make_metrics(50, 50); // deleted half the tests
+    let err = winner_test_count_gate(&baseline, &winner).unwrap_err();
+    assert!(
+        err.contains("winner rejected: test count regressed 100→50"),
+        "unexpected rejection message: {}",
+        err
+    );
+}
+
+#[test]
+fn test_winner_gate_allows_equal_or_more_tests() {
+    let baseline = make_metrics(100, 100);
+    // Same count passes.
+    assert!(winner_test_count_gate(&baseline, &make_metrics(95, 100)).is_ok());
+    // More tests passes.
+    assert!(winner_test_count_gate(&baseline, &make_metrics(101, 101)).is_ok());
+    // Zero-baseline (synthetic) never blocks the first generation.
+    let synthetic = make_metrics(0, 0);
+    assert!(winner_test_count_gate(&synthetic, &make_metrics(1, 1)).is_ok());
+}
+
 #[test]
 fn test_parse_hypotheses_valid_json() {
     let json = r#"[

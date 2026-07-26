@@ -5,7 +5,7 @@ use axum::{
     extract::{Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -359,10 +359,22 @@ impl EvolveServer {
             .composer
             .write()
             .map_err(|_| anyhow::anyhow!("context lock poisoned"))?;
+        // A hand-picked custom selection must survive refreshes (the composer
+        // is rebuilt from scratch on every save): carry it over before the
+        // composer is replaced.
+        let custom_selection = if matches!(requested, RequestedMode::Fixed(ContextMode::Custom)) {
+            Some(current.included_nodes())
+        } else {
+            None
+        };
         let mut composer = ContextComposer::new(refreshed.clone());
         let (mode, outcome) =
             fit_mode(&requested, &refreshed, &self.project_root, &self.fit_budget);
-        composer.set_mode(mode);
+        if let Some(ids) = custom_selection {
+            composer.set_custom(ids);
+        } else {
+            composer.set_mode(mode);
+        }
         *current = composer;
         drop(current);
         self.record_fit(outcome)?;
@@ -514,7 +526,7 @@ async fn context_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<J
         let map_tokens =
             tokio::task::spawn_blocking(move || super::build_map(&graph, &root).map_tokens)
                 .await
-                .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+                .map_err(join_error)?;
         if let Some(obj) = value.as_object_mut() {
             obj.insert("estimated_tokens".into(), json!(map_tokens));
             obj.insert(
@@ -550,7 +562,7 @@ async fn duplicate_fns_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     let root = server.project_root.join("src");
     let pairs = tokio::task::spawn_blocking(move || super::FnDedupAnalyzer::new(root).find())
         .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+        .map_err(join_error)?
         .map_err(internal_error)?;
     let exact = pairs.iter().filter(|p| p.kind == "exact").count();
     Ok(Json(json!({
@@ -588,7 +600,7 @@ async fn graph_findings_handler(State(server): State<Arc<EvolveServer>>) -> ApiR
         Ok((dead, dupes))
     })
     .await
-    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .map_err(join_error)?
     .map_err(internal_error)?;
 
     // Accumulate per file path.
@@ -737,7 +749,7 @@ async fn dead_code_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
     let root = server.project_root.as_ref().clone();
     let dead = tokio::task::spawn_blocking(move || super::DeadCodeAnalyzer::new(root).find())
         .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+        .map_err(join_error)?
         .map_err(internal_error)?;
     let confident = dead.iter().filter(|d| !d.cfg_gated).count();
     Ok(Json(json!({
@@ -754,7 +766,7 @@ async fn structure_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
     let root = server.project_root.join("src");
     let files = tokio::task::spawn_blocking(move || super::StructureAnalyzer::new(root).outline())
         .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+        .map_err(join_error)?
         .map_err(internal_error)?;
     // Group by top-level component for the navigator.
     use std::collections::BTreeMap;
@@ -807,7 +819,7 @@ async fn context_select_handler(
     let selection =
         tokio::task::spawn_blocking(move || super::select_context(kind, &target, &graph, &root))
             .await
-            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+            .map_err(join_error)?
             .map_err(internal_error)?;
     Ok(Json(json!({
         "task_kind": selection.task_kind,
@@ -843,7 +855,7 @@ async fn context_select_symbols_handler(
     let report =
         tokio::task::spawn_blocking(move || symbol_selection_json(kind, &target, &graph, &root))
             .await
-            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+            .map_err(join_error)?
             .map_err(internal_error)?;
     Ok(Json(report))
 }
@@ -962,7 +974,7 @@ async fn context_sizes_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     let root = server.project_root.as_ref().clone();
     let map = tokio::task::spawn_blocking(move || super::build_map(&graph, &root))
         .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+        .map_err(join_error)?;
     sizes.insert(
         0,
         super::ContextModeSize {
@@ -1026,7 +1038,7 @@ async fn context_dedup_handler(
         }))
     })
     .await
-    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .map_err(join_error)?
     .map_err(internal_error)?;
     Ok(Json(report))
 }
@@ -1109,7 +1121,7 @@ async fn context_map_handler(State(server): State<Arc<EvolveServer>>) -> ApiResu
     let root = server.project_root.as_ref().clone();
     let map = tokio::task::spawn_blocking(move || super::build_map(&graph, &root))
         .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+        .map_err(join_error)?;
     let ratio = if map.map_tokens > 0 {
         map.full_tokens as f64 / map.map_tokens as f64
     } else {
@@ -1150,7 +1162,7 @@ async fn context_expand_handler(
         super::expand_component(&graph, &root, &target, sym.as_deref(), full)
     })
     .await
-    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .map_err(join_error)?
     .ok_or_else(|| match &symbol {
         Some(s) => bad_request(format!(
             "symbol `{s}` not found in component `{component}` (or the component itself is unknown)"
@@ -1567,7 +1579,7 @@ async fn ide_write_handler(
     let refresh_server = server.clone();
     let refresh_result = tokio::task::spawn_blocking(move || refresh_server.refresh_graph())
         .await
-        .map_err(internal_error)?;
+        .map_err(join_error)?;
     let (graph_revision, graph_refresh) = match refresh_result {
         Ok(graph_revision) => (
             Some(graph_revision.clone()),
@@ -2008,7 +2020,7 @@ async fn assistant_orientation_handler(
         super::workspace_orientation(&graph, &root, include_map)
     })
     .await
-    .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+    .map_err(join_error)?;
     Ok(Json(json!({
         "included_map": include_map,
         "tokens": crate::token_count::estimate_content_tokens(&text),
@@ -2047,7 +2059,7 @@ async fn graph_logical_handler(State(server): State<Arc<EvolveServer>>) -> ApiRe
     let root = server.project_root.as_ref().clone();
     let model = tokio::task::spawn_blocking(move || super::build_logical_model(&graph, &root))
         .await
-        .map_err(|e| internal_error(anyhow::anyhow!(e)))?;
+        .map_err(join_error)?;
     let nodes: Vec<Value> = model
         .capabilities
         .iter()
@@ -2224,7 +2236,7 @@ async fn evolve_pair_suggest_handler(
         let pair = pair.clone();
         tokio::task::spawn_blocking(move || super::pair_context(&graph, &root, &pair))
             .await
-            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+            .map_err(join_error)?
     };
     let context_tokens = crate::token_count::estimate_content_tokens(&context);
 
@@ -2617,7 +2629,31 @@ async fn git_branch_handler(
     Ok(Json(serde_json::to_value(result).map_err(internal_error)?))
 }
 
+/// DNS-rebinding guard: this server hands out a session token on
+/// /api/workspace. It binds 127.0.0.1, but a rebound attacker page would
+/// arrive same-origin — reject any request whose Host header is not a
+/// loopback name.
+fn is_loopback_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return true; // HTTP/1.0 clients may omit Host
+    };
+    let name = host.trim_matches(|c| c == '[' || c == ']');
+    let name = name.split(':').next().unwrap_or("");
+    matches!(name, "127.0.0.1" | "localhost" | "::1" | "")
+}
+
 async fn security_headers(request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get("host")
+        .and_then(|value| value.to_str().ok());
+    if !is_loopback_host(host) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "loopback host required (DNS-rebinding protection)"})),
+        )
+            .into_response();
+    }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -2738,6 +2774,14 @@ fn internal_error(error: impl std::fmt::Display) -> ApiError {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": error.to_string() })),
     )
+}
+
+/// Map a spawn_blocking JoinError without leaking the panic payload — tokio's
+/// Display includes the panic message, which is unreviewed internals and must
+/// not reach API clients (AGENTS.md §3). The full error stays in the log.
+fn join_error(error: tokio::task::JoinError) -> ApiError {
+    tracing::error!("background task failed: {error}");
+    internal_error("background task failed")
 }
 
 fn bad_action_error(error: impl std::fmt::Display) -> ApiError {

@@ -78,6 +78,13 @@ impl ChatStore {
         let data = if let Some(encryption) = EncryptionManager::get() {
             encryption.encrypt(json.as_bytes())?
         } else {
+            // Never silently degrade to plaintext (AGENTS.md §3): the user
+            // asked for keychain-backed encryption when initializing; if it
+            // is unavailable they must know the bytes on disk are readable.
+            tracing::warn!(
+                "encryption unavailable — saving chat '{}' in plaintext",
+                name
+            );
             json.into_bytes()
         };
 

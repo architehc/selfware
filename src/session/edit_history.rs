@@ -299,7 +299,16 @@ impl EditHistory {
 
     /// Can undo?
     pub fn can_undo(&self) -> bool {
+        // Multi-checkpoint histories move back one position as before. A lone
+        // checkpoint is only undoable when it actually holds file snapshots —
+        // i.e. the first EDIT (pre-edit content captured) can be reverted,
+        // while a bare SessionStart marker cannot.
         self.current > 1
+            || (self.current == 1
+                && self
+                    .checkpoints
+                    .first()
+                    .is_some_and(|c| !c.files.is_empty()))
     }
 
     /// Can redo?
@@ -309,12 +318,16 @@ impl EditHistory {
 
     /// Undo to previous checkpoint
     pub fn undo(&mut self) -> Option<&EditCheckpoint> {
-        if self.can_undo() {
-            self.current -= 1;
-            self.current_checkpoint()
-        } else {
-            None
+        if !self.can_undo() {
+            return None;
         }
+        // Restore the TIP checkpoint (it holds the pre-edit snapshot of the
+        // last edit), then step back. Decrementing before reading used to
+        // return the *previous* edit's checkpoint, reverting unrelated files
+        // and making the first edit un-undoable.
+        let index = self.current - 1;
+        self.current -= 1;
+        self.checkpoints.get(index)
     }
 
     /// Redo to next checkpoint

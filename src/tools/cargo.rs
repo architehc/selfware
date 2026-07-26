@@ -196,6 +196,7 @@ impl Tool for CargoTest {
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("test");
 
         if let Some(pkg) = args.get("package").and_then(|v| v.as_str()) {
@@ -298,6 +299,7 @@ impl Tool for CargoCheck {
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("check");
         cmd.arg("--message-format=json");
         cmd.kill_on_drop(true);
@@ -413,6 +415,7 @@ impl Tool for CargoClippy {
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("clippy");
         cmd.arg("--message-format=json");
         cmd.kill_on_drop(true);
@@ -520,6 +523,7 @@ impl Tool for CargoFmt {
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new(cargo_program());
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("fmt");
         cmd.kill_on_drop(true);
 

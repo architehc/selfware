@@ -31,8 +31,12 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
     LazyLock::new(|| {
         vec![
             // rm -rf / variants (handles multiple slashes, spaces, flags, and parent dir escape)
+            // Flags match both -rf and --no-preserve-root (the only form that
+            // actually executes on GNU coreutils, and the one a naive
+            // -[a-z]+ pattern would miss).
             (
-                Regex::new(r"rm\s+(-[a-z]+\s+)*(/+|\*|/\*|\.\.|\.\./\*)").expect("Invalid regex"),
+                Regex::new(r"rm\s+(--?[a-z-]+\s+)*(/+|\*|/\*|\.\.|\.\./\*)")
+                    .expect("Invalid regex"),
                 "rm -rf / or .. (destructive deletion)",
             ),
             // mkfs - format filesystem

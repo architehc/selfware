@@ -264,9 +264,11 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
 
     // Warn about unclosed tool tags (common with Qwen3.5 quantized models)
     if content.contains("<tool>") && !content.contains("</tool>") {
+        // floor_char_boundary: byte-slicing at 300 panics when a multi-byte
+        // char straddles the cut (exactly the flaky-model case this warns on).
         tracing::warn!(
             "Unclosed <tool> tag detected — tool call may be lost. Content preview: {}",
-            &content[..content.len().min(300)]
+            &content[..content.floor_char_boundary(300)]
         );
     }
 

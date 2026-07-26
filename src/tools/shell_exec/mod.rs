@@ -404,6 +404,33 @@ impl Tool for ShellExec {
                     name
                 );
             }
+            // The structured env map must not smuggle what the command-string
+            // DANGEROUS_ENV_VARS check would block (loader injection,
+            // interpreter startup hooks, PATH hijack).
+            const DENIED_ENV: &[&str] = &[
+                "LD_PRELOAD",
+                "LD_LIBRARY_PATH",
+                "DYLD_INSERT_LIBRARIES",
+                "DYLD_LIBRARY_PATH",
+                "DYLD_FALLBACK_LIBRARY_PATH",
+                "LD_AUDIT",
+                "LD_DEBUG",
+                "BASH_ENV",
+                "ENV",
+                "PYTHONPATH",
+                "NODE_PATH",
+                "RUBYLIB",
+                "PERL5LIB",
+                "PATH",
+                "IFS",
+            ];
+            let upper = name.to_ascii_uppercase();
+            if DENIED_ENV.contains(&upper.as_str()) {
+                anyhow::bail!(
+                    "Environment variable '{}' is not allowed in shell_exec env (injection risk)",
+                    name
+                );
+            }
         }
 
         // Intercept simple sed -i substitutions and route through file tools

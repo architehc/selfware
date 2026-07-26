@@ -278,6 +278,26 @@ fn metrics_from_sab_result(
     metrics
 }
 
+/// Hard gate on the winner: a candidate whose test count regressed relative
+/// to the baseline must never be committed, no matter how good its composite
+/// score looks — deleting tests inflates the pass ratio. This enforces the
+/// invariant the dead `SafetyConfig.min_test_count` field promised.
+///
+/// Returns `Err(reason)` when the winner regressed; `Ok(())` otherwise.
+fn winner_test_count_gate(
+    baseline: &FitnessMetrics,
+    winner: &FitnessMetrics,
+) -> Result<(), String> {
+    if winner.tests_total < baseline.tests_total {
+        Err(format!(
+            "winner rejected: test count regressed {}→{}",
+            baseline.tests_total, winner.tests_total
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// Run the evolution daemon
 pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
     let start = Instant::now();
@@ -640,6 +660,27 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
         let winner_composite = config.fitness_weights.composite(&winner_metrics);
 
         if winner_composite > baseline_composite {
+            // Hard gate: a winner that runs FEWER tests than the baseline
+            // must never be committed — it enforces the invariant the dead
+            // `SafetyConfig.min_test_count` promised. A regression here
+            // usually means the mutation deleted/skipped tests to inflate
+            // its pass ratio.
+            if let Err(reason) = winner_test_count_gate(&current_baseline_metrics, &winner_metrics)
+            {
+                log_warning(&reason);
+                log_event(
+                    repo_root,
+                    &serde_json::json!({
+                        "event": "generation_end",
+                        "timestamp": chrono_now(),
+                        "generation": generation,
+                        "outcome": "frost",
+                        "reason": reason,
+                        "duration_secs": gen_start.elapsed().as_secs_f64(),
+                    }),
+                );
+                continue;
+            }
             log_bloom(
                 generation,
                 &winner.description,

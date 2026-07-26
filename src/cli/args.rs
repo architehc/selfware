@@ -6,6 +6,16 @@ use crate::config::ExecutionMode;
 
 pub(crate) const DEFAULT_MULTI_CHAT_CONCURRENCY: usize = 4;
 
+/// Clap value parser rejecting zero — for counts that must be >= 1
+/// (e.g. `evolve --generations`, where 0 used to mean "infinite").
+fn parse_nonzero_usize(s: &str) -> Result<usize, String> {
+    let value: usize = s.parse().map_err(|_| format!("invalid number: {}", s))?;
+    if value == 0 {
+        return Err("value must be >= 1".to_string());
+    }
+    Ok(value)
+}
+
 #[derive(Parser)]
 #[command(name = "selfware")]
 #[command(about = "Your personal AI workshop — software you own, software that lasts")]
@@ -464,8 +474,8 @@ pub(crate) enum Commands {
     #[cfg(feature = "self-improvement")]
     #[command(hide = true)]
     Evolve {
-        /// Number of generations (0 = infinite)
-        #[arg(short, long, default_value = "10")]
+        /// Number of generations (must be >= 1)
+        #[arg(short, long, default_value = "10", value_parser = parse_nonzero_usize)]
         generations: usize,
 
         /// Population size per generation

@@ -52,10 +52,13 @@ pub const PROTECTED_PATHS: &[&str] = &[
     "src/safety/",
     "system_tests/",
     "benches/sab_",
+    // The fitness signal lives here: a mutation that can edit tests can
+    // weaken the very gate that judges it. Immutable from the agent.
+    "tests/",
 ];
 
 /// LLM endpoint configuration for hypothesis generation
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlmConfig {
     /// API endpoint (e.g. `"https://api.example.com/v1"`)
     pub endpoint: String,
@@ -67,6 +70,26 @@ pub struct LlmConfig {
     pub max_tokens: usize,
     /// Sampling temperature (default 0.7)
     pub temperature: f32,
+}
+
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print credentials — dry-run and log output include this struct.
+        f.debug_struct("LlmConfig")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field(
+                "api_key",
+                &self.api_key.as_ref().map(|k| {
+                    let mut m: String = k.chars().take(4).collect();
+                    m.push_str("…[redacted]");
+                    m
+                }),
+            )
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .finish()
+    }
 }
 
 impl Default for LlmConfig {

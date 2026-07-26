@@ -653,3 +653,34 @@ fn test_history_undo_then_create() {
 
     assert!(!history.can_redo());
 }
+
+#[test]
+fn test_first_edit_with_files_is_undoable_and_restores_tip() {
+    // Production shape (no SessionStart marker): one edit checkpoint holding
+    // the pre-edit snapshot. Old behavior: can_undo false + undo returned the
+    // previous edit's checkpoint (off-by-one).
+    let mut history = EditHistory::new();
+    history.create_checkpoint(EditAction::FileEdit {
+        path: PathBuf::from("a.rs"),
+        tool: "edit".to_string(),
+    });
+    history.add_file_to_current(FileSnapshot::new(
+        PathBuf::from("a.rs"),
+        "pre-edit content".to_string(),
+    ));
+
+    assert!(history.can_undo(), "first edit must be undoable");
+    let cp = history.undo().expect("undo returns the tip checkpoint");
+    assert_eq!(cp.files.len(), 1);
+    assert_eq!(
+        cp.files
+            .get(&PathBuf::from("a.rs"))
+            .map(|s| s.content.as_str()),
+        Some("pre-edit content"),
+        "undo must restore THIS edit's pre-edit snapshot, not the previous one"
+    );
+    assert!(
+        !history.can_undo(),
+        "nothing left to undo after reverting the only edit"
+    );
+}
