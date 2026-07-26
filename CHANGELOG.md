@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-26
+
+### Added
+- Symbol-level context retrieval: `GET /api/context/select/symbols` (task → relevant symbols, not files, via the dependency graph) and per-symbol `expand` (`/api/context/expand?component=..&symbol=..`) returning exactly one function/struct/enum span — the smallest precise retrieval unit for tiny windows
+- `config set-key` read-back verification: keychain writes that silently fail to persist (observed on non-GUI macOS sessions) now report an honest error with the config-file/env fallback instead of claiming success
+
+### Changed
+- Config warnings no longer print twice when logging is enabled (stderr fallback only when no tracing subscriber)
+- keyring crate bumped to 3.6
+
 ## [0.6.1] - 2026-07-26
 
 ### Added
@@ -158,7 +168,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/architehc/selfware/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/architehc/selfware/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/architehc/selfware/compare/v0.3.1-beta.1...v0.6.0
 [0.3.1-beta.1]: https://github.com/architehc/selfware/compare/v0.3.0...v0.3.1-beta.1
