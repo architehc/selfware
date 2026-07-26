@@ -151,6 +151,22 @@ const SEEDS: &[Seed] = &[
         verify: VERIFY_DEFAULT,
     },
     Seed {
+        id: "gate-context-trust",
+        title: "Deepen the context trust gate",
+        direction: "safety",
+        capability: "safety",
+        summary: "Assistant sends are gated through evolve::context_trust (shipped 2026-07-26: high-severity findings in non-trusted evidence block with 422 context_trust_blocked). Next: role-enclosure verification and perplexity/entropy anomaly detection.",
+        task: "Extend the evidence trust gate in src/evolve/assistant.rs (gate_evidence_trust) with role-enclosure \
+               verification (content must not reframe itself as system/role messages mid-evidence) and a \
+               perplexity/entropy anomaly check for machine-generated payloads, keeping the invariant below.",
+        invariants: &[
+            "High-severity findings in non-trusted evidence block the send before any model call.",
+            "Trusted first-party code is reported, never blocked.",
+        ],
+        context_recipe: "custom (safety + evolve::context_trust + assistant)",
+        verify: "cargo test --lib trust_gate; blocked send returns 422 context_trust_blocked.",
+    },
+    Seed {
         id: "add-perspective",
         title: "Add a comprehension perspective",
         direction: "comprehension",

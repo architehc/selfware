@@ -109,6 +109,30 @@ pub enum ReviewProtocolError {
         latency_ms: u128,
         usage: ReviewUsage,
     },
+    /// The evidence trust gate refused the send: a high-severity injection
+    /// finding in non-trusted content. Happens before any model call, so
+    /// there is no model telemetry to retain (no request was made).
+    TrustBlocked { findings: Vec<TrustGateFinding> },
+}
+
+/// One blocking trust-gate finding (subset of context_trust::InjectionFinding
+/// plus the source path it shipped from).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustGateFinding {
+    pub path: String,
+    pub kind: String,
+    pub severity: String,
+    pub line: usize,
+    pub excerpt: String,
+}
+
+/// Compact summary of the evidence trust scan, attached to every review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustGateSummary {
+    pub sources_scanned: usize,
+    pub findings: usize,
+    /// Worst risk_score across scanned sources (0 clean .. 100 suspicious).
+    pub worst_risk_score: u32,
 }
 
 impl ReviewProtocolError {
@@ -149,6 +173,10 @@ impl ReviewProtocolError {
                 "latency_ms": latency_ms,
                 "usage": usage,
             }),
+            Self::TrustBlocked { findings } => serde_json::json!({
+                "error": "context_trust_blocked",
+                "findings": findings,
+            }),
         }
     }
 }
@@ -164,11 +192,85 @@ impl std::fmt::Display for ReviewProtocolError {
                 f,
                 "model review fully ungrounded: {rejected_items} item(s) rejected"
             ),
+            Self::TrustBlocked { findings } => write!(
+                f,
+                "evidence trust gate blocked the send: {} high-severity finding(s) in non-trusted content",
+                findings.len()
+            ),
         }
     }
 }
 
 impl std::error::Error for ReviewProtocolError {}
+
+/// Classify an evidence path for trust scanning: first-party Rust is trusted
+/// code (rules downgrade to informational); everything else is data — it
+/// should never carry instructions, so injection patterns stay hot.
+fn trust_classification(path: &str) -> &'static str {
+    if path.ends_with(".rs") {
+        "rust_source"
+    } else {
+        "data"
+    }
+}
+
+/// Scan what is about to reach the model. High-severity findings in content
+/// whose trust level is not `Trusted` block the send (the seed invariant:
+/// untrusted content never reaches the model unflagged). Trusted first-party
+/// code can legitimately contain these patterns — those are reported, not
+/// blocked.
+pub fn gate_evidence_trust(
+    evidence: &[GroundingEvidence],
+) -> Result<TrustGateSummary, ReviewProtocolError> {
+    use super::context_trust::{analyze_source, TrustLevel};
+
+    let mut blocking: Vec<TrustGateFinding> = Vec::new();
+    let mut total_findings = 0usize;
+    let mut worst_risk = 0u32;
+    let mut scanned: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for chunk in evidence {
+        let classification = trust_classification(&chunk.path);
+        let report = analyze_source(
+            &chunk.path,
+            super::context_trust::SourceKind::Workspace,
+            classification,
+            &chunk.excerpt,
+        );
+        scanned.insert(chunk.path.as_str());
+        total_findings += report.findings.len();
+        worst_risk = worst_risk.max(report.risk_score);
+        if super::context_trust::trust_level(
+            super::context_trust::SourceKind::Workspace,
+            classification,
+        ) == TrustLevel::Trusted
+        {
+            continue; // trusted code: informational only
+        }
+        blocking.extend(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.severity == "high")
+                .map(|f| TrustGateFinding {
+                    path: chunk.path.clone(),
+                    kind: f.kind.clone(),
+                    severity: f.severity.clone(),
+                    line: f.line,
+                    excerpt: f.excerpt.clone(),
+                }),
+        );
+    }
+
+    if !blocking.is_empty() {
+        return Err(ReviewProtocolError::TrustBlocked { findings: blocking });
+    }
+    Ok(TrustGateSummary {
+        sources_scanned: scanned.len(),
+        findings: total_findings,
+        worst_risk_score: worst_risk,
+    })
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroundedReview {
@@ -191,6 +293,8 @@ pub struct GroundedReview {
     /// "structural" (citation-valid, complete evidence, structural checks
     /// only), or "degraded" (anything else still returning 200).
     pub trust_state: String,
+    /// Evidence trust-gate summary (what was scanned before the send).
+    pub trust_gate: TrustGateSummary,
     pub usage: ReviewUsage,
 }
 
@@ -268,6 +372,10 @@ impl GroundedAssistant {
         if evidence.is_empty() {
             bail!("grounded review requires source evidence");
         }
+
+        // Trust gate: scan what is about to reach the model. High-severity
+        // findings in non-trusted content refuse the send before any API call.
+        let trust_gate = gate_evidence_trust(&evidence)?;
 
         let evidence_json = serde_json::to_string_pretty(&evidence)?;
         let system = Message::system(
@@ -378,6 +486,7 @@ impl GroundedAssistant {
             rejected_items,
             trust_state: trust_state(citation_valid, evidence_complete, semantic_validation)
                 .to_string(),
+            trust_gate,
             usage: response.usage.into(),
         })
     }
@@ -562,3 +671,7 @@ fn validate_grounding(
 
     (claims, recommendations, rejected)
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/evolve/assistant_trust_gate_test.rs"]
+mod assistant_trust_gate_test;

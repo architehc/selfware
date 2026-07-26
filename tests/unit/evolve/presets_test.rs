@@ -33,6 +33,7 @@ fn directions_span_expansion_space() {
         "context",
         "refactor",
         "capability",
+        "safety",
         "automation",
         "comprehension",
     ] {
