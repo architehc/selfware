@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-26
+
+### Added
+- Evidence trust gate: assistant sends scan evidence through `evolve::context_trust` before any model call — high-severity findings in non-trusted content block with typed `422 context_trust_blocked`; trusted first-party code is reported, never blocked (`trust_gate` summary on every review response)
+- `selfware run --preset <id>`: renders an evolve preset's task + invariants into a headless run; unknown ids list the library
+- `gate-context-trust` preset (safety direction restored to the library)
+- `AGENTS.md` working agreements: stop-the-line, review-gate sign-off for subtractions, honest status, measured-not-estimated
+
+### Changed
+- crates.io-publishable by default: `llmfit-core` moved from pinned git rev to crates.io 1.1 (`unpack` hardware calibration unchanged)
+- Stop-the-line pre-commit gate (fmt + clippy `-D warnings`); all clippy warnings cleared
+- `codegraph_viewer.html`: `--danger` variable, d3 link id unwrapping, bare-path root categorization; component checklist preserves scroll while filtering
+
 ## [0.6.0] - 2026-07-25
 
 ### Added
@@ -145,7 +158,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/architehc/selfware/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/architehc/selfware/compare/v0.3.1-beta.1...v0.6.0
 [0.3.1-beta.1]: https://github.com/architehc/selfware/compare/v0.3.0...v0.3.1-beta.1
 [0.1.0]: https://github.com/architehc/selfware/releases/tag/v0.1.0
