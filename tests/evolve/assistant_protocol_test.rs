@@ -272,9 +272,11 @@ async fn review_server(endpoint: &str, content: &str) -> (tempfile::TempDir, Evo
         nodes: vec![Node::code("crate::reviewed", "src/reviewed.rs")],
         edges: vec![],
     };
-    let mut config = Config::default();
-    config.endpoint = endpoint.to_string();
-    config.context_length = 1_000_000;
+    let config = Config {
+        endpoint: endpoint.to_string(),
+        context_length: 1_000_000,
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
     (dir, server)
 }

@@ -45,20 +45,24 @@ async fn auto_mode_resolves_full_on_large_window_and_degrades_on_small() {
     let (dir, graph) = fixture(20_000);
 
     // Large window: auto resolves to a full tier and fits.
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
-    config.context_mode = "auto".to_string();
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: "auto".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph.clone(), dir.path(), &config).unwrap();
     let (status, json) = get_json(&server, "/api/context").await;
     assert_eq!(status, StatusCode::OK);
     assert!(["full", "full_extended"].contains(&json["mode"].as_str().unwrap()));
     assert_eq!(json["requested_mode"].as_str().unwrap(), "auto");
-    assert_eq!(json["fits_context_window"].as_bool().unwrap(), true);
+    assert!(json["fits_context_window"].as_bool().unwrap());
 
     // 8k window: auto degrades below full, still reports coherently.
-    let mut config = Config::default();
-    config.context_length = 8_192;
-    config.context_mode = "auto".to_string();
+    let config = Config {
+        context_length: 8_192,
+        context_mode: "auto".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
     let (status, json) = get_json(&server, "/api/context").await;
     assert_eq!(status, StatusCode::OK);
@@ -69,9 +73,11 @@ async fn auto_mode_resolves_full_on_large_window_and_degrades_on_small() {
 #[tokio::test]
 async fn auto_mode_reports_fit_and_pinned_mode_clears_it() {
     let (dir, graph) = fixture(20_000);
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
-    config.context_mode = "auto".to_string();
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: "auto".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph.clone(), dir.path(), &config).unwrap();
 
     // Auto: the fit outcome rides along with the context payload.
@@ -85,7 +91,7 @@ async fn auto_mode_reports_fit_and_pinned_mode_clears_it() {
         fit["budget_tokens"].as_u64().unwrap() as usize,
         expected_budget
     );
-    assert_eq!(fit["fits"].as_bool().unwrap(), true);
+    assert!(fit["fits"].as_bool().unwrap());
     // The resolved tier is measured, so its size matches the fixture exactly.
     let tier_tokens: usize = graph.nodes.iter().map(|n| n.tokens).sum();
     assert_eq!(
@@ -148,9 +154,11 @@ async fn post_custom(server: &EvolveServer, components: Vec<&str>) -> Value {
 #[tokio::test]
 async fn custom_mode_applies_handpicked_selection_and_drops_unknown() {
     let (dir, graph) = fixture_two_files();
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
-    config.context_mode = "auto".to_string();
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: "auto".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
 
     let json = post_custom(&server, vec!["crate::a", "crate::bogus", "crate::b"]).await;
@@ -174,9 +182,11 @@ async fn custom_mode_applies_handpicked_selection_and_drops_unknown() {
 #[tokio::test]
 async fn custom_mode_empty_selection_clears_back_to_auto() {
     let (dir, graph) = fixture_two_files();
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
-    config.context_mode = "auto".to_string();
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: "auto".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
 
     let json = post_custom(&server, vec!["crate::a"]).await;
@@ -196,16 +206,20 @@ async fn custom_mode_empty_selection_clears_back_to_auto() {
 #[tokio::test]
 async fn invalid_context_mode_in_config_is_an_error() {
     let (dir, graph) = fixture(1_000);
-    let mut config = Config::default();
-    config.context_mode = "bogus".to_string();
+    let config = Config {
+        context_mode: "bogus".to_string(),
+        ..Default::default()
+    };
     assert!(EvolveServer::with_config(graph, dir.path(), &config).is_err());
 }
 
 #[tokio::test]
 async fn post_mode_auto_refits_and_pinned_mode_sticks() {
     let (dir, graph) = fixture(20_000);
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
+    let config = Config {
+        context_length: 1_000_000,
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
 
     let json = post_mode(&server, "auto").await;
@@ -219,8 +233,10 @@ async fn post_mode_auto_refits_and_pinned_mode_sticks() {
 #[tokio::test]
 async fn context_json_reports_envelope_fields() {
     let (dir, graph) = fixture_two_files();
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
+    let config = Config {
+        context_length: 1_000_000,
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
     let (status, json) = get_json(&server, "/api/context").await;
     assert_eq!(status, StatusCode::OK);
@@ -237,9 +253,11 @@ async fn context_json_reports_envelope_fields() {
 #[tokio::test]
 async fn pinned_over_budget_mode_is_rejected_with_422() {
     let (dir, graph) = fixture_two_files();
-    let mut config = Config::default();
-    config.context_length = 8_192; // usable budget = 0.7 * (8192 - 2048) = 4300 tokens
-    config.context_mode = "auto".to_string();
+    let config = Config {
+        context_length: 8_192, // usable budget = 0.7 * (8192 - 2048) = 4300 tokens
+        context_mode: "auto".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
 
     let (status, body) = post_mode_raw(&server, "full").await;

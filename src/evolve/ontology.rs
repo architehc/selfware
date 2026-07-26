@@ -82,11 +82,14 @@ pub fn validate_graph(graph: &Graph) -> ValidationReport {
     }
     let node_ids: HashSet<&str> = node_counts.keys().copied().collect();
 
-    let mut report = ValidationReport::default();
-    report.duplicate_ids = node_counts
-        .into_iter()
-        .filter_map(|(id, count)| (count > 1).then(|| id.to_string()))
-        .collect();
+    let mut report = ValidationReport {
+        duplicate_ids: node_counts
+            .into_iter()
+            .filter(|&(_id, count)| count > 1)
+            .map(|(id, _count)| id.to_string())
+            .collect(),
+        ..Default::default()
+    };
     report.duplicate_ids.sort();
 
     for edge in &graph.edges {

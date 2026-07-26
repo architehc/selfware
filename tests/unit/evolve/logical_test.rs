@@ -55,14 +55,15 @@ fn modules_and_tokens_derive_from_the_graph() {
 
 #[test]
 fn dependency_edges_collapse_to_capability_level() {
-    let mut g = Graph::default();
-    g.nodes = vec![code("crate::agent::execution"), code("crate::tools::shell")];
-    // agent (task_loop) depends on tools (tool_dispatch)
-    g.edges = vec![Edge {
-        from: "crate::agent::execution".to_string(),
-        to: "crate::tools::shell".to_string(),
-        edge_type: EdgeType::DependsOn,
-    }];
+    let g = Graph {
+        nodes: vec![code("crate::agent::execution"), code("crate::tools::shell")],
+        // agent (task_loop) depends on tools (tool_dispatch)
+        edges: vec![Edge {
+            from: "crate::agent::execution".to_string(),
+            to: "crate::tools::shell".to_string(),
+            edge_type: EdgeType::DependsOn,
+        }],
+    };
     let model = build_logical_model(&g, std::path::Path::new("."));
     assert!(model
         .edges

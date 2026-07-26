@@ -15,6 +15,7 @@ use tracing::{debug, info, warn};
 /// `DiskManager` via the resource monitor, and eager creation polluted the
 /// user's working directory with empty `checkpoints/`, `logs/`, `models/`
 /// dirs. Creation happens here instead, only when something actually writes.
+#[allow(dead_code)] // used by the pending maintenance chain + disk tests
 async fn ensure_dir(path: &Path) -> Result<(), ResourceError> {
     fs::create_dir_all(path).await.map_err(|e| {
         ResourceError::DiskExhausted(format!(
@@ -27,8 +28,13 @@ async fn ensure_dir(path: &Path) -> Result<(), ResourceError> {
 
 /// Disk manager for storage management
 pub struct DiskManager {
+    // Maintenance tuning (max_usage_percent, compress_after_days) is read by the
+    // test-covered maintenance chain below; production wiring of that chain is
+    // pending (see TODO on perform_maintenance).
+    #[allow(dead_code)]
     config: DiskConfig,
     checkpoints_path: PathBuf,
+    #[allow(dead_code)] // read by the pending maintenance chain (cleanup_old_files)
     logs_path: PathBuf,
     models_path: PathBuf,
     /// Cache for models directory size: (calculated_at, size_in_bytes)
@@ -168,7 +174,13 @@ impl DiskManager {
         ))
     }
 
-    /// Perform maintenance tasks
+    /// Perform maintenance tasks.
+    ///
+    /// TODO(wire): never called in production today — the chain below
+    /// (cleanup/compress/orphans) is exercised by tests/unit/resource/disk and
+    /// awaits a scheduler call site. Kept rather than pruned per the
+    /// review-gate protocol (test-covered feature surface).
+    #[allow(dead_code)]
     async fn perform_maintenance(&self) -> Result<(), ResourceError> {
         debug!("Starting disk maintenance");
 
@@ -191,6 +203,7 @@ impl DiskManager {
     }
 
     /// Clean up old files
+    #[allow(dead_code)] // called by perform_maintenance (pending production wiring)
     async fn cleanup_old_files(&self) -> Result<u64, ResourceError> {
         let mut deleted = 0u64;
 
@@ -218,6 +231,7 @@ impl DiskManager {
     }
 
     /// Compress old checkpoints
+    #[allow(dead_code)] // called by perform_maintenance (pending production wiring)
     async fn compress_old_checkpoints(&self) -> Result<u64, ResourceError> {
         let mut compressed = 0u64;
 
@@ -254,6 +268,7 @@ impl DiskManager {
     }
 
     /// Compress a single file
+    #[allow(dead_code)] // called by compress_old_checkpoints (pending production wiring)
     async fn compress_file(&self, path: &PathBuf) -> Result<(), ResourceError> {
         let data = fs::read(path)
             .await
@@ -284,6 +299,7 @@ impl DiskManager {
     }
 
     /// Clean up orphaned files
+    #[allow(dead_code)] // called by perform_maintenance (pending production wiring)
     async fn cleanup_orphaned_files(&self) -> Result<u64, ResourceError> {
         // In a real implementation, this would check for files not referenced
         // by any checkpoint and remove them

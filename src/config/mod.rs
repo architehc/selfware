@@ -52,28 +52,7 @@ pub use types::*;
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-
-/// Fields in `extra_body` that are always safe (sampling / template params).
-const EXTRA_BODY_ALLOWED: &[&str] = &[
-    "chat_template_kwargs",
-    "top_p",
-    "top_k",
-    "min_p",
-    "presence_penalty",
-    "repetition_penalty",
-    "frequency_penalty",
-    "seed",
-];
-
-/// Fields that could alter model behaviour in unexpected ways.
-/// We allow them but emit a warning so the operator is aware.
-const EXTRA_BODY_WARN: &[&str] = &["logit_bias", "stop", "response_format"];
-
-/// Fields that would override core chat-completion request fields.
-/// Allowing these would let a config silently replace the model, messages,
-/// tool definitions, or streaming flag, which is a security risk.
-const EXTRA_BODY_BLOCKED: &[&str] = &["model", "messages", "tools", "stream"];
+use std::collections::HashMap;
 
 // Re-export default functions used by other config submodules via `super::`.
 pub fn default_context_length() -> usize {

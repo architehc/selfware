@@ -70,7 +70,7 @@ impl FnDedupAnalyzer {
         let mut fns: Vec<FnBody> = Vec::new();
         for entry in WalkDir::new(&self.root).into_iter().filter_map(|e| e.ok()) {
             let p = entry.path();
-            if p.extension().map_or(false, |e| e == "rs") {
+            if p.extension().is_some_and(|e| e == "rs") {
                 if let Ok(text) = std::fs::read_to_string(p) {
                     let rel = p
                         .strip_prefix(&self.root)
@@ -115,8 +115,7 @@ impl FnDedupAnalyzer {
             if let Some(adjacent) = by_bucket.get(&(bucket + 1)) {
                 candidates.extend(adjacent);
             }
-            for w in 0..members.len() {
-                let a = members[w];
+            for &a in members {
                 for &b in candidates.iter().filter(|&&c| c > a) {
                     let key = (a.min(b), a.max(b));
                     if exact_pairs.contains(&key) {

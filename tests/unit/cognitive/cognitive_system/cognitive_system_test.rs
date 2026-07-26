@@ -1,5 +1,7 @@
 use super::*;
-use crate::cognitive::memory_hierarchy::{FileContext, MemoryMetrics, MemoryUsage, TokenBudget};
+use crate::cognitive::memory_hierarchy::{
+    EpisodeType, FileContext, MemoryMetrics, MemoryUsage, TokenBudget,
+};
 
 // ========================================================================
 // Helper functions

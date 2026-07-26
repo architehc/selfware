@@ -1,4 +1,5 @@
 use super::*;
+use std::time::Duration;
 
 // ── format_file_size tests ──
 

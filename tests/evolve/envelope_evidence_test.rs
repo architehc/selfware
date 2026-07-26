@@ -170,10 +170,12 @@ async fn spawn_mock_review_server() -> (tokio::task::JoinHandle<()>, String) {
 /// pinned tier is never over budget.
 async fn pinned_server(mode: &str, endpoint: &str) -> (tempfile::TempDir, EvolveServer) {
     let (dir, graph) = fixture();
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
-    config.context_mode = mode.to_string();
-    config.endpoint = endpoint.to_string();
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: mode.to_string(),
+        endpoint: endpoint.to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
     (dir, server)
 }
@@ -334,9 +336,11 @@ async fn absolute_node_path_envelope_twin_does_not_duplicate_selected_document()
         nodes: vec![reviewed, neighbor],
         edges: vec![edge("crate::reviewed", "crate::neighbor")],
     };
-    let mut config = Config::default();
-    config.context_length = 1_000_000;
-    config.context_mode = "full".to_string();
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: "full".to_string(),
+        ..Default::default()
+    };
     let server = EvolveServer::with_config(graph, dir.path(), &config).unwrap();
     let expected_hash = reviewed_document_hash(&server).await;
 

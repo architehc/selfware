@@ -15,9 +15,8 @@ use crate::token_count::estimate_tokens_with_overhead;
 use crate::vector_store::EmbeddingBackend;
 
 use super::memory_hierarchy::{
-    CodeContext, CodeModification, Episode, EpisodeType, HierarchicalMemory, Importance,
-    MemoryConfig, MemoryStats, SelfImprovementContext, SelfModel, WorkingContext,
-    TOTAL_CONTEXT_TOKENS,
+    CodeContext, CodeModification, Episode, HierarchicalMemory, Importance, MemoryConfig,
+    MemoryStats, SelfImprovementContext, SelfModel, WorkingContext, TOTAL_CONTEXT_TOKENS,
 };
 use super::self_reference::{SelfReferenceSystem, SourceRetrievalOptions};
 use super::token_budget::{AdaptationResult, BudgetStats, TaskType, TokenBudgetAllocator};
@@ -493,6 +492,7 @@ impl LlmContext {
 }
 
 /// Generate unique ID
+#[allow(dead_code)] // used by cognitive_system tests via `use super::*`
 fn generate_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now()
@@ -503,6 +503,7 @@ fn generate_id() -> String {
 }
 
 /// Get current timestamp in seconds
+#[allow(dead_code)] // used by cognitive_system tests via `use super::*`
 fn current_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

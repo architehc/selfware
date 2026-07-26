@@ -654,8 +654,8 @@ fn parent_node_id(id: &str, node_ids: &HashSet<String>) -> Option<String> {
         if node_ids.contains(&candidate) {
             return Some(candidate);
         }
-        if candidate.starts_with("test::") {
-            let crate_candidate = format!("crate::{}", &candidate[6..]);
+        if let Some(stripped) = candidate.strip_prefix("test::") {
+            let crate_candidate = format!("crate::{}", stripped);
             if node_ids.contains(&crate_candidate) {
                 return Some(crate_candidate);
             }
