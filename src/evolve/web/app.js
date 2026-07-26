@@ -875,7 +875,10 @@ function renderComponentChecklist() {
     const badge = $('#component-custom-badge');
     badge?.classList.toggle('hidden', state.context.mode !== 'custom');
 
+    // Preserve scroll across re-renders (live filter typing rebuilds the list).
+    const scrollTop = list.scrollTop;
     list.replaceChildren();
+    list.scrollTop = scrollTop;
     if (!state.contextCards) {
         const note = document.createElement('div');
         note.className = 'pane-state';
