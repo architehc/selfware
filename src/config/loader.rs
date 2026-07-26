@@ -244,6 +244,15 @@ impl Config {
             origin.get_or_insert_with(|| p.to_path_buf());
             reset.push("safety.allowed_paths");
         }
+        // Push-to-protected-branch protection (enforced by the safety
+        // checker's git_push guards): an untrusted repo could ship
+        // `protected_branches = []` and silently disable push-to-main
+        // protection, so restore the built-in defaults.
+        if let Some(p) = untrusted_checkout_origin(sources, "safety.protected_branches") {
+            self.safety.protected_branches = safe.protected_branches.clone();
+            origin.get_or_insert_with(|| p.to_path_buf());
+            reset.push("safety.protected_branches");
+        }
 
         origin.map(|p| (p, reset))
     }
@@ -573,6 +582,35 @@ impl Config {
                         "Refusing to send the global SELFWARE_API_KEY to endpoint '{}' selected by \
                          the project's selfware.toml: this repository is not trusted. If you trust \
                          it, add this path to ~/.selfware/trusted_repos:\n  {}",
+                        config.endpoint,
+                        canon.display()
+                    );
+                }
+            }
+        }
+
+        // Untrusted-endpoint gate: even with NO credential configured, an
+        // untrusted checkout-local `selfware.toml` must not redirect the
+        // agent's whole conversation (code, prompts, tool output) to an
+        // attacker-controlled REMOTE endpoint. Localhost endpoints stay
+        // allowed (dev servers); endpoints from env / CLI / home config are
+        // operator choices and unaffected — as is a config FILE the operator
+        // explicitly selected via SELFWARE_CONFIG (same trust level as
+        // SELFWARE_ENDPOINT). Trusting the repo (`selfware trust`) lifts the
+        // refusal.
+        let config_path_from_env = matches!(
+            sources.get("__config_path_source"),
+            Some(ConfigSource::EnvVar(_))
+        );
+        if !config_path_from_env && !is_local_endpoint(&config.endpoint) {
+            if let Some(ConfigSource::ConfigFile(p)) = sources.get("endpoint") {
+                if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
+                    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                    bail!(
+                        "Refusing to load remote endpoint '{}' selected by the project's \
+                         selfware.toml: this repository is not trusted, and the endpoint \
+                         would receive the full conversation. If you trust it, run \
+                         `selfware trust` or add this path to ~/.selfware/trusted_repos:\n  {}",
                         config.endpoint,
                         canon.display()
                     );

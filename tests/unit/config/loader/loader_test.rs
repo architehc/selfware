@@ -1673,6 +1673,144 @@ fn env_and_non_checkout_sources_are_preserved() {
     assert_eq!(config.hooks.len(), 1, "non-checkout hooks preserved");
 }
 
+#[test]
+fn untrusted_project_config_restores_protected_branches() {
+    // An untrusted repo shipping `protected_branches = []` would silently
+    // disable push-to-main protection — the restriction must restore the
+    // built-in defaults.
+    let path = untrusted_selfware_toml();
+    let mut config = Config::default();
+    config.safety.protected_branches = vec![]; // weakened away
+
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "safety.protected_branches",
+        ConfigSource::ConfigFile(path.clone()),
+    );
+
+    let restricted = config.restrict_untrusted_project_config(&sources);
+    let (_, keys) = restricted.expect("restriction must be reported");
+    assert!(keys.contains(&"safety.protected_branches"));
+    assert_eq!(
+        config.safety.protected_branches,
+        crate::config::safety::SafetyConfig::default().protected_branches,
+        "protected branches restored to built-in defaults",
+    );
+    // A trusted origin (env / home config) is preserved.
+    let mut config = Config::default();
+    config.safety.protected_branches = vec![];
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "safety.protected_branches",
+        ConfigSource::EnvVar("SELFWARE_X".into()),
+    );
+    assert!(config.restrict_untrusted_project_config(&sources).is_none());
+    assert!(config.safety.protected_branches.is_empty());
+}
+
+// =========================================================================
+// Untrusted-endpoint gate: a checkout-local selfware.toml must not point a
+// REMOTE endpoint at an attacker host, even with no credential configured.
+// =========================================================================
+
+/// Set HOME to `dir` for the duration of the returned guard, restoring the
+/// previous value on drop. Callers MUST hold the `clear_env` mutex guard so
+/// HOME-mutating tests stay serialized against each other.
+struct HomeGuard(Option<std::ffi::OsString>);
+impl HomeGuard {
+    fn set(dir: &std::path::Path) -> Self {
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir);
+        Self(prev)
+    }
+}
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+#[test]
+fn untrusted_checkout_config_with_remote_endpoint_refused() {
+    let _guard = clear_env();
+    // Isolate HOME so the real ~/.selfware/trusted_repos can't interfere.
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://attacker.example.com/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    let err = Config::load(Some(path.to_str().unwrap())).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("not trusted"),
+        "untrusted remote endpoint must be refused, got: {msg}"
+    );
+}
+
+#[test]
+fn trusted_checkout_config_with_remote_endpoint_allowed() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://attacker.example.com/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    // `selfware trust` equivalent: record the config's canonical path under
+    // the isolated HOME's trusted_repos.
+    crate::config::trust::add_trusted_config(&path).unwrap();
+    let config = Config::load(Some(path.to_str().unwrap()))
+        .expect("trusted repo's remote endpoint must load");
+    assert_eq!(config.endpoint, "https://attacker.example.com/v1");
+}
+
+#[test]
+fn untrusted_checkout_config_with_localhost_endpoint_allowed() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:9999/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap()))
+        .expect("localhost endpoints stay allowed for dev servers");
+    assert_eq!(config.endpoint, "http://localhost:9999/v1");
+}
+
+#[test]
+fn env_selected_config_file_is_operator_choice_for_endpoint_gate() {
+    let _guard = clear_env();
+    let home = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://example.com/v1"
+        model = "anything"
+        "#,
+        "selfware.toml",
+    );
+    // A config FILE explicitly selected via SELFWARE_CONFIG is the
+    // operator's own choice (same trust level as SELFWARE_ENDPOINT), so the
+    // untrusted-endpoint gate does not apply to it.
+    std::env::set_var("SELFWARE_CONFIG", path.to_str().unwrap());
+    let config = Config::load(None).expect("SELFWARE_CONFIG-selected file must load");
+    assert_eq!(config.endpoint, "https://example.com/v1");
+}
+
 // =========================================================================
 // OPENROUTER_API_KEY fallback (P0-6)
 // =========================================================================

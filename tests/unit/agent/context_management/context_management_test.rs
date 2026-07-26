@@ -1595,3 +1595,142 @@ async fn test_trim_does_not_exceed_max_context_tokens() {
 
     server.stop().await;
 }
+
+// =====================================================================
+// compress_to_fit caller-contract regressions (double subtraction bug)
+// =====================================================================
+
+use crate::agent::context_map::{ContextMap, FileSkeleton};
+use crate::evolve::ContextMode;
+use crate::token_count::estimate_content_tokens;
+
+/// Build code-like content whose estimated token count reaches at least
+/// `target` tokens (deterministic, tokenizer-based).
+fn code_with_token_floor(target: usize) -> String {
+    let mut s = String::new();
+    while estimate_content_tokens(&s) < target {
+        s.push_str("fn process_item() { let value = 1; }\n");
+    }
+    s
+}
+
+/// Give the agent a small context map (1500-token budget) holding two
+/// resident full files WITH skeletons; each downgrade frees ~400 tokens.
+fn install_small_context_map_with_residents(agent: &mut Agent) {
+    let mut map = ContextMap::new(2_000, 0.75, 0.20, 0.05);
+    for name in ["resident_a.rs", "resident_b.rs"] {
+        map.register_tree_entry(name.into(), 100);
+        map.load_skeleton(
+            std::path::Path::new(name),
+            FileSkeleton {
+                path: name.into(),
+                items: vec![],
+                token_count: 100,
+            },
+        );
+        map.load_full(std::path::Path::new(name), code_with_token_floor(500));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    agent.context_map = map;
+}
+
+/// Regression: `track_file_read_in_context_map` passed the ADDITIONAL room
+/// (`estimated - remaining`) to `compress_to_fit`, whose contract is TOTAL
+/// free room — compression stopped ~`remaining()` short and the load blew
+/// the budget.
+#[tokio::test]
+async fn test_track_file_read_compresses_to_actual_fit() {
+    let server = MockLlmServer::builder().build().await;
+    let mut agent = make_test_agent(&server).await;
+    install_small_context_map_with_residents(&mut agent);
+
+    // The incoming file: pre-load + evict so costs.l3 is cached and
+    // `can_load(Full)` estimates the real full cost (deterministic).
+    let content = code_with_token_floor(1200);
+    agent
+        .context_map
+        .register_tree_entry("new_file.rs".into(), 100);
+    agent
+        .context_map
+        .load_full(std::path::Path::new("new_file.rs"), content.clone());
+    agent
+        .context_map
+        .evict_to_tree(std::path::Path::new("new_file.rs"));
+
+    let estimate = agent
+        .context_map
+        .can_load(std::path::Path::new("new_file.rs"), ContextMode::Full)
+        .await;
+    assert!(!estimate.fits, "precondition: new file must not fit");
+    assert!(
+        agent.context_map.remaining() > 0,
+        "precondition: headroom must exist (double subtraction needs R > 0)"
+    );
+
+    agent
+        .track_file_read_in_context_map("new_file.rs", &content)
+        .await;
+
+    assert!(
+        agent.context_map.total_tokens() <= agent.context_map.budget(),
+        "after auto-compression the load must stay within budget \
+         (total {}, budget {})",
+        agent.context_map.total_tokens(),
+        agent.context_map.budget()
+    );
+    assert_eq!(
+        agent
+            .context_map
+            .level_of(std::path::Path::new("new_file.rs")),
+        Some(ContextMode::Full)
+    );
+    server.stop().await;
+}
+
+/// Regression: `parallel_bulk_read` made the same contract mistake; because
+/// it then required `freed >= needed`, files were SKIPPED even though
+/// compression could have made them fit.
+#[tokio::test]
+async fn test_parallel_bulk_read_loads_after_compression() {
+    let server = MockLlmServer::builder().build().await;
+    let mut agent = make_test_agent(&server).await;
+    install_small_context_map_with_residents(&mut agent);
+
+    // Real file on disk (absolute path: `root.join(abs)` resolves to itself).
+    // can_load estimates size/3 tokens: exactly 3300 bytes → 1100 tokens,
+    // which needs BOTH resident downgrades (~800 freed) to fit.
+    let dir = tempdir().expect("tempdir");
+    let file = dir.path().join("bulk_target.rs");
+    let mut content = code_with_token_floor(1000);
+    content.truncate(3_300);
+    while content.len() < 3_300 {
+        content.push('\n');
+    }
+    assert_eq!(content.len(), 3_300);
+    std::fs::write(&file, &content).expect("write temp file");
+    let estimate_tokens = agent
+        .context_map
+        .can_load(&file, ContextMode::Full)
+        .await
+        .estimated_tokens;
+    assert!(
+        !agent
+            .context_map
+            .can_load(&file, ContextMode::Full)
+            .await
+            .fits,
+        "precondition: bulk target must not fit initially"
+    );
+
+    let (loaded, skipped, tokens_added) = agent.parallel_bulk_read(vec![file.clone()]).await;
+
+    assert_eq!(
+        (loaded, skipped),
+        (1, 0),
+        "compression must make room (estimate {estimate_tokens} tokens); \
+         the file must be loaded, not skipped"
+    );
+    assert!(tokens_added > 0);
+    assert_eq!(agent.context_map.level_of(&file), Some(ContextMode::Full));
+    server.stop().await;
+}

@@ -377,10 +377,20 @@ impl SafetyChecker {
     pub fn check_shell_command(&self, cmd: &str) -> Result<()> {
         let normalized = normalize_shell_command(cmd);
         let dequoted = dequote_and_lowercase(&normalized);
+        // $IFS obfuscation: shells expand `$IFS`/`${IFS}` to whitespace, so
+        // `rm$IFS-rf$IFS/target` EXECUTES as `rm -rf /target` while matching
+        // no literal `rm\s+` pattern. Expand it in a CHECK-ONLY copy used
+        // solely for pattern matching — the command that runs is untouched.
+        let ifs_expanded = expand_ifs_for_matching(&normalized);
+        let ifs_dequoted = dequote_and_lowercase(&ifs_expanded);
 
         // SECURITY: Check for dangerous patterns
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
-            if pattern.is_match(&normalized) || pattern.is_match(&dequoted) {
+            if pattern.is_match(&normalized)
+                || pattern.is_match(&dequoted)
+                || pattern.is_match(&ifs_expanded)
+                || pattern.is_match(&ifs_dequoted)
+            {
                 return Err(SelfwareError::Safety(
                     SafetyError::DangerousCommandPattern {
                         description: (*description).to_string(),
@@ -458,9 +468,13 @@ impl SafetyChecker {
             }
         }
 
-        // Check for environment variable injection
+        // Check for environment variable injection. Besides the bare
+        // `VAR=value` prefix form, cover the `export VAR=` and `env VAR=`
+        // wrappers — both assign the variable for subsequent commands
+        // (`export` persists it in the shell, `env` sets it for the child),
+        // so they are the same injection with extra steps.
         static DANGEROUS_ENV_VARS: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?i)^\s*(PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|PYTHONPATH|NODE_PATH|PERL5LIB|RUBYLIB|CLASSPATH|HOME|SHELL|USER|TERM|IFS)\s*=")
+            Regex::new(r"(?i)^\s*(?:(?:export|env)\s+)?(PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|PYTHONPATH|NODE_PATH|PERL5LIB|RUBYLIB|CLASSPATH|HOME|SHELL|USER|TERM|IFS)\s*=")
                 .expect("Invalid regex")
         });
 
@@ -475,8 +489,10 @@ impl SafetyChecker {
         // agent can bypass that entirely by invoking git directly through
         // shell_exec/container_exec -- catch explicit protected-branch
         // targets here too (see git_push_protected_branch_target's doc
-        // comment for what this does and doesn't catch).
-        for part in split_shell_commands(&normalized) {
+        // comment for what this does and doesn't catch). Split on pipeline
+        // boundaries (not just `;`/`&&`/`||`) so `… | git push origin main`
+        // still sees git as the segment's command word.
+        for part in split_shell_pipeline(&normalized) {
             if let Some(branch) =
                 git_push_protected_branch_target(part.trim(), &self.config.protected_branches)
             {
@@ -997,6 +1013,19 @@ pub(crate) fn dequote_and_lowercase(cmd: &str) -> String {
     out.to_lowercase()
 }
 
+/// Replace `$IFS`/`${IFS}` (either case) with a space in a CHECK-ONLY copy
+/// of a shell command. Shells expand `$IFS` to whitespace, so
+/// `rm$IFS-rf$IFS/target` runs as `rm -rf /target` while evading literal
+/// `rm\s+` patterns; matching against this copy closes that gap. This is
+/// only ever applied to strings used for pattern matching — never to the
+/// command that executes.
+fn expand_ifs_for_matching(cmd: &str) -> String {
+    cmd.replace("${IFS}", " ")
+        .replace("$IFS", " ")
+        .replace("${ifs}", " ")
+        .replace("$ifs", " ")
+}
+
 /// Split shell commands on separators
 pub fn split_shell_commands(cmd: &str) -> Vec<&str> {
     let mut parts = Vec::new();
@@ -1450,6 +1479,12 @@ fn is_drive_letter_segment(seg: &str) -> bool {
 /// dedicated git_push tool) that explicitly target a protected branch, and
 /// return the offending branch name if found.
 ///
+/// `cmd` is ONE chain segment (already split on `;`/`&&`/`||`). Git only
+/// counts when it IS the command — the first token of the segment, either
+/// bare (`git`) or an absolute/relative path ending in `/git`
+/// (`/usr/bin/git`). Searching for `git` anywhere would both false-positive
+/// on `echo git push origin main` and miss the `/usr/bin/git` spelling.
+///
 /// Only catches an *explicit* branch argument (`git push origin main`,
 /// `git push origin --delete main`, `git push origin :main`,
 /// `git push --force-with-lease origin main`, etc.). A bare `git push` with
@@ -1461,8 +1496,11 @@ fn git_push_protected_branch_target(cmd: &str, protected_branches: &[String]) ->
         return None;
     }
     let tokens = shlex::split(cmd)?;
-    let git_pos = tokens.iter().position(|t| t == "git")?;
-    let rest = &tokens[git_pos + 1..];
+    let command = tokens.first()?;
+    if command != "git" && !command.ends_with("/git") {
+        return None;
+    }
+    let rest = &tokens[1..];
     let push_pos = rest.iter().position(|t| t == "push")?;
     let args = &rest[push_pos + 1..];
 

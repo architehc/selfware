@@ -156,6 +156,13 @@ fn hidden_char_name(c: char) -> Option<&'static str> {
         '\u{200B}' | '\u{200C}' | '\u{2060}' | '\u{FEFF}' => Some("zero-width character"),
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => Some("bidirectional override"),
         '\u{00AD}' => Some("soft hyphen"),
+        // U+2028/U+2029 look like ordinary line breaks to a human reader but
+        // are single "characters" that can split a payload across what looks
+        // like separate lines.
+        '\u{2028}' | '\u{2029}' => Some("unicode line/paragraph separator"),
+        // TAG characters (plane 14): invisible ASCII-encoded glyphs used to
+        // smuggle instructions past both humans and naive string filters.
+        '\u{E0000}'..='\u{E007F}' => Some("TAG character"),
         _ => None,
     }
 }

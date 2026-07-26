@@ -810,3 +810,110 @@ fn test_custom_ratios() {
     assert_eq!(map.compression_headroom(), 30_000);
     assert_eq!(map.thinking_reserve(), 20_000);
 }
+
+// =========================================================================
+// compress_to_fit contract + skeleton-less eviction regressions
+// =========================================================================
+
+/// Build code-like content whose estimated token count reaches at least
+/// `target` tokens (deterministic, tokenizer-based).
+fn code_with_token_floor(target: usize) -> String {
+    let mut s = String::new();
+    while estimate_content_tokens(&s) < target {
+        s.push_str("fn process_item() { let value = 1; }\n");
+    }
+    s
+}
+
+/// Regression (bug: skeleton-less Full entries were incompressible).
+/// Files loaded directly via `load_full` have no skeleton, so pass 1
+/// (downgrade) freed 0 and pass 2 only evicted snapshot-time Lite entries —
+/// `compress_to_fit` returned ~0 for the dominant runtime flow.
+#[test]
+fn test_compress_to_fit_evicts_skeletonless_full_entries() {
+    let mut map = ContextMap::new(2_000, 0.75, 0.20, 0.05);
+    // Budget is 1500 tokens.
+
+    // Two directly-loaded (no skeleton) full files, oldest first.
+    map.register_tree_entry("a.rs".into(), 100);
+    map.load_full(Path::new("a.rs"), code_with_token_floor(600));
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    map.register_tree_entry("b.rs".into(), 100);
+    map.load_full(Path::new("b.rs"), code_with_token_floor(600));
+
+    // Sanity: neither entry has a skeleton to downgrade to.
+    assert_eq!(map.level_of(Path::new("a.rs")), Some(ContextMode::Full));
+
+    // Request more room than is currently free: must free ~400+ tokens.
+    let needed = map.remaining() + 400;
+    let freed = map.compress_to_fit(needed);
+
+    assert!(
+        freed >= 400,
+        "must free skeleton-less Full entries by evicting them to tree (freed {freed})"
+    );
+    assert!(
+        map.remaining() >= needed,
+        "post-compression remaining {} must cover needed {needed}",
+        map.remaining()
+    );
+    // Oldest file evicted all the way to L1 (tree), not just downgraded.
+    assert_eq!(map.level_of(Path::new("a.rs")), Some(ContextMode::Map));
+}
+
+/// Regression (bug: double subtraction). `focus_on_query` used to pass
+/// `estimated - remaining` (ADDITIONAL room) to `compress_to_fit`, whose
+/// contract is TOTAL free room required — so it stopped ~`remaining()`
+/// tokens short and the promoted file still did not fit.
+#[tokio::test]
+async fn test_focus_on_query_frees_enough_for_full_estimate() {
+    let mut map = ContextMap::new(2_000, 0.75, 0.20, 0.05);
+    // Budget is 1500 tokens.
+
+    // Two resident files WITH skeletons, each downgrade frees ~400 tokens.
+    for name in ["resident_a.rs", "resident_b.rs"] {
+        map.register_tree_entry(name.into(), 100);
+        map.load_skeleton(
+            Path::new(name),
+            FileSkeleton {
+                path: name.into(),
+                items: vec![],
+                token_count: 100,
+            },
+        );
+        map.load_full(Path::new(name), code_with_token_floor(500));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    // Candidate that matches the query. Pre-load then evict so costs.l3 is
+    // cached and `can_load(Full)` estimates the real full cost.
+    map.register_tree_entry("needle.rs".into(), 100);
+    map.load_full(Path::new("needle.rs"), code_with_token_floor(1200));
+    map.evict_to_tree(Path::new("needle.rs"));
+
+    let before = map
+        .can_load(Path::new("needle.rs"), ContextMode::Full)
+        .await;
+    assert!(
+        !before.fits,
+        "precondition: candidate must not fit initially"
+    );
+    assert!(
+        map.remaining() > 0,
+        "precondition: some headroom must exist (double subtraction needs R > 0)"
+    );
+
+    let promoted = map.focus_on_query("needle", 5).await;
+    assert!(promoted.contains(&PathBuf::from("needle.rs")));
+
+    let after = map
+        .can_load(Path::new("needle.rs"), ContextMode::Full)
+        .await;
+    assert!(
+        after.fits,
+        "focus_on_query must free enough for the FULL estimate \
+         (remaining {}, estimate {})",
+        map.remaining(),
+        after.estimated_tokens
+    );
+}

@@ -578,6 +578,12 @@ impl ContextMap {
 
     /// Free enough tokens to fit `needed` by downgrading L3→L2 then L2→L1,
     /// starting with the least recently accessed files.
+    ///
+    /// Contract: `needed` is the TOTAL free room required afterwards — i.e.
+    /// compression stops once `self.remaining() >= needed` (or nothing more
+    /// can be freed). Callers must pass the full estimated cost of what they
+    /// want to load, NOT `estimate - remaining` (that double-subtracts the
+    /// existing headroom and stops ~`remaining()` tokens short).
     /// Returns total tokens freed.
     pub fn compress_to_fit(&mut self, needed: usize) -> usize {
         if self.remaining() >= needed {
@@ -603,6 +609,23 @@ impl ContextMap {
             }
             if *level == ContextMode::Full {
                 freed += self.downgrade_to_skeleton(path);
+            }
+        }
+
+        // Pass 1b: Full entries without a skeleton can't be downgraded
+        // (load_full never populates skeletons, so directly-read files hit
+        // this). Evict them straight to L1 (tree) instead of leaving them
+        // incompressible.
+        if freed < deficit {
+            for (path, _, level) in &candidates {
+                if freed >= deficit {
+                    break;
+                }
+                // Snapshot said Full and it is STILL Full (pass 1 skipped it
+                // for lack of a skeleton).
+                if *level == ContextMode::Full && self.level_of(path) == Some(ContextMode::Full) {
+                    freed += self.evict_to_tree(path);
+                }
             }
         }
 
@@ -934,8 +957,9 @@ impl ContextMap {
             // Estimate cost and ensure headroom.
             let estimate = self.can_load(&path, ContextMode::Full).await;
             if !estimate.fits {
-                let needed = estimate.estimated_tokens.saturating_sub(self.remaining());
-                self.compress_to_fit(needed);
+                // compress_to_fit takes the TOTAL free room required, not
+                // the additional deficit over remaining().
+                self.compress_to_fit(estimate.estimated_tokens);
             }
 
             // We can't load the actual content here (no filesystem access in ContextMap),

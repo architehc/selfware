@@ -204,7 +204,9 @@ async fn malformed_twice_yields_invalid_protocol_error_with_telemetry() {
     assert!(body["detail"].is_string());
     assert_eq!(body["model"], "mock-review");
     assert!(body["latency_ms"].is_number());
-    assert_eq!(body["usage"]["total_tokens"], 18);
+    // Accumulated across original + repair call (2 requests x 18);
+    // last-call-only reporting was the old dishonest underreport.
+    assert_eq!(body["usage"]["total_tokens"], 36);
     assert_eq!(state.requests.load(Ordering::SeqCst), 2);
 }
 
@@ -347,7 +349,9 @@ async fn malformed_twice_maps_to_422_with_spec_body() {
     assert!(body["detail"].is_string());
     assert_eq!(body["model"], "mock-review");
     assert!(body["latency_ms"].is_number());
-    assert_eq!(body["usage"]["total_tokens"], 18);
+    // Accumulated across original + repair call (2 requests x 18);
+    // last-call-only reporting was the old dishonest underreport.
+    assert_eq!(body["usage"]["total_tokens"], 36);
     // One budgeted repair, then the typed failure.
     assert_eq!(state.requests.load(Ordering::SeqCst), 2);
 }

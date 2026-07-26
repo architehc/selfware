@@ -300,6 +300,42 @@ fn test_shell_exec_bare_git_push_not_flagged() {
 }
 
 #[test]
+fn test_shell_exec_echo_git_push_not_flagged() {
+    // `git` here is an ARGUMENT to echo, not the command — must not
+    // false-positive.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "echo git push origin main"}"#);
+    assert!(checker.check_tool_call(&call).is_ok());
+}
+
+#[test]
+fn test_shell_exec_absolute_git_path_push_protected_branch_blocked() {
+    // `/usr/bin/git push …` is the same command spelled with an absolute
+    // path — it must be caught just like bare `git push`.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "/usr/bin/git push origin main"}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("protected branch"));
+}
+
+#[test]
+fn test_shell_exec_pipe_to_git_push_protected_branch_blocked() {
+    // Git as the command of a later pipeline segment still counts.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "echo hi | git push origin main"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
 fn test_container_exec_git_push_protected_branch_blocked() {
     let config = SafetyConfig::default();
     let checker = SafetyChecker::new(&config);
@@ -702,6 +738,48 @@ fn test_shell_exec_with_cwd() {
 }
 
 // ── Additional shell command injection tests ────────────────────────────
+
+#[test]
+fn test_shell_exec_blocks_export_env_injection() {
+    // `export LD_PRELOAD=…` persists the variable in the shell — same
+    // injection as the bare `LD_PRELOAD=…` prefix, one keyword later.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "export LD_PRELOAD=/tmp/evil.so"}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("environment variable injection"));
+}
+
+#[test]
+fn test_shell_exec_blocks_env_wrapper_env_injection() {
+    // `env LD_PRELOAD=… cmd` sets the variable for the child process.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "env LD_PRELOAD=/tmp/evil.so victim"}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("environment variable injection"));
+}
+
+#[test]
+fn test_shell_exec_blocks_ifs_obfuscated_rm() {
+    // The shell expands $IFS to whitespace, so this RUNS as
+    // `rm -rf /target` while matching no literal `rm\s+` pattern.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in ["rm$IFS-rf$IFS/target", "rm${IFS}-rf${IFS}/"] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "$IFS-obfuscated rm should be blocked: {cmd}"
+        );
+    }
+}
 
 #[test]
 fn test_shell_exec_blocks_base64_encoded_command() {

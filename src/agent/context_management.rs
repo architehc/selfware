@@ -416,16 +416,15 @@ impl Agent {
             .can_load(p, crate::evolve::ContextMode::Full)
             .await;
         if !estimate.fits {
-            // Auto-compress to make room.
-            let needed = estimate
-                .estimated_tokens
-                .saturating_sub(self.context_map.remaining());
-            let freed = self.context_map.compress_to_fit(needed);
+            // Auto-compress to make room. compress_to_fit takes the TOTAL
+            // free room required (the full estimate), not the additional
+            // deficit over remaining().
+            let freed = self.context_map.compress_to_fit(estimate.estimated_tokens);
             tracing::debug!(
-                "Auto-compressed {} tokens to fit {} (needed {})",
+                "Auto-compressed {} tokens to fit {} (estimate {})",
                 freed,
                 path,
-                needed
+                estimate.estimated_tokens
             );
         }
         self.context_map.load_full(p, content.to_string());
@@ -473,11 +472,10 @@ impl Agent {
                 let estimate = self.context_map.can_load(&path, ContextMode::Full).await;
                 if !estimate.fits {
                     // Try to compress existing content to make room.
-                    let needed = estimate
-                        .estimated_tokens
-                        .saturating_sub(self.context_map.remaining());
-                    let freed = self.context_map.compress_to_fit(needed);
-                    if freed < needed {
+                    // compress_to_fit takes the TOTAL free room required
+                    // (the full estimate), not the additional deficit.
+                    self.context_map.compress_to_fit(estimate.estimated_tokens);
+                    if self.context_map.remaining() < estimate.estimated_tokens {
                         skipped += 1;
                         continue; // Can't fit even after compression.
                     }
