@@ -46,14 +46,16 @@ use super::provenance::{ConfigSource, ConfigSources};
 use super::types::ExecutionMode;
 use super::Config;
 
-/// Emit a user-actionable config warning. These MUST be visible by default:
-/// they go through `tracing::warn!` (captured by the log file when tracing is
-/// enabled) AND straight to stderr, because `init_tracing()` only installs a
-/// subscriber when RUST_LOG / SELFWARE_LOG_LEVEL is set — a tracing-only
-/// warning is invisible on a default run.
+/// Emit a user-actionable config warning. Goes through `tracing::warn!`, and
+/// additionally straight to stderr ONLY when no tracing subscriber exists.
+/// `init_tracing()` installs a subscriber iff RUST_LOG / SELFWARE_LOG_LEVEL is
+/// set; without this check, runs with logging enabled see every warning twice
+/// (subscriber output plus the stderr fallback).
 fn config_warning(message: &str) {
     warn!("{}", message);
-    eprintln!("Config warning: {}", message);
+    if std::env::var_os("RUST_LOG").is_none() && std::env::var_os("SELFWARE_LOG_LEVEL").is_none() {
+        eprintln!("Config warning: {}", message);
+    }
 }
 
 /// Walk a parsed TOML value and record `ConfigSource::ConfigFile(path)` for

@@ -86,7 +86,7 @@ ctrlc = "3"
 hnsw_rs = "0.3"  # Hierarchical Navigable Small World graphs (embedded vector search)
 bincode = { version = "2.0", features = ["serde"] }  # Fast binary serialization
 aes-gcm = "0.10"
-keyring = "3.2"
+keyring = "3.6"
 
 # Workflows
 serde_yaml = "0.9"  # YAML workflow definitions

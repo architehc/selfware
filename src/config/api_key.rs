@@ -186,7 +186,20 @@ pub fn set_api_key_for_endpoint(config: &super::Config, api_key: &str) -> Result
     let trimmed = api_key.trim();
     anyhow::ensure!(!trimmed.is_empty(), "API key must not be empty");
     save_api_key_to_keyring(&config.endpoint, trimmed)?;
-    Ok(config.endpoint.clone())
+    // Read-back verification: on some macOS environments (notably non-GUI
+    // sessions) the keychain backend accepts the write but the item is not
+    // retrievable afterwards. Report that honestly instead of claiming success.
+    match load_api_key_from_keyring(&config.endpoint) {
+        Ok(Some(_)) => Ok(config.endpoint.clone()),
+        Ok(None) => anyhow::bail!(
+            "keychain write did not persist (backend returned no entry on read-back). \
+             Use `api_key` in selfware.toml (chmod 600) or SELFWARE_API_KEY instead."
+        ),
+        Err(e) => anyhow::bail!(
+            "keychain read-back failed ({e}). \
+             Use `api_key` in selfware.toml (chmod 600) or SELFWARE_API_KEY instead."
+        ),
+    }
 }
 
 #[cfg(test)]

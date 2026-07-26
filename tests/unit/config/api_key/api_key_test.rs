@@ -106,3 +106,13 @@ fn set_api_key_rejects_empty_key() {
     assert!(set_api_key_for_endpoint(&config, "").is_err());
     assert!(set_api_key_for_endpoint(&config, "   ").is_err());
 }
+
+#[test]
+#[ignore = "touches the real OS keyring; run explicitly"]
+fn keyring_roundtrip_real() {
+    let endpoint = "https://openrouter.ai/api/v1";
+    let key = "probe-key-123";
+    crate::config::api_key::save_api_key_to_keyring(endpoint, key).unwrap();
+    let loaded = crate::config::api_key::load_api_key_from_keyring(endpoint).unwrap();
+    assert_eq!(loaded.as_deref(), Some(key));
+}
