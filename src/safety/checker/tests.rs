@@ -310,6 +310,27 @@ fn test_shell_exec_echo_git_push_not_flagged() {
 }
 
 #[test]
+fn test_shell_exec_sudo_git_push_protected_branch_blocked() {
+    // A sudo wrapper must not defeat the protected-branch guard.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "sudo git push origin main"}"#);
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
+fn test_shell_exec_env_prefix_git_push_protected_branch_blocked() {
+    // A VAR=value prefix must not defeat the protected-branch guard either.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "GIT_EDITOR=true git push origin main"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
 fn test_shell_exec_absolute_git_path_push_protected_branch_blocked() {
     // `/usr/bin/git push …` is the same command spelled with an absolute
     // path — it must be caught just like bare `git push`.

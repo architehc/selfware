@@ -1496,11 +1496,15 @@ fn git_push_protected_branch_target(cmd: &str, protected_branches: &[String]) ->
         return None;
     }
     let tokens = shlex::split(cmd)?;
-    let command = tokens.first()?;
+    // Resolve the actual command word, skipping `VAR=value` prefixes and a
+    // `sudo`/`doas` wrapper (with its flags) — those prefixes must not defeat
+    // the guard (`sudo git push origin main` pushes just as hard).
+    let cmd_idx = command_word_index(&tokens)?;
+    let command = &tokens[cmd_idx];
     if command != "git" && !command.ends_with("/git") {
         return None;
     }
-    let rest = &tokens[1..];
+    let rest = &tokens[cmd_idx + 1..];
     let push_pos = rest.iter().position(|t| t == "push")?;
     let args = &rest[push_pos + 1..];
 

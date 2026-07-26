@@ -55,7 +55,7 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // GitLab tokens (glpat-)
             compile_pattern("gitlab_token", r#"(glpat-[a-zA-Z0-9_\-]{20,})"#),
             // OpenAI/Anthropic API keys
-            compile_pattern("openai_key", r#"(sk-[a-zA-Z0-9_-]{20,})"#),
+            compile_pattern("openai_key", r#"(?:^|[^A-Za-z0-9])(sk-[a-zA-Z0-9_-]{20,})"#),
             // Google API keys
             compile_pattern("google_api_key", r#"(AIza[a-zA-Z0-9_\-]{35})"#),
             // Stripe API keys (secret, restricted, and publishable)

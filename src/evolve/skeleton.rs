@@ -379,6 +379,8 @@ fn is_fn_line(line: &str) -> bool {
         "pub unsafe fn ",
         "const fn ",
         "pub const fn ",
+        "pub(crate) const fn ",
+        "pub(super) const fn ",
     ];
     prefixes.iter().any(|p| line.starts_with(p))
 }
