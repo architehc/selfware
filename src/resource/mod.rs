@@ -91,6 +91,9 @@ impl ResourceManager {
     /// `shutdown` watch receiver.
     pub async fn monitor_loop(&self, mut shutdown: tokio::sync::watch::Receiver<bool>) {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
+        /// Disk maintenance cadence: every 720 ticks (1 hour at 5s).
+        const MAINTENANCE_EVERY_TICKS: u64 = 720;
+        let mut ticks = 0u64;
 
         if *shutdown.borrow() {
             return;
@@ -135,6 +138,16 @@ impl ResourceManager {
             {
                 let quotas = self.quotas.write().await;
                 quotas.adjust_for_pressure(pressure).await;
+            }
+
+            // Periodic disk maintenance (hourly): cleanup old logs, compress
+            // old checkpoints, remove orphans. Best-effort — failures are
+            // logged, never fatal to the monitor loop.
+            ticks += 1;
+            if ticks.is_multiple_of(MAINTENANCE_EVERY_TICKS) {
+                if let Err(error) = self.disk.perform_maintenance().await {
+                    warn!(error = %error, "disk maintenance failed");
+                }
             }
         }
     }
