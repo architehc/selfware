@@ -139,15 +139,35 @@ pub fn render_card(card: &ComponentCard) -> String {
     out
 }
 
-/// Expand one component to real detail for the model. `full` returns the whole
+/// Expand one component to real detail for the model. With `symbol`, returns
+/// just that symbol's source span as numbered evidence lines (`N | line`,
+/// the same style as grounded evidence excerpts); `full` returns the whole
 /// source with comments stripped; otherwise just the interface signatures.
-pub fn expand(graph: &Graph, root: &Path, component: &str, full: bool) -> Option<String> {
+pub fn expand(
+    graph: &Graph,
+    root: &Path,
+    component: &str,
+    symbol: Option<&str>,
+    full: bool,
+) -> Option<String> {
     let node = graph
         .nodes
         .iter()
         .find(|n| n.layer == NodeLayer::Code && n.id == component)?;
     let rel = node.path.as_deref()?;
     let src = std::fs::read_to_string(root.join(rel)).ok()?;
+    if let Some(symbol) = symbol {
+        let (start, end) = crate::evolve::skeleton::extract_symbol_source(&src, symbol)?;
+        let excerpt = src
+            .lines()
+            .enumerate()
+            .skip(start - 1)
+            .take(end - start + 1)
+            .map(|(i, line)| format!("{:>6} | {}", i + 1, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Some(excerpt);
+    }
     if full {
         return Some(reduce_source(&src));
     }
@@ -293,7 +313,8 @@ fn render(cards: &[ComponentCard], full_tokens: usize) -> String {
     ));
     out.push_str(
         "# Each card lists a component and its public symbols. To read detail, call\n\
-         # expand(component) for interface signatures, or expand(component, full) for code.\n\n",
+         # expand(component) for interface signatures, expand(component, full) for code,\n\
+         # or expand(component, symbol) for one symbol's source span.\n\n",
     );
     for card in cards {
         out.push_str(&format!(

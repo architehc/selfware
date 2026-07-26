@@ -36,6 +36,7 @@ mod readiness_test;
 mod server_test;
 mod small_model_context_fit_test;
 mod summary_test;
+mod symbol_context_test;
 
 /// Shorthand for a `DependsOn` edge between two node ids.
 fn edge(from: &str, to: &str) -> Edge {

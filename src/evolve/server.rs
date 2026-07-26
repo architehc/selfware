@@ -202,6 +202,10 @@ impl EvolveServer {
             .route("/api/context/custom", post(context_custom_handler))
             .route("/api/context/sizes", get(context_sizes_handler))
             .route("/api/context/select", get(context_select_handler))
+            .route(
+                "/api/context/select/symbols",
+                get(context_select_symbols_handler),
+            )
             .route("/api/context/map", get(context_map_handler))
             .route("/api/context/expand", get(context_expand_handler))
             .route("/api/context/trust", get(context_trust_handler))
@@ -814,6 +818,134 @@ async fn context_select_handler(
     })))
 }
 
+/// Cap on symbol matches returned by `/api/context/select/symbols` — the same
+/// "bounded answer, more on request" discipline as the map's symbol cap.
+const MAX_SYMBOL_MATCHES: usize = 50;
+
+/// Task-aware SYMBOL selection: the file-level `select_context` pass, then for
+/// each selected Rust file the skeleton symbols whose name or signature
+/// mentions the target (case-insensitive). Exact name matches sort first.
+/// `GET /api/context/select/symbols?kind=..&target=..`.
+async fn context_select_symbols_handler(
+    State(server): State<Arc<EvolveServer>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Value>> {
+    let kind = super::TaskKind::parse(
+        params
+            .get("kind")
+            .map(String::as_str)
+            .unwrap_or("understand"),
+    )
+    .map_err(|e| bad_request(e.to_string()))?;
+    let target = params.get("target").cloned().unwrap_or_default();
+    let graph = server.graph_snapshot().map_err(internal_error)?;
+    let root = server.project_root.as_ref().clone();
+    let report =
+        tokio::task::spawn_blocking(move || symbol_selection_json(kind, &target, &graph, &root))
+            .await
+            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+            .map_err(internal_error)?;
+    Ok(Json(report))
+}
+
+/// The task's matching symbols as a JSON report: exact name matches first,
+/// then substring matches, capped at [`MAX_SYMBOL_MATCHES`].
+fn symbol_selection_json(
+    kind: super::TaskKind,
+    target: &str,
+    graph: &Graph,
+    root: &Path,
+) -> Result<Value> {
+    let selection = super::select_context(kind, target, graph, root)?;
+    let needle = target.to_lowercase();
+    // File path → graph node id, for honest component attribution.
+    let component_of: HashMap<&str, &str> = graph
+        .nodes
+        .iter()
+        .filter_map(|n| n.path.as_deref().map(|p| (p, n.id.as_str())))
+        .collect();
+    let mut files_scanned = 0usize;
+    let mut exact: Vec<Value> = Vec::new();
+    let mut substring: Vec<Value> = Vec::new();
+    for file in &selection.files {
+        if !file.path.ends_with(".rs") {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(root.join(&file.path)) else {
+            continue;
+        };
+        files_scanned += 1;
+        let component = component_of
+            .get(file.path.as_str())
+            .copied()
+            .unwrap_or(file.path.as_str());
+        let skeleton = super::extract_rust_skeleton(Path::new(&file.path), &src);
+        for item in &skeleton.items {
+            let Some((name, item_kind, line, signature)) = symbol_entry(item) else {
+                continue;
+            };
+            if !needle.is_empty()
+                && !name.to_lowercase().contains(&needle)
+                && !signature.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            let entry = json!({
+                "component": component,
+                "path": file.path,
+                "symbol": name,
+                "kind": item_kind,
+                "line": line,
+                "signature": signature,
+            });
+            if name.eq_ignore_ascii_case(target) {
+                exact.push(entry);
+            } else {
+                substring.push(entry);
+            }
+        }
+    }
+    let mut symbols = exact;
+    symbols.extend(substring);
+    symbols.truncate(MAX_SYMBOL_MATCHES);
+    Ok(json!({
+        "kind": format!("{kind:?}").to_lowercase(),
+        "target": target,
+        "files_scanned": files_scanned,
+        "symbols": symbols,
+    }))
+}
+
+/// Flatten a skeleton item into `(name, kind, line, signature)` for symbol
+/// search results. `use` items have no single name to search by and are
+/// skipped.
+fn symbol_entry(item: &super::SkeletonItem) -> Option<(String, &'static str, usize, String)> {
+    use super::SkeletonItem as S;
+    Some(match item {
+        S::Function {
+            name,
+            signature,
+            line,
+        } => (name.clone(), "function", *line, signature.clone()),
+        S::Struct { name, line, .. } => (name.clone(), "struct", *line, format!("struct {name}")),
+        S::Enum { name, line, .. } => (name.clone(), "enum", *line, format!("enum {name}")),
+        S::Trait { name, line, .. } => (name.clone(), "trait", *line, format!("trait {name}")),
+        S::Impl { target, line, .. } => (target.clone(), "impl", *line, format!("impl {target}")),
+        S::Module { name, line } => (name.clone(), "module", *line, format!("mod {name}")),
+        S::Const {
+            name,
+            type_hint,
+            line,
+        } => (
+            name.clone(),
+            "const",
+            *line,
+            format!("const {name}: {type_hint}"),
+        ),
+        S::Use { .. } => return None,
+    })
+}
+
 /// Node count and token size of every selectable context mode, so the picker
 /// can show the cost of each option. Read-only; does not change the active mode.
 async fn context_sizes_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
@@ -994,7 +1126,8 @@ async fn context_map_handler(State(server): State<Arc<EvolveServer>>) -> ApiResu
 }
 
 /// Expand one component from the map to real detail: interface signatures by
-/// default, or the full comment-stripped source with `?full=true`.
+/// default, the full comment-stripped source with `?full=true`, or exactly one
+/// symbol's numbered source span with `?symbol=<name>`.
 async fn context_expand_handler(
     State(server): State<Arc<EvolveServer>>,
     Query(params): Query<HashMap<String, String>>,
@@ -1004,6 +1137,7 @@ async fn context_expand_handler(
         .cloned()
         .filter(|c| !c.is_empty())
         .ok_or_else(|| bad_request("expand requires a `component` query parameter"))?;
+    let symbol = params.get("symbol").cloned().filter(|s| !s.is_empty());
     let full = params
         .get("full")
         .map(|v| v == "true" || v == "1")
@@ -1011,14 +1145,29 @@ async fn context_expand_handler(
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let root = server.project_root.as_ref().clone();
     let target = component.clone();
-    let content =
-        tokio::task::spawn_blocking(move || super::expand_component(&graph, &root, &target, full))
-            .await
-            .map_err(|e| internal_error(anyhow::anyhow!(e)))?
-            .ok_or_else(|| bad_request(format!("unknown component: {component}")))?;
+    let sym = symbol.clone();
+    let content = tokio::task::spawn_blocking(move || {
+        super::expand_component(&graph, &root, &target, sym.as_deref(), full)
+    })
+    .await
+    .map_err(|e| internal_error(anyhow::anyhow!(e)))?
+    .ok_or_else(|| match &symbol {
+        Some(s) => bad_request(format!(
+            "symbol `{s}` not found in component `{component}` (or the component itself is unknown)"
+        )),
+        None => bad_request(format!("unknown component: {component}")),
+    })?;
+    let mode = if symbol.is_some() {
+        "symbol"
+    } else if full {
+        "full"
+    } else {
+        "signatures"
+    };
     Ok(Json(json!({
         "component": component,
-        "mode": if full { "full" } else { "signatures" },
+        "symbol": symbol,
+        "mode": mode,
         "tokens": crate::token_count::estimate_content_tokens(&content),
         "content": content,
     })))

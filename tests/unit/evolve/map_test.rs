@@ -183,14 +183,19 @@ fn build_map_and_expand_round_trip() {
     assert!(map.rendered.contains("Errors for the crate."));
 
     // Signatures view keeps declarations, elides bodies.
-    let sigs = expand(&graph, dir.path(), "crate::errors", false).unwrap();
+    let sigs = expand(&graph, dir.path(), "crate::errors", None, false).unwrap();
     assert!(sigs.contains("pub fn boom"));
     assert!(sigs.contains("pub struct MyError"));
 
     // Full view returns the (comment-stripped) source.
-    let full = expand(&graph, dir.path(), "crate::errors", true).unwrap();
+    let full = expand(&graph, dir.path(), "crate::errors", None, true).unwrap();
     assert!(full.contains("pub fn boom"));
 
+    // Symbol view returns just that item's numbered span.
+    let sym = expand(&graph, dir.path(), "crate::errors", Some("boom"), false).unwrap();
+    assert!(sym.contains("pub fn boom"));
+    assert!(!sym.contains("pub struct MyError"));
+
     // Unknown component yields nothing.
-    assert!(expand(&graph, dir.path(), "crate::missing", false).is_none());
+    assert!(expand(&graph, dir.path(), "crate::missing", None, false).is_none());
 }

@@ -268,6 +268,99 @@ pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
     }
 }
 
+// ─── Symbol-level retrieval ─────────────────────────────────────────────────
+
+/// Locate the 1-based inclusive `(start_line, end_line)` span of a named
+/// symbol in Rust source. Functions, impls, traits, and braced struct/enum
+/// blocks use brace matching from the declaration line (string literals and
+/// line comments are skipped, so a `}` inside them can't close the block
+/// early — the same approximation as `context_reduce::scan_fn_bodies`);
+/// `;`-terminated items (`const`, `use`, unit structs, bodyless trait
+/// methods) span just their own line. Returns `None` when no item with that
+/// name exists. Intentionally approximate — line scanning, not a full AST.
+pub fn extract_symbol_source(content: &str, symbol: &str) -> Option<(usize, usize)> {
+    let skeleton = extract_rust_skeleton(Path::new(""), content);
+    let decl_line = skeleton.items.iter().find_map(|item| match item {
+        SkeletonItem::Function { name, line, .. } if name == symbol => Some(*line),
+        SkeletonItem::Struct { name, line, .. } if name == symbol => Some(*line),
+        SkeletonItem::Enum { name, line, .. } if name == symbol => Some(*line),
+        SkeletonItem::Trait { name, line, .. } if name == symbol => Some(*line),
+        SkeletonItem::Module { name, line } if name == symbol => Some(*line),
+        SkeletonItem::Const { name, line, .. } if name == symbol => Some(*line),
+        // An impl block answers to its type name: `impl Agent for Foo` is `Foo`.
+        SkeletonItem::Impl { target, line, .. }
+            if target == symbol || target.split_whitespace().last() == Some(symbol) =>
+        {
+            Some(*line)
+        }
+        SkeletonItem::Use { path, line }
+            if path
+                .trim_end_matches(';')
+                .rsplit("::")
+                .next()
+                .is_some_and(|last| {
+                    last.trim_matches(|c| ['{', '}', ' '].contains(&c)) == symbol
+                }) =>
+        {
+            Some(*line)
+        }
+        _ => None,
+    })?;
+    let lines: Vec<&str> = content.lines().collect();
+    let start = decl_line - 1;
+    let end = block_end_line(&lines, start);
+    Some((decl_line, end + 1))
+}
+
+/// End line (0-based) of the item declared at `start` (0-based): the line
+/// where the braces opened from the declaration balance, or the declaration
+/// line itself for items without a body. Braces inside `"..."` literals and
+/// after `//` are ignored so they can't distort the match.
+fn block_end_line(lines: &[&str], start: usize) -> usize {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        let mut in_str = false;
+        let mut escaped = false;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if in_str {
+                if escaped {
+                    escaped = false;
+                } else if c == b'\\' {
+                    escaped = true;
+                } else if c == b'"' {
+                    in_str = false;
+                }
+            } else if c == b'"' {
+                in_str = true;
+            } else if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+                break; // rest of the line is a comment
+            } else if c == b'{' {
+                depth += 1;
+                opened = true;
+            } else if c == b'}' {
+                depth -= 1;
+                if opened && depth == 0 {
+                    return idx;
+                }
+            } else if c == b';' && !opened {
+                return idx; // bodyless declaration (`const`, unit struct, ...)
+            }
+            i += 1;
+        }
+    }
+    // Unbalanced source (shouldn't happen for valid Rust): an opened block
+    // runs to EOF, a never-opened one spans just its declaration line.
+    if opened {
+        lines.len().saturating_sub(1)
+    } else {
+        start
+    }
+}
+
 // ─── Skeleton helpers ───────────────────────────────────────────────────────
 
 fn is_fn_line(line: &str) -> bool {
@@ -391,3 +484,7 @@ fn extract_impl_target(line: &str) -> String {
         .trim()
         .to_string()
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/evolve/skeleton_test.rs"]
+mod skeleton_test;
