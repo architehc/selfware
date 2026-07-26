@@ -1000,6 +1000,50 @@ async fn test_long_term_memory_consolidate() {
     assert!(result.entries_removed > 0);
 }
 
+/// Regression: consolidate() must de-index removed entries — before the fix,
+/// tag/tier queries returned orphaned ids for entries that no longer existed.
+#[tokio::test]
+async fn test_long_term_consolidate_removes_orphaned_index_ids() {
+    let index = std::sync::Arc::new(MemoryIndex::new());
+    let ltm = LongTermMemory::new(1000, index.clone());
+
+    // Low-importance entries (will be consolidated away), all sharing a tag.
+    for i in 0..3u64 {
+        ltm.store(
+            MemoryEntry::new(i, "stale", MemoryTier::LongTerm)
+                .with_importance(0.1)
+                .with_tags(vec!["stale-tag".to_string()]),
+        )
+        .await
+        .unwrap();
+    }
+    // One high-importance entry with the same tag must survive.
+    ltm.store(
+        MemoryEntry::new(99, "keeper", MemoryTier::LongTerm)
+            .with_importance(0.9)
+            .with_tags(vec!["stale-tag".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(index.get_by_tag("stale-tag").await.len(), 4);
+
+    let result = ltm.consolidate().await;
+    assert_eq!(result.entries_removed, 3);
+
+    let remaining = index.get_by_tag("stale-tag").await;
+    assert_eq!(
+        remaining,
+        vec![99],
+        "tag query must not return orphaned ids for consolidated entries"
+    );
+    assert_eq!(
+        index.get_by_tier(MemoryTier::LongTerm).await,
+        vec![99],
+        "tier query must not return orphaned ids for consolidated entries"
+    );
+}
+
 #[tokio::test]
 async fn test_long_term_memory_archive_oldest() {
     let index = std::sync::Arc::new(MemoryIndex::new());

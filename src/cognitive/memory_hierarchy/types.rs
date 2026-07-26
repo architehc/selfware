@@ -320,18 +320,24 @@ pub struct SelfImprovementContext {
 
 impl SelfImprovementContext {
     pub fn estimate_tokens(&self) -> usize {
-        let base = self.goal.len()
-            + self.self_model.len()
-            + self.architecture.len()
-            + self.recent_modifications.len();
+        // AGENTS.md rule 4: token accounting goes through
+        // `token_count::estimate_content_tokens`, never a chars/4 heuristic.
+        let base = crate::token_count::estimate_content_tokens(&self.goal)
+            + crate::token_count::estimate_content_tokens(&self.self_model)
+            + crate::token_count::estimate_content_tokens(&self.architecture)
+            + crate::token_count::estimate_content_tokens(&self.recent_modifications);
         let code_tokens: usize = self
             .relevant_code
             .files
             .iter()
-            .map(|f| f.content.len())
+            .map(|f| crate::token_count::estimate_content_tokens(&f.content))
             .sum();
-        let suggestions_tokens: usize = self.suggestions.iter().map(|s| s.len()).sum();
-        (base + code_tokens + suggestions_tokens) / 4
+        let suggestions_tokens: usize = self
+            .suggestions
+            .iter()
+            .map(|s| crate::token_count::estimate_content_tokens(s))
+            .sum();
+        base + code_tokens + suggestions_tokens
     }
 
     pub fn to_prompt(&self) -> String {

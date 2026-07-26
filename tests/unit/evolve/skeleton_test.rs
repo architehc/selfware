@@ -45,3 +45,98 @@ fn method_inside_impl_is_found_by_its_own_name() {
     let src = "struct A;\nimpl A {\n    fn run(&self) {\n        todo!()\n    }\n}\n";
     assert_eq!(extract_symbol_source(src, "run"), Some((3, 5)));
 }
+
+#[test]
+fn multi_line_fn_signature_is_captured_in_full() {
+    let src = "pub fn foo(\n    x: usize,\n    y: usize,\n) -> usize {\n    x + y\n}\n";
+    let skel = extract_rust_skeleton(Path::new("t.rs"), src);
+    let sig = skel
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SkeletonItem::Function {
+                name, signature, ..
+            } if name == "foo" => Some(signature),
+            _ => None,
+        })
+        .expect("foo must be captured");
+    assert!(
+        sig.contains("x: usize") && sig.contains("y: usize") && sig.contains("-> usize"),
+        "multi-line signature must include continuation lines, got: {sig}"
+    );
+    assert!(
+        !sig.contains("x + y"),
+        "body must not leak into the signature"
+    );
+}
+
+#[test]
+fn multi_line_signature_is_capped_at_eight_lines() {
+    let src = "fn wide(\n    a: usize,\n    b: usize,\n    c: usize,\n    d: usize,\n    e: usize,\n    f: usize,\n    g: usize,\n    h: usize,\n    i: usize,\n) {}\n";
+    let skel = extract_rust_skeleton(Path::new("t.rs"), src);
+    let sig = skel
+        .items
+        .iter()
+        .find_map(|item| match item {
+            SkeletonItem::Function {
+                name, signature, ..
+            } if name == "wide" => Some(signature),
+            _ => None,
+        })
+        .expect("wide must be captured");
+    // 8-line cap: the declaration line plus at most 7 continuation lines —
+    // the unbalanced tail must not swallow the rest of the file.
+    assert!(
+        !sig.contains("i: usize"),
+        "signature capture must stop at the 8-line cap, got: {sig}"
+    );
+}
+
+#[test]
+fn scoped_visibility_prefixes_are_recognized() {
+    let src = "pub(in crate::inner) fn scoped_fn() {}\n\
+               pub(crate) struct ScopedStruct;\n\
+               pub(in crate::inner) enum ScopedEnum { A }\n\
+               pub(super) trait ScopedTrait {}\n\
+               pub(crate) const SCOPED_CONST: usize = 1;\n\
+               pub(crate) use std::fmt;\n\
+               pub(in crate::inner) mod scoped_mod;\n";
+    let skel = extract_rust_skeleton(Path::new("t.rs"), src);
+    let has = |pred: fn(&SkeletonItem) -> bool| skel.items.iter().any(pred);
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Function { name, .. } if name == "scoped_fn")
+    ));
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Struct { name, .. } if name == "ScopedStruct")
+    ));
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Enum { name, .. } if name == "ScopedEnum")
+    ));
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Trait { name, .. } if name == "ScopedTrait")
+    ));
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Const { name, .. } if name == "SCOPED_CONST")
+    ));
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Use { path, .. } if path.starts_with("pub(crate) use"))
+    ));
+    assert!(has(
+        |i| matches!(i, SkeletonItem::Module { name, .. } if name == "scoped_mod")
+    ));
+}
+
+#[test]
+fn plain_visibility_prefixes_still_work() {
+    let src = "pub fn a() {}\npub(crate) fn b() {}\npub(super) async fn c() {}\nfn d() {}\n";
+    let skel = extract_rust_skeleton(Path::new("t.rs"), src);
+    let names: Vec<&str> = skel
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            SkeletonItem::Function { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["a", "b", "c", "d"]);
+}

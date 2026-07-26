@@ -311,6 +311,96 @@ fn test_rsi_stop_saves_state() {
     assert!(state_path.exists());
 }
 
+// ── Circuit breaker: non-improving cycles count as failures ──
+
+#[test]
+fn test_record_cycle_failure_increments_and_only_trips_at_threshold() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_root = dir.path().to_path_buf();
+    let state_path = project_root.join(".selfware/rsi_state.json");
+    let history_path = project_root.join(".selfware/history.json");
+    let mut orch = RSIOrchestrator::with_paths(project_root, state_path, history_path);
+    orch.max_consecutive_failures = 3;
+
+    // Each non-improving cycle (Ok(false) path) increments the counter...
+    orch.record_cycle_failure(1).unwrap();
+    assert_eq!(orch.consecutive_failures, 1);
+    orch.record_cycle_failure(1).unwrap();
+    assert_eq!(orch.consecutive_failures, 2);
+
+    // ...and the breaker trips exactly at the threshold.
+    let err = orch.record_cycle_failure(2).unwrap_err();
+    assert!(
+        err.to_string().contains("3 consecutive failures"),
+        "trip error must name the failure count, got: {}",
+        err
+    );
+
+    // Tripping persists state so the failure count survives a restart.
+    let saved = std::fs::read_to_string(RSIOrchestrator::default_state_path(dir.path())).unwrap();
+    let state: RSIState = serde_json::from_str(&saved).unwrap();
+    assert_eq!(state.consecutive_failures, 3);
+}
+
+#[test]
+fn test_genuine_improvement_resets_consecutive_failures() {
+    // run_loop resets the counter on Ok(true) only; simulate the exact
+    // assignment it performs after a merged improvement.
+    let dir = tempfile::tempdir().unwrap();
+    let project_root = dir.path().to_path_buf();
+    let state_path = project_root.join(".selfware/rsi_state.json");
+    let history_path = project_root.join(".selfware/history.json");
+    let mut orch = RSIOrchestrator::with_paths(project_root, state_path, history_path);
+
+    orch.record_cycle_failure(1).unwrap();
+    orch.record_cycle_failure(1).unwrap();
+    assert_eq!(orch.consecutive_failures, 2);
+
+    // Ok(true) arm in run_loop:
+    orch.consecutive_failures = 0;
+    assert_eq!(orch.consecutive_failures, 0);
+}
+
+// ── Atomic save_state ──
+
+#[test]
+fn test_save_state_is_atomic_and_leaves_no_temp_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_root = dir.path().to_path_buf();
+    let state_path = project_root.join(".selfware/rsi_state.json");
+    let history_path = project_root.join(".selfware/history.json");
+    let mut orch = RSIOrchestrator::with_paths(project_root, state_path.clone(), history_path);
+    orch.total_iterations = 7;
+    orch.consecutive_failures = 2;
+
+    orch.save_state().unwrap();
+
+    // The final file holds the full, valid JSON snapshot.
+    let state: RSIState =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state.total_iterations, 7);
+    assert_eq!(state.consecutive_failures, 2);
+
+    // No temp files are left behind after the rename.
+    let leftovers: Vec<_> = std::fs::read_dir(state_path.parent().unwrap())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "save_state must not leave temp files: {:?}",
+        leftovers
+    );
+
+    // A second save (over an existing state file) works too.
+    orch.total_iterations = 8;
+    orch.save_state().unwrap();
+    let state: RSIState =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state.total_iterations, 8);
+}
+
 // The fixture writes a `run_projecte2e.sh` shell script with a bash
 // shebang and runs it via the RSI improvement cycle; Windows CI doesn't
 // ship `bash` and `.sh` files aren't executable there. The path-safety

@@ -111,7 +111,14 @@ impl RSIOrchestrator {
     }
 
     /// Save the current loop state to disk so it can be resumed.
+    ///
+    /// The write is atomic: the JSON goes to a temp file in the same
+    /// directory, is fsynced, then renamed over the target — a crash
+    /// mid-write can never leave a truncated `rsi_state.json` (same pattern
+    /// as `session::chat_store`).
     pub fn save_state(&self) -> std::result::Result<(), std::io::Error> {
+        use std::io::Write;
+
         let state = RSIState {
             total_iterations: self.total_iterations,
             consecutive_failures: self.consecutive_failures,
@@ -122,7 +129,24 @@ impl RSIOrchestrator {
             std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
-        std::fs::write(&self.state_path, json)
+
+        let tmp_path = self
+            .state_path
+            .with_extension(format!("json.tmp.{}", std::process::id()));
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+        }
+        if let Err(err) = std::fs::rename(&tmp_path, &self.state_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Load previously persisted state.
@@ -130,6 +154,45 @@ impl RSIOrchestrator {
         let data = std::fs::read_to_string(&self.state_path)?;
         serde_json::from_str(&data)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+
+    /// Record one failed (or non-improving) cycle: bump `consecutive_failures`,
+    /// warn when the next failure would trip the breaker, and when the
+    /// threshold is reached persist state and return the circuit-breaker
+    /// error that aborts the loop. Non-improving cycles count too — each one
+    /// burned two paid e2e suites without progress, so an unbroken string of
+    /// them must abort the loop exactly like unbroken errors. Only a genuine
+    /// improvement (`Ok(true)` in `run_loop`) resets the counter.
+    fn record_cycle_failure(&mut self, iteration: usize) -> Result<()> {
+        self.consecutive_failures += 1;
+
+        if self.consecutive_failures >= self.max_consecutive_failures {
+            error!(
+                "Circuit breaker tripped: {} consecutive failures reached the limit of {}. \
+                 Aborting RSI loop to prevent runaway damage.",
+                self.consecutive_failures, self.max_consecutive_failures
+            );
+            // Persist state before aborting so it survives the restart.
+            self.total_iterations += iteration;
+            if let Err(save_err) = self.save_state() {
+                warn!(
+                    "Failed to save RSI state on circuit-breaker abort: {}",
+                    save_err
+                );
+            }
+            return Err(SelfwareError::Internal(format!(
+                "RSI loop aborted: {} consecutive failures (limit: {})",
+                self.consecutive_failures, self.max_consecutive_failures
+            )));
+        }
+
+        if self.consecutive_failures >= self.max_consecutive_failures - 1 {
+            warn!(
+                "Next failure will trip the circuit breaker ({}/{} consecutive failures)",
+                self.consecutive_failures, self.max_consecutive_failures
+            );
+        }
+        Ok(())
     }
 
     /// Run the RSI outer loop with safety guardrails.
@@ -175,41 +238,14 @@ impl RSIOrchestrator {
                 }
                 Ok(false) => {
                     info!("Improvement cycle did not yield a better fitness score. Changes discarded.");
-                    self.consecutive_failures = 0;
+                    // Non-improving cycles count toward the circuit breaker
+                    // (see record_cycle_failure); a genuine improvement is
+                    // the only thing that resets it.
+                    self.record_cycle_failure(iteration)?;
                 }
                 Err(e) => {
-                    self.consecutive_failures += 1;
-                    error!(
-                        "Improvement cycle failed ({} consecutive failure(s)): {}",
-                        self.consecutive_failures, e
-                    );
-
-                    if self.consecutive_failures >= self.max_consecutive_failures {
-                        error!(
-                            "Circuit breaker tripped: {} consecutive failures reached the limit of {}. \
-                             Aborting RSI loop to prevent runaway damage.",
-                            self.consecutive_failures, self.max_consecutive_failures
-                        );
-                        // Persist state before aborting so it survives the restart.
-                        self.total_iterations += iteration;
-                        if let Err(save_err) = self.save_state() {
-                            warn!(
-                                "Failed to save RSI state on circuit-breaker abort: {}",
-                                save_err
-                            );
-                        }
-                        return Err(SelfwareError::Internal(format!(
-                            "RSI loop aborted: {} consecutive failures (limit: {})",
-                            self.consecutive_failures, self.max_consecutive_failures
-                        )));
-                    }
-
-                    if self.consecutive_failures >= self.max_consecutive_failures - 1 {
-                        warn!(
-                            "Next failure will trip the circuit breaker ({}/{} consecutive failures)",
-                            self.consecutive_failures, self.max_consecutive_failures
-                        );
-                    }
+                    error!("Improvement cycle failed: {}", e);
+                    self.record_cycle_failure(iteration)?;
 
                     // Exponential backoff: 60s * 2^(failures-1), capped at 3600s
                     let backoff_secs = std::cmp::min(

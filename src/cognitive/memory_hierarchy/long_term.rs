@@ -122,7 +122,10 @@ impl LongTermMemory {
         let mut removed = 0;
 
         for id in &to_consolidate {
-            if entries.remove(id).is_some() {
+            if let Some(entry) = entries.remove(id) {
+                // Keep the shared index in sync: dropping the entry without
+                // de-indexing it would leave orphaned ids in tag/tier queries.
+                self.index.remove_entry(&entry).await;
                 removed += 1;
             }
         }

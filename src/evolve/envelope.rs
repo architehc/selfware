@@ -5,7 +5,11 @@
 //! Preview and outbound responses carry its `content_hash`; equality of the
 //! hashes proves they describe the same bytes. Projections reuse the exact
 //! machinery TierMeasurer measures with (skeleton / reduce_source / map
-//! cards), so measured tier size and shipped size converge.
+//! cards), so measured tier size and shipped size converge — with one
+//! deliberate exception: Lite/Custom project `.rs` files to skeletons but
+//! ship non-Rust sources VERBATIM, because the alternative (dropping them)
+//! silently loses content the caller explicitly included. The measurer's
+//! per-node fallback fraction stays a budget estimate only.
 
 use sha2::{Digest, Sha256};
 
@@ -92,9 +96,19 @@ pub fn build_envelope_with_root(
                 .as_ref()
                 .and_then(|m| m.cards.iter().find(|c| &c.component == id))
                 .map(render_card),
-            ContextMode::Lite | ContextMode::Custom => read_source(rel)
-                .filter(|_| rel.ends_with(".rs"))
-                .map(|src| extract_rust_skeleton(std::path::Path::new(rel), &src).render()),
+            ContextMode::Lite | ContextMode::Custom => read_source(rel).map(|src| {
+                if rel.ends_with(".rs") {
+                    extract_rust_skeleton(std::path::Path::new(rel), &src).render()
+                } else {
+                    // Non-Rust sources ship VERBATIM (like Full): silently
+                    // skipping them here lost included content outright (a
+                    // .md/.toml in a custom selection shipped nothing). This
+                    // intentionally diverges from TierMeasurer's signature
+                    // fraction for such nodes — the measurer stays a budget
+                    // estimate; the envelope must not lose content.
+                    src
+                }
+            }),
             ContextMode::Compact => read_source(rel).map(|src| reduce_source(&src)),
             // Full/FullExtended/Preset ship verbatim source; cfg(test) exclusion
             // for Full stays in the evidence-chunking stage (unchanged behavior).

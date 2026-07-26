@@ -343,16 +343,22 @@ fn test_self_improvement_context_estimate_tokens_empty() {
 
 #[test]
 fn test_self_improvement_context_estimate_tokens_basic() {
-    // 40 chars total base + 0 code + 0 suggestions => 40/4 = 10
+    // Token accounting goes through `token_count::estimate_content_tokens`
+    // (AGENTS.md rule 4), so the expected value is the sum of the shared
+    // estimator over each field — never chars/4.
     let sic = SelfImprovementContext {
-        goal: "improve speed".to_string(),                // 13
-        self_model: "model v1".to_string(),               // 8
-        architecture: "modular".to_string(),              // 7
-        recent_modifications: "refactored x".to_string(), // 12 = 40 total
+        goal: "improve speed".to_string(),
+        self_model: "model v1".to_string(),
+        architecture: "modular".to_string(),
+        recent_modifications: "refactored x".to_string(),
         relevant_code: CodeContext::new(),
         suggestions: vec![],
     };
-    assert_eq!(sic.estimate_tokens(), 40 / 4);
+    let expected = crate::token_count::estimate_content_tokens("improve speed")
+        + crate::token_count::estimate_content_tokens("model v1")
+        + crate::token_count::estimate_content_tokens("modular")
+        + crate::token_count::estimate_content_tokens("refactored x");
+    assert_eq!(sic.estimate_tokens(), expected);
 }
 
 #[test]
@@ -366,15 +372,18 @@ fn test_self_improvement_context_estimate_tokens_with_code() {
         relevance_score: 0.5,
     });
     let sic = SelfImprovementContext {
-        goal: "g".to_string(),         // 1
-        self_model: "m".to_string(),   // 1
-        architecture: "a".to_string(), // 1
+        goal: "g".to_string(),
+        self_model: "m".to_string(),
+        architecture: "a".to_string(),
         recent_modifications: String::new(),
         relevant_code: cc,
         suggestions: vec![],
     };
-    // base = 3, code = 40, total = 43, 43/4 = 10 (integer division)
-    assert_eq!(sic.estimate_tokens(), 40_usize.div_ceil(4));
+    let expected = crate::token_count::estimate_content_tokens("g")
+        + crate::token_count::estimate_content_tokens("m")
+        + crate::token_count::estimate_content_tokens("a")
+        + crate::token_count::estimate_content_tokens(&"x".repeat(40));
+    assert_eq!(sic.estimate_tokens(), expected);
 }
 
 #[test]
@@ -385,9 +394,11 @@ fn test_self_improvement_context_estimate_tokens_with_suggestions() {
         architecture: String::new(),
         recent_modifications: String::new(),
         relevant_code: CodeContext::new(),
-        suggestions: vec!["do A".to_string(), "do B".to_string()], // 4 + 4 = 8
+        suggestions: vec!["do A".to_string(), "do B".to_string()],
     };
-    assert_eq!(sic.estimate_tokens(), 8 / 4);
+    let expected = crate::token_count::estimate_content_tokens("do A")
+        + crate::token_count::estimate_content_tokens("do B");
+    assert_eq!(sic.estimate_tokens(), expected);
 }
 
 #[test]

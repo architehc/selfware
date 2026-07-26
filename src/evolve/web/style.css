@@ -2,10 +2,12 @@
     color-scheme: dark;
     --bg: #151515;
     --surface: #1d1d1d;
+    --surface-2: #222222;
     --surface-raised: #242424;
     --surface-active: #29362f;
     --surface-hover: #2b2b2b;
     --border: #383838;
+    --border-subtle: #2e2e2e;
     --border-strong: #4a4a4a;
     --text: #ededed;
     --text-soft: #c8c8c8;

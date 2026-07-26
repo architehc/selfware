@@ -455,6 +455,24 @@ function wireEvents() {
     $('#graph-zoom-out')?.addEventListener('click', () => graphZoom(0.77));
     $('#graph-reset')?.addEventListener('click', resetGraphView);
     $('#graph-refresh')?.addEventListener('click', () => loadGraph(true));
+
+    // Re-render the graph when its container resizes (panel toggles, window
+    // resize) — the SVG is sized at render time and would otherwise clip.
+    let graphResizeTimer = null;
+    const graphCanvas = $('#graph-canvas');
+    if (graphCanvas && typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(() => {
+            if (!state.graphData || !state.graphLoaded) return;
+            clearTimeout(graphResizeTimer);
+            graphResizeTimer = setTimeout(() => {
+                try {
+                    renderGraph(state.graphData);
+                } catch {
+                    // d3 not ready yet — the next loadGraph will render.
+                }
+            }, 120);
+        }).observe(graphCanvas);
+    }
     $('#graph-search')?.addEventListener('input', (event) => highlightGraphSearch(event.target.value));
     $('#graph-search')?.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -818,11 +836,14 @@ function renderContextInspector() {
              if (node && node.path) {
                  selectSource(node.path, node);
              } else {
-                 // `id` is a composer node id (crate::…), not a file path —
-                 // resolve it to a path via the loaded graph before opening.
-                 const graphNode = state.graphData?.nodes?.find((entry) => entry.id === id);
-                 if (graphNode?.path) {
-                     openFile(graphNode.path);
+                 // `id` is a composer node id (crate::…), not a file path.
+                 // Resolve via the component cards (loaded with the checklist)
+                 // first, then the graph (only loaded after the Graph tab).
+                 const cardPath = state.contextCards?.find((c) => c.component === id)?.path;
+                 const graphPath = state.graphData?.nodes?.find((entry) => entry.id === id)?.path;
+                 const resolved = cardPath || graphPath;
+                 if (resolved) {
+                     openFile(resolved);
                  } else {
                      toast(`No file mapping for ${id}`, 'warning');
                  }
@@ -996,6 +1017,12 @@ async function applyComponentContext(components) {
         });
         state.context = normalizeContext(response);
         state.componentChecksDirty = false;
+        // A Clear (empty list) returns the server to auto — the checklist must
+        // not keep showing the old selection as checked.
+        if (components.length === 0) {
+            state.componentChecked = new Set();
+            state.componentChecksSeeded = false;
+        }
         syncComponentChecksWithServer();
         renderContext(previous);
         renderComponentChecklist();

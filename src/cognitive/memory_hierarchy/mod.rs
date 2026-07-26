@@ -148,8 +148,10 @@ impl SemanticMemory {
                 .to_string_lossy()
                 .to_string();
 
-            // Estimate ~2 tokens per path component as lightweight index
-            let path_tokens = rel_path.len() / 4 + 1;
+            // Estimate the token cost of the path string itself (lightweight
+            // index) — via the shared estimator per AGENTS.md rule 4, with a
+            // floor of 1 so an empty/short path still counts as an entry.
+            let path_tokens = crate::token_count::estimate_content_tokens(&rel_path).max(1);
             total_tokens += path_tokens;
 
             let lang = match ext {

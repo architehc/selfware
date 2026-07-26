@@ -146,8 +146,9 @@ impl FileSkeleton {
 /// This is intentionally fast and approximate — not a full AST parse.
 pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
     let mut items = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
 
-    for (line_num_0, line) in content.lines().enumerate() {
+    for (line_num_0, line) in lines.iter().enumerate() {
         let line_num = line_num_0 + 1;
         let trimmed = line.trim();
 
@@ -157,7 +158,7 @@ pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
         }
 
         // `use` statements.
-        if trimmed.starts_with("use ") || trimmed.starts_with("pub use ") {
+        if strip_visibility(trimmed).starts_with("use ") {
             items.push(SkeletonItem::Use {
                 path: trimmed.trim_end_matches(';').to_string(),
                 line: line_num,
@@ -166,7 +167,7 @@ pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
         }
 
         // `mod` declarations.
-        if (trimmed.starts_with("mod ") || trimmed.starts_with("pub mod "))
+        if strip_visibility(trimmed).starts_with("mod ")
             && (trimmed.ends_with(';') || trimmed.ends_with('{'))
         {
             let name = extract_name_after(trimmed, "mod ");
@@ -177,34 +178,32 @@ pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
             continue;
         }
 
-        // `fn` declarations — capture the full signature line.
+        // `fn` declarations — capture the full signature, following
+        // continuation lines when the parameter list spans multiple lines.
         // Must run BEFORE the const/static arm: `const fn` / `pub const fn`
         // are functions, not const items.
         if is_fn_line(trimmed) {
             let name = extract_fn_name(trimmed);
             items.push(SkeletonItem::Function {
                 name,
-                signature: trimmed.trim_end_matches('{').trim().to_string(),
+                signature: capture_signature(&lines, line_num_0),
                 line: line_num,
             });
             continue;
         }
 
         // `const` / `static`.
-        if trimmed.starts_with("const ")
-            || trimmed.starts_with("pub const ")
-            || trimmed.starts_with("pub(super) const ")
-            || trimmed.starts_with("pub(crate) const ")
-            || trimmed.starts_with("static ")
-            || trimmed.starts_with("pub static ")
         {
-            let (name, type_hint) = extract_const_parts(trimmed);
-            items.push(SkeletonItem::Const {
-                name,
-                type_hint,
-                line: line_num,
-            });
-            continue;
+            let rest = strip_visibility(trimmed);
+            if rest.starts_with("const ") || rest.starts_with("static ") {
+                let (name, type_hint) = extract_const_parts(trimmed);
+                items.push(SkeletonItem::Const {
+                    name,
+                    type_hint,
+                    line: line_num,
+                });
+                continue;
+            }
         }
 
         // `struct` declarations.
@@ -365,28 +364,66 @@ fn block_end_line(lines: &[&str], start: usize) -> usize {
 
 // ─── Skeleton helpers ───────────────────────────────────────────────────────
 
+/// Strip a leading visibility modifier: `pub(...)` with ANY scope
+/// (`pub(crate)`, `pub(super)`, `pub(in crate::path)`, ...) or a bare `pub `.
+/// Returns the line unchanged when there is no visibility prefix (or the
+/// `pub(` scope is malformed), so callers can then apply keyword checks.
+fn strip_visibility(line: &str) -> &str {
+    if let Some(rest) = line.strip_prefix("pub(") {
+        match rest.find(')') {
+            Some(close) => rest[close + 1..].trim_start(),
+            None => line,
+        }
+    } else {
+        line.strip_prefix("pub ").unwrap_or(line)
+    }
+}
+
+/// Net paren balance of a line (`(` +1, `)` -1). Good enough for the
+/// approximate line-scanning parser — a paren inside a string literal on a
+/// signature line is vanishingly rare.
+fn paren_balance(s: &str) -> i32 {
+    s.chars()
+        .map(|c| match c {
+            '(' => 1,
+            ')' => -1,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Capture a declaration's full signature. When the declaration line leaves
+/// parentheses unbalanced (a multi-line parameter list), trimmed continuation
+/// lines are appended (space-joined) until they balance, capped at 8 lines
+/// total so a malformed line can't swallow the file.
+fn capture_signature(lines: &[&str], start: usize) -> String {
+    const MAX_SIGNATURE_LINES: usize = 8;
+    let mut sig = lines[start].trim().to_string();
+    let mut balance = paren_balance(&sig);
+    let mut idx = start;
+    while balance > 0 && idx + 1 < lines.len() && idx - start + 1 < MAX_SIGNATURE_LINES {
+        idx += 1;
+        let cont = lines[idx].trim();
+        sig.push(' ');
+        sig.push_str(cont);
+        balance += paren_balance(cont);
+    }
+    sig.trim_end_matches('{').trim().to_string()
+}
+
 fn is_fn_line(line: &str) -> bool {
-    let prefixes = [
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "pub(super) fn ",
-        "async fn ",
-        "pub async fn ",
-        "pub(crate) async fn ",
-        "pub(super) async fn ",
-        "unsafe fn ",
-        "pub unsafe fn ",
-        "const fn ",
-        "pub const fn ",
-        "pub(crate) const fn ",
-        "pub(super) const fn ",
-    ];
-    prefixes.iter().any(|p| line.starts_with(p))
+    let rest = strip_visibility(line);
+    rest.starts_with("fn ")
+        || rest.starts_with("async fn ")
+        || rest.starts_with("unsafe fn ")
+        || rest.starts_with("const fn ")
 }
 
 fn extract_fn_name(line: &str) -> String {
-    // Find "fn " and extract the name before '(' or '<'.
+    // Find "fn " and extract the name before '(' or '<'. Search the
+    // visibility-stripped line so a `pub(in ...)` scope can't shadow the
+    // real `fn` keyword.
+    let line = strip_visibility(line);
     if let Some(fn_idx) = line.find("fn ") {
         let after_fn = &line[fn_idx + 3..];
         let end = after_fn
@@ -399,25 +436,15 @@ fn extract_fn_name(line: &str) -> String {
 }
 
 fn is_struct_line(line: &str) -> bool {
-    (line.starts_with("struct ")
-        || line.starts_with("pub struct ")
-        || line.starts_with("pub(crate) struct ")
-        || line.starts_with("pub(super) struct "))
-        && !line.contains("impl")
+    strip_visibility(line).starts_with("struct ") && !line.contains("impl")
 }
 
 fn is_enum_line(line: &str) -> bool {
-    line.starts_with("enum ")
-        || line.starts_with("pub enum ")
-        || line.starts_with("pub(crate) enum ")
-        || line.starts_with("pub(super) enum ")
+    strip_visibility(line).starts_with("enum ")
 }
 
 fn is_trait_line(line: &str) -> bool {
-    line.starts_with("trait ")
-        || line.starts_with("pub trait ")
-        || line.starts_with("pub(crate) trait ")
-        || line.starts_with("pub(super) trait ")
+    strip_visibility(line).starts_with("trait ")
 }
 
 fn is_impl_line(line: &str) -> bool {
