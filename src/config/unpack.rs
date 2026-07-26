@@ -104,7 +104,7 @@ async fn probe_lmstudio() -> Option<DiscoveredEndpoint> {
 }
 
 async fn probe_ollama() -> Option<DiscoveredEndpoint> {
-    let provider = OllamaProvider::new();
+    let mut provider = OllamaProvider::new();
     let (available, models, _count) = provider.detect_with_installed();
     if !available || models.is_empty() {
         return None;
@@ -329,6 +329,7 @@ fn pick_ollama_model_for_hardware() -> &'static str {
         unified_memory: false,
         backend: llmfit_core::hardware::GpuBackend::CpuX86,
         gpus: vec![],
+        gpu_available_gb: None,
         cluster_mode: false,
         cluster_node_count: 0,
     });

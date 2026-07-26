@@ -100,7 +100,7 @@ sysinfo = "0.38.3"
 # publishable. Do NOT add a `version = ` here: with the git source stripped at
 # package time, cargo would resolve a DIFFERENT crates.io llmfit-core whose API
 # has diverged from rev f216779 (E0596 in src/config/unpack.rs).
-llmfit-core = { git = "https://github.com/AlexsJones/llmfit", rev = "f216779" }
+llmfit-core = { version = "1.1" }
 xcap = "0.3"
 nvml-wrapper = "0.12.1"
 zstd = "0.13.3"
