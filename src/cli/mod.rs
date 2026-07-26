@@ -1514,7 +1514,15 @@ async fn handle_command(
             }
         }
 
-        Commands::Run { task, skill } => {
+        Commands::Run {
+            task,
+            skill,
+            preset,
+        } => {
+            // Resolve the task: --preset <id> renders the preset's task +
+            // invariants; otherwise the positional task is required (clap
+            // enforces this via required_unless_present).
+            let task = resolve_preset_task(preset, task)?;
             // Fail fast BEFORE any LLM call: Normal mode cannot confirm tool
             // executions without a terminal on stdin (see the -p entry path).
             {
@@ -4422,3 +4430,22 @@ fn run_swebench_diagnose(output_dir: &str) -> Result<()> {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+/// Resolve a `run` invocation's task text: `--preset <id>` renders the evolve
+/// preset's task + invariants; otherwise the positional task is used.
+fn resolve_preset_task(preset: Option<String>, task: Option<String>) -> Result<String> {
+    match (preset, task) {
+        (Some(id), _) => {
+            let p = crate::evolve::presets::preset(&id).ok_or_else(|| {
+                let known: Vec<String> = crate::evolve::presets::presets()
+                    .into_iter()
+                    .map(|p| p.id.to_string())
+                    .collect();
+                anyhow::anyhow!("unknown preset '{id}' (available: {})", known.join(", "))
+            })?;
+            Ok(crate::evolve::presets::render_prompt(&p))
+        }
+        (None, Some(task)) => Ok(task),
+        (None, None) => anyhow::bail!("a task or --preset <id> is required"),
+    }
+}

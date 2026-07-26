@@ -206,11 +206,15 @@ pub(crate) enum Commands {
     /// Run a task headless and exit
     #[command(alias = "r", display_order = 3)]
     Run {
-        /// The task to run
-        task: String,
+        /// The task to run (omit when --preset is given)
+        #[arg(required_unless_present = "preset")]
+        task: Option<String>,
         /// Inject a user skill's instructions (from ~/.selfware/skills or ./.selfware/skills)
         #[arg(long)]
         skill: Option<String>,
+        /// Run an evolve preset by id (its task + invariants become the prompt)
+        #[arg(long)]
+        preset: Option<String>,
     },
 
     /// Resume a task from a journal entry

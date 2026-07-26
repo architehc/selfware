@@ -174,7 +174,7 @@ fn cli_run_yolo_flag() {
     let cli = Cli::try_parse_from(["selfware", "run", "-y", "fix bug"]).unwrap();
     assert!(cli.yolo, "run -y should set the global yolo flag");
     match cli.command.unwrap() {
-        Commands::Run { task, .. } => assert_eq!(task, "fix bug"),
+        Commands::Run { task, .. } => assert_eq!(task.as_deref(), Some("fix bug")),
         other => panic!("Expected Run, got {:?}", other),
     }
 }
@@ -253,7 +253,7 @@ fn cli_trailing_mode_and_max_turns_after_run() {
     assert_eq!(cli.mode, Some(ExecutionMode::Yolo));
     assert_eq!(cli.max_turns, Some(1));
     match cli.command.unwrap() {
-        Commands::Run { task, .. } => assert_eq!(task, "x"),
+        Commands::Run { task, .. } => assert_eq!(task.as_deref(), Some("x")),
         other => panic!("Expected Run, got {:?}", other),
     }
 }
@@ -264,7 +264,7 @@ fn cli_trailing_yolo_after_run_task() {
     let cli = Cli::try_parse_from(["selfware", "run", "fix the bug", "-y"]).unwrap();
     assert!(cli.yolo);
     match cli.command.unwrap() {
-        Commands::Run { task, .. } => assert_eq!(task, "fix the bug"),
+        Commands::Run { task, .. } => assert_eq!(task.as_deref(), Some("fix the bug")),
         other => panic!("Expected Run, got {:?}", other),
     }
 }
@@ -1027,4 +1027,27 @@ fn tui_launch_blocked_without_a_terminal() {
             "reason must name the headless alternative: {reason}"
         );
     }
+}
+
+// ── resolve_preset_task tests ──
+
+#[test]
+fn resolve_preset_task_renders_known_preset() {
+    let id = crate::evolve::presets::presets()[0].id.to_string();
+    let task = resolve_preset_task(Some(id), None).unwrap();
+    assert!(task.contains("Invariants"));
+}
+
+#[test]
+fn resolve_preset_task_errors_on_unknown_id_with_available_list() {
+    let err = resolve_preset_task(Some("nope".to_string()), None).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("unknown preset 'nope'"));
+    assert!(msg.contains("available:"));
+}
+
+#[test]
+fn resolve_preset_task_passthrough_plain_task() {
+    let task = resolve_preset_task(None, Some("do the thing".to_string())).unwrap();
+    assert_eq!(task, "do the thing");
 }
