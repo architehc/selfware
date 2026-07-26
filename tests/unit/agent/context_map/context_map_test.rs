@@ -222,6 +222,25 @@ mod tests {
     assert!(!skeleton.items.is_empty());
     assert!(skeleton.token_count > 0);
 
+    // `const fn` / `pub const fn` are functions, not const items — the fn
+    // arm must win over the const arm (regression: they used to render as
+    // garbage Const entries and be invisible to symbol retrieval).
+    let const_fn_code =
+        "pub const fn max_value() -> usize { 100 }\nconst fn helper() -> bool { true }\n";
+    let const_fn_skeleton = extract_rust_skeleton(Path::new("t.rs"), const_fn_code);
+    assert!(const_fn_skeleton
+        .items
+        .iter()
+        .any(|item| matches!(item, SkeletonItem::Function { name, .. } if name == "max_value")));
+    assert!(const_fn_skeleton
+        .items
+        .iter()
+        .any(|item| matches!(item, SkeletonItem::Function { name, .. } if name == "helper")));
+    assert!(!const_fn_skeleton
+        .items
+        .iter()
+        .any(|item| matches!(item, SkeletonItem::Const { .. })));
+
     // Check that we found the key items.
     let names: Vec<String> = skeleton
         .items

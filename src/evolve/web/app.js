@@ -815,10 +815,17 @@ function renderContextInspector() {
         }
 
         li.addEventListener('click', () => {
-             if (node) {
-                 selectGraphNode(node);
+             if (node && node.path) {
+                 selectSource(node.path, node);
              } else {
-                 openFile(id);
+                 // `id` is a composer node id (crate::…), not a file path —
+                 // resolve it to a path via the loaded graph before opening.
+                 const graphNode = state.graphData?.nodes?.find((entry) => entry.id === id);
+                 if (graphNode?.path) {
+                     openFile(graphNode.path);
+                 } else {
+                     toast(`No file mapping for ${id}`, 'warning');
+                 }
              }
         });
         li.addEventListener('mouseover', () => li.style.background = 'var(--surface-hover)');
@@ -847,10 +854,12 @@ async function ensureContextCards() {
     }
 }
 
-// When the server reports a custom selection, the checklist mirrors it.
-// Called after every /api/context load and after Apply/Clear responses.
+// When the server reports a custom selection, the checklist mirrors it —
+// UNLESS the user has un-applied edits: a background reload (e.g. after a
+// document save) must never wipe a selection the user is still composing.
 function syncComponentChecksWithServer() {
     if (state.context.mode !== 'custom') return;
+    if (state.componentChecksDirty) return;
     state.componentChecked = new Set(state.context.includedIds || []);
     state.componentChecksSeeded = true;
     if (state.contextCards) renderComponentChecklist();
@@ -913,6 +922,7 @@ function renderComponentChecklist() {
             box.addEventListener('change', () => {
                 if (box.checked) state.componentChecked.add(id);
                 else state.componentChecked.delete(id);
+                state.componentChecksDirty = true;
                 updateComponentTotals();
                 updateComponentButtons();
             });
@@ -985,6 +995,7 @@ async function applyComponentContext(components) {
             body: { components },
         });
         state.context = normalizeContext(response);
+        state.componentChecksDirty = false;
         syncComponentChecksWithServer();
         renderContext(previous);
         renderComponentChecklist();
@@ -3251,14 +3262,16 @@ async function runReview() {
             || payload?.trust_state
             || ((payload?.review?.evidence_complete === true
                 && payload?.context?.evidence_complete !== false) ? 'structural' : 'degraded');
-        if (trust === 'degraded') {
-            setGlobalStatus('Grounded review degraded (partial evidence or rejected items)', 'warning');
-            toast('Grounded review degraded — check trust_state.', 'warning');
-        } else {
+        // Allowlist: only states the backend can honestly claim render green.
+        // Unknown future states must degrade to a warning, never success.
+        if (trust === 'verified' || trust === 'structural') {
             setGlobalStatus(
                 trust === 'verified' ? 'Grounded review (verified)' : 'Grounded review (structural only)',
                 'success',
             );
+        } else {
+            setGlobalStatus('Grounded review degraded (partial evidence or rejected items)', 'warning');
+            toast('Grounded review degraded — check trust_state.', 'warning');
         }
     } catch (error) {
         if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;

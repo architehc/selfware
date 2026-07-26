@@ -177,6 +177,19 @@ pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
             continue;
         }
 
+        // `fn` declarations — capture the full signature line.
+        // Must run BEFORE the const/static arm: `const fn` / `pub const fn`
+        // are functions, not const items.
+        if is_fn_line(trimmed) {
+            let name = extract_fn_name(trimmed);
+            items.push(SkeletonItem::Function {
+                name,
+                signature: trimmed.trim_end_matches('{').trim().to_string(),
+                line: line_num,
+            });
+            continue;
+        }
+
         // `const` / `static`.
         if trimmed.starts_with("const ")
             || trimmed.starts_with("pub const ")
@@ -189,17 +202,6 @@ pub fn extract_rust_skeleton(path: &Path, content: &str) -> FileSkeleton {
             items.push(SkeletonItem::Const {
                 name,
                 type_hint,
-                line: line_num,
-            });
-            continue;
-        }
-
-        // `fn` declarations — capture the full signature line.
-        if is_fn_line(trimmed) {
-            let name = extract_fn_name(trimmed);
-            items.push(SkeletonItem::Function {
-                name,
-                signature: trimmed.trim_end_matches('{').trim().to_string(),
                 line: line_num,
             });
             continue;

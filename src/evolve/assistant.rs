@@ -240,23 +240,29 @@ pub fn gate_evidence_trust(
         scanned.insert(chunk.path.as_str());
         total_findings += report.findings.len();
         worst_risk = worst_risk.max(report.risk_score);
-        if super::context_trust::trust_level(
+        let trusted = super::context_trust::trust_level(
             super::context_trust::SourceKind::Workspace,
             classification,
-        ) == TrustLevel::Trusted
-        {
-            continue; // trusted code: informational only
-        }
+        ) == TrustLevel::Trusted;
+        // Findings are excerpt-relative (the excerpt starts at
+        // chunk.start_line): offset back to real file lines.
+        let line_offset = chunk.start_line.saturating_sub(1);
         blocking.extend(
             report
                 .findings
                 .iter()
-                .filter(|f| f.severity == "high")
+                .filter(|f| {
+                    f.severity == "high"
+                        // hidden_unicode is never legitimate in source, even
+                        // trusted first-party code (e.g. reviewing a hostile
+                        // PR branch): it blocks regardless of provenance.
+                        && (!trusted || f.kind == "hidden_unicode")
+                })
                 .map(|f| TrustGateFinding {
                     path: chunk.path.clone(),
                     kind: f.kind.clone(),
                     severity: f.severity.clone(),
-                    line: f.line,
+                    line: f.line + line_offset,
                     excerpt: f.excerpt.clone(),
                 }),
         );
@@ -413,12 +419,30 @@ impl GroundedAssistant {
         // One budgeted repair, no loops: attempt 0 is the original call;
         // attempt 1 reuses the same token budget with the malformed reply and
         // the repair instruction appended. A second parse failure is final.
+        // Usage is ACCUMULATED across attempts — a repair roughly doubles
+        // prompt cost and cost reporting must stay honest (AGENTS.md §3).
+        let mut total_usage = ReviewUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cost: None,
+        };
         let (payload, response) = loop {
             let response = self
                 .client
                 .chat(messages.clone(), None, ThinkingMode::Disabled)
                 .await
                 .context("grounded model review failed")?;
+            {
+                let usage: ReviewUsage = response.usage.clone().into();
+                total_usage.prompt_tokens += usage.prompt_tokens;
+                total_usage.completion_tokens += usage.completion_tokens;
+                total_usage.total_tokens += usage.total_tokens;
+                total_usage.cost = match (total_usage.cost, usage.cost) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (a, b) => a.or(b),
+                };
+            }
             let parsed = response
                 .choices
                 .first()
@@ -435,7 +459,7 @@ impl GroundedAssistant {
                             detail: format!("{error:#}"),
                             model: response.model,
                             latency_ms: started.elapsed().as_millis(),
-                            usage: response.usage.into(),
+                            usage: total_usage,
                         }
                         .into());
                     }
@@ -452,19 +476,18 @@ impl GroundedAssistant {
         let (claims, recommendations, rejected_items) = validate_grounding(payload, &evidence);
         if claims.is_empty() && recommendations.is_empty() {
             let latency_ms = started.elapsed().as_millis();
-            let usage: ReviewUsage = response.usage.into();
             return Err(if rejected_items == 0 {
                 ReviewProtocolError::Empty {
                     model: response.model,
                     latency_ms,
-                    usage,
+                    usage: total_usage,
                 }
             } else {
                 ReviewProtocolError::Ungrounded {
                     rejected_items,
                     model: response.model,
                     latency_ms,
-                    usage,
+                    usage: total_usage,
                 }
             }
             .into());
@@ -487,7 +510,7 @@ impl GroundedAssistant {
             trust_state: trust_state(citation_valid, evidence_complete, semantic_validation)
                 .to_string(),
             trust_gate,
-            usage: response.usage.into(),
+            usage: total_usage,
         })
     }
 }

@@ -1937,6 +1937,10 @@ async fn assistant_task_handler(
             let mut used = Vec::new();
             for file in files.into_iter().take(max_files) {
                 let Ok(doc) = ide.read_document(&file.path) else {
+                    // A selected file that can't be read means the evidence is
+                    // partial — never report complete coverage (AGENTS.md §3).
+                    complete = false;
+                    tracing::warn!(path = %file.path, "task evidence file unreadable; marking evidence incomplete");
                     continue;
                 };
                 // For smaller models, strip comments to cut the prompt (~18%).

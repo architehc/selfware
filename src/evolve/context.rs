@@ -103,13 +103,15 @@ impl ContextComposer {
     }
 
     /// Apply a hand-picked component selection as the active context.
-    /// Unknown ids are dropped; the mode becomes `Custom` (even when empty).
+    /// Unknown ids are dropped, duplicates collapsed; the mode becomes
+    /// `Custom` (even when empty).
     pub fn set_custom(&mut self, ids: Vec<String>) {
         let known: std::collections::HashSet<&str> =
             self.graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        let mut seen = std::collections::HashSet::new();
         self.included = ids
             .into_iter()
-            .filter(|id| known.contains(id.as_str()))
+            .filter(|id| known.contains(id.as_str()) && seen.insert(id.clone()))
             .collect();
         self.mode = ContextMode::Custom;
     }

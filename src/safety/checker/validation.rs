@@ -9,7 +9,7 @@ use std::sync::LazyLock;
 
 use crate::api::types::ToolCall;
 use crate::config::{is_local_endpoint, SafetyConfig};
-use crate::safety::scanner::SecuritySeverity;
+use crate::safety::scanner::{SecurityCategory, SecuritySeverity};
 
 use super::types::*;
 
@@ -674,10 +674,16 @@ impl SafetyChecker {
     /// Scan content for hardcoded secrets
     fn check_content_for_secrets(&self, content: &str) -> Result<()> {
         let result = self.security_scanner.scan_content(content, None, "");
+        // Only actual secrets block a write. Compliance findings (e.g. the
+        // OWASP-A02 `md5(|sha1(` Cryptography rule) must not stop legitimate
+        // code from being written, and must not be misreported as secrets.
         let blocked: Vec<_> = result
             .findings
             .iter()
-            .filter(|f| f.severity >= SecuritySeverity::High)
+            .filter(|f| {
+                f.severity >= SecuritySeverity::High
+                    && f.category == SecurityCategory::HardcodedSecret
+            })
             .collect();
         if !blocked.is_empty() {
             let titles: Vec<_> = blocked.iter().map(|f| f.title.as_str()).collect();

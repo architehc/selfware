@@ -113,14 +113,21 @@ pub fn build_envelope_with_root(
 
     let total_tokens = documents.iter().map(|d| d.tokens).sum();
     let mut hasher = Sha256::new();
-    hasher.update(graph_revision.as_bytes());
-    hasher.update(mode.name().as_bytes());
+    // Length-prefixed fields: raw concatenation would let
+    // ["ab","c"] and ["a","bc"] hash identically when they resolve to the
+    // same documents — the hash is an equality proof, so boundaries matter.
+    fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    hash_field(&mut hasher, graph_revision.as_bytes());
+    hash_field(&mut hasher, mode.name().as_bytes());
     for id in included {
-        hasher.update(id.as_bytes());
+        hash_field(&mut hasher, id.as_bytes());
     }
     for doc in &documents {
-        hasher.update(doc.path.as_bytes());
-        hasher.update(doc.content.as_bytes());
+        hash_field(&mut hasher, doc.path.as_bytes());
+        hash_field(&mut hasher, doc.content.as_bytes());
     }
     let content_hash = format!("{:x}", hasher.finalize());
 
