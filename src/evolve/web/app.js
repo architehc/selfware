@@ -120,6 +120,7 @@ const state = {
     output: [],
     loadingDocuments: new Map(),
     groundingRequest: 0,
+    applyRequest: 0,
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -440,6 +441,7 @@ function wireEvents() {
     $('#node-branch-action')?.addEventListener('click', branchSelectedNode);
     $('#node-delete-preview-action')?.addEventListener('click', previewSelectedNodeDeletion);
     $('#node-task')?.addEventListener('submit', taskReviewSelectedNode);
+    ensureApplyActionButton();
     $('#orientation-load')?.addEventListener('click', loadOrientation);
     $('#orientation-include-map')?.addEventListener('change', () => {
         if (state.orientationLoaded) loadOrientation();
@@ -1835,6 +1837,7 @@ function renderNodeInspector(node, path) {
         $('#node-branch-action').disabled = true;
         $('#node-delete-preview-action').disabled = true;
         if ($('#node-task-action')) $('#node-task-action').disabled = true;
+        if ($('#node-apply-action')) $('#node-apply-action').disabled = true;
         return;
     }
     if ($('#node-task-action')) $('#node-task-action').disabled = false;
@@ -1844,6 +1847,7 @@ function renderNodeInspector(node, path) {
     const sourcePath = path || graphNodePath(node);
     const hasSource = Boolean(sourcePath);
     const anyDirty = [...state.openDocuments.values()].some((document) => document.dirty);
+    if ($('#node-apply-action')) $('#node-apply-action').disabled = anyDirty;
     $('#node-open-action').disabled = !hasSource;
     $('#node-review-action').disabled = !hasSource || anyDirty;
     $('#node-branch-action').disabled = anyDirty;
@@ -2309,6 +2313,234 @@ async function previewSelectedNodeDeletion() {
         setGlobalStatus('Deletion preview failed', 'error');
     } finally {
         setBusy(button, false);
+    }
+}
+
+// --- Two-step apply flow (isolation spec §2.3) -------------------------------
+// "Run Action" stages the agent in a shadow worktree (POST /api/actions/apply
+// now STAGES — nothing touches the live checkout). The staged run's verified
+// diff is shown for review; only the deliberate Apply button commits it
+// (POST /api/actions/apply/commit with the run's one-use diff digest).
+
+const APPLY_POLL_MS = 2000;
+
+// Injects the "Run Action" button into the node task row, next to Task Review.
+// Done in JS so the whole apply flow stays contained in this file.
+function ensureApplyActionButton() {
+    const row = $('.node-task-row');
+    if (!row || $('#node-apply-action')) return;
+    const button = document.createElement('button');
+    button.id = 'node-apply-action';
+    button.className = 'command-button';
+    button.type = 'button';
+    button.disabled = true;
+    button.title = 'Stage an agent run for this task kind in an isolated worktree — review the diff, then Apply';
+    button.append(icon('play'), document.createElement('span'));
+    button.querySelector('span').textContent = 'Run Action';
+    button.addEventListener('click', runApplyAction);
+    row.appendChild(button);
+    refreshIcons();
+}
+
+async function runApplyAction() {
+    const node = state.selectedNode;
+    if (!node) {
+        toast('Select a graph node first.', 'warning');
+        return;
+    }
+    if ([...state.openDocuments.values()].some((document) => document.dirty)) {
+        toast('Save all modified buffers before staging an apply run.', 'warning');
+        return;
+    }
+    const kind = $('#node-task-kind').value;
+    const target = selectedNodePath() || node.id;
+    const button = $('#node-apply-action');
+    const result = $('#node-result');
+    const requestId = ++state.applyRequest;
+    setBusy(button, true);
+    result.className = 'inspector-result pane-state';
+    result.textContent = `Staging ${kind} run for ${target}…`;
+    setGlobalStatus(`Apply run staging: ${kind}`, 'working');
+    try {
+        const payload = await request('/api/actions/apply', {
+            method: 'POST',
+            body: { kind, target },
+        });
+        appendOutput(`Apply run started (${kind}): ${target}`, payload);
+        await pollApplyRun(payload.id, requestId);
+    } catch (error) {
+        if (requestId !== state.applyRequest) return;
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Apply run failed to start: ${formatError(error)}`;
+        appendOutput(`Apply run failed to start: ${target}`, formatError(error));
+        setGlobalStatus('Apply run failed to start', 'error');
+        toast(`Apply run failed: ${formatError(error)}`, 'error');
+    } finally {
+        if (requestId === state.applyRequest) {
+            setBusy(button, false);
+            refreshIcons();
+        }
+    }
+}
+
+// Poll GET /api/actions/apply/status?id=X until the run leaves `running`.
+async function pollApplyRun(id, requestId) {
+    const result = $('#node-result');
+    try {
+        for (;;) {
+            if (requestId !== state.applyRequest) return;
+            const run = await request(`/api/actions/apply/status?id=${encodeURIComponent(id)}`);
+            const status = applyRunStatus(run);
+            if (status.name !== 'running') {
+                renderApplyRun(run, status);
+                return;
+            }
+            result.className = 'inspector-result pane-state';
+            result.textContent = `Apply run ${id} is running — the agent works in an isolated worktree; nothing is merged yet.`;
+            await new Promise((resolve) => window.setTimeout(resolve, APPLY_POLL_MS));
+        }
+    } catch (error) {
+        if (requestId !== state.applyRequest) return;
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Apply run status unavailable: ${formatError(error)}`;
+        setGlobalStatus('Apply run status polling failed', 'error');
+    }
+}
+
+// ApplyStatus serializes as "running"/"staged"/"failed"/"succeeded" and
+// {rejected: "<reason>"} (serde externally tagged, snake_case).
+function applyRunStatus(run) {
+    const raw = run?.status;
+    if (typeof raw === 'string') return { name: raw, reason: null };
+    if (raw && typeof raw === 'object') {
+        const [name, payload] = Object.entries(raw)[0] || [];
+        return { name: name || 'unknown', reason: typeof payload === 'string' ? payload : outputText(payload) };
+    }
+    return { name: 'unknown', reason: null };
+}
+
+function renderApplyRun(run, status) {
+    const result = $('#node-result');
+    if (status.name === 'staged' && run.diff) {
+        const diff = run.diff;
+        const wrap = document.createElement('div');
+
+        const summary = document.createElement('div');
+        summary.className = 'orientation-banner';
+        const strong = document.createElement('strong');
+        strong.textContent = `Staged: ${formatCount(diff.files_changed)} files, +${formatCount(diff.insertions)} −${formatCount(diff.deletions)}`;
+        summary.appendChild(strong);
+        wrap.appendChild(summary);
+
+        const note = document.createElement('p');
+        note.className = 'inspector-hint';
+        note.textContent = 'Nothing is merged yet. Review the staged diff, then Apply to fast-forward the live checkout.';
+        wrap.appendChild(note);
+
+        const details = document.createElement('details');
+        const detailsSummary = document.createElement('summary');
+        detailsSummary.textContent = `Diff preview (capped) · digest ${String(diff.digest).slice(0, 12)}…`;
+        const pre = document.createElement('pre');
+        pre.className = 'summary-code';
+        pre.textContent = diff.preview || '(empty preview)';
+        details.append(detailsSummary, pre);
+        wrap.appendChild(details);
+
+        const applyButton = document.createElement('button');
+        applyButton.className = 'command-button primary';
+        applyButton.type = 'button';
+        applyButton.title = 'Merge this exact staged diff into the live checkout (one-use)';
+        applyButton.append(icon('git-merge'), document.createElement('span'));
+        applyButton.querySelector('span').textContent = 'Apply';
+        applyButton.addEventListener('click', () => commitApplyRun(run.id, diff.digest, applyButton));
+        wrap.appendChild(applyButton);
+
+        result.className = 'inspector-result';
+        result.replaceChildren(wrap);
+        setGlobalStatus('Apply run staged — review the diff', 'warning');
+        appendOutput(`Apply run staged: ${run.id}`, {
+            digest: diff.digest,
+            files_changed: diff.files_changed,
+            insertions: diff.insertions,
+            deletions: diff.deletions,
+        });
+    } else if (status.name === 'rejected') {
+        // Typed verification refusal (e.g. "diff_out_of_scope: build.rs",
+        // "empty_diff") — verbatim, never dressed up as success.
+        const reason = status.reason || 'unknown reason';
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Apply run rejected: ${reason}`;
+        setGlobalStatus('Apply run rejected', 'error');
+        appendOutput(`Apply run rejected: ${run.id}`, reason);
+        toast(`Apply run rejected: ${reason}`, 'error');
+    } else if (status.name === 'succeeded') {
+        result.className = 'inspector-result pane-state';
+        result.textContent = `Apply run ${run.id} was merged.`;
+        setGlobalStatus('Apply run merged', 'success');
+    } else {
+        // failed / unknown: honest status with whatever exit evidence exists.
+        result.className = 'inspector-result pane-state error';
+        const exit = run.exit_code === null || run.exit_code === undefined ? '' : ` (exit ${run.exit_code})`;
+        result.textContent = `Apply run ${status.name}${exit}`;
+        const output = String(run.output || '').trim();
+        if (output) {
+            const pre = document.createElement('pre');
+            pre.className = 'summary-code';
+            pre.textContent = output.slice(-4000);
+            result.appendChild(pre);
+        }
+        setGlobalStatus('Apply run failed', 'error');
+        appendOutput(`Apply run ${status.name}: ${run.id}`, output || '(no output)');
+        toast(`Apply run ${status.name}${exit}`, 'error');
+    }
+    refreshIcons();
+}
+
+// The deliberate second step: merge the staged run by presenting its id plus
+// the exact digest of the diff that was reviewed.
+async function commitApplyRun(runId, digest, button) {
+    setBusy(button, true);
+    setGlobalStatus('Merging staged run…', 'working');
+    try {
+        const payload = await request('/api/actions/apply/commit', {
+            method: 'POST',
+            body: { run_id: runId, diff_digest: digest },
+        });
+        const head = String(payload?.new_head || '');
+        const result = $('#node-result');
+        result.className = 'inspector-result pane-state';
+        result.textContent = `Merged ${formatCount(payload?.files_changed)} files · new HEAD ${head.slice(0, 12)}`;
+        setGlobalStatus('Staged run merged', 'success');
+        toast(`Merged staged run · new HEAD ${head.slice(0, 12)}`, 'success');
+        appendOutput(`Apply run merged: ${runId}`, payload);
+        loadGitStatus({ silent: true }).catch(() => {});
+        loadFiles(true).catch(() => {});
+    } catch (error) {
+        // Typed refusals per the isolation spec §3: 404 unknown_run, 409
+        // base_moved / not_staged — show the server's message verbatim, then
+        // re-read the run so the panel reflects its real state.
+        setGlobalStatus('Merge refused', 'error');
+        toast(`Merge refused: ${formatError(error)}`, 'error');
+        appendOutput(`Apply run merge refused: ${runId}`, formatError(error));
+        await refreshApplyRun(runId, formatError(error));
+    } finally {
+        setBusy(button, false);
+        refreshIcons();
+    }
+}
+
+async function refreshApplyRun(runId, refusal) {
+    const result = $('#node-result');
+    try {
+        const run = await request(`/api/actions/apply/status?id=${encodeURIComponent(runId)}`);
+        renderApplyRun(run, applyRunStatus(run));
+        const warning = document.createElement('p');
+        warning.className = 'inspector-hint';
+        warning.textContent = `Merge refused: ${refusal}`;
+        result.prepend(warning);
+    } catch (error) {
+        result.className = 'inspector-result pane-state error';
+        result.textContent = `Merge refused: ${refusal} · run ${runId} is no longer readable: ${formatError(error)}`;
     }
 }
 

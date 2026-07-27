@@ -182,6 +182,13 @@ impl EvolveServer {
         self.session_token.as_str()
     }
 
+    /// The apply-run registry. Exposed so tests can stage runs directly
+    /// (spawning the agent subprocess is not test-viable); production callers
+    /// go through the HTTP endpoints.
+    pub fn apply_registry(&self) -> super::ApplyRegistry {
+        self.apply_runs.clone()
+    }
+
     pub async fn graph_json(&self) -> Result<String> {
         Ok(serde_json::to_string_pretty(&self.graph_snapshot()?)?)
     }
@@ -228,6 +235,7 @@ impl EvolveServer {
                 post(deletion_preview_handler),
             )
             .route("/api/actions/apply", post(apply_action_handler))
+            .route("/api/actions/apply/commit", post(apply_commit_handler))
             .route("/api/actions/apply/status", get(apply_status_handler))
             .route("/api/gates", get(gates_handler))
             .route("/api/ontology/validate", get(ontology_validate_handler))
@@ -712,11 +720,19 @@ async fn apply_action_handler(
 ) -> ApiResult<Json<Value>> {
     require_session(&headers, &server)?;
     let status = server.git.status().map_err(internal_error)?;
-    if status.dirty {
+    // `.worktrees/` holds this feature's own staged shadows — on projects that
+    // don't gitignore it, a staged run would otherwise make the tree look
+    // "dirty" and block every subsequent apply with a misleading message.
+    let blocking: Vec<_> = status
+        .files
+        .iter()
+        .filter(|f| !f.path.starts_with(".worktrees/"))
+        .collect();
+    if !blocking.is_empty() {
         return Err(bad_request(format!(
             "working tree has {} uncommitted path(s); commit or stash first so the agent's diff \
              stays isolated and reviewable",
-            status.files.len()
+            blocking.len()
         )));
     }
     let prompt = apply_prompt(&body.kind, &body.target, body.prompt.as_deref());
@@ -741,6 +757,47 @@ async fn apply_status_handler(
         .await
         .ok_or_else(|| not_found(format!("unknown apply run: {id}")))?;
     Ok(Json(serde_json::to_value(run).map_err(internal_error)?))
+}
+
+#[derive(serde::Deserialize)]
+struct ApplyCommitRequest {
+    run_id: String,
+    diff_digest: String,
+}
+
+/// One-use merge of a staged apply run into the live checkout.
+/// POST /api/actions/apply/commit {run_id, diff_digest} →
+/// {merged: true, new_head, files_changed}. Typed errors per the isolation
+/// spec §3: 404 `unknown_run` (bad/used id or wrong digest), 409 `base_moved`
+/// (live HEAD changed since staging), 409 `not_staged` (run exists but is not
+/// Staged — 409 because it is a state conflict, the same class as base_moved),
+/// 500 for infra failures.
+async fn apply_commit_handler(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Json(body): Json<ApplyCommitRequest>,
+) -> ApiResult<Json<Value>> {
+    require_session(&headers, &server)?;
+    let root = server.project_root.as_ref().clone();
+    let outcome =
+        super::apply::commit_staged(&server.apply_runs, &body.run_id, &body.diff_digest, &root)
+            .await
+            .map_err(commit_error)?;
+    Ok(Json(json!({
+        "merged": true,
+        "new_head": outcome.new_head,
+        "files_changed": outcome.files_changed,
+    })))
+}
+
+/// Map a commit-step failure onto the isolation spec §3 taxonomy.
+fn commit_error(error: super::apply::CommitError) -> ApiError {
+    use super::apply::CommitError;
+    match &error {
+        CommitError::UnknownRun(_) => not_found(error.to_string()),
+        CommitError::NotStaged(_) | CommitError::BaseMoved { .. } => conflict(error.to_string()),
+        CommitError::Git(_) => internal_error(error),
+    }
 }
 
 /// Reachability-based dead code: symbols whose name appears only at their own

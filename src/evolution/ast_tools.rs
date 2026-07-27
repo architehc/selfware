@@ -114,7 +114,18 @@ impl AstMutationResult {
 /// Create an isolated git worktree for mutation testing
 pub fn create_shadow_worktree(repo_root: &Path) -> Result<PathBuf, WorktreeError> {
     let worktree_name = format!("evolution-{}", uuid_short());
-    let worktree_path = repo_root.join(".worktrees").join(&worktree_name);
+    create_shadow_worktree_named(repo_root, &worktree_name)
+}
+
+/// Create an isolated git worktree with an explicit name. Callers that share
+/// the `.worktrees/` namespace with other features (e.g. apply staging vs.
+/// mutation testing) MUST use a distinguishing prefix so lifecycle pruning
+/// never reaps another feature's live worktree.
+pub fn create_shadow_worktree_named(
+    repo_root: &Path,
+    worktree_name: &str,
+) -> Result<PathBuf, WorktreeError> {
+    let worktree_path = repo_root.join(".worktrees").join(worktree_name);
 
     let output = Command::new("git")
         .args(["worktree", "add", "--detach"])
