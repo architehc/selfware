@@ -1,5 +1,11 @@
 //! Generates a comprehensive JSON graph of the selfware codebase.
 //!
+//! **DEPRECATED (2026-07-26):** this regex-based generator emits duplicate node
+//! IDs, dangling edges, and a schema that disagrees with editor consumers. Use
+//! the evolve workspace graph (`selfware self-evolve`, src/evolve/graph.rs),
+//! which is structurally validated. Retained for reference only; scheduled for
+//! removal unless a consumer steps forward.
+//!
 //! Usage: cargo run --bin codegraph
 //! Output: codegraph.json in the current directory
 
@@ -11,6 +17,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 fn main() {
+    eprintln!("warning: codegraph is DEPRECATED (regex-based, emits duplicate ids and dangling edges); use `selfware self-evolve` for the validated graph.");
     let src_dir = PathBuf::from("src");
     if !src_dir.exists() {
         eprintln!("Error: src/ directory not found. Run from project root.");

@@ -495,7 +495,9 @@ impl Config {
                 }
                 Ok(None) => {} // No key stored in keyring
                 Err(e) => {
-                    warn!(error = %e, "Failed to read API key from system keyring");
+                    config_warning(&format!(
+                        "failed to read API key from system keyring: {e} (falling back to config file / env)"
+                    ));
                 }
             }
         }

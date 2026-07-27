@@ -284,6 +284,10 @@ pub struct GroundedReview {
     pub claims: Vec<GroundedClaim>,
     pub recommendations: Vec<GroundedRecommendation>,
     pub evidence: Vec<GroundingEvidence>,
+    /// Coverage of *files*: false only when a selected file could not be read.
+    /// It does NOT mean every line of every file was shipped — long files are
+    /// excerpted by design. Read this as "no file omitted", not "everything
+    /// included" (review finding #9, 2026-07-26).
     pub evidence_complete: bool,
     /// Structural citation integrity only: every retained item cites known
     /// evidence IDs. This does not claim semantic entailment.

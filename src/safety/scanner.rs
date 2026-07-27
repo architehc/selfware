@@ -926,6 +926,9 @@ pub struct ScanResult {
     pub files_scanned: usize,
     /// Lines scanned
     pub lines_scanned: usize,
+    /// Scan classes that did NOT run (e.g. poisoned lock) — a "clean" result
+    /// with non-empty warnings means coverage was partial (AGENTS.md §3).
+    pub scan_warnings: Vec<String>,
 }
 
 impl ScanResult {
@@ -937,6 +940,7 @@ impl ScanResult {
             duration_ms: 0,
             files_scanned: 0,
             lines_scanned: 0,
+            scan_warnings: Vec::new(),
         }
     }
 
@@ -1009,6 +1013,12 @@ impl SecurityScanner {
         // Scan for secrets
         if let Ok(mut scanner) = self.secret_scanner.write() {
             result.findings.extend(scanner.scan_content(content, file));
+        } else {
+            // Never silently skip a scan class and report "clean"
+            // (AGENTS.md §3): a poisoned lock means this check was NOT run.
+            result
+                .scan_warnings
+                .push("secret scan skipped: lock poisoned".to_string());
         }
 
         // Scan for vulnerabilities
@@ -1016,11 +1026,19 @@ impl SecurityScanner {
             result
                 .findings
                 .extend(detector.scan_content(content, file, language));
+        } else {
+            result
+                .scan_warnings
+                .push("vulnerability scan skipped: lock poisoned".to_string());
         }
 
         // Check compliance
         if let Ok(mut checker) = self.compliance_checker.write() {
             result.findings.extend(checker.check_content(content, file));
+        } else {
+            result
+                .scan_warnings
+                .push("compliance check skipped: lock poisoned".to_string());
         }
 
         // Calculate summaries

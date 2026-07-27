@@ -134,11 +134,21 @@ impl AuditLogger {
                     line.push(b'\n');
                     if let Err(e) = f.write_all(&line).await {
                         warn!("Failed to write audit event: {}", e);
+                    } else {
+                        // Flush per event: the writer is detached and the
+                        // process can exit at any time — buffered tail events
+                        // would be lost otherwise.
+                        let _ = f.flush().await;
                     }
                 }
             }
         }
 
+        // Channel closed (all senders dropped) — sync before exit so no tail
+        // events sit in the OS buffer.
+        if let Some(ref mut f) = file {
+            let _ = f.sync_all().await;
+        }
         debug!("Audit writer loop exited");
     }
 

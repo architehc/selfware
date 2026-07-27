@@ -480,6 +480,26 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                 continue;
             }
 
+            // Format FIRST — the fmt auto-fix must not change code after it
+            // was tested, otherwise the committed bytes differ from the
+            // tested bytes.
+            let fmt_check = Command::new("cargo")
+                .args(["fmt", "--", "--check"])
+                .current_dir(&worktree)
+                .output();
+
+            if fmt_check.map(|o| !o.status.success()).unwrap_or(true) {
+                log_warning(&format!(
+                    "  {} failed fmt check — auto-formatting before evaluation",
+                    hypothesis.id
+                ));
+                // Auto-fix: run cargo fmt to correct formatting
+                let _ = Command::new("cargo")
+                    .args(["fmt"])
+                    .current_dir(&worktree)
+                    .output();
+            }
+
             // Compile check
             let mut check_cmd = Command::new("cargo");
             check_cmd
@@ -526,24 +546,6 @@ pub async fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResul
                     &format!("Tests failed: {} — {}", hypothesis.id, fail_count),
                 );
                 continue;
-            }
-
-            // Format check — prevent committing code that violates `cargo fmt`
-            let fmt_check = Command::new("cargo")
-                .args(["fmt", "--", "--check"])
-                .current_dir(&worktree)
-                .output();
-
-            if fmt_check.map(|o| !o.status.success()).unwrap_or(true) {
-                log_warning(&format!(
-                    "  {} failed fmt check — auto-formatting",
-                    hypothesis.id
-                ));
-                // Auto-fix: run cargo fmt to correct formatting
-                let _ = Command::new("cargo")
-                    .args(["fmt"])
-                    .current_dir(&worktree)
-                    .output();
             }
 
             // Clippy lint gate — reject code with clippy warnings
