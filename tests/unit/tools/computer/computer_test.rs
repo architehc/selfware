@@ -58,12 +58,17 @@ async fn test_mouse_tool_move_to() {
     let tool = ComputerMouseTool;
     let result = tool
         .execute(json!({"action": "move_to", "x": 100, "y": 200}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["action"], "move_to");
-    assert_eq!(result["x"], 100);
-    assert_eq!(result["y"], 200);
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["action"], "move_to");
+        assert_eq!(result["x"], 100);
+        assert_eq!(result["y"], 200);
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
@@ -71,10 +76,15 @@ async fn test_mouse_tool_click() {
     let tool = ComputerMouseTool;
     let result = tool
         .execute(json!({"action": "click", "x": 50, "y": 50}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["action"], "click");
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["action"], "click");
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
@@ -82,10 +92,15 @@ async fn test_mouse_tool_double_click() {
     let tool = ComputerMouseTool;
     let result = tool
         .execute(json!({"action": "double_click", "x": 50, "y": 50}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["action"], "double_click");
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["action"], "double_click");
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
@@ -93,10 +108,15 @@ async fn test_mouse_tool_right_click() {
     let tool = ComputerMouseTool;
     let result = tool
         .execute(json!({"action": "right_click", "x": 10, "y": 20}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["action"], "right_click");
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["action"], "right_click");
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
@@ -104,19 +124,30 @@ async fn test_mouse_tool_scroll() {
     let tool = ComputerMouseTool;
     let result = tool
         .execute(json!({"action": "scroll", "delta_x": 0, "delta_y": -3}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["action"], "scroll");
-    assert_eq!(result["delta_y"], -3);
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["action"], "scroll");
+        assert_eq!(result["delta_y"], -3);
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
 async fn test_mouse_tool_scroll_defaults() {
     let tool = ComputerMouseTool;
-    let result = tool.execute(json!({"action": "scroll"})).await.unwrap();
-    assert_eq!(result["delta_x"], 0);
-    assert_eq!(result["delta_y"], 0);
+    let result = tool.execute(json!({"action": "scroll"})).await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["delta_x"], 0);
+        assert_eq!(result["delta_y"], 0);
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
@@ -126,18 +157,29 @@ async fn test_mouse_tool_drag() {
         .execute(json!({
             "action": "drag", "x": 10, "y": 20, "end_x": 100, "end_y": 200
         }))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["action"], "drag");
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["action"], "drag");
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
 async fn test_mouse_tool_defaults_to_zero_coords() {
     let tool = ComputerMouseTool;
-    let result = tool.execute(json!({"action": "move_to"})).await.unwrap();
-    assert_eq!(result["x"], 0);
-    assert_eq!(result["y"], 0);
+    let result = tool.execute(json!({"action": "move_to"})).await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["x"], 0);
+        assert_eq!(result["y"], 0);
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 // ── Keyboard tool tests ───────────────────────────────────────────
@@ -208,10 +250,15 @@ async fn test_keyboard_tool_press() {
     let tool = ComputerKeyboardTool;
     let result = tool
         .execute(json!({"action": "press", "key": "Enter"}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["key"], "Enter");
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["key"], "Enter");
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]
@@ -226,10 +273,15 @@ async fn test_keyboard_tool_combo() {
     let tool = ComputerKeyboardTool;
     let result = tool
         .execute(json!({"action": "combo", "keys": "ctrl+s"}))
-        .await
-        .unwrap();
-    assert_eq!(result["status"], "ok");
-    assert_eq!(result["keys"], "ctrl+s");
+        .await;
+    #[cfg(target_os = "linux")]
+    {
+        let result = result.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["keys"], "ctrl+s");
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.unwrap_err().to_string().contains("not supported"));
 }
 
 #[tokio::test]

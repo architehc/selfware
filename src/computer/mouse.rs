@@ -4,17 +4,15 @@
 //! On Linux, uses xdotool for actual input. When running under WSL2 without
 //! xdotool, falls back to PowerShell with Win32 `mouse_event` and
 //! `System.Windows.Forms.Cursor` via `powershell.exe`.
-//! On other platforms, stubs with logging.
+//! On macOS, actions return an explicit "not supported" error rather than
+//! silently succeeding without performing the action.
 
 #[cfg(all(target_os = "linux", not(test)))]
 use anyhow::Context;
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-#[cfg(not(target_os = "macos"))]
 use tracing::debug;
-#[cfg(target_os = "macos")]
-use tracing::{debug, warn};
 
 use super::{ActionRateLimiter, MovementProfile};
 
@@ -427,13 +425,22 @@ impl MouseController {
 
         #[cfg(target_os = "macos")]
         {
-            // Placeholder for macOS — would use CoreGraphics CGEventCreateMouseEvent
-            warn!(
-                "Mouse move to ({}, {}) — macOS not yet implemented, requires Accessibility permissions",
-                x, y
+            // No macOS input backend is implemented (would require
+            // CoreGraphics CGEvent + Accessibility permissions). Report an
+            // honest error instead of silently succeeding as a no-op.
+            bail!(
+                "mouse move_to({}, {}) is not supported on macOS: no input backend implemented (requires Accessibility permissions)",
+                x,
+                y
             );
         }
 
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("mouse move_to is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -458,6 +465,20 @@ impl MouseController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "mouse click({:?}) is not supported on macOS: no input backend implemented (requires Accessibility permissions)",
+                button
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("mouse click is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -482,6 +503,19 @@ impl MouseController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "mouse double_click is not supported on macOS: no input backend implemented (requires Accessibility permissions)"
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("mouse double_click is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -514,6 +548,21 @@ impl MouseController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "mouse scroll({}, {}) is not supported on macOS: no input backend implemented (requires Accessibility permissions)",
+                delta_x,
+                delta_y
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("mouse scroll is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -543,6 +592,20 @@ impl MouseController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "mouse drag({:?}) is not supported on macOS: no input backend implemented (requires Accessibility permissions)",
+                button
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("mouse drag is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 

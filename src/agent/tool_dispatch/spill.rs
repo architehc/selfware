@@ -1,7 +1,5 @@
-
 use serde_json::Value;
 use tracing::warn;
-
 
 /// A tool execution was halted before it returned a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

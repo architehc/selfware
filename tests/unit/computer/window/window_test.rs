@@ -243,4 +243,49 @@ mod macos {
         let map = wm.window_id_to_app.lock().unwrap();
         assert!(map.is_empty());
     }
+
+    // Stubs must error honestly with the action name, never silently succeed.
+    #[tokio::test]
+    async fn test_resize_window_errors_on_macos() {
+        let wm = WindowManager::new();
+        let err = wm
+            .resize_window(&WindowId(1), 800, 600)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("resize_window"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_move_window_errors_on_macos() {
+        let wm = WindowManager::new();
+        let err = wm
+            .move_window(&WindowId(1), 100, 100)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("move_window"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_minimize_window_errors_on_macos() {
+        let wm = WindowManager::new();
+        let err = wm
+            .minimize_window(&WindowId(1))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("minimize_window"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_close_window_errors_on_macos() {
+        let wm = WindowManager::new();
+        let err = wm.close_window(&WindowId(1)).await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("close_window"), "{err}");
+    }
 }

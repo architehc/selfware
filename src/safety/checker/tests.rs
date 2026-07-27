@@ -1497,3 +1497,53 @@ fn test_shell_exec_body_allowcheck_skipped_without_allowlist() {
     let denied = create_test_call("shell_exec", r#"{"command": "cat .env"}"#);
     assert!(checker.check_tool_call(&denied).is_err());
 }
+
+#[test]
+fn test_patch_apply_deletion_of_denied_path_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    // A unified-diff deletion has `+++ /dev/null`; the OLD path must still be
+    // validated against denied_paths.
+    let diff = "--- a/.env\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+    let call = create_test_call(
+        "patch_apply",
+        &serde_json::json!({"diff": diff}).to_string(),
+    );
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "deletion of denied path must be blocked"
+    );
+}
+
+#[test]
+fn test_patch_apply_deletion_of_allowed_path_ok() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    let diff = "--- a/old_notes.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+    let call = create_test_call(
+        "patch_apply",
+        &serde_json::json!({"diff": diff}).to_string(),
+    );
+    assert!(
+        checker.check_tool_call(&call).is_ok(),
+        "deletion of allowed path must pass validation"
+    );
+}
+
+#[test]
+fn test_patch_apply_deletion_parent_escape_blocked() {
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+
+    let diff = "--- a/../outside.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
+    let call = create_test_call(
+        "patch_apply",
+        &serde_json::json!({"diff": diff}).to_string(),
+    );
+    assert!(
+        checker.check_tool_call(&call).is_err(),
+        "deletion escaping the workspace must be blocked"
+    );
+}

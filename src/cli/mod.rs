@@ -2640,6 +2640,17 @@ async fn handle_command(
                                     .execute(&workflow_name, inputs, working_dir)
                                     .await?;
 
+                                // A workflow whose required steps failed must
+                                // not exit zero (honest status, AGENTS.md §3).
+                                if matches!(result.status, crate::workflows::WorkflowStatus::Failed)
+                                {
+                                    anyhow::bail!(
+                                        "workflow '{}' failed after {}ms",
+                                        workflow_name,
+                                        result.duration_ms
+                                    );
+                                }
+
                                 match result.status {
                                     crate::workflows::WorkflowStatus::Completed => {
                                         println!(

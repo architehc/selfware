@@ -793,7 +793,37 @@ impl VerificationGate {
 
     /// Full verification - all checks
     pub async fn full_verify(&mut self) -> Result<VerificationReport> {
-        self.verify_change(&[], "full_verification").await
+        // Do NOT delegate with an empty file list: verify_change early-returns
+        // overall_passed=true with zero checks for empty input, so a "full
+        // verification" would pass vacuously without running anything. Run the
+        // crate-wide checks the config enables.
+        let start = Instant::now();
+        let mut checks = Vec::new();
+        if self.config.check_on_edit {
+            checks.push(self.run_cargo_check().await?);
+        }
+        if self.config.lint_on_edit {
+            checks.push(self.run_cargo_clippy().await?);
+        }
+        if self.config.test_on_edit {
+            checks.push(self.run_cargo_test().await?);
+        }
+        let overall_passed = checks.iter().all(|c| c.passed);
+        let suggested_next_steps = if checks.is_empty() {
+            vec!["No verification checks enabled in config".to_string()]
+        } else {
+            vec![]
+        };
+        Ok(VerificationReport {
+            triggered_by: "full_verification".to_string(),
+            timestamp: chrono::Utc::now(),
+            total_duration_ms: start.elapsed().as_millis() as u64,
+            overall_passed,
+            affected_files: vec![],
+            side_effects: vec![],
+            checks,
+            suggested_next_steps,
+        })
     }
 
     /// Run cargo check

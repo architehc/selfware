@@ -6,23 +6,50 @@ use std::io::Write;
 use tempfile::NamedTempFile;
 
 /// Parse a unified diff and return approximate stats and target paths.
+///
+/// File deletions (`+++ /dev/null`) target the OLD file path (`--- a/<path>`):
+/// that is the path the operation actually affects, so it is what must be
+/// validated and checkpointed — never `/dev/null`.
 fn parse_diff_stats(diff: &str) -> (usize, usize, usize, Vec<String>) {
     let mut files = 0;
     let mut insertions = 0;
     let mut deletions = 0;
     let mut targets = Vec::new();
+    let mut old_path: Option<String> = None;
 
     for line in diff.lines() {
-        if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
+        if let Some(rest) = line.strip_prefix("--- ") {
+            // Remember the old-file path; a following `+++ /dev/null` means
+            // this file is being deleted.
+            let p = rest.split('\t').next().unwrap_or("").trim();
+            let p = p.strip_prefix("a/").unwrap_or(p);
+            old_path = if p.is_empty() || p == "/dev/null" {
+                None
+            } else {
+                Some(p.to_string())
+            };
+        } else if line.starts_with("+++ ") {
             files += 1;
-            // Extract path after "+++ b/" or "+++ "
-            let path = line
-                .strip_prefix("+++ b/")
-                .or_else(|| line.strip_prefix("+++ "))
-                .unwrap_or("");
-            if !path.is_empty() {
-                targets.push(path.to_string());
+            if line.starts_with("+++ /dev/null") {
+                // File deletion: the old path is the operation's target.
+                if let Some(old) = old_path.take() {
+                    targets.push(old);
+                }
+            } else {
+                // Extract path after "+++ b/" or "+++ "
+                let path = line
+                    .strip_prefix("+++ b/")
+                    .or_else(|| line.strip_prefix("+++ "))
+                    .unwrap_or("")
+                    .split('\t')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !path.is_empty() {
+                    targets.push(path.to_string());
+                }
             }
+            old_path = None;
         } else if line.starts_with('+') && !line.starts_with("+++") && !line.starts_with("@@") {
             insertions += 1;
         } else if line.starts_with('-') && !line.starts_with("---") && !line.starts_with("@@") {

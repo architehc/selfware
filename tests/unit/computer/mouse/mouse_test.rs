@@ -54,7 +54,13 @@ fn test_validate_coordinates_both_out_of_range() {
 #[tokio::test]
 async fn test_move_to_valid() {
     let mouse = MouseController::new();
-    assert!(mouse.move_to(100, 200).await.is_ok());
+    let result = mouse.move_to(100, 200).await;
+    // Linux uses a no-op xdotool stub in tests; unsupported platforms must
+    // return an honest error instead of silently succeeding.
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -66,21 +72,35 @@ async fn test_move_to_out_of_bounds() {
 #[tokio::test]
 async fn test_click() {
     let mouse = MouseController::new();
-    assert!(mouse.click(MouseButton::Left).await.is_ok());
-    assert!(mouse.click(MouseButton::Right).await.is_ok());
-    assert!(mouse.click(MouseButton::Middle).await.is_ok());
+    let left = mouse.click(MouseButton::Left).await;
+    #[cfg(target_os = "linux")]
+    {
+        assert!(left.is_ok());
+        assert!(mouse.click(MouseButton::Right).await.is_ok());
+        assert!(mouse.click(MouseButton::Middle).await.is_ok());
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(left.is_err());
 }
 
 #[tokio::test]
 async fn test_double_click() {
     let mouse = MouseController::new();
-    assert!(mouse.double_click().await.is_ok());
+    let result = mouse.double_click().await;
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_click_at() {
     let mouse = MouseController::new();
-    assert!(mouse.click_at(100, 200, MouseButton::Left).await.is_ok());
+    let result = mouse.click_at(100, 200, MouseButton::Left).await;
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -92,9 +112,15 @@ async fn test_click_at_out_of_bounds() {
 #[tokio::test]
 async fn test_scroll() {
     let mouse = MouseController::new();
-    assert!(mouse.scroll(0, -3).await.is_ok());
-    assert!(mouse.scroll(5, 5).await.is_ok());
-    assert!(mouse.scroll(0, 0).await.is_ok());
+    let result = mouse.scroll(0, -3).await;
+    #[cfg(target_os = "linux")]
+    {
+        assert!(result.is_ok());
+        assert!(mouse.scroll(5, 5).await.is_ok());
+        assert!(mouse.scroll(0, 0).await.is_ok());
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -102,7 +128,11 @@ async fn test_drag_valid() {
     let mouse = MouseController::new();
     let from = Point::new(10, 10);
     let to = Point::new(200, 200);
-    assert!(mouse.drag(from, to, MouseButton::Left).await.is_ok());
+    let result = mouse.drag(from, to, MouseButton::Left).await;
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -323,4 +353,59 @@ fn test_ps_drag_contains_coordinates() {
     assert!(script.contains("Point(300, 400)"));
     assert!(script.contains("MOUSEEVENTF_LEFTDOWN"));
     assert!(script.contains("MOUSEEVENTF_LEFTUP"));
+}
+
+// ---- macOS: stubs must error honestly, never silently succeed ----
+
+#[cfg(target_os = "macos")]
+mod macos_honesty {
+    use super::*;
+
+    #[tokio::test]
+    async fn move_to_errors_with_action_name() {
+        let mouse = MouseController::new();
+        let err = mouse.move_to(100, 200).await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("move_to"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn click_errors_with_action_name() {
+        let mouse = MouseController::new();
+        let err = mouse
+            .click(MouseButton::Left)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("click"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn double_click_errors_with_action_name() {
+        let mouse = MouseController::new();
+        let err = mouse.double_click().await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("double_click"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn scroll_errors_with_action_name() {
+        let mouse = MouseController::new();
+        let err = mouse.scroll(0, -3).await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("scroll"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn drag_errors_with_action_name() {
+        let mouse = MouseController::new();
+        let err = mouse
+            .drag(Point::new(0, 0), Point::new(10, 10), MouseButton::Left)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("drag"), "{err}");
+    }
 }

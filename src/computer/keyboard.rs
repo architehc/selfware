@@ -3,14 +3,18 @@
 //! Provides programmatic typing, key presses, and key combinations.
 //! On Linux, uses xdotool for actual input. When running under WSL2 without
 //! xdotool, falls back to PowerShell `SendKeys` via `powershell.exe`.
-//! On other platforms, stubs with logging.
+//! On macOS, typing goes through `osascript` (System Events); key presses and
+//! combos return an explicit "not supported" error rather than silently
+//! succeeding without performing the action.
 
-#[cfg(all(target_os = "linux", not(test)))]
+#[cfg(any(all(target_os = "linux", not(test)), target_os = "macos"))]
 use anyhow::Context;
 use anyhow::{bail, Result};
 
 use std::sync::OnceLock;
-use tracing::{debug, warn};
+use tracing::debug;
+#[cfg(target_os = "linux")]
+use tracing::warn;
 
 use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};
 
@@ -406,27 +410,35 @@ impl KeyboardController {
                     "tell application \"System Events\" to keystroke \"{}\"",
                     escaped
                 );
-                let _ = tokio::process::Command::new("osascript")
+                let output = tokio::process::Command::new("osascript")
                     .arg("-e")
                     .arg(&script)
                     .output()
-                    .await;
+                    .await
+                    .context("failed to run osascript for macOS keyboard typing")?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    bail!(
+                        "macOS keyboard typing via System Events failed (exit {}): {} — grant Accessibility permissions to the terminal app",
+                        output.status,
+                        stderr.trim()
+                    );
+                }
             }
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            if self.typing_profile.base_delay_ms > 0 {
-                for ch in text.chars() {
-                    let delay = self.typing_profile.base_delay_ms;
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                    debug!("Typed: '{}'", ch);
+            if !text.is_empty() {
+                if self.typing_profile.base_delay_ms > 0 {
+                    for ch in text.chars() {
+                        let delay = self.typing_profile.base_delay_ms;
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        debug!("Typed: '{}'", ch);
+                    }
                 }
-            } else {
-                debug!(
-                    "Typed {} chars instantly (stub — no keyboard backend on this platform)",
-                    text.len()
-                );
+                // Never silently succeed without typing anything.
+                bail!("keyboard type_text is not supported on this platform");
             }
         }
 
@@ -456,6 +468,22 @@ impl KeyboardController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            // No key-name → macOS key-code mapping is implemented; never
+            // silently succeed without pressing anything.
+            bail!(
+                "keyboard press_key('{}') is not supported on macOS: no key-code backend implemented (requires Accessibility permissions)",
+                key
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("keyboard press_key is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -491,6 +519,20 @@ impl KeyboardController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "keyboard key_combo('{}') is not supported on macOS: no key-code backend implemented (requires Accessibility permissions)",
+                combo
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("keyboard key_combo is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -524,6 +566,20 @@ impl KeyboardController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "keyboard key_down('{}') is not supported on macOS: no key-code backend implemented (requires Accessibility permissions)",
+                key
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("keyboard key_down is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 
@@ -553,6 +609,20 @@ impl KeyboardController {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            bail!(
+                "keyboard key_up('{}') is not supported on macOS: no key-code backend implemented (requires Accessibility permissions)",
+                key
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            bail!("keyboard key_up is not supported on this platform");
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(())
     }
 }

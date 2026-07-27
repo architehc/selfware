@@ -140,6 +140,16 @@ impl McpClient {
                 )
             })?;
 
+        // An MCP result with `isError: true` is a tool-level FAILURE, not a
+        // success. Flag it with `success: false` so downstream success
+        // detection (and therefore the result caches gated on it) never
+        // treats the payload as successful — an error result must never be
+        // cached and replayed as a success.
+        let is_error = result
+            .get("isError")
+            .and_then(|e| e.as_bool())
+            .unwrap_or(false);
+
         // MCP tool results have a `content` array with text/image/resource blocks
         // Extract text content for simple use
         if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
@@ -157,9 +167,19 @@ impl McpClient {
             if !text_parts.is_empty() {
                 return Ok(serde_json::json!({
                     "content": text_parts.join("\n"),
-                    "isError": result.get("isError").and_then(|e| e.as_bool()).unwrap_or(false),
+                    "isError": is_error,
+                    "success": !is_error,
                 }));
             }
+        }
+
+        if is_error {
+            // Non-text (or empty) content: still flag the failure honestly.
+            let mut flagged = result;
+            if let Some(obj) = flagged.as_object_mut() {
+                obj.insert("success".to_string(), Value::Bool(false));
+            }
+            return Ok(flagged);
         }
 
         Ok(result)
@@ -168,6 +188,16 @@ impl McpClient {
     /// Get the server name.
     pub fn server_name(&self) -> &str {
         &self.server_name
+    }
+
+    /// Construct a client over an arbitrary transport (test-only).
+    #[cfg(test)]
+    pub(crate) fn new_for_test(transport: Arc<dyn Transport>, server_name: &str) -> Self {
+        Self {
+            transport,
+            server_name: server_name.to_string(),
+            server_info: None,
+        }
     }
 
     /// Shut down the client and its transport.
@@ -184,3 +214,7 @@ impl std::fmt::Debug for McpClient {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/mcp/client/client_test.rs"]
+mod tests;

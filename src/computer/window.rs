@@ -18,7 +18,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::env;
-use tracing::{debug, info, warn};
+#[cfg(target_os = "linux")]
+use tracing::warn;
+use tracing::{debug, info};
 
 #[cfg(target_os = "macos")]
 use anyhow::Context;
@@ -230,8 +232,9 @@ impl WindowManager {
     ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
-    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions
-    ///   and AppleScript or CoreGraphics API integration.
+    /// - **macOS**: Not implemented (requires Accessibility permissions and
+    ///   AppleScript or CoreGraphics API integration) — returns an error
+    ///   instead of silently succeeding.
     pub async fn resize_window(&self, id: &WindowId, width: u32, height: u32) -> Result<()> {
         debug!("Resizing window {:?} to {}x{}", id, width, height);
         #[cfg(target_os = "linux")]
@@ -240,22 +243,26 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // STUB: macOS resize not yet implemented
-            // Would require AppleScript or CoreGraphics API
-            warn!(
-                "STUB: Window resize not implemented for macOS - window {:?} not resized",
-                id
+            anyhow::bail!(
+                "window resize_window({:?}, {}x{}) is not supported on macOS: requires Accessibility permissions and an AppleScript/CoreGraphics backend that is not implemented",
+                id,
+                width,
+                height
             );
         }
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
     }
 
     /// Move a window to specific coordinates.
     ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
-    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions
-    ///   and AppleScript or CoreGraphics API integration.
+    /// - **macOS**: Not implemented (requires Accessibility permissions and
+    ///   AppleScript or CoreGraphics API integration) — returns an error
+    ///   instead of silently succeeding.
     pub async fn move_window(&self, id: &WindowId, x: i32, y: i32) -> Result<()> {
         debug!("Moving window {:?} to position {}, {}", id, x, y);
         #[cfg(target_os = "linux")]
@@ -264,21 +271,25 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // STUB: macOS move not yet implemented
-            // Would require AppleScript or CoreGraphics API
-            warn!(
-                "STUB: Window move not implemented for macOS - window {:?} not moved",
-                id
+            anyhow::bail!(
+                "window move_window({:?}, {}, {}) is not supported on macOS: requires Accessibility permissions and an AppleScript/CoreGraphics backend that is not implemented",
+                id,
+                x,
+                y
             );
         }
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
     }
 
     /// Minimize a window.
     ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `xdotool` and `wmctrl`
-    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions.
+    /// - **macOS**: Not implemented (requires Accessibility permissions) —
+    ///   returns an error instead of silently succeeding.
     pub async fn minimize_window(&self, id: &WindowId) -> Result<()> {
         debug!("Minimizing window {:?}", id);
         #[cfg(target_os = "linux")]
@@ -287,20 +298,23 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // STUB: macOS minimize not yet implemented
-            warn!(
-                "STUB: Window minimize not implemented for macOS - window {:?} not minimized",
+            anyhow::bail!(
+                "window minimize_window({:?}) is not supported on macOS: requires Accessibility permissions and an AppleScript/CoreGraphics backend that is not implemented",
                 id
             );
         }
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
     }
 
     /// Close a window.
     ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
-    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions.
+    /// - **macOS**: Not implemented (requires Accessibility permissions) —
+    ///   returns an error instead of silently succeeding.
     pub async fn close_window(&self, id: &WindowId) -> Result<()> {
         debug!("Closing window {:?}", id);
         #[cfg(target_os = "linux")]
@@ -309,13 +323,15 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // STUB: macOS close not yet implemented
-            warn!(
-                "STUB: Window close not implemented for macOS - window {:?} not closed",
+            anyhow::bail!(
+                "window close_window({:?}) is not supported on macOS: requires Accessibility permissions and an AppleScript/CoreGraphics backend that is not implemented",
                 id
             );
         }
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(())
+        }
     }
 
     /// Launch an application.

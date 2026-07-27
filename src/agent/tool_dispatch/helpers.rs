@@ -226,7 +226,9 @@ where
     required
 }
 
-pub(crate) fn extract_explicit_disallowed_tools(task_context: &str) -> std::collections::BTreeSet<String> {
+pub(crate) fn extract_explicit_disallowed_tools(
+    task_context: &str,
+) -> std::collections::BTreeSet<String> {
     let mut disallowed = std::collections::BTreeSet::new();
 
     for line in task_context.lines() {
@@ -519,16 +521,37 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
 
 pub(crate) fn patch_target_paths(diff: &str) -> Vec<std::path::PathBuf> {
     let mut targets = Vec::new();
+    let mut old_path: Option<String> = None;
     for line in diff.lines() {
-        if line.starts_with("+++ ") && !line.starts_with("+++ /dev/null") {
-            let path = line
-                .strip_prefix("+++ b/")
-                .or_else(|| line.strip_prefix("+++ "))
-                .unwrap_or("");
-            let path = path.split('\t').next().unwrap_or("").trim();
-            if !path.is_empty() {
-                targets.push(std::path::PathBuf::from(path));
+        if let Some(rest) = line.strip_prefix("--- ") {
+            // Remember the old-file path; a following `+++ /dev/null` means
+            // this file is being deleted.
+            let p = rest.split('\t').next().unwrap_or("").trim();
+            let p = p.strip_prefix("a/").unwrap_or(p);
+            old_path = if p.is_empty() || p == "/dev/null" {
+                None
+            } else {
+                Some(p.to_string())
+            };
+        } else if line.starts_with("+++ ") {
+            if line.starts_with("+++ /dev/null") {
+                // File deletion: the old path is the operation's target, so it
+                // must be snapshotted for undo/checkpoint accounting just
+                // like a written file.
+                if let Some(old) = old_path.take() {
+                    targets.push(std::path::PathBuf::from(old));
+                }
+            } else {
+                let path = line
+                    .strip_prefix("+++ b/")
+                    .or_else(|| line.strip_prefix("+++ "))
+                    .unwrap_or("");
+                let path = path.split('\t').next().unwrap_or("").trim();
+                if !path.is_empty() {
+                    targets.push(std::path::PathBuf::from(path));
+                }
             }
+            old_path = None;
         }
     }
     targets
@@ -779,16 +802,15 @@ pub(crate) fn read_tool_target(name: &str, args_str: &str) -> Option<String> {
             .get("path")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        "directory_tree" => {
-            args.get("path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    args.get("pattern")
-                        .and_then(|v| v.as_str())
-                        .map(|s| format!("tree:{}", s))
-                })
-        }
+        "directory_tree" => args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                args.get("pattern")
+                    .and_then(|v| v.as_str())
+                    .map(|s| format!("tree:{}", s))
+            }),
         "glob_find" => args
             .get("pattern")
             .and_then(|v| v.as_str())

@@ -1193,7 +1193,24 @@ impl WorkflowExecutor {
 
         // Set final status if not already failed
         if context.status == WorkflowStatus::Running {
-            context.status = WorkflowStatus::Completed;
+            // Steps executed inline by control flow (condition/loop branches)
+            // record failures in step_results keyed by step id (loops use
+            // "id@iteration") without tripping the top-level abort check
+            // above — e.g. a required step failing inside an optional loop.
+            // Any failed (non-skipped) step that is required (non-optional)
+            // must fail the workflow: never report success when a required
+            // step failed.
+            let required_step_failed = context.step_results.iter().any(|(key, result)| {
+                result.status == StepStatus::Failed
+                    && workflow.steps.iter().any(|s| {
+                        s.required && s.id == key.split('@').next().unwrap_or(key.as_str())
+                    })
+            });
+            context.status = if required_step_failed {
+                WorkflowStatus::Failed
+            } else {
+                WorkflowStatus::Completed
+            };
         }
 
         // Collect outputs

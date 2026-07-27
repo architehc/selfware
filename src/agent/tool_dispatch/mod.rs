@@ -11,11 +11,11 @@ use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
 use crate::hooks::HookContext;
 
-mod spill;
 mod helpers;
+mod spill;
 
-pub(crate) use spill::*;
 pub(crate) use helpers::*;
+pub(crate) use spill::*;
 
 impl Agent {
     /// Credit (or record the failure of) a verification tool call for the
@@ -1277,7 +1277,7 @@ impl Agent {
 
             // Audit log
             if let Some(ref logger) = self.audit_logger {
-                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 vt.args_str.hash(&mut hasher);
                 let args_hash = format!("{:x}", hasher.finish());
                 logger.log_tool_execution(&vt.name, &args_hash, success, duration_ms, None);
@@ -1580,7 +1580,7 @@ impl Agent {
 
         // Audit: log tool execution
         if let Some(ref logger) = self.audit_logger {
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
             args_str.hash(&mut hasher);
             let args_hash = format!("{:x}", hasher.finish());
             logger.log_tool_execution(&name, &args_hash, success, duration_ms, None);

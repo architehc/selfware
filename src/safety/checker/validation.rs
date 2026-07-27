@@ -281,16 +281,34 @@ impl SafetyChecker {
                 }
             }
             // patch_apply targets paths embedded in the unified diff — validate the
-            // `+++ b/<path>` targets and secret-scan the diff body.
+            // `+++ b/<path>` targets and secret-scan the diff body. File
+            // deletions (`+++ /dev/null`) target the OLD file (`--- a/<path>`):
+            // that path is what the operation removes, so it is what must be
+            // validated against denied/allowed paths.
             "patch_apply" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(diff) = args.get("diff").and_then(|v| v.as_str()) {
+                    let mut old_path: Option<String> = None;
                     for line in diff.lines() {
-                        if let Some(rest) = line.strip_prefix("+++ ") {
+                        if let Some(rest) = line.strip_prefix("--- ") {
+                            let p = rest.split('\t').next().unwrap_or("").trim();
+                            let p = p.strip_prefix("a/").unwrap_or(p);
+                            old_path = if p.is_empty() || p == "/dev/null" {
+                                None
+                            } else {
+                                Some(p.to_string())
+                            };
+                        } else if let Some(rest) = line.strip_prefix("+++ ") {
                             let p = rest.trim().trim_start_matches("b/");
-                            if !p.is_empty() && p != "/dev/null" {
+                            if p.is_empty() || p == "/dev/null" {
+                                // Deletion: validate the old file path.
+                                if let Some(old) = old_path.take() {
+                                    self.check_path(&old)?;
+                                }
+                            } else {
                                 self.check_path(p)?;
                             }
+                            old_path = None;
                         }
                     }
                     self.check_content_for_secrets(diff)?;

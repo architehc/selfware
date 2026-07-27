@@ -27,16 +27,36 @@ async fn test_all_blocked_combos_rejected() {
 #[tokio::test]
 async fn test_safe_combo_allowed() {
     let kb = KeyboardController::new();
-    assert!(kb.key_combo("ctrl+c").await.is_ok());
-    assert!(kb.key_combo("ctrl+v").await.is_ok());
-    assert!(kb.key_combo("ctrl+s").await.is_ok());
-    assert!(kb.key_combo("ctrl+shift+t").await.is_ok());
+    let result = kb.key_combo("ctrl+c").await;
+    // Linux uses a no-op xdotool stub in tests; unsupported platforms must
+    // return an honest error instead of silently succeeding.
+    #[cfg(target_os = "linux")]
+    {
+        assert!(result.is_ok());
+        assert!(kb.key_combo("ctrl+v").await.is_ok());
+        assert!(kb.key_combo("ctrl+s").await.is_ok());
+        assert!(kb.key_combo("ctrl+shift+t").await.is_ok());
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_type_text_success() {
     let kb = KeyboardController::new();
-    assert!(kb.type_text("hello world").await.is_ok());
+    let result = kb.type_text("hello world").await;
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    // macOS actually attempts the action via osascript; without Accessibility
+    // permissions it must error honestly, never silently succeed.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = &result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("System Events") || msg.contains("osascript"),
+            "unexpected error: {msg}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -49,7 +69,17 @@ async fn test_type_text_empty() {
 async fn test_type_text_at_limit() {
     let kb = KeyboardController::new();
     let text = "x".repeat(10_000);
-    assert!(kb.type_text(&text).await.is_ok());
+    let result = kb.type_text(&text).await;
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    #[cfg(target_os = "macos")]
+    if let Err(e) = &result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("System Events") || msg.contains("osascript"),
+            "unexpected error: {msg}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -64,16 +94,28 @@ async fn test_type_text_length_limit() {
 #[tokio::test]
 async fn test_press_key() {
     let kb = KeyboardController::new();
-    assert!(kb.press_key("Enter").await.is_ok());
-    assert!(kb.press_key("Tab").await.is_ok());
-    assert!(kb.press_key("Escape").await.is_ok());
+    let result = kb.press_key("Enter").await;
+    #[cfg(target_os = "linux")]
+    {
+        assert!(result.is_ok());
+        assert!(kb.press_key("Tab").await.is_ok());
+        assert!(kb.press_key("Escape").await.is_ok());
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn test_key_down_up() {
     let kb = KeyboardController::new();
-    assert!(kb.key_down("Shift").await.is_ok());
-    assert!(kb.key_up("Shift").await.is_ok());
+    let down = kb.key_down("Shift").await;
+    #[cfg(target_os = "linux")]
+    {
+        assert!(down.is_ok());
+        assert!(kb.key_up("Shift").await.is_ok());
+    }
+    #[cfg(not(target_os = "linux"))]
+    assert!(down.is_err());
 }
 
 #[test]
@@ -99,7 +141,51 @@ async fn test_type_text_with_delay_profile() {
         variation_ms: 0,
     };
     let kb = KeyboardController::new().with_typing_profile(profile);
-    assert!(kb.type_text("hi").await.is_ok());
+    let result = kb.type_text("hi").await;
+    #[cfg(target_os = "linux")]
+    assert!(result.is_ok());
+    #[cfg(target_os = "macos")]
+    if let Err(e) = &result {
+        let msg = e.to_string();
+        assert!(
+            msg.contains("System Events") || msg.contains("osascript"),
+            "unexpected error: {msg}"
+        );
+    }
+}
+
+// ---- macOS: key presses/combos must error honestly, never silently succeed ----
+
+#[cfg(target_os = "macos")]
+mod macos_honesty {
+    use super::*;
+
+    #[tokio::test]
+    async fn press_key_errors_with_action_name() {
+        let kb = KeyboardController::new();
+        let err = kb.press_key("Enter").await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("press_key"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn key_combo_errors_with_action_name() {
+        let kb = KeyboardController::new();
+        let err = kb.key_combo("ctrl+c").await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("key_combo"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn key_down_up_error_with_action_name() {
+        let kb = KeyboardController::new();
+        let err = kb.key_down("Shift").await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("key_down"), "{err}");
+        let err = kb.key_up("Shift").await.unwrap_err().to_string();
+        assert!(err.contains("not supported on macOS"), "{err}");
+        assert!(err.contains("key_up"), "{err}");
+    }
 }
 
 // ---- Command construction tests ----

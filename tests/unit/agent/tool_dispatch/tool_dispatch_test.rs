@@ -196,9 +196,13 @@ fn patch_target_paths_extracts_targets() {
             std::path::PathBuf::from("b.txt")
         ]
     );
-    // Deleted files (+++ /dev/null) have no pre-edit content to snapshot.
+    // Deleted files (+++ /dev/null) target the OLD path so the file is
+    // snapshotted for undo before it is removed.
     let deleted = "--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n";
-    assert!(patch_target_paths(deleted).is_empty());
+    assert_eq!(
+        patch_target_paths(deleted),
+        vec![std::path::PathBuf::from("gone.rs")]
+    );
 }
 
 #[tokio::test]
