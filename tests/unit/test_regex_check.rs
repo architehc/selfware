@@ -5,7 +5,7 @@ fn test_rm_pattern_matches_inside_substitution() {
     use regex::Regex;
 
     // Pattern from DANGEROUS_COMMAND_PATTERNS for rm -rf /
-    let re = Regex::new(r"rm\s+(-[a-z]+\s+)*(/+|\*|/\*|\.\.|\.\./\*)").unwrap();
+    let re = Regex::new(r"rm\s+(--?[a-z-]+\s+)*(/\*?|\.\.(/\.\.)+/?)").unwrap();
 
     // These should all match
     assert!(re.is_match("rm -rf /"), "Basic rm -rf / should match");

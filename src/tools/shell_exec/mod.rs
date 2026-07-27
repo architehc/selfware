@@ -406,26 +406,11 @@ impl Tool for ShellExec {
             }
             // The structured env map must not smuggle what the command-string
             // DANGEROUS_ENV_VARS check would block (loader injection,
-            // interpreter startup hooks, PATH hijack).
-            const DENIED_ENV: &[&str] = &[
-                "LD_PRELOAD",
-                "LD_LIBRARY_PATH",
-                "DYLD_INSERT_LIBRARIES",
-                "DYLD_LIBRARY_PATH",
-                "DYLD_FALLBACK_LIBRARY_PATH",
-                "LD_AUDIT",
-                "LD_DEBUG",
-                "BASH_ENV",
-                "ENV",
-                "PYTHONPATH",
-                "NODE_PATH",
-                "RUBYLIB",
-                "PERL5LIB",
-                "PATH",
-                "IFS",
-            ];
+            // interpreter startup hooks, PATH hijack). Both enforce the same
+            // shared list — see DENIED_ENV_VARS for what's deliberately NOT
+            // denied (ENV, LD_DEBUG, HOME, …).
             let upper = name.to_ascii_uppercase();
-            if DENIED_ENV.contains(&upper.as_str()) {
+            if crate::safety::checker::validation::DENIED_ENV_VARS.contains(&upper.as_str()) {
                 anyhow::bail!(
                     "Environment variable '{}' is not allowed in shell_exec env (injection risk)",
                     name

@@ -491,3 +491,63 @@ async fn sed_replacement_metachars_pass_through_to_real_sed() {
 
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
 }
+
+// ── Structured env map denylist (aligned with the command-string check) ──
+
+#[tokio::test]
+async fn test_shell_exec_env_allows_everyday_vars() {
+    // ENV / LD_DEBUG / HOME / TERM were denied by the old structured
+    // denylist but are everyday settings (ENV=production, loader debugging,
+    // scratch HOME) — and the inline `VAR=value cmd` check never blocked
+    // them. Both forms now share one denylist.
+    let tool = ShellExec;
+    let command = if cfg!(target_os = "windows") {
+        "echo %MY_VAR%"
+    } else {
+        "echo $MY_VAR"
+    };
+    let args = serde_json::json!({
+        "command": command,
+        "timeout_secs": 5,
+        "env": {
+            "MY_VAR": "ok",
+            "ENV": "production",
+            "LD_DEBUG": "libs",
+            "HOME": "/tmp/selfware-test-home",
+            "TERM": "xterm-256color"
+        }
+    });
+
+    let result = tool.execute(args).await.unwrap();
+    assert!(result["stdout"].as_str().unwrap().contains("ok"));
+}
+
+#[tokio::test]
+async fn test_shell_exec_env_still_denies_injection_vars() {
+    // PATH hijack, loader injection/audit, interpreter startup hooks stay
+    // denied in the structured map — same list as the inline check.
+    let tool = ShellExec;
+    for var in [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "LD_AUDIT",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "BASH_ENV",
+        "PYTHONPATH",
+        "PATH",
+        "IFS",
+    ] {
+        let args = serde_json::json!({
+            "command": "echo hi",
+            "timeout_secs": 5,
+            "env": { var: "/tmp/evil" }
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "env var {var} must be denied");
+        assert!(
+            result.unwrap_err().to_string().contains("not allowed"),
+            "expected the env-denied error for {var}"
+        );
+    }
+}

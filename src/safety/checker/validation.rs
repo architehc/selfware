@@ -13,6 +13,68 @@ use crate::safety::scanner::{SecurityCategory, SecuritySeverity};
 
 use super::types::*;
 
+/// Environment variables denied in BOTH the inline command-string check
+/// (`VAR=value cmd`, `export VAR=`, `env VAR=`) and the shell_exec
+/// structured env map: PATH hijack, dynamic-loader injection/audit, and
+/// interpreter startup hooks. Single source of truth —
+/// `src/tools/shell_exec/mod.rs` uses this same list. Deliberately NOT
+/// denied: HOME/USER/TERM/SHELL/CLASSPATH (everyday overrides), ENV
+/// (breaks `ENV=production`), LD_DEBUG (legitimate loader debugging).
+pub(crate) const DENIED_ENV_VARS: &[&str] = &[
+    "PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "BASH_ENV",
+    "PYTHONPATH",
+    "NODE_PATH",
+    "PERL5LIB",
+    "RUBYLIB",
+    "IFS",
+];
+
+/// Programs whose `eval $(<program> …)` shell-integration line is a
+/// known-safe everyday pattern (`eval $(ssh-agent)`,
+/// `eval "$(direnv hook bash)"`, prompt and version-manager init).
+const SAFE_EVAL_SUBSTITUTION_PROGRAMS: &[&str] = &[
+    "ssh-agent",
+    "direnv",
+    "keychain",
+    "starship",
+    "zoxide",
+    "fnm",
+    "mise",
+    "rbenv",
+    "pyenv",
+    "conda",
+];
+
+static EVAL_WITH_SUBSTITUTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\beval\b[^\n;]*\$\(").expect("Invalid regex"));
+static EVAL_SUBSTITUTION_PROGRAM: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\beval\b[^\n;]*?\$\(\s*([a-z0-9_.-]+)").expect("Invalid regex"));
+
+/// Whether an `eval` invokes command substitution with a program outside
+/// the known-safe shell-integration list. `eval` without substitution is
+/// not handled here. (The command is first run through
+/// `normalize_shell_command`, which rewrites backticks to `$(…)`.)
+fn eval_substitution_is_blocked(cmd: &str) -> bool {
+    if !EVAL_WITH_SUBSTITUTION.is_match(cmd) {
+        return false;
+    }
+    match EVAL_SUBSTITUTION_PROGRAM.captures(cmd) {
+        Some(caps) => {
+            let program = caps[1].to_string();
+            !SAFE_EVAL_SUBSTITUTION_PROGRAMS.contains(&program.as_str())
+        }
+        // eval + substitution whose program we can't identify: keep blocking.
+        None => true,
+    }
+}
+
 impl SafetyChecker {
     /// Create a safety checker with the given configuration
     pub fn new(config: &SafetyConfig) -> Self {
@@ -395,26 +457,49 @@ impl SafetyChecker {
     pub fn check_shell_command(&self, cmd: &str) -> Result<()> {
         let normalized = normalize_shell_command(cmd);
         let dequoted = dequote_and_lowercase(&normalized);
+        // Quote-masked scaffold: quoted segments stay as opaque placeholders,
+        // so quoted PROSE (`git commit -m "revert the rm -rf / guard"`,
+        // `echo "never run chown -R /"`) cannot trip the dangerous-command
+        // patterns. Unquoted dangerous content still matches.
+        let masked = normalize_shell_command_masked(cmd);
         // $IFS obfuscation: shells expand `$IFS`/`${IFS}` to whitespace, so
         // `rm$IFS-rf$IFS/target` EXECUTES as `rm -rf /target` while matching
         // no literal `rm\s+` pattern. Expand it in a CHECK-ONLY copy used
         // solely for pattern matching — the command that runs is untouched.
-        let ifs_expanded = expand_ifs_for_matching(&normalized);
-        let ifs_dequoted = dequote_and_lowercase(&ifs_expanded);
+        let masked_ifs = expand_ifs_for_matching(&masked);
 
-        // SECURITY: Check for dangerous patterns
+        // SECURITY: Check for dangerous patterns (against the masked form).
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
-            if pattern.is_match(&normalized)
-                || pattern.is_match(&dequoted)
-                || pattern.is_match(&ifs_expanded)
-                || pattern.is_match(&ifs_dequoted)
-            {
+            if pattern.is_match(&masked) || pattern.is_match(&masked_ifs) {
                 return Err(SelfwareError::Safety(
                     SafetyError::DangerousCommandPattern {
                         description: (*description).to_string(),
                     },
                 ));
             }
+        }
+
+        // Payload patterns inspect QUOTED content (python -c '…', eval "…"),
+        // so they match the quote-restored and dequoted forms instead.
+        for (pattern, description) in PAYLOAD_COMMAND_PATTERNS.iter() {
+            if pattern.is_match(&normalized) || pattern.is_match(&dequoted) {
+                return Err(SelfwareError::Safety(
+                    SafetyError::DangerousCommandPattern {
+                        description: (*description).to_string(),
+                    },
+                ));
+            }
+        }
+
+        // eval with command substitution: allowed for a small set of
+        // known-safe shell-integration programs (`eval $(ssh-agent)`,
+        // `eval "$(direnv hook bash)"`), blocked otherwise.
+        if eval_substitution_is_blocked(&normalized) || eval_substitution_is_blocked(&dequoted) {
+            return Err(SelfwareError::Safety(
+                SafetyError::DangerousCommandPattern {
+                    description: "eval with command substitution".to_string(),
+                },
+            ));
         }
 
         // Check for base64-encoded command execution
@@ -472,8 +557,9 @@ impl SafetyChecker {
         // Apply a conservative lexical check to file-targeting tokens.
         self.check_shell_command_paths(cmd)?;
 
-        // Check command chaining
-        for part in split_shell_commands(&normalized) {
+        // Check command chaining (against the masked form, same rationale
+        // as the main dangerous-pattern pass above).
+        for part in split_shell_commands(&masked) {
             let part_trimmed = part.trim();
             for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
                 if pattern.is_match(part_trimmed) {
@@ -490,10 +576,14 @@ impl SafetyChecker {
         // `VAR=value` prefix form, cover the `export VAR=` and `env VAR=`
         // wrappers — both assign the variable for subsequent commands
         // (`export` persists it in the shell, `env` sets it for the child),
-        // so they are the same injection with extra steps.
+        // so they are the same injection with extra steps. The list is
+        // shared with the shell_exec structured env map (DENIED_ENV_VARS).
         static DANGEROUS_ENV_VARS: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?i)^\s*(?:(?:export|env)\s+)?(PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|PYTHONPATH|NODE_PATH|PERL5LIB|RUBYLIB|CLASSPATH|HOME|SHELL|USER|TERM|IFS)\s*=")
-                .expect("Invalid regex")
+            Regex::new(&format!(
+                r"(?i)^\s*(?:(?:export|env)\s+)?({})\s*=",
+                DENIED_ENV_VARS.join("|")
+            ))
+            .expect("Invalid regex")
         });
 
         for part in split_shell_commands(&normalized) {
@@ -555,6 +645,13 @@ impl SafetyChecker {
     ///   against the working dir (with a leading `~` expanded). Failures
     ///   return the same errors the file tools return
     ///   (`PathDeniedPattern`/`PathNotAllowed`).
+    /// - Operands of READ-ONLY commands (see [`READ_ONLY_COMMANDS`] — and
+    ///   `find` without `-delete`/`-exec`) are exempt from the allow-list:
+    ///   reads can't destroy anything, so `cat /etc/hosts`,
+    ///   `tail /tmp/build.log`, or `ls /usr/local/bin` work even with the
+    ///   default `allowed_paths = ["./**"]`. The `denied_paths` check
+    ///   (`.env`, `.ssh`, `secrets`, …) still fires on those reads.
+    ///   Write/execute verbs keep full allow-list enforcement.
     ///
     /// Documented fail-open gaps: paths hidden in `--flag=VALUE` pairs,
     /// command substitution `$(…)`, nested `sh -c '…'`, and remote
@@ -573,6 +670,17 @@ impl SafetyChecker {
             if verb == "tee" || verb == "sponge" {
                 continue;
             }
+            // Read-only commands may read absolute paths outside the cwd;
+            // `find` only when it can't write/execute (`-delete`, `-exec`).
+            let read_only = READ_ONLY_COMMANDS.contains(&verb)
+                || (verb == "find"
+                    && !tokens.iter().any(|t| {
+                        matches!(
+                            t.as_str(),
+                            "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"
+                        )
+                    }));
+            let enforce_allowlist = !read_only;
             let is_file_verb = FILE_TARGET_VERBS.contains(&verb);
             let mut chmod_mode_seen = false;
             let mut flags_done = false;
@@ -597,7 +705,7 @@ impl SafetyChecker {
                     }
                     Redirect::Take => {
                         pending = Redirect::None;
-                        self.check_shell_path_candidate(tok)?;
+                        self.check_shell_path_candidate(tok, enforce_allowlist)?;
                         continue;
                     }
                     Redirect::None => {}
@@ -617,7 +725,7 @@ impl SafetyChecker {
                     if rest.is_empty() {
                         pending = Redirect::Take;
                     } else {
-                        self.check_shell_path_candidate(rest)?;
+                        self.check_shell_path_candidate(rest, enforce_allowlist)?;
                     }
                     continue;
                 }
@@ -644,7 +752,7 @@ impl SafetyChecker {
                     if verb == "dd" {
                         if let Some(v) = tok.strip_prefix("if=").or_else(|| tok.strip_prefix("of="))
                         {
-                            self.check_shell_path_candidate(v)?;
+                            self.check_shell_path_candidate(v, enforce_allowlist)?;
                         }
                         continue; // bs=/count=/… operands are not paths
                     }
@@ -652,11 +760,11 @@ impl SafetyChecker {
                         chmod_mode_seen = true; // the mode operand is not a path
                         continue;
                     }
-                    self.check_shell_path_candidate(tok)?;
+                    self.check_shell_path_candidate(tok, enforce_allowlist)?;
                     continue;
                 }
                 if looks_like_explicit_path(tok) {
-                    self.check_shell_path_candidate(tok)?;
+                    self.check_shell_path_candidate(tok, enforce_allowlist)?;
                 }
             }
         }
@@ -665,10 +773,12 @@ impl SafetyChecker {
 
     /// Validate one extracted shell-command path token against
     /// `denied_paths` (same matcher as redirect targets) and, when
-    /// `allowed_paths` is non-empty, against the allow-list. A leading `~`
-    /// is expanded so home-relative tokens see the same absolute path the
-    /// shell would use.
-    fn check_shell_path_candidate(&self, candidate: &str) -> Result<()> {
+    /// `allowed_paths` is non-empty AND `enforce_allowlist` is set, against
+    /// the allow-list. A leading `~` is expanded so home-relative tokens
+    /// see the same absolute path the shell would use. Operands of
+    /// read-only commands pass `enforce_allowlist = false` (reads can't
+    /// destroy; the denied-path check still applies).
+    fn check_shell_path_candidate(&self, candidate: &str, enforce_allowlist: bool) -> Result<()> {
         let expanded = expand_home_token(candidate);
         {
             let forms: &[&str] = if expanded == candidate {
@@ -688,7 +798,7 @@ impl SafetyChecker {
                 }
             }
         }
-        if self.config.allowed_paths.is_empty() {
+        if !enforce_allowlist || self.config.allowed_paths.is_empty() {
             return Ok(());
         }
         let resolved = resolve_redirect_target_lexical(&expanded, &self.working_dir);
@@ -938,8 +1048,23 @@ impl SafetyChecker {
     }
 }
 
-/// Normalize a shell command
+/// Normalize a shell command, with quoted segments restored into the result.
 pub fn normalize_shell_command(cmd: &str) -> String {
+    normalize_shell_command_impl(cmd, true)
+}
+
+/// Normalize a shell command but leave quoted segments as opaque
+/// placeholders. This is the form dangerous-command patterns are matched
+/// against, so quoted prose — commit messages, echoed strings — cannot
+/// trigger them (e.g. `git commit -m "revert the rm -rf / guard"` or
+/// `echo "never run chown -R /"`). Patterns that must inspect quoted
+/// payloads (python -c '…', eval "…") match the restored form from
+/// [`normalize_shell_command`] instead.
+pub(crate) fn normalize_shell_command_masked(cmd: &str) -> String {
+    normalize_shell_command_impl(cmd, false)
+}
+
+fn normalize_shell_command_impl(cmd: &str, restore_quotes: bool) -> String {
     let mut quoted_segments: Vec<String> = Vec::new();
     let mut unquoted = String::with_capacity(cmd.len());
     let bytes = cmd.as_bytes();
@@ -998,10 +1123,13 @@ pub fn normalize_shell_command(cmd: &str) -> String {
     result = result.replace('|', " | ");
     result = result.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    // Restore quoted segments
-    for (idx, segment) in quoted_segments.iter().enumerate() {
-        let placeholder = format!("\x00\x01{}\x00", idx);
-        result = result.replace(&placeholder, segment);
+    // Restore quoted segments (unless the caller wants the masked scaffold
+    // for dangerous-pattern matching — see normalize_shell_command_masked).
+    if restore_quotes {
+        for (idx, segment) in quoted_segments.iter().enumerate() {
+            let placeholder = format!("\x00\x01{}\x00", idx);
+            result = result.replace(&placeholder, segment);
+        }
     }
     result
 }
@@ -1253,6 +1381,33 @@ pub fn shell_tee_write_targets(cmd: &str) -> Vec<String> {
 const FILE_TARGET_VERBS: &[&str] = &[
     "cat", "cp", "mv", "rm", "chmod", "ln", "mkdir", "touch", "head", "tail", "less", "more", "dd",
     "install", "rsync", "scp",
+];
+
+/// Commands whose operands are only ever READ: their absolute-path operands
+/// outside the working dir are exempt from the `allowed_paths` allow-list
+/// (`cat /etc/hosts`, `tail /tmp/build.log`, `ls /usr/local/bin` are
+/// everyday reads). `denied_paths` still applies to them. `find` is NOT in
+/// this list — it is handled separately because `-delete`/`-exec` make it
+/// a write/execute primitive; only find invocations without those flags
+/// get the read-only exemption.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "cat",
+    "head",
+    "tail",
+    "less",
+    "more",
+    "ls",
+    "file",
+    "stat",
+    "wc",
+    "grep",
+    "rg",
+    "diff",
+    "md5",
+    "md5sum",
+    "shasum",
+    "sha1sum",
+    "sha256sum",
 ];
 
 /// Whether a shell token has the shape of an explicit filesystem path:
