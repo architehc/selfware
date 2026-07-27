@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-07-27
+
+### Added
+- Apply isolation: shadow-worktree staging, bounded diff, one-use merge token, compile gate, two-step UI
+- Multi-language context tiers: Python/JS/TS/Go are Code-layer nodes (envelope ships them verbatim; Lite measured==shipped)
+- Embedded UI assets (index/app/style/editor + d3/lucide) — the released binary serves a working Evolve UI with no source checkout
+- Evidence trust gate, review protocol (typed 422s, one repair, trust_state), custom component checklist, symbol-level retrieval
+
+### Fixed (review rounds 6-8)
+- Credential hygiene: MCP resources AND tools redact secrets; cargo/git/workflow spawns sanitize env; `[models.*]` profile endpoints gated; SELFWARE_CONFIG only for trusted configs
+- Honest status: merge recomputes digest (bytes bound to preview); MCP isError never success-cached; failed workflows exit non-zero; full_verify non-vacuous; macOS stubs error honestly
+- Data integrity: `/undo` restores tip checkpoint; custom selection survives refresh; panic payloads hidden; `tool_parser` + parse + output-cap char-boundary fixes
+- Apply self-blocks removed (`.selfware/` + `.worktrees/` exempt); graph excludes `.worktrees/`; dead-code excludes test fns; readiness falls back to plain cargo test; graceful shutdown exits 0
+- Safety pattern false-positive tuning (rm globs, eval substitutions, checksum pipes, python -c, quoted strings, env prefixes, read-only absolute reads, chown -R, mkfs)
+- Selected-document review excludes inline tests in Full mode; envelope Custom ships hand-picked docs; trust gate markup classification (docs report-only)
+- no-default-features build green; MSRV 1.95; coverage floor 60%+ratchet; CI system-tests clippy
+
 ## [0.6.4] - 2026-07-26
 
 ### Added
@@ -205,7 +222,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.5...HEAD
+[0.6.5]: https://github.com/architehc/selfware/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/architehc/selfware/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/architehc/selfware/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/architehc/selfware/compare/v0.6.1...v0.6.2
