@@ -681,6 +681,19 @@ impl McpServer {
                     None => serde_json::to_string_pretty(&result).unwrap_or_default(),
                 };
 
+                // Content-serving tools return raw file/diff text — the same
+                // leak resources/read had before round 6: a client could
+                // `file_read` selfware.toml and receive the raw api_key.
+                // Redact secrets before the content leaves the process.
+                // Structural tools (lsp_*, glob_find, directory_tree) return
+                // locations/paths, not file content, and stay untouched.
+                const CONTENT_SERVING_TOOLS: &[&str] = &["file_read", "grep_search", "git_diff"];
+                let text = if CONTENT_SERVING_TOOLS.contains(&tool_name) {
+                    crate::safety::redact::redact_secrets(&text).into_owned()
+                } else {
+                    text
+                };
+
                 let response = serde_json::json!({
                     "content": [
                         {

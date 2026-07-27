@@ -461,6 +461,37 @@ fn read_head_oid(project_root: &std::path::Path) -> std::result::Result<String, 
     Ok(oid)
 }
 
+/// Decide the `SELFWARE_CONFIG` env for the shadow child.
+///
+/// The shadow worktree contains only TRACKED files — a gitignored repo
+/// selfware.toml (holding endpoint/model/api_key) is absent and the child
+/// would 401 — so a TRUSTED project config is handed down via the override
+/// env. An UNTRUSTED one must not be: an env-selected config is exempt from
+/// the loader's untrusted-endpoint gate, so passing it down would launder
+/// the parent's trust decision into the child and let a checkout-local
+/// attacker endpoint receive the run's whole conversation.
+///
+/// Returns `(Some(path), None)` to pass the config down, `(None, Some(line))`
+/// when an untrusted config is deliberately withheld (the line goes into the
+/// run's output), and `(None, None)` when the project has no config at all.
+fn shadow_config_env(project_root: &Path) -> (Option<PathBuf>, Option<String>) {
+    let project_config = project_root.join("selfware.toml");
+    if !project_config.is_file() {
+        return (None, None);
+    }
+    if crate::config::trust::is_config_trusted(&project_config) {
+        (Some(project_config), None)
+    } else {
+        (
+            None,
+            Some(format!(
+                "untrusted project config: child runs without it ({})",
+                project_config.display()
+            )),
+        )
+    }
+}
+
 /// Register a run that never got off the ground as Failed (honest status —
 /// AGENTS.md §3), so callers can inspect it via the status endpoint.
 async fn register_failed(registry: &ApplyRegistry, id: &str, prompt: &str) {
@@ -503,10 +534,29 @@ pub async fn spawn(
     // The shadow worktree contains only TRACKED files — a gitignored repo
     // selfware.toml (holding endpoint/model/api_key) is absent and the child
     // would 401. Point it at the project's real config via the override env
-    // (explicitly exempt from the untrusted-endpoint gate).
-    let project_config = project_root.join("selfware.toml");
-    if project_config.is_file() {
-        command.env("SELFWARE_CONFIG", &project_config);
+    // — but only when that config is TRUSTED: the env override skips the
+    // loader's untrusted-endpoint gate, so an untrusted checkout config must
+    // not be laundered into the child (it then loads the shadow's own
+    // — absent — config and fails honestly).
+    let (config_env, config_withheld) = shadow_config_env(&project_root);
+    match &config_env {
+        Some(path) => {
+            command.env("SELFWARE_CONFIG", path);
+        }
+        None => {
+            if config_withheld.is_some() {
+                // Make sure a parent-process SELFWARE_CONFIG can't smuggle
+                // the same untrusted file into the child either.
+                command.env_remove("SELFWARE_CONFIG");
+            }
+        }
+    }
+    if let Some(line) = config_withheld {
+        tracing::warn!("{line}");
+        if let Some(run) = registry.lock().await.get_mut(&id) {
+            run.output.push_str(&line);
+            run.output.push('\n');
+        }
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -798,4 +848,76 @@ fn merge_shadow(
         .map_err(git_err)?;
 
     Ok(new_oid.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Set HOME to `dir` for the duration of the returned guard (so the real
+    /// ~/.selfware/trusted_repos can't interfere), restoring on drop. Callers
+    /// hold the shared env mutex via `clear_env` to stay serialized.
+    struct HomeGuard(Option<std::ffi::OsString>);
+    impl HomeGuard {
+        fn set(dir: &Path) -> Self {
+            let prev = std::env::var_os("HOME");
+            std::env::set_var("HOME", dir);
+            Self(prev)
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn untrusted_project_config_is_not_handed_to_the_child() {
+        let _env = crate::config::test_helpers::clear_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("selfware.toml"),
+            "endpoint = \"https://attacker.example.com/v1\"\n",
+        )
+        .unwrap();
+
+        let (env, withheld) = shadow_config_env(project.path());
+        assert!(
+            env.is_none(),
+            "untrusted project config must not set SELFWARE_CONFIG"
+        );
+        let line = withheld.expect("a warning line must be produced");
+        assert!(
+            line.contains("untrusted project config"),
+            "warning names the cause: {line}"
+        );
+    }
+
+    #[test]
+    fn trusted_project_config_is_handed_to_the_child() {
+        let _env = crate::config::test_helpers::clear_env();
+        let home = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(home.path());
+        let project = tempfile::tempdir().unwrap();
+        let config_path = project.path().join("selfware.toml");
+        std::fs::write(&config_path, "endpoint = \"http://localhost:1234/v1\"\n").unwrap();
+        crate::config::trust::add_trusted_config(&config_path).unwrap();
+
+        let (env, withheld) = shadow_config_env(project.path());
+        assert_eq!(env.as_deref(), Some(config_path.as_path()));
+        assert!(withheld.is_none(), "trusted config needs no warning");
+    }
+
+    #[test]
+    fn missing_project_config_is_a_noop() {
+        let project = tempfile::tempdir().unwrap();
+        let (env, withheld) = shadow_config_env(project.path());
+        assert!(env.is_none());
+        assert!(withheld.is_none());
+    }
 }

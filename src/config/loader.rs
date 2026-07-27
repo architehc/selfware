@@ -184,8 +184,8 @@ impl Config {
     fn restrict_untrusted_project_config(
         &mut self,
         sources: &ConfigSources,
-    ) -> Option<(std::path::PathBuf, Vec<&'static str>)> {
-        let mut reset: Vec<&'static str> = Vec::new();
+    ) -> Option<(std::path::PathBuf, Vec<String>)> {
+        let mut reset: Vec<String> = Vec::new();
         let mut origin: Option<std::path::PathBuf> = None;
 
         // Arbitrary tool auto-approval (`tool_pattern = "*"` → silent approval).
@@ -193,7 +193,7 @@ impl Config {
             if !self.safety.permissions.is_empty() {
                 self.safety.permissions = Vec::new();
                 origin.get_or_insert_with(|| p.to_path_buf());
-                reset.push("safety.permissions");
+                reset.push("safety.permissions".to_string());
             }
         }
         // Shell hooks (`sh -c <command>` on tool events).
@@ -201,7 +201,7 @@ impl Config {
             if !self.hooks.is_empty() {
                 self.hooks = Vec::new();
                 origin.get_or_insert_with(|| p.to_path_buf());
-                reset.push("hooks");
+                reset.push("hooks".to_string());
             }
         }
         // Arbitrary MCP subprocess commands.
@@ -209,7 +209,7 @@ impl Config {
             if !self.mcp.servers.is_empty() {
                 self.mcp.servers = Vec::new();
                 origin.get_or_insert_with(|| p.to_path_buf());
-                reset.push("mcp.servers");
+                reset.push("mcp.servers".to_string());
             }
         }
         // Post-edit command executed as a subprocess after every edit.
@@ -217,14 +217,14 @@ impl Config {
             if self.agent.post_edit_test_command.is_some() {
                 self.agent.post_edit_test_command = None;
                 origin.get_or_insert_with(|| p.to_path_buf());
-                reset.push("agent.post_edit_test_command");
+                reset.push("agent.post_edit_test_command".to_string());
             }
         }
         // Forced yolo (config can turn it on / allow destructive shell).
         if let Some(p) = untrusted_checkout_origin(sources, "yolo") {
             self.yolo = super::types::YoloFileConfig::default();
             origin.get_or_insert_with(|| p.to_path_buf());
-            reset.push("yolo");
+            reset.push("yolo".to_string());
         }
         // Weakening the safety defaults (confirmation list / path guardrails):
         // reset to the strong built-in defaults rather than the project's.
@@ -232,17 +232,17 @@ impl Config {
         if let Some(p) = untrusted_checkout_origin(sources, "safety.require_confirmation") {
             self.safety.require_confirmation = safe.require_confirmation.clone();
             origin.get_or_insert_with(|| p.to_path_buf());
-            reset.push("safety.require_confirmation");
+            reset.push("safety.require_confirmation".to_string());
         }
         if let Some(p) = untrusted_checkout_origin(sources, "safety.denied_paths") {
             self.safety.denied_paths = safe.denied_paths.clone();
             origin.get_or_insert_with(|| p.to_path_buf());
-            reset.push("safety.denied_paths");
+            reset.push("safety.denied_paths".to_string());
         }
         if let Some(p) = untrusted_checkout_origin(sources, "safety.allowed_paths") {
             self.safety.allowed_paths = safe.allowed_paths.clone();
             origin.get_or_insert_with(|| p.to_path_buf());
-            reset.push("safety.allowed_paths");
+            reset.push("safety.allowed_paths".to_string());
         }
         // Push-to-protected-branch protection (enforced by the safety
         // checker's git_push guards): an untrusted repo could ship
@@ -251,7 +251,24 @@ impl Config {
         if let Some(p) = untrusted_checkout_origin(sources, "safety.protected_branches") {
             self.safety.protected_branches = safe.protected_branches.clone();
             origin.get_or_insert_with(|| p.to_path_buf());
-            reset.push("safety.protected_branches");
+            reset.push("safety.protected_branches".to_string());
+        }
+        // Profile endpoints (`[models.*] endpoint`): profile-routed requests
+        // (`chat_with_profile` via `resolve_model`) use the profile's
+        // endpoint, so a checkout-supplied one would bypass every gate that
+        // only inspects the top-level key. Reset any profile endpoint that
+        // ORIGINATED from the untrusted file to the top-level endpoint (which
+        // is itself gated above).
+        let default_endpoint = self.endpoint.clone();
+        for (name, profile) in self.models.iter_mut() {
+            let key = format!("models.{name}.endpoint");
+            if let Some(p) = untrusted_checkout_origin(sources, &key) {
+                if profile.endpoint != default_endpoint {
+                    profile.endpoint = default_endpoint.clone();
+                    origin.get_or_insert_with(|| p.to_path_buf());
+                    reset.push(key);
+                }
+            }
         }
 
         origin.map(|p| (p, reset))
@@ -616,6 +633,32 @@ impl Config {
                         config.endpoint,
                         canon.display()
                     );
+                }
+            }
+        }
+        // Profile endpoints (`[models.*] endpoint`) route profile traffic
+        // (`chat_with_profile` via `resolve_model`) to their OWN endpoint, so
+        // they need the same gate — otherwise an untrusted checkout ships a
+        // remote `[models.default] endpoint` and the top-level check above
+        // never sees it. Localhost profile endpoints stay allowed.
+        if !config_path_from_env {
+            for (name, profile) in &config.models {
+                if is_local_endpoint(&profile.endpoint) {
+                    continue;
+                }
+                let key = format!("models.{name}.endpoint");
+                if let Some(ConfigSource::ConfigFile(p)) = sources.get(&key) {
+                    if config_is_checkout_local(p) && !super::trust::is_config_trusted(p) {
+                        let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+                        bail!(
+                            "Refusing to load remote endpoint '{}' selected by the project's \
+                             selfware.toml: this repository is not trusted, and the endpoint \
+                             would receive the full conversation. If you trust it, run \
+                             `selfware trust` or add this path to ~/.selfware/trusted_repos:\n  {}",
+                            profile.endpoint,
+                            canon.display()
+                        );
+                    }
                 }
             }
         }

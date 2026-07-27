@@ -1184,3 +1184,93 @@ async fn test_mcp_destructive_tools_allowed_parsing() {
     assert!(!mcp_destructive_tools_allowed());
     set_destructive_opt_in(None);
 }
+
+/// tools/call must apply the same redaction resources/read got in round 6:
+/// content-serving tools return raw file text, so `file_read selfware.toml`
+/// used to hand any MCP client the raw api_key.
+#[tokio::test]
+async fn test_tools_call_file_read_redacts_secrets() {
+    // Hermetic: code-default safety config (relative paths under cwd allowed).
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let dir =
+        std::path::Path::new("target/tmp").join(format!("mcp-redact-read-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("selfware.toml");
+    std::fs::write(
+        &file,
+        "api_key = \"sk-or-v1-0123456789abcdef0123456789abcdef\"\nendpoint = \"http://localhost:1234/v1\"\n",
+    )
+    .unwrap();
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(40)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "file_read",
+            "arguments": {"path": file.to_string_lossy()}
+        })),
+    };
+
+    let response = server.handle_request(&request).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(response.error.is_none());
+    let result = response.result.unwrap();
+    assert_eq!(result.get("isError").and_then(|v| v.as_bool()), Some(false));
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("sk-or-v1-0123456789abcdef"),
+        "raw api_key must not leak via tools/call file_read: {text}"
+    );
+    assert!(
+        text.contains("[REDACTED]"),
+        "expected a redaction marker in the file_read output: {text}"
+    );
+    assert!(
+        text.contains("http://localhost:1234/v1"),
+        "non-secret content must pass through: {text}"
+    );
+}
+
+/// grep_search returns matching lines WITH context — raw file content — so
+/// it goes through the same redaction.
+#[tokio::test]
+async fn test_tools_call_grep_search_redacts_secrets() {
+    let server = McpServer::with_explicit_safety_config(crate::config::SafetyConfig::default());
+    initialize_server(&server).await;
+
+    let dir =
+        std::path::Path::new("target/tmp").join(format!("mcp-redact-grep-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("notes.txt"),
+        "nothing here\nexport GITHUB_TOKEN=ghp_0123456789abcdefghijklmnopqrstuvwx\nmore text\n",
+    )
+    .unwrap();
+
+    let request = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(Value::from(41)),
+        method: "tools/call".to_string(),
+        params: Some(serde_json::json!({
+            "name": "grep_search",
+            "arguments": {"pattern": "GITHUB_TOKEN", "path": dir.to_string_lossy()}
+        })),
+    };
+
+    let response = server.handle_request(&request).await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(response.error.is_none());
+    let result = response.result.unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("ghp_0123456789abcdefghijklmnopqrstuvwx"),
+        "raw token must not leak via tools/call grep_search: {text}"
+    );
+    assert!(
+        text.contains("[REDACTED]"),
+        "expected a redaction marker in the grep_search output: {text}"
+    );
+}

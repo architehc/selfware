@@ -8,8 +8,11 @@
 //! cards), so measured tier size and shipped size converge — with one
 //! deliberate exception: Lite/Custom project `.rs` files to skeletons but
 //! ship non-Rust sources VERBATIM, because the alternative (dropping them)
-//! silently loses content the caller explicitly included. The measurer's
-//! per-node fallback fraction stays a budget estimate only.
+//! silently loses content the caller explicitly included. Custom (the user's
+//! hand-picked selection) additionally admits Auxiliary-layer nodes — the
+//! production shape of every non-`.rs` file — so a picked README.md actually
+//! ships; Lite stays Code-only (the signature tier). The measurer's per-node
+//! fallback fraction stays a budget estimate only.
 
 use sha2::{Digest, Sha256};
 
@@ -85,7 +88,19 @@ pub fn build_envelope_with_root(
         let Some(node) = graph.nodes.iter().find(|n| &n.id == id) else {
             continue;
         };
-        if node.layer != NodeLayer::Code && !matches!(mode, ContextMode::FullExtended) {
+        let layer_allowed = match mode {
+            // Custom is the user's hand-picked selection — ship what they
+            // picked. Production nodes for non-.rs files are Auxiliary
+            // (NodeLayer::Code only exists for rust_source), so a Code-only
+            // filter dropped a hand-picked README.md before the verbatim
+            // arm below ever ran.
+            ContextMode::Custom => matches!(node.layer, NodeLayer::Code | NodeLayer::Auxiliary),
+            // FullExtended ships every layer.
+            ContextMode::FullExtended => true,
+            // Everything else (incl. Lite, the signature tier) is Code-only.
+            _ => node.layer == NodeLayer::Code,
+        };
+        if !layer_allowed {
             continue;
         }
         let Some(rel) = node.path.as_deref() else {

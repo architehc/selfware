@@ -222,17 +222,20 @@ fn unknown_and_unreadable_nodes_are_skipped() {
     assert_eq!(env.documents.len(), 1, "unknown ids produce no document");
 }
 
-/// Semantics change (was: Lite/Custom silently SKIPPED non-.rs nodes, so a
-/// .md/.toml in a custom selection shipped nothing at all). Now Lite/Custom
-/// project .rs files to skeletons but ship non-Rust sources VERBATIM — the
-/// envelope must never lose explicitly included content; the TierMeasurer's
-/// signature fraction for such nodes stays a budget estimate only.
+/// Custom is the user's hand-picked selection: production nodes for non-.rs
+/// files are NodeLayer::Auxiliary (NodeLayer::Code only exists for
+/// rust_source), so the Code-only layer filter used to drop a picked
+/// README.md before the verbatim arm ever ran — the selection shipped
+/// nothing. Custom now ships Auxiliary picks VERBATIM; Lite stays Code-only
+/// (the signature tier). The TierMeasurer's signature fraction for such
+/// nodes stays a budget estimate only.
 #[test]
-fn lite_and_custom_ship_non_rust_files_verbatim() {
+fn custom_ships_handpicked_auxiliary_files_verbatim_lite_stays_code_only() {
     const README_MD: &str = "# Project\n\nSome prose the model must see.\n";
     let mut node = Node::code("crate::foo", "src/foo.rs");
     node.tokens = selfware::token_count::estimate_content_tokens(FOO_RS);
-    let mut md_node = Node::code("crate::readme", "README.md");
+    // Production shape: non-source files are Auxiliary, classified markup.
+    let mut md_node = Node::auxiliary("crate::readme", "README.md", "markup");
     md_node.tokens = selfware::token_count::estimate_content_tokens(README_MD);
     let graph = Graph {
         nodes: vec![node, md_node],
@@ -243,31 +246,53 @@ fn lite_and_custom_ship_non_rust_files_verbatim() {
     sources.insert("README.md".to_string(), README_MD.to_string());
     let reader = move |rel: &str| sources.get(rel).cloned();
 
-    for mode in [ContextMode::Lite, ContextMode::Custom] {
-        let env = build_envelope(
-            &graph,
-            &mode,
-            &["crate::foo".to_string(), "crate::readme".to_string()],
-            "rev1",
-            &reader,
-        );
-        let md_doc = env
-            .documents
-            .iter()
-            .find(|d| d.path == "README.md")
-            .unwrap_or_else(|| panic!("{mode:?} must not drop non-.rs files"));
-        assert_eq!(
-            md_doc.content, README_MD,
-            "{mode:?} ships non-Rust content verbatim"
-        );
-        let rs_doc = env
-            .documents
-            .iter()
-            .find(|d| d.path == "src/foo.rs")
-            .expect(".rs file still present");
-        assert!(
-            !rs_doc.content.contains("x + 1"),
-            "{mode:?} still projects .rs files to skeletons"
-        );
-    }
+    // Custom ships what the user picked: the .md verbatim, the .rs skeleton.
+    let env = build_envelope(
+        &graph,
+        &ContextMode::Custom,
+        &["crate::foo".to_string(), "crate::readme".to_string()],
+        "rev1",
+        &reader,
+    );
+    let md_doc = env
+        .documents
+        .iter()
+        .find(|d| d.path == "README.md")
+        .expect("Custom must not drop a hand-picked Auxiliary node");
+    assert_eq!(
+        md_doc.content, README_MD,
+        "Custom ships non-Rust content verbatim"
+    );
+    let rs_doc = env
+        .documents
+        .iter()
+        .find(|d| d.path == "src/foo.rs")
+        .expect(".rs file still present");
+    assert!(
+        !rs_doc.content.contains("x + 1"),
+        "Custom still projects .rs files to skeletons"
+    );
+
+    // Lite stays the Code-only signature tier: the Auxiliary .md is out of
+    // scope there, the .rs skeleton ships.
+    let env = build_envelope(
+        &graph,
+        &ContextMode::Lite,
+        &["crate::foo".to_string(), "crate::readme".to_string()],
+        "rev1",
+        &reader,
+    );
+    assert!(
+        env.documents.iter().all(|d| d.path != "README.md"),
+        "Lite is Code-only — Auxiliary nodes stay dropped"
+    );
+    let rs_doc = env
+        .documents
+        .iter()
+        .find(|d| d.path == "src/foo.rs")
+        .expect(".rs file still present in Lite");
+    assert!(
+        !rs_doc.content.contains("x + 1"),
+        "Lite projects .rs files to skeletons"
+    );
 }

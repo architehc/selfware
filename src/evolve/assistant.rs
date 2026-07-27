@@ -204,11 +204,20 @@ impl std::fmt::Display for ReviewProtocolError {
 impl std::error::Error for ReviewProtocolError {}
 
 /// Classify an evidence path for trust scanning: first-party Rust is trusted
-/// code (rules downgrade to informational); everything else is data — it
+/// code (rules downgrade to informational); documentation markup (.md /
+/// .markdown / .rst / .txt) is prose that legitimately instructs the reader
+/// ("You MUST call file_edit" is ordinary docs language, matching the graph
+/// classifier's "markup" class in graph.rs); everything else is data — it
 /// should never carry instructions, so injection patterns stay hot.
 fn trust_classification(path: &str) -> &'static str {
     if path.ends_with(".rs") {
         "rust_source"
+    } else if path.ends_with(".md")
+        || path.ends_with(".markdown")
+        || path.ends_with(".rst")
+        || path.ends_with(".txt")
+    {
+        "markup"
     } else {
         "data"
     }
@@ -218,7 +227,10 @@ fn trust_classification(path: &str) -> &'static str {
 /// whose trust level is not `Trusted` block the send (the seed invariant:
 /// untrusted content never reaches the model unflagged). Trusted first-party
 /// code can legitimately contain these patterns — those are reported, not
-/// blocked.
+/// blocked. Documentation markup (.md/.markdown/.rst/.txt) is also
+/// report-only: docs legitimately instruct the reader, so instruction-shaped
+/// prose there is not an injection signal. `hidden_unicode` findings block
+/// in every classification.
 pub fn gate_evidence_trust(
     evidence: &[GroundingEvidence],
 ) -> Result<TrustGateSummary, ReviewProtocolError> {
@@ -244,6 +256,13 @@ pub fn gate_evidence_trust(
             super::context_trust::SourceKind::Workspace,
             classification,
         ) == TrustLevel::Trusted;
+        // Documentation (markup) legitimately instructs the reader — a
+        // sentence like "You MUST call file_edit" is ordinary docs prose,
+        // not an injection attempt — so markup-classified sources are
+        // report-only (findings are surfaced in the summary, never blocked).
+        // hidden_unicode is the exception: it is never legitimate in ANY
+        // source and blocks everywhere.
+        let report_only = trusted || classification == "markup";
         // Findings are excerpt-relative (the excerpt starts at
         // chunk.start_line): offset back to real file lines.
         let line_offset = chunk.start_line.saturating_sub(1);
@@ -256,7 +275,7 @@ pub fn gate_evidence_trust(
                         // hidden_unicode is never legitimate in source, even
                         // trusted first-party code (e.g. reviewing a hostile
                         // PR branch): it blocks regardless of provenance.
-                        && (!trusted || f.kind == "hidden_unicode")
+                        && (!report_only || f.kind == "hidden_unicode")
                 })
                 .map(|f| TrustGateFinding {
                     path: chunk.path.clone(),
