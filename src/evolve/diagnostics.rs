@@ -97,7 +97,18 @@ impl DiagnosticsEngine {
 
     pub async fn run(&self, kind: AnalysisKind) -> Result<AnalysisReport> {
         let started = Instant::now();
-        let args = kind.args();
+        // `EvolveTests` hardcodes the selfware-specific `--test evolve` target;
+        // on any other project that target doesn't exist and the gate fails
+        // unconditionally. Fall back to the project's default test suite.
+        let fallback: &[&str] = &["test", "--message-format=json", "--", "--nocapture"];
+        let args = if matches!(kind, AnalysisKind::EvolveTests)
+            && !self.project_root.join("tests/evolve.rs").exists()
+            && !self.project_root.join("tests/evolve/mod.rs").exists()
+        {
+            fallback
+        } else {
+            kind.args()
+        };
         let output = Command::new("cargo")
             .args(args)
             .current_dir(&self.project_root)

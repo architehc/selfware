@@ -732,13 +732,14 @@ async fn apply_action_handler(
 ) -> ApiResult<Json<Value>> {
     require_session(&headers, &server)?;
     let status = server.git.status().map_err(internal_error)?;
-    // `.worktrees/` holds this feature's own staged shadows — on projects that
-    // don't gitignore it, a staged run would otherwise make the tree look
-    // "dirty" and block every subsequent apply with a misleading message.
+    // `.worktrees/` holds this feature's own staged shadows, and `.selfware/`
+    // is the server's own state directory (evolve-graph.yaml is written at
+    // startup) — neither is user dirt. Without the .selfware exemption, Apply
+    // blocks itself on a clean project with a misleading "uncommitted" error.
     let blocking: Vec<_> = status
         .files
         .iter()
-        .filter(|f| !f.path.starts_with(".worktrees/"))
+        .filter(|f| !f.path.starts_with(".worktrees/") && !f.path.starts_with(".selfware/"))
         .collect();
     if !blocking.is_empty() {
         return Err(bad_request(format!(
@@ -2909,10 +2910,11 @@ where
 }
 
 /// The embedded asset map: path → (bytes, mime), compiled into the binary via
-/// `include_str!`. `vendor/` (d3/lucide/monaco) is deliberately NOT embedded:
-/// only the editor needs it and editor mode requires a source checkout (where
-/// the dev override serves vendor/ from disk); embedded-mode requests for it
-/// get a 404.
+/// `include_str!`/`include_bytes!`. d3 and lucide are REQUIRED by index.html
+/// for the core UI (graph + icons), so they're embedded; vendor/monaco (12 MB,
+/// 114 files, editor-only) is NOT — editor mode requires a source checkout
+/// (where the dev override serves it from disk); embedded-mode requests for
+/// other vendor paths get a 404 with an honest note.
 fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
     Some(match path {
         "/" | "/index.html" => (
@@ -2931,6 +2933,14 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_str!("web/editor.html").as_bytes(),
             "text/html; charset=utf-8",
         ),
+        "/vendor/d3/d3.min.js" => (
+            include_bytes!("web/vendor/d3/d3.min.js").as_slice(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/vendor/lucide/lucide.min.js" => (
+            include_bytes!("web/vendor/lucide/lucide.min.js").as_slice(),
+            "text/javascript; charset=utf-8",
+        ),
         _ => return None,
     })
 }
@@ -2941,7 +2951,7 @@ async fn embedded_web(uri: axum::http::Uri) -> Response {
         Some((body, mime)) => ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            "not found (vendor/ assets are served only from a source checkout)",
+            "not found (monaco editor assets are served only from a source checkout)",
         )
             .into_response(),
     }

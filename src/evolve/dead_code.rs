@@ -93,6 +93,7 @@ struct Def {
     line: usize,
     is_pub: bool,
     cfg_gated: bool,
+    is_test: bool,
 }
 
 pub struct DeadCodeAnalyzer {
@@ -150,7 +151,7 @@ impl DeadCodeAnalyzer {
             .iter()
             .filter(|d| {
                 let name = d.name.as_str();
-                if DISPATCHED.contains(&name) || name.starts_with("__") {
+                if DISPATCHED.contains(&name) || name.starts_with("__") || d.is_test {
                     return false;
                 }
                 // Occurrences beyond the definition signatures themselves.
@@ -181,22 +182,71 @@ impl DeadCodeAnalyzer {
 
 fn collect_defs(text: &str, rel_path: &str, out: &mut Vec<Def>) {
     let lines: Vec<&str> = text.lines().collect();
+    // Track `#[cfg(test)] mod … {` blocks (brace counting) so helpers and
+    // #[test] fns inside test modules are never dead-code candidates.
+    let mut test_ranges: Vec<(usize, usize)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        if t.starts_with("#[cfg(test)]") {
+            // Find the opening brace of the following mod/impl block.
+            let mut depth = 0i32;
+            let mut started = false;
+            let mut end = lines.len();
+            for (j, l) in lines.iter().enumerate().skip(i) {
+                for ch in l.chars() {
+                    match ch {
+                        '{' => {
+                            depth += 1;
+                            started = true;
+                        }
+                        '}' => {
+                            depth -= 1;
+                            if started && depth == 0 {
+                                end = j + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if started && depth == 0 {
+                    break;
+                }
+            }
+            if started {
+                test_ranges.push((i, end));
+            }
+        }
+    }
+    let in_test_range = |line_no: usize| {
+        test_ranges
+            .iter()
+            .any(|&(s, e)| line_no >= s && line_no < e)
+    };
+
     for (i, line) in lines.iter().enumerate() {
         let Some(c) = def_re().captures(line) else {
             continue;
         };
         // A preceding attribute line containing `cfg(` marks platform/feature gating.
-        let cfg_gated = i > 0 && {
-            let prev = lines[i - 1].trim_start();
-            prev.starts_with("#[cfg(") || prev.starts_with("#[cfg_attr(")
-        };
+        let prev = if i > 0 { lines[i - 1].trim_start() } else { "" };
+        let cfg_gated = prev.starts_with("#[cfg(") || prev.starts_with("#[cfg_attr(");
+        // Test code is exercised by the harness, not by call sites — the
+        // occurrence heuristic can never see it, so it must never be a
+        // dead-code candidate (review round 8: an inline #[test] fn was
+        // confidently flagged with deletion enabled).
+        let is_test = prev.starts_with("#[test")
+            || prev.starts_with("#[tokio::test")
+            || prev.starts_with("#[cfg(test")
+            || in_test_range(i);
         out.push(Def {
             name: c["name"].to_string(),
             kind: c["kind"].to_string(),
             path: rel_path.to_string(),
             line: i + 1,
             is_pub: c.name("vis").is_some(),
-            cfg_gated,
+            cfg_gated: cfg_gated || is_test,
+            is_test,
         });
     }
 }

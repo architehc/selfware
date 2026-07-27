@@ -74,10 +74,23 @@ async fn style_and_editor_are_served_from_embedded_assets() {
 }
 
 #[tokio::test]
-async fn vendor_and_unknown_paths_404_in_embedded_mode() {
-    // vendor/ (d3/lucide/monaco) is only needed by the editor, which requires
-    // a source checkout — embedded mode deliberately does not ship it.
+async fn vendor_paths_in_embedded_mode() {
+    // d3/lucide are REQUIRED by index.html for the core UI — embedded.
     let (status, _, body) = get(embedded_router(), "/vendor/d3/d3.min.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.as_bytes(),
+        include_bytes!("../../../src/evolve/web/vendor/d3/d3.min.js")
+    );
+    let (status, _, body) = get(embedded_router(), "/vendor/lucide/lucide.min.js").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body.as_bytes(),
+        include_bytes!("../../../src/evolve/web/vendor/lucide/lucide.min.js")
+    );
+
+    // monaco (editor-only) is NOT embedded — it requires a source checkout.
+    let (status, _, body) = get(embedded_router(), "/vendor/monaco/min/vs/loader.js").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(body.contains("source checkout"), "{body}");
 
