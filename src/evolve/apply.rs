@@ -373,15 +373,23 @@ pub async fn spawn(
     let staged = stage_run(prompt.clone(), project_root.clone(), registry.clone()).await?;
     let id = staged.id;
 
-    let mut child = match Command::new(exe)
+    let mut command = Command::new(exe);
+    command
         .arg("run")
         .arg(&prompt)
         .arg("--yolo")
         .current_dir(&staged.shadow_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    // The shadow worktree contains only TRACKED files — a gitignored repo
+    // selfware.toml (holding endpoint/model/api_key) is absent and the child
+    // would 401. Point it at the project's real config via the override env
+    // (explicitly exempt from the untrusted-endpoint gate).
+    let project_config = project_root.join("selfware.toml");
+    if project_config.is_file() {
+        command.env("SELFWARE_CONFIG", &project_config);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             let _ = cleanup_worktree(&project_root, &staged.shadow_path);
@@ -557,6 +565,26 @@ pub async fn commit_staged(
         return Err(CommitError::BaseMoved {
             base: base.clone(),
             head,
+        });
+    }
+
+    // Cryptographic binding: the shadow worktree is MUTABLE — recompute the
+    // digest now and require it to still match the reviewed preview. Without
+    // this, bytes could change between staging and merge (review round 6 #1).
+    let recomputed = verify_staged_diff(shadow, base)
+        .map_err(|e| CommitError::Git(format!("failed to re-verify staged diff: {e}")))?;
+    let recomputed_digest = match &recomputed {
+        Ok(staged) => staged.digest.clone(),
+        Err(rejection) => {
+            return Err(CommitError::Git(format!(
+                "staged diff no longer verifies: {rejection}"
+            )))
+        }
+    };
+    if recomputed_digest != diff.digest {
+        return Err(CommitError::BaseMoved {
+            base: format!("staged diff {}", diff.digest),
+            head: format!("shadow now {recomputed_digest}"),
         });
     }
 

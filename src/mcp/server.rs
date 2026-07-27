@@ -967,6 +967,11 @@ impl McpServer {
                     "text/plain"
                 };
 
+                // Config files can hold credentials (selfware.toml api_key,
+                // ~/.aws/credentials-style blocks): redact before the content
+                // leaves the process (verified leak, review round 6 #4).
+                let content = crate::safety::redact::redact_secrets(&content).into_owned();
+
                 (
                     Some(serde_json::json!({
                         "contents": [{

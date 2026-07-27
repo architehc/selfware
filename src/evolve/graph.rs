@@ -267,6 +267,7 @@ fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
         name.to_str().unwrap_or_default(),
         ".git"
             | ".selfware"
+            | ".worktrees"
             | "target"
             | "node_modules"
             | "vendor"

@@ -1588,7 +1588,12 @@ impl WorkflowExecutor {
                 );
 
                 let (shell, flag) = crate::tools::shell_exec::default_shell();
-                let shell_future = Command::new(shell)
+                let mut shell_cmd = Command::new(shell);
+                // Workflow shell steps must not inherit the agent process's
+                // credentials (SELFWARE_API_KEY, GITHUB_TOKEN, …) — scripts
+                // can spawn arbitrary children (review round 6 #5).
+                crate::safety::process_env::sanitize_command_env(&mut shell_cmd);
+                let shell_future = shell_cmd
                     .arg(flag)
                     .arg(&resolved_cmd)
                     .current_dir(&dir)
