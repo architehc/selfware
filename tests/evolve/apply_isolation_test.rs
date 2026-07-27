@@ -51,6 +51,33 @@ fn committed_repository() -> (tempfile::TempDir, String) {
     (project, head)
 }
 
+/// Temp repo holding a minimal dependency-free Cargo package (so the compile
+/// gate runs offline and fast); returns (dir, HEAD oid).
+fn cargo_repository() -> (tempfile::TempDir, String) {
+    let (project, _) = committed_repository();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("Cargo.toml"),
+        "[package]\nname = \"apply-gate-test\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.path().join("src/lib.rs"),
+        "pub fn answer() -> u32 { 42 }\n",
+    )
+    .unwrap();
+    let repo = Repository::open(project.path()).unwrap();
+    commit_paths(&repo, &["Cargo.toml", "src/lib.rs"], "add cargo package");
+    let head = repo
+        .head()
+        .unwrap()
+        .peel_to_commit()
+        .unwrap()
+        .id()
+        .to_string();
+    (project, head)
+}
+
 #[tokio::test]
 async fn staged_run_writes_isolated_from_live_checkout() {
     let (project, head) = committed_repository();
@@ -412,4 +439,85 @@ async fn commit_after_live_head_moved_is_base_moved_conflict() {
         .await
         .expect("a base_moved conflict must not consume the run");
     assert_eq!(run.status, ApplyStatus::Staged);
+}
+
+// --- Task 4: authoritative compile gate ------------------------------------
+//
+// A run whose agent exited 0 is only Staged after `cargo check` passes in the
+// shadow worktree. These tests drive `finalize_run` (the post-exit pipeline)
+// directly; spawning the agent subprocess is not test-viable.
+
+/// A shadow whose diff does not compile is Rejected with `compile_failed` and
+/// a capped stderr excerpt — never Staged.
+#[tokio::test]
+async fn compile_error_in_shadow_is_rejected_compile_failed() {
+    let (project, _head) = cargo_repository();
+    let registry = apply::new_registry();
+    let staged = apply::stage_run(
+        "break the build".to_string(),
+        project.path().to_path_buf(),
+        registry.clone(),
+    )
+    .await
+    .expect("staging must succeed");
+
+    // What a sloppy agent would leave behind: a type error in src/.
+    std::fs::write(
+        staged.shadow_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { \"nope\" }\n",
+    )
+    .unwrap();
+
+    let outcome =
+        apply::finalize_run(&staged.shadow_path, &staged.base_revision, project.path()).await;
+    match outcome {
+        apply::RunVerification::Rejected(reason) => {
+            assert!(
+                reason.starts_with("compile_failed: "),
+                "expected compile_failed rejection, got: {reason}"
+            );
+            assert!(
+                reason.len() <= "compile_failed: ".len() + 2 * 1024,
+                "stderr excerpt is capped: {} bytes",
+                reason.len()
+            );
+        }
+        other => panic!("expected compile_failed rejection, got {other:?}"),
+    }
+
+    cleanup_worktree(project.path(), &staged.shadow_path).unwrap();
+    drop(staged.guard);
+}
+
+/// A shadow with a clean, compiling diff passes the gate and is Staged.
+#[tokio::test]
+async fn compiling_shadow_diff_is_staged() {
+    let (project, _head) = cargo_repository();
+    let registry = apply::new_registry();
+    let staged = apply::stage_run(
+        "fix the answer".to_string(),
+        project.path().to_path_buf(),
+        registry.clone(),
+    )
+    .await
+    .expect("staging must succeed");
+
+    std::fs::write(
+        staged.shadow_path.join("src/lib.rs"),
+        "pub fn answer() -> u32 { 43 }\n",
+    )
+    .unwrap();
+
+    let outcome =
+        apply::finalize_run(&staged.shadow_path, &staged.base_revision, project.path()).await;
+    match outcome {
+        apply::RunVerification::Staged(diff) => {
+            assert_eq!(diff.files_changed, 1);
+            assert!(diff.preview.contains("src/lib.rs"));
+        }
+        other => panic!("expected Staged, got {other:?}"),
+    }
+
+    cleanup_worktree(project.path(), &staged.shadow_path).unwrap();
+    drop(staged.guard);
 }

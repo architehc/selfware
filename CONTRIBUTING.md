@@ -6,7 +6,7 @@ Thank you for your interest in contributing to Selfware! This document provides 
 
 ### Prerequisites
 
-- Rust 1.91.0 or later (MSRV)
+- Rust 1.95.0 or later (MSRV)
 - Git
 - A local LLM backend for testing (optional, but recommended)
 

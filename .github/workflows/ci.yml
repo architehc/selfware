@@ -149,9 +149,9 @@ jobs:
 
   # Minimum supported Rust version
   msrv:
-    name: MSRV (1.91.0)
+    name: MSRV (1.95.0)
     runs-on: ubuntu-24.04
-    # A cold build + two full `cargo test` runs on 1.91 plus the cache-save
+    # A cold build + two full `cargo test` runs on 1.95 plus the cache-save
     # post-step exceeded 15m (build/tests passed but the job was cancelled
     # mid cache upload). Match the other Test jobs' 30m budget.
     timeout-minutes: 30
@@ -163,10 +163,10 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
 
-      - name: Install Rust 1.91.0
+      - name: Install Rust 1.95.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
 
       - name: Cache cargo registry
         uses: actions/cache@v5

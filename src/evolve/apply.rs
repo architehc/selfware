@@ -24,6 +24,16 @@
 //! carry a [`StagedDiff`] (digest + stats + capped preview) for the commit
 //! step to bind against.
 //!
+//! Compile gate: a verified diff is NOT enough — before a run becomes
+//! `Staged`, `cargo check` must pass inside the shadow worktree (bounded to
+//! 10 minutes, killed on timeout, environment sanitized). This makes the
+//! build requirement authoritative instead of a prompt-level request the
+//! agent can ignore. Tests are deliberately NOT run here: apply is an
+//! interactive loop and a full test suite is too slow per iteration;
+//! compilation is the authoritative minimum, and deeper verification happens
+//! at commit review and in CI. A shadow that fails to compile is
+//! `Rejected("compile_failed: …")` with a capped stderr excerpt.
+//!
 //! Commit: [`commit_staged`] is the one-use merge endpoint's core. The caller
 //! must present the run id plus the exact [`StagedDiff::digest`]; the live
 //! checkout's HEAD must still equal the run's `base_revision`. The merge
@@ -61,8 +71,8 @@ pub enum ApplyStatus {
     /// Agent exited 0 and the staged diff passed verification; awaiting the
     /// deliberate commit step.
     Staged,
-    /// Agent exited 0 but the staged diff failed verification (out of scope or
-    /// empty); the payload names the typed reason.
+    /// Agent exited 0 but the staged diff failed verification (out of scope,
+    /// empty, or failed the compile gate); the payload names the typed reason.
     Rejected(String),
     /// Merged into the live checkout by the commit step.
     Succeeded,
@@ -127,6 +137,9 @@ pub enum RejectReason {
     OutOfScope(String),
     /// The agent produced no changes.
     Empty,
+    /// The staged diff failed the compile gate (`cargo check` in the shadow);
+    /// carries a capped excerpt of cargo's stderr.
+    CompileFailed(String),
 }
 
 impl std::fmt::Display for RejectReason {
@@ -134,6 +147,7 @@ impl std::fmt::Display for RejectReason {
         match self {
             RejectReason::OutOfScope(path) => write!(f, "diff_out_of_scope: {path}"),
             RejectReason::Empty => write!(f, "empty_diff"),
+            RejectReason::CompileFailed(stderr) => write!(f, "compile_failed: {stderr}"),
         }
     }
 }
@@ -202,6 +216,101 @@ pub fn verify_staged_diff(
         deletions: stats.deletions(),
         preview,
     }))
+}
+
+/// Compile-gate timeout: 10 minutes, then the cargo process is killed
+/// (`kill_on_drop` + dropping the future on timeout).
+const CARGO_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Cap on the cargo stderr excerpt stored in a `compile_failed` rejection, so
+/// the status endpoint stays cheap even for verbose compiler output.
+const MAX_COMPILE_STDERR: usize = 2 * 1024;
+
+/// Verdict of the compile gate.
+enum CompileGate {
+    /// `cargo check` exited 0 in the shadow worktree.
+    Passed,
+    /// Non-zero exit; carries the typed rejection with a capped stderr excerpt.
+    Failed(RejectReason),
+    /// The gate itself could not render a verdict (cargo spawn/wait failure or
+    /// timeout) — an infrastructure problem, not a compile verdict; carries a
+    /// note for the run output. The run becomes `Failed`, never `Staged`
+    /// (honest status, AGENTS.md §3).
+    Unavailable(String),
+}
+
+/// Authoritative compile gate: run `cargo check` inside the shadow worktree
+/// with a sanitized environment, bounded to [`CARGO_CHECK_TIMEOUT`].
+///
+/// Tests are deliberately NOT run: apply is an interactive loop and a full
+/// test suite is too slow per iteration; compilation is the authoritative
+/// minimum before a diff may be staged for review/merge.
+///
+/// `CARGO_TARGET_DIR` points at the live checkout's `target/` so the check is
+/// incremental (warm cache) and no `target/` directory is created inside the
+/// shadow — build artifacts there would change the staged digest the commit
+/// step re-verifies.
+async fn cargo_check_shadow(shadow_path: &Path, project_root: &Path) -> CompileGate {
+    let mut cmd = Command::new(crate::tools::cargo::cargo_program());
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    cmd.arg("check")
+        .current_dir(shadow_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .env("CARGO_TARGET_DIR", project_root.join("target"));
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return CompileGate::Unavailable(format!("compile gate failed to spawn cargo: {e}"));
+        }
+    };
+    match tokio::time::timeout(CARGO_CHECK_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(output)) if output.status.success() => CompileGate::Passed,
+        Ok(Ok(output)) => {
+            let stderr: String = String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(MAX_COMPILE_STDERR)
+                .collect();
+            CompileGate::Failed(RejectReason::CompileFailed(stderr))
+        }
+        Ok(Err(e)) => CompileGate::Unavailable(format!("compile gate cargo wait failed: {e}")),
+        Err(_) => CompileGate::Unavailable(format!(
+            "compile gate timed out after {}s (cargo killed)",
+            CARGO_CHECK_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Post-exit verification outcome for a run whose agent exited 0.
+#[derive(Debug)]
+pub enum RunVerification {
+    /// Diff verified and the shadow compiles; ready for the commit step.
+    Staged(StagedDiff),
+    /// Typed rejection (scope, empty diff, or compile failure).
+    Rejected(String),
+    /// Infrastructure failure (git2, cargo spawn/wait/timeout); the run becomes
+    /// `Failed` and this note is appended to its output.
+    Failed(String),
+}
+
+/// The full post-exit verification pipeline: staged-diff verification, then
+/// the compile gate. Separated from the exit watcher so tests can drive it
+/// directly (spawning the agent subprocess is not test-viable).
+pub async fn finalize_run(
+    shadow_path: &Path,
+    base_revision: &str,
+    project_root: &Path,
+) -> RunVerification {
+    match verify_staged_diff(shadow_path, base_revision) {
+        Ok(Ok(diff)) => match cargo_check_shadow(shadow_path, project_root).await {
+            CompileGate::Passed => RunVerification::Staged(diff),
+            CompileGate::Failed(reason) => RunVerification::Rejected(reason.to_string()),
+            CompileGate::Unavailable(note) => RunVerification::Failed(note),
+        },
+        Ok(Err(reason)) => RunVerification::Rejected(reason.to_string()),
+        Err(e) => RunVerification::Failed(format!("diff verification failed: {e}")),
+    }
 }
 
 /// Prune old shadow worktrees down to [`MAX_KEPT_SHADOWS`] (oldest first, by
@@ -406,6 +515,7 @@ pub async fn spawn(
     let rid = id.clone();
     let shadow_for_verify = staged.shadow_path.clone();
     let base_for_verify = staged.base_revision.clone();
+    let root_for_check = project_root.clone();
     tokio::spawn(async move {
         // Hold the apply lock across the whole staged run (spawn → exit).
         let _guard = staged.guard;
@@ -414,28 +524,29 @@ pub async fn spawn(
             pump_pipe(stderr, reg.clone(), rid.clone()),
         );
         let code = child.wait().await.ok().and_then(|s| s.code());
-        // Verify the staged diff on successful exit; failures (non-zero exit or
-        // git2 infra errors) stay honest Failed runs, typed rejections become
-        // Rejected with the reason, and clean diffs become Staged.
-        let verified = if code == Some(0) {
-            Some(verify_staged_diff(&shadow_for_verify, &base_for_verify))
+        // Verify successful runs BEFORE taking the registry lock (diff scope
+        // check + compile gate can take minutes and must not block status
+        // polling): clean verified diffs become Staged, typed rejections
+        // become Rejected with the reason, and infra failures (non-zero exit,
+        // git2 errors, cargo spawn/timeout) stay honest Failed runs.
+        let verification = if code == Some(0) {
+            Some(finalize_run(&shadow_for_verify, &base_for_verify, &root_for_check).await)
         } else {
             None
         };
         if let Some(run) = reg.lock().await.get_mut(&rid) {
             run.exit_code = code;
-            match verified {
-                Some(Ok(Ok(diff))) => {
+            match verification {
+                Some(RunVerification::Staged(diff)) => {
                     run.status = ApplyStatus::Staged;
                     run.diff = Some(diff);
                 }
-                Some(Ok(Err(reason))) => {
-                    run.status = ApplyStatus::Rejected(reason.to_string());
+                Some(RunVerification::Rejected(reason)) => {
+                    run.status = ApplyStatus::Rejected(reason);
                 }
-                Some(Err(e)) => {
+                Some(RunVerification::Failed(note)) => {
                     run.status = ApplyStatus::Failed;
-                    run.output
-                        .push_str(&format!("\ndiff verification failed: {e}\n"));
+                    run.output.push_str(&format!("\n{note}\n"));
                     if run.output.len() > MAX_OUTPUT {
                         let cut = run.output.len() - MAX_OUTPUT;
                         run.output.drain(..cut);

@@ -12,6 +12,9 @@ use tower::ServiceExt;
 use selfware::evolve::{Edge, EdgeType, EvolveServer, Graph, Node, NodeLayer};
 
 mod actions_test;
+// Apply staging requires shadow worktrees from `evolution::ast_tools`, which
+// exists only with the self-improvement feature (mirrors src/evolve/mod.rs).
+#[cfg(feature = "self-improvement")]
 mod apply_isolation_test;
 mod assistant_protocol_test;
 mod assistant_test;

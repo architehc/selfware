@@ -29,7 +29,7 @@ pub struct ComponentCard {
     pub types: Vec<String>,
     pub traits: Vec<String>,
     pub consts: Vec<String>,
-    /// Public symbols beyond [`MAX_SYMBOLS_PER_COMPONENT`], reported not dropped.
+    /// Public symbols beyond `MAX_SYMBOLS_PER_COMPONENT`, reported not dropped.
     pub more: usize,
     /// Full-code tokens of the component (what expanding it in full would cost).
     pub tokens: usize,

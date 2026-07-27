@@ -56,6 +56,7 @@ pub struct EvolveServer {
     readiness: Arc<ReadinessEngine>,
     assistant: Arc<GroundedAssistant>,
     concept_index: Arc<super::ConceptIndex>,
+    #[cfg(feature = "self-improvement")]
     apply_runs: super::ApplyRegistry,
     ontology: Option<Arc<OntologyStore>>,
     project_root: Arc<PathBuf>,
@@ -157,6 +158,7 @@ impl EvolveServer {
             readiness: Arc::new(ReadinessEngine::new(&project_root)),
             assistant: Arc::new(GroundedAssistant::new(config)?),
             concept_index: Arc::new(concept_index),
+            #[cfg(feature = "self-improvement")]
             apply_runs: super::apply::new_registry(),
             ontology: persist_ontology.then(|| Arc::new(ontology)),
             project_root: Arc::new(project_root),
@@ -185,6 +187,7 @@ impl EvolveServer {
     /// The apply-run registry. Exposed so tests can stage runs directly
     /// (spawning the agent subprocess is not test-viable); production callers
     /// go through the HTTP endpoints.
+    #[cfg(feature = "self-improvement")]
     pub fn apply_registry(&self) -> super::ApplyRegistry {
         self.apply_runs.clone()
     }
@@ -201,7 +204,7 @@ impl EvolveServer {
     }
 
     pub fn router(&self) -> Router {
-        Router::new()
+        let router = Router::new()
             .route("/api/workspace", get(workspace_handler))
             .route("/api/graph", get(graph_handler))
             .route("/api/context", get(context_handler))
@@ -234,9 +237,6 @@ impl EvolveServer {
                 "/api/actions/deletion/preview",
                 post(deletion_preview_handler),
             )
-            .route("/api/actions/apply", post(apply_action_handler))
-            .route("/api/actions/apply/commit", post(apply_commit_handler))
-            .route("/api/actions/apply/status", get(apply_status_handler))
             .route("/api/gates", get(gates_handler))
             .route("/api/ontology/validate", get(ontology_validate_handler))
             .route("/api/ide/files", get(ide_files_handler))
@@ -267,9 +267,18 @@ impl EvolveServer {
                 post(evolve_pair_suggest_handler),
             )
             .route("/api/git/status", get(git_status_handler))
-            .route("/api/git/branch", post(git_branch_handler))
+            .route("/api/git/branch", post(git_branch_handler));
+        // Apply endpoints exist only with the self-improvement feature: apply
+        // staging rides on shadow worktrees from `evolution::ast_tools`, so
+        // without the feature the routes (and the whole apply module) are
+        // compiled out and no-default-features builds stay green.
+        #[cfg(feature = "self-improvement")]
+        let router = router
+            .route("/api/actions/apply", post(apply_action_handler))
+            .route("/api/actions/apply/commit", post(apply_commit_handler))
+            .route("/api/actions/apply/status", get(apply_status_handler));
+        with_web_fallback(router, Path::new(WEB_DIR))
             .with_state(Arc::new(self.clone()))
-            .fallback_service(ServeDir::new(WEB_DIR).append_index_html_on_directories(true))
             .layer(middleware::from_fn(security_headers))
     }
 
@@ -669,6 +678,7 @@ async fn graph_findings_handler(State(server): State<Arc<EvolveServer>>) -> ApiR
     })))
 }
 
+#[cfg(feature = "self-improvement")]
 #[derive(serde::Deserialize)]
 struct ApplyActionRequest {
     kind: String,
@@ -679,6 +689,7 @@ struct ApplyActionRequest {
 }
 
 /// Build the agent task prompt for a kind/target, or use a caller override.
+#[cfg(feature = "self-improvement")]
 fn apply_prompt(kind: &str, target: &str, custom: Option<&str>) -> String {
     if let Some(p) = custom.filter(|s| !s.trim().is_empty()) {
         return p.to_string();
@@ -713,6 +724,7 @@ fn apply_prompt(kind: &str, target: &str, custom: Option<&str>) -> String {
 /// Apply an evolve action by driving the agent (`selfware run --yolo`) as a
 /// subprocess. Requires a clean working tree so the resulting diff is exactly
 /// the agent's work. POST /api/actions/apply {kind, target, prompt?}.
+#[cfg(feature = "self-improvement")]
 async fn apply_action_handler(
     State(server): State<Arc<EvolveServer>>,
     headers: HeaderMap,
@@ -746,6 +758,7 @@ async fn apply_action_handler(
 }
 
 /// Poll an apply run's status + streamed output. GET /api/actions/apply/status?id=X
+#[cfg(feature = "self-improvement")]
 async fn apply_status_handler(
     State(server): State<Arc<EvolveServer>>,
     Query(params): Query<HashMap<String, String>>,
@@ -759,6 +772,7 @@ async fn apply_status_handler(
     Ok(Json(serde_json::to_value(run).map_err(internal_error)?))
 }
 
+#[cfg(feature = "self-improvement")]
 #[derive(serde::Deserialize)]
 struct ApplyCommitRequest {
     run_id: String,
@@ -772,6 +786,7 @@ struct ApplyCommitRequest {
 /// (live HEAD changed since staging), 409 `not_staged` (run exists but is not
 /// Staged — 409 because it is a state conflict, the same class as base_moved),
 /// 500 for infra failures.
+#[cfg(feature = "self-improvement")]
 async fn apply_commit_handler(
     State(server): State<Arc<EvolveServer>>,
     headers: HeaderMap,
@@ -791,6 +806,7 @@ async fn apply_commit_handler(
 }
 
 /// Map a commit-step failure onto the isolation spec §3 taxonomy.
+#[cfg(feature = "self-improvement")]
 fn commit_error(error: super::apply::CommitError) -> ApiError {
     use super::apply::CommitError;
     match &error {
@@ -2875,3 +2891,62 @@ fn document_write_error(error: impl std::fmt::Display) -> ApiError {
         internal_error(message)
     }
 }
+
+/// UI fallback for the evolve workspace. DEV OVERRIDE: when the source
+/// checkout's web dir exists on disk, serve from it (`ServeDir`) so UI
+/// iteration doesn't need rebuilds. Otherwise serve the assets embedded in
+/// the binary — release artifacts ship only binary + docs, so `src/evolve/web`
+/// doesn't exist at runtime there and a disk-only fallback 404s / and /app.js.
+fn with_web_fallback<S>(router: Router<S>, web_dir: &Path) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if web_dir.is_dir() {
+        router.fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true))
+    } else {
+        router.fallback(embedded_web)
+    }
+}
+
+/// The embedded asset map: path → (bytes, mime), compiled into the binary via
+/// `include_str!`. `vendor/` (d3/lucide/monaco) is deliberately NOT embedded:
+/// only the editor needs it and editor mode requires a source checkout (where
+/// the dev override serves vendor/ from disk); embedded-mode requests for it
+/// get a 404.
+fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
+    Some(match path {
+        "/" | "/index.html" => (
+            include_str!("web/index.html").as_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        "/app.js" => (
+            include_str!("web/app.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/style.css" => (
+            include_str!("web/style.css").as_bytes(),
+            "text/css; charset=utf-8",
+        ),
+        "/editor.html" => (
+            include_str!("web/editor.html").as_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        _ => return None,
+    })
+}
+
+/// Fallback handler serving the embedded UI assets (release-binary mode).
+async fn embedded_web(uri: axum::http::Uri) -> Response {
+    match embedded_asset(uri.path()) {
+        Some((body, mime)) => ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            "not found (vendor/ assets are served only from a source checkout)",
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+#[path = "../../tests/unit/evolve/server_web_test.rs"]
+mod server_web_test;

@@ -4,6 +4,10 @@
 //! and action execution with git branch isolation.
 
 pub mod actions;
+// Apply staging rides on shadow worktrees from `evolution::ast_tools`, so it
+// exists only with the self-improvement feature; without it the module and
+// its server routes are compiled out (keeps no-default-features builds green).
+#[cfg(feature = "self-improvement")]
 pub mod apply;
 pub mod assistant;
 pub mod ast;
@@ -42,6 +46,7 @@ pub mod summary;
 pub mod xray;
 
 pub use actions::{Action, ActionEngine, ActionResult};
+#[cfg(feature = "self-improvement")]
 pub use apply::{ApplyRegistry, ApplyRun, ApplyStatus};
 pub use ast::{AstAnalyzer, AstNode};
 pub use clusters::{cluster_of, clustered, ClusteredGraph};

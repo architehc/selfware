@@ -11,7 +11,7 @@ repository = "https://github.com/architehc/selfware"
 keywords = ["ai", "agent", "local-first", "cli", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"
-rust-version = "1.91"
+rust-version = "1.95"
 documentation = "https://docs.rs/selfware"
 exclude = [
     "system_tests/",

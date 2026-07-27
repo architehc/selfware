@@ -13,7 +13,8 @@ use tracing::instrument;
 /// agent process was launched without cargo on PATH (observed: cargo_check
 /// returned "No such file or directory" and the model then looped trying to
 /// verify via full-path shell commands that weren't credited as verification).
-fn cargo_program() -> std::path::PathBuf {
+/// `pub(crate)` so the evolve apply compile gate resolves cargo the same way.
+pub(crate) fn cargo_program() -> std::path::PathBuf {
     let exe = if cfg!(windows) { "cargo.exe" } else { "cargo" };
     if let Some(path) = std::env::var_os("PATH") {
         if std::env::split_paths(&path).any(|dir| dir.join(exe).is_file()) {
