@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-26
+
+### Added
+- Symbol-level context retrieval (`/api/context/select/symbols`, per-symbol `expand`)
+- Evidence trust gate: `422 context_trust_blocked` for high-severity non-trusted content; hidden-unicode detection incl. TAG chars; `gate-context-trust` preset
+- `selfware run --preset <id>`; AGENTS.md working agreements; stop-the-line pre-commit gate (fmt + clippy `-D warnings`)
+- DNS-rebinding Host-header guard on the evolve server; disk-maintenance hourly wiring
+- Skeleton: multi-line signature capture, scoped `pub(in …)` visibility, `const fn` classification; envelope ships non-Rust files verbatim
+- Custom context checklist UI (per-component lite/full tokens, Apply/Clear, filter, ResizeObserver graph)
+
+### Fixed (four external review rounds — safety, integrity, honesty)
+- **Credential hygiene**: cargo/git spawns sanitize env (no more `SELFWARE_API_KEY` to build.rs/hooks); `shell_exec` env-map injection block; untrusted-remote-endpoint load refusal; `protected_branches` reset; keyring read-back verification
+- **Evolution daemon**: `tests/` protected; test-count-regression winners rejected; `generations ≥ 1`; dry-run key redaction
+- **Honest status**: `full_verify` no longer vacuous; MCP `isError` never cached as success; failed workflows exit non-zero; usage accumulated across repair; `evidence_complete=false` on unreadable files; macOS computer stubs error honestly
+- **Data integrity**: `/undo` restores the tip checkpoint (first edit undoable); custom selection survives refresh; panic payloads no longer leak to clients; `tool_parser` multi-byte panic; lessons sanitized before prompt injection
+- **Validation**: `rm --no-preserve-root` matched; `sudo`/env-prefix can't bypass protected-branch guard; `export`/`env` injection wrappers covered; `$IFS` normalization; patch deletions validated via old path
+- **Agent context**: `compress_to_fit` contract (double-subtraction) + skeleton-less eviction; memory index leak on consolidate; RSI circuit breaker counts non-improving cycles; chars/4 estimators removed
+
+### Changed
+- `llmfit-core` moved to crates.io 1.1 (crate is publishable); keyring 3.6; config warnings no longer double-print
+
 ## [0.6.2] - 2026-07-26
 
 ### Added
@@ -168,7 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/architehc/selfware/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/architehc/selfware/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/architehc/selfware/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/architehc/selfware/compare/v0.3.1-beta.1...v0.6.0
