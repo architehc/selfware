@@ -811,7 +811,7 @@ impl McpServer {
                         crate::config::model::redact_config_secrets(&mut value);
                         serde_json::to_string_pretty(&value).unwrap_or_default()
                     }
-                    Err(e) => format!("{{\"error\": \"{}\"}}", e),
+                    Err(e) => serde_json::json!({ "error": e.to_string() }).to_string(),
                 };
                 (
                     Some(serde_json::json!({
@@ -927,22 +927,11 @@ impl McpServer {
     ) -> (Option<Value>, Option<JsonRpcError>) {
         let full_path = self.project_root.join(relative_path);
 
-        // Safety: ensure the resolved path is within the project root.
-        match full_path.canonicalize() {
-            Ok(canonical) => {
-                if let Ok(root_canonical) = self.project_root.canonicalize() {
-                    if !canonical.starts_with(&root_canonical) {
-                        return (
-                            None,
-                            Some(JsonRpcError {
-                                code: INVALID_PARAMS,
-                                message: "Path escapes project root".to_string(),
-                                data: None,
-                            }),
-                        );
-                    }
-                }
-            }
+        // Safety: ensure the resolved path is within the project root, and
+        // READ VIA the canonical path (reading the unresolved path after a
+        // canonical check is a classic TOCTOU symlink escape).
+        let canonical = match full_path.canonicalize() {
+            Ok(canonical) => canonical,
             Err(e) => {
                 return (
                     None,
@@ -953,9 +942,34 @@ impl McpServer {
                     }),
                 );
             }
+        };
+        let root_canonical = match self.project_root.canonicalize() {
+            Ok(root) => root,
+            // No root canonicalization → no containment guarantee: deny, don't
+            // silently skip the check.
+            Err(e) => {
+                return (
+                    None,
+                    Some(JsonRpcError {
+                        code: INTERNAL_ERROR,
+                        message: format!("Cannot canonicalize project root: {e}"),
+                        data: None,
+                    }),
+                );
+            }
+        };
+        if !canonical.starts_with(&root_canonical) {
+            return (
+                None,
+                Some(JsonRpcError {
+                    code: INVALID_PARAMS,
+                    message: "Path escapes project root".to_string(),
+                    data: None,
+                }),
+            );
         }
 
-        match std::fs::read_to_string(&full_path) {
+        match std::fs::read_to_string(&canonical) {
             Ok(content) => {
                 let mime = if relative_path.ends_with(".json") {
                     "application/json"

@@ -95,7 +95,7 @@ impl RagConfig {
     pub fn rust() -> Self {
         Self {
             include_extensions: vec!["rs".into(), "toml".into(), "md".into()],
-            exclude_patterns: vec!["target/".into(), ".git/".into()],
+            exclude_patterns: vec!["target/".into(), ".git/".into(), ".worktrees/".into()],
             ..Default::default()
         }
     }
@@ -297,8 +297,10 @@ impl FileWatcher {
         let path_str = path.to_string_lossy();
         for pattern in &self.config.exclude_patterns {
             if pattern.ends_with('/') {
-                // Directory pattern
-                if path_str.contains(pattern.trim_end_matches('/')) {
+                // Directory pattern: match a whole path component, not a
+                // substring ("target/" must not exclude target_info.rs).
+                let dir = pattern.trim_end_matches('/');
+                if path_str.split('/').any(|component| component == dir) {
                     return true;
                 }
             } else if pattern.starts_with('*') {

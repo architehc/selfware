@@ -682,6 +682,21 @@ impl Agent {
             self.messages
                 .push(crate::api::types::Message::user("[RECENT CONTEXT]:"));
             self.messages.extend(recent);
+
+            // The recent window can split a tool-call pair (assistant with
+            // tool_calls whose results were dropped, or tool results whose
+            // assistant message fell outside the window). Providers 400 on
+            // orphaned sequences — enforce the invariants like trim does
+            // (review round 7).
+            let mut keep = vec![true; self.messages.len()];
+            Self::enforce_tool_call_pair_invariants(&self.messages, &mut keep);
+            self.messages = self
+                .messages
+                .iter()
+                .zip(&keep)
+                .filter(|(_, k)| **k)
+                .map(|(m, _)| m.clone())
+                .collect();
         }
     }
 

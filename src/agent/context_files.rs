@@ -92,6 +92,7 @@ impl Agent {
                     if p.contains("/target/")
                         || p.contains("/node_modules/")
                         || p.contains("/.git/")
+                        || p.contains("/.worktrees/")
                         || p.contains("/__pycache__/")
                     {
                         continue;
@@ -170,6 +171,7 @@ impl Agent {
                 if path_str.contains("/target/")
                     || path_str.contains("/node_modules/")
                     || path_str.contains("/.git/")
+                    || path_str.contains("/.worktrees/")
                     || path_str.contains("/__pycache__/")
                 {
                     continue;
@@ -290,7 +292,10 @@ impl Agent {
                 let path = entry.path().to_path_buf();
                 let path_str = path.display().to_string();
 
-                if path_str.contains("/target/") || path_str.contains("/.git/") {
+                if path_str.contains("/target/")
+                    || path_str.contains("/.git/")
+                    || path_str.contains("/.worktrees/")
+                {
                     continue;
                 }
 

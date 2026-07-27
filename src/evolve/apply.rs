@@ -117,6 +117,16 @@ pub fn new_registry() -> ApplyRegistry {
 /// unbounded; older output is dropped from the front.
 const MAX_OUTPUT: usize = 200_000;
 
+/// Cap run output at MAX_OUTPUT bytes without panicking — `String::drain`
+/// panics on non-char-boundary cuts and LLM output is full of multi-byte
+/// chars (em-dashes, box-drawing, CJK).
+fn cap_run_output(output: &mut String) {
+    if output.len() > MAX_OUTPUT {
+        let cut = output.floor_char_boundary(output.len() - MAX_OUTPUT);
+        output.drain(..cut);
+    }
+}
+
 /// Cap on the diff preview kept per run (bytes), so the status endpoint stays
 /// cheap even for large staged diffs.
 const MAX_PREVIEW: usize = 8 * 1024;
@@ -547,10 +557,7 @@ pub async fn spawn(
                 Some(RunVerification::Failed(note)) => {
                     run.status = ApplyStatus::Failed;
                     run.output.push_str(&format!("\n{note}\n"));
-                    if run.output.len() > MAX_OUTPUT {
-                        let cut = run.output.len() - MAX_OUTPUT;
-                        run.output.drain(..cut);
-                    }
+                    cap_run_output(&mut run.output);
                 }
                 None => {
                     run.status = ApplyStatus::Failed;
@@ -574,10 +581,7 @@ where
         if let Some(run) = reg.lock().await.get_mut(&rid) {
             run.output.push_str(&line);
             run.output.push('\n');
-            if run.output.len() > MAX_OUTPUT {
-                let cut = run.output.len() - MAX_OUTPUT;
-                run.output.drain(..cut);
-            }
+            cap_run_output(&mut run.output);
         }
     }
 }

@@ -1009,15 +1009,20 @@ impl ContextMap {
                 }
             }
 
-            // Check if the file is in the loading plan.
-            let in_l3_plan = plan.l3_files.iter().any(|f| {
-                let f_str = f.to_string_lossy().to_lowercase();
-                path_str.contains(&f_str) || f_str.contains(&path_str)
-            });
-            let in_l2_plan = plan.l2_files.iter().any(|f| {
-                let f_str = f.to_string_lossy().to_lowercase();
-                path_str.contains(&f_str) || f_str.contains(&path_str)
-            });
+            // Check if the file is in the loading plan. Empty plan paths
+            // (modalities like Implement/Debug/Refactor ship l3_files with an
+            // empty PathBuf) would make contains("") match EVERY entry — skip
+            // them or every suggestion fabricates a plan match.
+            let plan_matches = |files: &[PathBuf]| {
+                files.iter().any(|f| {
+                    let f_str = f.to_string_lossy().to_lowercase();
+                    !f_str.is_empty()
+                        && !path_str.is_empty()
+                        && (path_str.contains(&f_str) || f_str.contains(&path_str))
+                })
+            };
+            let in_l3_plan = plan_matches(&plan.l3_files);
+            let in_l2_plan = plan_matches(&plan.l2_files);
 
             if in_l3_plan || relevance >= 3.0 {
                 if entry.level != ContextMode::Full {

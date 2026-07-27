@@ -625,6 +625,11 @@ fn parse_model_review(text: &str) -> Result<ModelReview> {
     let end = trimmed
         .rfind('}')
         .context("model response did not contain complete JSON")?;
+    if end < start {
+        // "} ... {" ordering would panic on the inclusive slice — this is a
+        // parse failure like any other, routed through the repair loop.
+        anyhow::bail!("model response has no well-formed JSON object");
+    }
     serde_json::from_str(&trimmed[start..=end]).context("model returned invalid review JSON")
 }
 

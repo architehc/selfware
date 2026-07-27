@@ -318,8 +318,9 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-      # llvm-cov measures 79.31% line coverage (vs tarpaulin's ~62.6%). The floor
-      # ratchets up 5 points per milestone toward 75: currently at the first step.
+      # llvm-cov measures 64.48% line coverage today. The floor ratchets UP as
+      # real coverage improves, 5 points per milestone toward 75 (step 2 = 65
+      # requires actually adding coverage first).
       - name: Enforce coverage floor
         run: cargo llvm-cov report --summary-only --fail-under-lines 60
 
