@@ -924,3 +924,134 @@ async fn test_root_serves_graph_page() {
     assert!(body.contains("<div id=\"graph-canvas\""));
     assert!(body.contains("/app.js"));
 }
+
+/// Reviewed file with an inline cfg(test) module at the end: Full-mode
+/// selected-document evidence must exclude it (matching the neighborhood
+/// path), FullExtended must keep it.
+const REVIEWED_WITH_INLINE_TESTS: &str = r#"//! Reviewed module.
+
+/// Computes the answer.
+pub fn answer() -> usize {
+    let production_marker = 41 + 1;
+    production_marker
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn answer_works() {
+        assert_eq!(super::answer(), 42);
+        let inline_test_marker = true;
+        assert!(inline_test_marker);
+    }
+}
+"#;
+
+fn inline_test_fixture(mode: &str) -> (tempfile::TempDir, EvolveServer) {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("src/reviewed.rs"),
+        REVIEWED_WITH_INLINE_TESTS,
+    )
+    .unwrap();
+    let graph = Graph {
+        nodes: vec![Node::code("crate::reviewed", "src/reviewed.rs")],
+        edges: vec![],
+    };
+    let config = Config {
+        context_length: 1_000_000,
+        context_mode: mode.to_string(),
+        ..Default::default()
+    };
+    let server = EvolveServer::with_config(graph, project.path(), &config).unwrap();
+    (project, server)
+}
+
+async fn selected_document_preview(server: &EvolveServer, mode: &str) -> Value {
+    let (status, document) = get_json(server, "/api/ide/document?path=src/reviewed.rs").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = post_json(
+        server,
+        "/api/assistant/evidence/preview",
+        json!({
+            "path": "src/reviewed.rs",
+            "expected_hash": document["hash"],
+            "mode": mode,
+            "scope": "selected_document"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {body}");
+    serde_json::from_str(&body).unwrap()
+}
+
+#[tokio::test]
+async fn test_selected_document_review_excludes_inline_tests_in_full_mode() {
+    let (_project, server) = inline_test_fixture("full");
+    let test_start = REVIEWED_WITH_INLINE_TESTS
+        .lines()
+        .position(|line| line == "#[cfg(test)]")
+        .unwrap()
+        + 1;
+
+    let preview = selected_document_preview(&server, "full").await;
+
+    assert_eq!(preview["excluded_test_ranges"], 1);
+    assert!(preview["excluded_test_lines"].as_u64().unwrap() > 0);
+    assert_eq!(
+        preview["evidence_complete"], true,
+        "excluding cfg(test) is the tier contract, not incomplete evidence"
+    );
+    let manifest = preview["manifest"].as_array().unwrap();
+    assert!(!manifest.is_empty());
+    assert!(
+        manifest
+            .iter()
+            .all(|item| item["end_line"].as_u64().unwrap() < test_start as u64),
+        "Full mode must not ship inline cfg(test) lines in selected-document \
+         evidence: {manifest:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_selected_document_review_keeps_inline_tests_in_full_extended_mode() {
+    let (_project, server) = inline_test_fixture("full_extended");
+    let test_start = REVIEWED_WITH_INLINE_TESTS
+        .lines()
+        .position(|line| line == "#[cfg(test)]")
+        .unwrap()
+        + 1;
+
+    let preview = selected_document_preview(&server, "full_extended").await;
+
+    assert_eq!(preview["excluded_test_ranges"], 0);
+    assert_eq!(preview["excluded_test_lines"], 0);
+    let manifest = preview["manifest"].as_array().unwrap();
+    assert!(
+        manifest
+            .iter()
+            .any(|item| item["end_line"].as_u64().unwrap() >= test_start as u64),
+        "FullExtended keeps the inline tests: {manifest:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_graceful_shutdown_returns_ok_instead_of_running_until_forced_exit() {
+    // The shutdown branch of `start`: once the shutdown signal resolves, the
+    // server must stop serving and return Ok(()) — so `main`'s grace timer
+    // never fires and the process exits 0 instead of 1.
+    let server = EvolveServer::new(sample_graph());
+    let served = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server.start_with_shutdown(0, async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }),
+    )
+    .await
+    .expect("server must stop within the grace window");
+    assert!(
+        served.is_ok(),
+        "graceful shutdown must return Ok (clean exit): {served:?}"
+    );
+}

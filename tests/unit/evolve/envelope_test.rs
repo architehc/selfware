@@ -222,13 +222,12 @@ fn unknown_and_unreadable_nodes_are_skipped() {
     assert_eq!(env.documents.len(), 1, "unknown ids produce no document");
 }
 
-/// Custom is the user's hand-picked selection: production nodes for non-.rs
-/// files are NodeLayer::Auxiliary (NodeLayer::Code only exists for
-/// rust_source), so the Code-only layer filter used to drop a picked
-/// README.md before the verbatim arm ever ran — the selection shipped
+/// Custom is the user's hand-picked selection: non-source production files
+/// are NodeLayer::Auxiliary, so the Code-only layer filter used to drop a
+/// picked README.md before the verbatim arm ever ran — the selection shipped
 /// nothing. Custom now ships Auxiliary picks VERBATIM; Lite stays Code-only
-/// (the signature tier). The TierMeasurer's signature fraction for such
-/// nodes stays a budget estimate only.
+/// (the signature tier). Non-Rust Code nodes ship verbatim in both, and the
+/// TierMeasurer counts them at full tokens to match.
 #[test]
 fn custom_ships_handpicked_auxiliary_files_verbatim_lite_stays_code_only() {
     const README_MD: &str = "# Project\n\nSome prose the model must see.\n";

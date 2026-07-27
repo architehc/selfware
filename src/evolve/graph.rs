@@ -68,10 +68,14 @@ impl GraphBuilder {
             };
             let id = file_node_id(relative, source_set);
             let file_class = classify_file(relative);
-            // Only real Rust source under `src` counts as Code. Web assets, data,
-            // config, scripts, and vendored files — even under `src` — become
-            // Auxiliary so they don't inflate the code token tiers.
-            let is_code = matches!(source_set, SourceSet::Code) && file_class == "rust_source";
+            // Implementation sources under `src` count as Code: Rust plus the
+            // other common implementation languages (Python, JS/TS, Go), so a
+            // non-Rust project still gets Code nodes and the context tiers
+            // ship something. Web assets, data, config, scripts, and vendored
+            // files — even under `src` — become Auxiliary so they don't
+            // inflate the code token tiers.
+            let is_code =
+                matches!(source_set, SourceSet::Code) && is_production_source_class(file_class);
             let mut node = match source_set {
                 SourceSet::Test | SourceSet::Example => {
                     let mut n = Node::test(&id, &path_string(relative));
@@ -83,8 +87,9 @@ impl GraphBuilder {
                     n.classification = file_class.to_string();
                     n
                 }
-                // Non-Rust under src (web assets) and everything outside src
-                // (data, scripts, config, vendored) stay out of the code tiers.
+                // Non-source files under src (web assets, markup, shell
+                // scripts) and everything outside src (data, scripts, config,
+                // vendored) stay out of the code tiers.
                 SourceSet::Code | SourceSet::Tooling => {
                     Node::auxiliary(&id, &path_string(relative), file_class)
                 }
@@ -421,7 +426,7 @@ fn extracted_test_name(path: &Path) -> bool {
         || name.ends_with("_tests.rs")
         || name.contains(".test.")
         || name.contains(".spec.")
-        || (extension == "py" && name.starts_with("test_"))
+        || (extension == "py" && (name.starts_with("test_") || name.ends_with("_test.py")))
         || (extension == "go" && name.ends_with("_test.go"))
         || (extension == "rb" && name.ends_with("_spec.rb"))
 }
@@ -822,8 +827,19 @@ fn is_rust_source(path: &Path) -> bool {
     path.extension().is_some_and(|extension| extension == "rs")
 }
 
+/// Implementation-source classes admitted to the Code layer (and therefore to
+/// the code token tiers). Data, config, markup, shell scripts, and vendored
+/// files stay Auxiliary even under `src`.
+fn is_production_source_class(file_class: &str) -> bool {
+    matches!(
+        file_class,
+        "rust_source" | "python_source" | "javascript_source" | "typescript_source" | "go_source"
+    )
+}
+
 /// Fine-grained content classification for a repository file, used both to keep
-/// non-Rust content out of the code token tiers and to drive graph perspectives.
+/// non-source content out of the code token tiers and to drive graph
+/// perspectives.
 fn classify_file(relative: &Path) -> &'static str {
     let p = relative.to_string_lossy().replace('\\', "/");
     if p.contains("vendor/")
@@ -840,10 +856,13 @@ fn classify_file(relative: &Path) -> &'static str {
         .to_ascii_lowercase();
     match ext.as_str() {
         "rs" => "rust_source",
+        "py" | "pyw" => "python_source",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript_source",
+        "ts" | "tsx" => "typescript_source",
+        "go" => "go_source",
         "json" | "jsonl" | "ndjson" | "csv" | "tsv" | "parquet" => "data",
         "toml" | "yaml" | "yml" | "lock" | "cfg" | "ini" | "conf" | "editorconfig" => "config",
-        "py" | "sh" | "bash" | "zsh" | "ps1" | "rb" | "pl" => "script",
-        "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" => "script",
+        "sh" | "bash" | "zsh" | "ps1" | "rb" | "pl" => "script",
         "html" | "htm" | "css" | "scss" | "sass" | "md" | "markdown" | "txt" | "svg" | "rst" => {
             "markup"
         }

@@ -297,8 +297,19 @@ fn estimate_context_node_tokens(node: &Node, mode: &ContextMode) -> usize {
         ContextMode::Map => 0,
         // Lite: interface signatures only — the smallest useful tier.
         // Custom selections also load at skeleton detail, so they cost the same.
+        // Exception: non-.rs sources have no skeleton and ship verbatim in both
+        // modes (see envelope.rs), so they cost their full content here too —
+        // the estimate must match what the envelope ships.
         ContextMode::Lite | ContextMode::Custom => {
-            ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize
+            if node
+                .path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(".rs"))
+            {
+                ((code_tokens as f64) * SIGNATURE_FRACTION).round() as usize
+            } else {
+                code_tokens
+            }
         }
         // Compact: full code with comments stripped, for smaller models.
         ContextMode::Compact => ((code_tokens as f64) * COMMENT_STRIPPED_FRACTION).round() as usize,

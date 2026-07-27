@@ -7,6 +7,73 @@ fn write_rust(path: &std::path::Path, content: &str) {
 }
 
 #[test]
+fn test_non_rust_implementation_sources_are_code_nodes_with_test_partition() {
+    let project = tempfile::tempdir().unwrap();
+    write_rust(&project.path().join("src/lib.rs"), "pub fn library() {}\n");
+    for (path, content) in [
+        ("src/worker.py", "def work():\n    return 1\n"),
+        ("src/app.js", "export function boot() {}\n"),
+        ("src/app.ts", "export function boot(): void {}\n"),
+        ("src/component.jsx", "export const C = () => null;\n"),
+        ("src/view.tsx", "export const V = () => null;\n"),
+        ("src/main.go", "package main\nfunc main() {}\n"),
+        // Ecosystem test naming conventions must partition to the Test layer.
+        ("src/test_worker.py", "def test_work():\n    assert True\n"),
+        ("src/worker_test.py", "def test_work():\n    assert True\n"),
+        ("src/app.test.js", "test('boot', () => {});\n"),
+        ("src/util.spec.ts", "describe('x', () => {});\n"),
+        ("src/main_test.go", "package main\nfunc TestMain() {}\n"),
+        // Shell scripts and markup stay Auxiliary even under src/.
+        ("src/deploy.sh", "echo deploy\n"),
+        ("src/index.html", "<html></html>\n"),
+    ] {
+        write_rust(&project.path().join(path), content);
+    }
+
+    let graph = GraphBuilder::new(project.path().join("src"))
+        .scan_src()
+        .unwrap();
+    let by_id = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap_or_else(|| panic!("missing node {id}"))
+    };
+
+    for (id, class) in [
+        ("crate::worker.py", "python_source"),
+        ("crate::app.js", "javascript_source"),
+        ("crate::app.ts", "typescript_source"),
+        ("crate::component.jsx", "javascript_source"),
+        ("crate::view.tsx", "typescript_source"),
+        ("crate::main.go", "go_source"),
+    ] {
+        let node = by_id(id);
+        assert_eq!(node.layer, NodeLayer::Code, "{id} must be a Code node");
+        assert_eq!(node.classification, class, "{id} classification");
+        assert!(node.tokens > 0, "{id} must carry measured tokens");
+    }
+
+    for id in [
+        "test::test_worker.py",
+        "test::worker_test.py",
+        "test::app.test.js",
+        "test::util.spec.ts",
+        "test::main_test.go",
+    ] {
+        assert_eq!(
+            by_id(id).layer,
+            NodeLayer::Test,
+            "{id} must partition to the Test layer"
+        );
+    }
+
+    assert_eq!(by_id("crate::deploy.sh").layer, NodeLayer::Auxiliary);
+    assert_eq!(by_id("crate::index.html").layer, NodeLayer::Auxiliary);
+}
+
+#[test]
 fn test_graph_builder_scans_agent_component() {
     let builder = GraphBuilder::new("src");
     let graph = builder.scan_src().unwrap();

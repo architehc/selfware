@@ -219,10 +219,10 @@ fn review_chars(review: &Value) -> usize {
 /// ContextEnvelope ships. Both project readable `.rs` sources through
 /// `extract_rust_skeleton`, and the skeleton's `token_count` is defined as
 /// `estimate_content_tokens(render())` — the same call the envelope makes per
-/// document — so the sums must match token-for-token. Non-`.rs` nodes are the
-/// documented fallback gap (measurer: 0.18 signature fraction; envelope:
-/// skips them); this fixture is all-`.rs` with readable sources, so neither
-/// fallback fires and the equality is exact.
+/// document — so the sums must match token-for-token. Non-`.rs` Code nodes
+/// align the same way: the envelope ships them verbatim and the measurer
+/// counts their full tokens. This fixture is all-`.rs` with readable
+/// sources, so neither fallback fires and the equality is exact.
 #[test]
 fn lite_envelope_tokens_match_tier_measurer() {
     let (dir, graph) = fixture();

@@ -137,7 +137,8 @@ pub struct Node {
     #[serde(default)]
     pub inline_test_tokens: usize,
     /// Fine-grained content class for perspectives and honest token accounting:
-    /// `rust_source`, `test`, `data`, `config`, `script`, `markup`, `vendored`,
+    /// `rust_source`, `python_source`, `javascript_source`, `typescript_source`,
+    /// `go_source`, `test`, `data`, `config`, `script`, `markup`, `vendored`,
     /// `generated`, or `other`. Defaults to `rust_source` for older graphs.
     #[serde(default = "default_classification")]
     pub classification: String,

@@ -195,11 +195,22 @@ impl<'a> TierMeasurer<'a> {
             .filter(|n| n.layer == NodeLayer::Code)
         {
             let code_tokens = node.tokens.saturating_sub(node.inline_test_tokens);
+            let is_rust = node
+                .path
+                .as_deref()
+                .is_some_and(|path| path.ends_with(".rs"));
+            // Non-.rs Code nodes ship VERBATIM in Lite (the envelope's
+            // verbatim arm — only Rust has a skeleton), so their measured
+            // cost is the full content. The 0.18 signature fraction
+            // understated them and let auto-fit pick a Lite tier whose
+            // shipped bytes then overflowed the budget.
+            if !is_rust {
+                total += code_tokens;
+                continue;
+            }
             total += match self.read_node_source(node) {
-                Some((rel, src)) if rel.ends_with(".rs") => {
-                    extract_rust_skeleton(Path::new(&rel), &src).token_count
-                }
-                _ => (code_tokens as f64 * SIGNATURE_FRACTION).round() as usize,
+                Some((rel, src)) => extract_rust_skeleton(Path::new(&rel), &src).token_count,
+                None => (code_tokens as f64 * SIGNATURE_FRACTION).round() as usize,
             };
         }
         total

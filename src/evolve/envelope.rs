@@ -5,14 +5,15 @@
 //! Preview and outbound responses carry its `content_hash`; equality of the
 //! hashes proves they describe the same bytes. Projections reuse the exact
 //! machinery TierMeasurer measures with (skeleton / reduce_source / map
-//! cards), so measured tier size and shipped size converge — with one
-//! deliberate exception: Lite/Custom project `.rs` files to skeletons but
-//! ship non-Rust sources VERBATIM, because the alternative (dropping them)
-//! silently loses content the caller explicitly included. Custom (the user's
-//! hand-picked selection) additionally admits Auxiliary-layer nodes — the
-//! production shape of every non-`.rs` file — so a picked README.md actually
-//! ships; Lite stays Code-only (the signature tier). The measurer's per-node
-//! fallback fraction stays a budget estimate only.
+//! cards), so measured tier size and shipped size converge. Lite/Custom
+//! project `.rs` files to skeletons but ship non-Rust Code nodes VERBATIM
+//! (no skeleton exists for them, and dropping them silently loses included
+//! content); the measurer counts those nodes at full tokens to match.
+//! Custom (the user's hand-picked selection) additionally admits
+//! Auxiliary-layer nodes — the production shape of non-source files — so a
+//! picked README.md actually ships; Lite stays Code-only (the signature
+//! tier). The measurer's per-node fallback fraction stays a budget estimate
+//! only.
 
 use sha2::{Digest, Sha256};
 
@@ -90,10 +91,9 @@ pub fn build_envelope_with_root(
         };
         let layer_allowed = match mode {
             // Custom is the user's hand-picked selection — ship what they
-            // picked. Production nodes for non-.rs files are Auxiliary
-            // (NodeLayer::Code only exists for rust_source), so a Code-only
-            // filter dropped a hand-picked README.md before the verbatim
-            // arm below ever ran.
+            // picked. Non-source production files (README.md, configs) are
+            // Auxiliary-layer nodes, so a Code-only filter dropped a
+            // hand-picked README.md before the verbatim arm below ever ran.
             ContextMode::Custom => matches!(node.layer, NodeLayer::Code | NodeLayer::Auxiliary),
             // FullExtended ships every layer.
             ContextMode::FullExtended => true,
@@ -117,10 +117,9 @@ pub fn build_envelope_with_root(
                 } else {
                     // Non-Rust sources ship VERBATIM (like Full): silently
                     // skipping them here lost included content outright (a
-                    // .md/.toml in a custom selection shipped nothing). This
-                    // intentionally diverges from TierMeasurer's signature
-                    // fraction for such nodes — the measurer stays a budget
-                    // estimate; the envelope must not lose content.
+                    // .md/.toml in a custom selection shipped nothing).
+                    // TierMeasurer::measure_lite counts these nodes at full
+                    // tokens, so measured and shipped size still converge.
                     src
                 }
             }),

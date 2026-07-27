@@ -188,3 +188,104 @@ fn requested_mode_parse_accepts_auto_and_tiers() {
     );
     assert!(RequestedMode::parse("bogus").is_err());
 }
+
+const WORKER_PY: &str = r#"def compute_answer(seed):
+    # walk a small range so the body has real weight
+    acc = seed + 1
+    for i in range(seed):
+        acc += i * 2
+        acc = acc % 1024
+    return acc
+
+
+def render_label(name):
+    return f"label:{name}!"
+"#;
+
+/// Mixed Rust + Python fixture: one .rs node (Lite projects it to a
+/// skeleton) and one .py Code node (Lite ships it verbatim — no skeleton
+/// exists for Python).
+fn mixed_fixture() -> (tempfile::TempDir, Graph) {
+    let (dir, mut graph) = fixture();
+    fs::write(dir.path().join("src/worker.py"), WORKER_PY).unwrap();
+    let mut worker = Node::code("crate::worker.py", "src/worker.py");
+    worker.tokens = selfware::token_count::estimate_content_tokens(WORKER_PY);
+    // Keep only the production .rs node; the Test-layer twin is irrelevant
+    // to this measurement.
+    graph.nodes.retain(|node| node.id == "crate::alpha");
+    graph.nodes.push(worker);
+    (dir, graph)
+}
+
+#[test]
+fn lite_measures_non_rust_code_nodes_at_full_tokens_matching_shipped_verbatim() {
+    let (dir, graph) = mixed_fixture();
+    let measurer = TierMeasurer::new(&graph, dir.path());
+    let measured = measurer.measure(&ContextMode::Lite);
+
+    let skeleton =
+        selfware::evolve::extract_rust_skeleton(std::path::Path::new("src/alpha.rs"), ALPHA_RS)
+            .token_count;
+    let worker_tokens = selfware::token_count::estimate_content_tokens(WORKER_PY);
+    assert_eq!(
+        measured,
+        skeleton + worker_tokens,
+        "Lite ships the .py node verbatim, so the measurer must count full \
+         tokens for it — not the 0.18 signature fraction"
+    );
+
+    // And the shipped envelope must match the measurement token-for-token.
+    let included: Vec<String> = graph.nodes.iter().map(|n| n.id.clone()).collect();
+    let envelope =
+        selfware::evolve::build_envelope(&graph, &ContextMode::Lite, &included, "rev", |rel| {
+            std::fs::read_to_string(dir.path().join(rel)).ok()
+        });
+    let worker_doc = envelope
+        .documents
+        .iter()
+        .find(|doc| doc.path == "src/worker.py")
+        .expect("Lite must not drop a non-Rust Code node");
+    assert_eq!(worker_doc.content, WORKER_PY, "Lite ships .py verbatim");
+    assert_eq!(envelope.total_tokens, measured);
+}
+
+#[test]
+fn full_envelope_includes_non_rust_code_nodes_verbatim() {
+    let (dir, graph) = mixed_fixture();
+    let included: Vec<String> = graph.nodes.iter().map(|n| n.id.clone()).collect();
+    let envelope =
+        selfware::evolve::build_envelope(&graph, &ContextMode::Full, &included, "rev", |rel| {
+            std::fs::read_to_string(dir.path().join(rel)).ok()
+        });
+    let worker_doc = envelope
+        .documents
+        .iter()
+        .find(|doc| doc.path == "src/worker.py")
+        .expect("Full must include the .py Code node");
+    assert_eq!(worker_doc.content, WORKER_PY);
+}
+
+#[test]
+fn auto_fit_on_mixed_fixture_uses_the_aligned_lite_measurement() {
+    let (dir, graph) = mixed_fixture();
+    let measurer = TierMeasurer::new(&graph, dir.path());
+
+    // A budget that fits verbatim-.py Lite must resolve to Lite; one that
+    // only fits the old 0.18 underestimate must NOT (that was the bug:
+    // auto-fit picked Lite, then the shipped verbatim content overflowed).
+    let lite = measurer.measure(&ContextMode::Lite);
+    let understated = lite - selfware::token_count::estimate_content_tokens(WORKER_PY)
+        + (selfware::token_count::estimate_content_tokens(WORKER_PY) as f64 * 0.18).round()
+            as usize;
+
+    let outcome = fit_tier(&measurer, &budget_for(lite));
+    assert_eq!(outcome.mode, ContextMode::Lite);
+    assert!(outcome.fits);
+
+    let outcome = fit_tier(&measurer, &budget_for(understated));
+    assert_ne!(
+        outcome.mode,
+        ContextMode::Lite,
+        "a budget below the real Lite cost must not pick Lite"
+    );
+}

@@ -283,10 +283,35 @@ impl EvolveServer {
     }
 
     pub async fn start(&self, port: u16) -> Result<()> {
+        // Graceful shutdown: `main` owns the SIGINT/SIGTERM handlers and flips
+        // the process-global shutdown latch (`crate::shutdown_requested`); a
+        // direct Ctrl-C covers embeddings that run the server without `main`.
+        // Without this, the server served until `main`'s grace timer expired
+        // and force-exited the process with code 1 — every "graceful" Evolve
+        // shutdown was a forced exit 1.
+        self.start_with_shutdown(port, async {
+            tokio::select! {
+                _ = crate::shutdown_requested() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        })
+        .await
+    }
+
+    /// Serve until `shutdown` resolves, then return `Ok(())` so the caller
+    /// exits 0. Split from `start` so tests can drive the shutdown branch
+    /// without touching process-global signals or the shutdown latch.
+    pub async fn start_with_shutdown(
+        &self,
+        port: u16,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<()> {
         let address = format!("127.0.0.1:{port}");
         let listener = TcpListener::bind(&address).await?;
         println!("Evolve workspace listening on http://{address}");
-        axum::serve(listener, self.router()).await?;
+        axum::serve(listener, self.router())
+            .with_graceful_shutdown(shutdown)
+            .await?;
         Ok(())
     }
 
@@ -2428,19 +2453,50 @@ fn select_review_evidence(
     let graph = server.graph_snapshot()?;
     let selection_revision = graph_revision(&graph)?;
     if matches!(scope, ReviewScope::SelectedDocument) {
-        let (mut evidence, complete) =
-            evidence_from_document(&selected.path, &selected.content, &selected.hash, 800);
+        // Full mode excludes inline cfg(test) blocks from the selected
+        // document, exactly as the active-context path excludes them from
+        // every shipped document; FullExtended (and the reduced tiers) keep
+        // them. Without this the selected doc shipped its tests while the
+        // neighborhood dropped them, and the review claimed complete evidence
+        // for content the tier contract says is out of scope.
+        let mut complete = true;
+        let mut partition_failures = Vec::new();
+        let excluded_ranges =
+            if matches!(context.mode, ContextMode::Full) && selected.language == "rust" {
+                match server.ast.cfg_test_ranges(&selected.content) {
+                    Ok(ranges) => ranges,
+                    Err(error) => {
+                        // Ship the document anyway — it is the only evidence
+                        // this scope has — but report the partition failure
+                        // instead of claiming clean, excluded evidence.
+                        complete = false;
+                        partition_failures.push(format!("{}: {error}", selected.path));
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+        let excluded_test_ranges = excluded_ranges.len();
+        let (mut evidence, chunk_complete, excluded_test_lines) =
+            evidence_from_document_excluding_ranges(
+                &selected.path,
+                &selected.content,
+                &selected.hash,
+                800,
+                &excluded_ranges,
+            );
         renumber_evidence(&mut evidence);
         return Ok(EvidenceSelection {
             evidence,
-            complete,
+            complete: complete && chunk_complete,
             candidate_files: 1,
             evidence_files: 1,
             omitted_files: Vec::new(),
             read_failures: Vec::new(),
-            partition_failures: Vec::new(),
-            excluded_test_ranges: 0,
-            excluded_test_lines: 0,
+            partition_failures,
+            excluded_test_ranges,
+            excluded_test_lines,
             graph_revision: selection_revision,
             // Selected-document scope ships only the fresh read; the envelope
             // backs nothing here.
