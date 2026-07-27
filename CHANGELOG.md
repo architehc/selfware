@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-07-26
+
+### Added
+- **Apply isolation**: `/api/actions/apply` now stages agent runs in isolated `evolve-apply-*` shadow worktrees pinned to HEAD, serialized under a global lock — the live checkout is never touched during a run
+- Bounded diff verification: scope limited to `src/`+`docs/` (rejections name the path), empty diffs honestly rejected, sha256 digest binds the exact patch
+- One-use merge: `POST /api/actions/apply/commit` merges only on exact digest match + unchanged HEAD (`409 base_moved`); atomic consumption; ff-only merge with safe checkout first
+- Two-step apply flow in the UI (staged diff preview → Apply)
+
+### Fixed
+- Evolution daemon: `cargo fmt` runs before compile/test (committed bytes == tested bytes)
+- Honest status: `full_verify` no longer passes vacuously; MCP `isError` never cached as success; failed workflows exit non-zero; macOS computer-control stubs error honestly
+- Patch deletions (`+++ /dev/null`) validate the old path and are checkpointed
+- Legacy `codegraph` bin deprecated; `evidence_complete` documented as file-coverage
+- Keyring failures visible without `RUST_LOG`; scanner lock-poisoning reported via `scan_warnings`; audit log flushes per event
+- Linux build breakers (mouse `button`, keyboard `warn!` import)
+
 ## [0.6.3] - 2026-07-26
 
 ### Added
@@ -189,7 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.3...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/architehc/selfware/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/architehc/selfware/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/architehc/selfware/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/architehc/selfware/compare/v0.6.0...v0.6.1
