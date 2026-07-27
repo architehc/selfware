@@ -2,10 +2,7 @@
 
 use super::types::{
     IntrospectionResult, IntrospectionTarget, ReferenceConfig, ReferenceLevel, ReferenceState,
-    SelfReference,
 };
-use crate::cognitive::memory_hierarchy::types::{MemoryQuery, MemoryTier};
-use crate::cognitive::memory_hierarchy::HierarchicalMemory;
 
 /// Introspection engine for self-examination
 pub struct IntrospectionEngine {

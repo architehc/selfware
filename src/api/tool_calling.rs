@@ -21,7 +21,7 @@
 //! `chat_with_profile()`, and the SWL runtime.
 
 use super::types::{Message, ToolCall, ToolDefinition, ToolFunction};
-use crate::tool_parser::{parse_tool_calls, ParseMethod, ParsedToolCall};
+use crate::tool_parser::{parse_tool_calls, ParsedToolCall};
 
 /// Attach tool definitions to a chat-completion request body.
 ///

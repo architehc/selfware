@@ -120,7 +120,7 @@ impl DeadCodeAnalyzer {
             let is_src = dir == "src";
             for entry in WalkDir::new(&dir_path).into_iter().filter_map(|e| e.ok()) {
                 let p = entry.path();
-                if p.extension().map_or(false, |e| e == "rs") {
+                if p.extension().is_some_and(|e| e == "rs") {
                     let Ok(text) = std::fs::read_to_string(p) else {
                         continue;
                     };

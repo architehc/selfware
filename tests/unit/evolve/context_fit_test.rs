@@ -156,7 +156,7 @@ fn fit_tier_falls_to_map_with_fits_false_when_nothing_fits() {
 fn fit_tier_short_circuits_io_when_full_fits() {
     let (dir, graph) = fixture();
     let measurer = TierMeasurer::new(&graph, dir.path());
-    let full = measurer.measure(&ContextMode::Full);
+    let _full = measurer.measure(&ContextMode::Full);
     let reads_before = measurer.io_reads();
     let outcome = fit_tier(&measurer, &budget_for(usize::MAX));
     assert_eq!(outcome.mode, ContextMode::FullExtended);

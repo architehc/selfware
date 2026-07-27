@@ -114,8 +114,7 @@ fn assistant_indices_empty(messages: &[Message]) -> Vec<usize> {
         .enumerate()
         .filter(|(_, m)| m.role == "assistant")
         .filter(|(_, m)| {
-            m.content.text().trim().is_empty()
-                && m.tool_calls.as_ref().map_or(true, |c| c.is_empty())
+            m.content.text().trim().is_empty() && m.tool_calls.as_ref().is_none_or(|c| c.is_empty())
         })
         .map(|(i, _)| i)
         .collect()

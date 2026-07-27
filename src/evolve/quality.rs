@@ -136,13 +136,13 @@ pub fn collect_warnings_from(cmd: &str) -> Option<HashMap<String, usize>> {
 fn read_rs_files(path: &Path) -> Result<Vec<String>> {
     let mut contents = Vec::new();
     if path.is_file() {
-        if path.extension().map_or(false, |e| e == "rs") {
+        if path.extension().is_some_and(|e| e == "rs") {
             contents.push(std::fs::read_to_string(path)?);
         }
     } else if path.is_dir() {
         for entry in walkdir::WalkDir::new(path) {
             let entry = entry?;
-            if entry.path().extension().map_or(false, |e| e == "rs") {
+            if entry.path().extension().is_some_and(|e| e == "rs") {
                 contents.push(std::fs::read_to_string(entry.path())?);
             }
         }

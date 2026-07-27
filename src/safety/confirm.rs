@@ -2,8 +2,6 @@
 
 // Feature-gated module
 
-use std::io::{self, Write};
-
 /// Operations that require confirmation
 #[derive(Debug, Clone, PartialEq)]
 pub enum DestructiveOperation {

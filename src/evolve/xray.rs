@@ -138,7 +138,7 @@ impl ConceptIndex {
             .filter_map(|e| e.ok())
         {
             let p = entry.path();
-            if p.extension().map_or(false, |e| e == "rs") {
+            if p.extension().is_some_and(|e| e == "rs") {
                 let text = match std::fs::read_to_string(p) {
                     Ok(t) => t,
                     Err(_) => continue,

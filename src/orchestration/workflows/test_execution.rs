@@ -1094,6 +1094,77 @@ steps:
 }
 
 #[tokio::test]
+async fn test_required_step_failure_inside_optional_loop_fails_workflow() {
+    // Regression: a required (non-optional) step failing inside an OPTIONAL
+    // loop recorded its failure per-iteration but the workflow still reported
+    // Completed — success on a failed run. The workflow must be Failed.
+    let yaml = r#"
+name: loop_required_failure
+description: Required step fails inside optional loop
+steps:
+  - id: loop
+    name: Optional loop
+    type: loop
+    for: item
+    in: "a"
+    do:
+      - failing_step
+    required: false
+  - id: failing_step
+    name: Failing shell step
+    type: shell
+    command: "exit 1"
+    required: true
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(yaml).unwrap();
+    let result = executor
+        .execute(
+            "loop_required_failure",
+            HashMap::new(),
+            PathBuf::from("/tmp"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.status, WorkflowStatus::Failed);
+    assert!(!result.is_success());
+    // The per-iteration failure is still recorded for inspection.
+    assert_eq!(
+        result.step_results["failing_step@0"].status,
+        StepStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn test_optional_step_failure_alone_does_not_fail_workflow() {
+    // Control: an OPTIONAL step failing must NOT fail the workflow — only
+    // required (non-optional) failures do.
+    let yaml = r#"
+name: optional_failure_ok
+description: Optional step failure is tolerated
+steps:
+  - id: optional_failing
+    name: Optional failing step
+    type: shell
+    command: "exit 1"
+    required: false
+  - id: after
+    name: Log after
+    type: log
+    message: "still running"
+"#;
+    let mut executor = WorkflowExecutor::new();
+    executor.load_yaml(yaml).unwrap();
+    let result = executor
+        .execute("optional_failure_ok", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+    assert_eq!(result.status, WorkflowStatus::Completed);
+    assert!(result.is_success());
+    assert_eq!(result.step_results["after"].status, StepStatus::Completed);
+}
+
+#[tokio::test]
 async fn test_loop_aggregated_results() {
     let yaml = r#"
 name: loop_agg

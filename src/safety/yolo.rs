@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

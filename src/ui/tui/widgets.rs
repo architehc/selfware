@@ -10,7 +10,6 @@ use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, Paragraph, Widget},
-    Frame,
 };
 
 /// A spinner widget showing progress with garden metaphors

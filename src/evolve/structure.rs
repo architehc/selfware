@@ -80,7 +80,7 @@ impl StructureAnalyzer {
         let mut out = Vec::new();
         for entry in WalkDir::new(&self.root).into_iter().filter_map(|e| e.ok()) {
             let p = entry.path();
-            if p.extension().map_or(false, |e| e == "rs")
+            if p.extension().is_some_and(|e| e == "rs")
                 && !p.to_string_lossy().ends_with("_test.rs")
             {
                 if let Ok(text) = std::fs::read_to_string(p) {

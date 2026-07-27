@@ -5,7 +5,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::info;
 
 /// A pre-authorized permission grant for tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
