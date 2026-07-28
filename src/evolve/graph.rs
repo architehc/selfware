@@ -80,8 +80,20 @@ impl GraphBuilder {
             // ship something. Web assets, data, config, scripts, and vendored
             // files — even under `src` — become Auxiliary so they don't
             // inflate the code token tiers.
-            let is_code =
-                matches!(source_set, SourceSet::Code) && is_production_source_class(file_class);
+            // Benchmark tooling under src/ is tooling, not product code:
+            // excluding it from the code tiers saves ~77k full / ~10k lite
+            // tokens of context that never describes the product
+            // (DEBLOAT_STATE.md).
+            let is_tooling_module = {
+                let module = relative
+                    .components()
+                    .nth(1)
+                    .and_then(|c| c.as_os_str().to_str());
+                matches!(module, Some("bench_harness") | Some("vlm_bench"))
+            };
+            let is_code = matches!(source_set, SourceSet::Code)
+                && is_production_source_class(file_class)
+                && !is_tooling_module;
             let mut node = match source_set {
                 SourceSet::Test | SourceSet::Example => {
                     let mut n = Node::test(&id, &path_string(relative));

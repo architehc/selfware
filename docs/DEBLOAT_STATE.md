@@ -9,14 +9,14 @@
 
 | Metric | Baseline | Previous (2026-07-25) | Delta |
 |---|---|---|---|
-| Full (all Code nodes) | 1,408,580 | 1,359,882 | +48,698 (multi-lang Code + new features) |
-| Lite (skeletons/verbatim) | 225,094 | 172,243 | +52,851 (non-rs now shipped) |
-| Compact | ~1.10M | 1,099,370 | — |
-| Map (component cards) | ~27k | 26,949 | — |
-| Production files | 376 | 380 | −4 |
+| Full (all Code nodes) | 1,327,929 | 1,359,882 | −31,953 (bench/vlm exclusion 2026-07-28) |
+| Lite (skeletons/verbatim) | 214,776 | 172,243 | +42,533 (non-rs shipped, minus exclusion) |
+| Compact | ~1.04M | 1,099,370 | — |
+| Map (component cards) | ~24.5k | 26,949 | — |
+| Production files | 342 in tiers (376 total incl. tooling) | 380 | bench/vlm → Auxiliary |
 | Source lines (repo) | ~205k | ~211k | −6,027 (waves 1-4) |
 
-Lite density: 16.0% of full (84.0% reduction). Map density: ~1.9%.
+Lite density: 16.2% of full (83.8% reduction). Map density: ~1.8%.
 
 ## Per-module tokens (top 15 by full size)
 
@@ -45,7 +45,7 @@ Full per-module table: `curl :7777/api/context/map` (evolve server) or
 
 | Item | Tokens at stake | Status |
 |---|---|---|
-| bench_harness + vlm_bench excluded from production tiers (they're tooling, not product code) | −77k full, −10k lite | [open] — classification change |
+| bench_harness + vlm_bench excluded from production tiers (they're tooling, not product code) | ~~−77k full, −10k lite~~ | [done] 2026-07-28 — measured −80.7k/−10.3k |
 | swl/ (experimental) — exclude or lower to orchestration executor (CONSOLIDATION_PLAN #1) | −46k full | [open] — owner decision |
 | tokens.rs dead subsystem | ~~1,489 src lines~~ | [done] 2026-07-28 |
 | tier_allocator duplicate tier system | ~~1,200 lines~~ | [done] 2026-07-28 |
