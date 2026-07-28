@@ -73,10 +73,14 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
 ];
 
 use super::*;
-use crate::config::test_helpers::clear_env;
 use crate::config::{default_context_length, ExecutionMode};
 use std::io::Write;
 use std::path::PathBuf;
+
+/// Shim onto the shared test-support env guard (single STATE_LOCK).
+fn clear_env() -> crate::test_support::EnvGuard {
+    crate::test_support::EnvGuard::clear_selfware_env()
+}
 
 // =========================================================================
 // Helper: write a TOML string to a temp file and return its path

@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use selfware::config::Config;
 use selfware::evolve::server::EvolveServer;
-use selfware::evolve::{Edge, EdgeType, Graph, Node, NodeLayer, OntologyStore};
+use selfware::evolve::{Edge, EdgeType, Graph, Node, OntologyStore};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -56,22 +56,7 @@ async fn test_server_returns_graph_json() {
 async fn test_persisted_ontology_keeps_semantic_edges_but_not_stale_derived_edges() {
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join(".selfware")).unwrap();
-    let concept = Node {
-        id: "concept::review".to_string(),
-        layer: NodeLayer::Concept,
-        path: None,
-        tokens: 0,
-        lines: 0,
-        files: 0,
-        coverage: None,
-        dead_code_ratio: None,
-        warning_count: None,
-        complexity: None,
-        inline_test_ranges: 0,
-        inline_test_lines: 0,
-        inline_test_tokens: 0,
-        classification: "concept".to_string(),
-    };
+    let concept = crate::concept_node("concept::review");
     let persisted = Graph {
         nodes: vec![
             Node::code("crate::a", "src/a.rs"),

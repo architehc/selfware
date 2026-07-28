@@ -398,9 +398,5 @@ impl Default for Config {
 }
 
 #[cfg(test)]
-#[path = "test_helpers.rs"]
-pub mod test_helpers;
-
-#[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

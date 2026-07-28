@@ -130,14 +130,53 @@ impl Drop for ExecGuard {
 pub(crate) struct EnvGuard {
     _lock: MutexGuard<'static, ()>,
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    clear_selfware_on_drop: bool,
 }
+
+/// `SELFWARE_*` (and provider key) env vars cleared by
+/// [`EnvGuard::clear_selfware_env`].
+const SELFWARE_ENV_VARS: &[&str] = &[
+    "SELFWARE_CONFIG",
+    "SELFWARE_ENDPOINT",
+    "SELFWARE_MODEL",
+    "SELFWARE_API_KEY",
+    "OPENROUTER_API_KEY",
+    "SELFWARE_MAX_TOKENS",
+    "SELFWARE_TEMPERATURE",
+    "SELFWARE_TIMEOUT",
+    "SELFWARE_THEME",
+    "SELFWARE_LOG_LEVEL",
+    "SELFWARE_MODE",
+    "SELFWARE_STRICT_PERMISSIONS",
+];
 
 impl EnvGuard {
     /// Acquire the state lock and capture the current values of `keys`.
     pub(crate) fn capture(keys: &[&'static str]) -> Self {
         let lock = state_lock();
         let saved = keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
-        Self { _lock: lock, saved }
+        Self {
+            _lock: lock,
+            saved,
+            clear_selfware_on_drop: false,
+        }
+    }
+
+    /// Acquire the state lock, clear every `SELFWARE_*` env var, and return a
+    /// guard that re-clears them on drop (including on panic). This uses the
+    /// SAME `STATE_LOCK` as every other guard — the old
+    /// `config::test_helpers::ENV_MUTEX` was a second, independent lock, which
+    /// let a `SELFWARE_*` mutator race a `HOME`/cwd mutator.
+    pub(crate) fn clear_selfware_env() -> Self {
+        let lock = state_lock();
+        for var in SELFWARE_ENV_VARS {
+            std::env::remove_var(var);
+        }
+        Self {
+            _lock: lock,
+            saved: Vec::new(),
+            clear_selfware_on_drop: true,
+        }
     }
 
     /// Set an environment variable while holding the guard.
@@ -154,5 +193,52 @@ impl Drop for EnvGuard {
                 None => std::env::remove_var(key),
             }
         }
+        if self.clear_selfware_on_drop {
+            for var in SELFWARE_ENV_VARS {
+                std::env::remove_var(var);
+            }
+        }
     }
+}
+
+/// Permissive agent config for tests that drive the agent against a mock LLM
+/// endpoint (Yolo mode, all paths allowed, no streaming, generous iteration
+/// budget). Shared by the tool_dispatch / execution / failure_mode suites.
+pub(crate) fn mock_agent_config(endpoint: &str) -> crate::config::Config {
+    crate::config::Config {
+        endpoint: endpoint.to_string(),
+        model: "mock-model".to_string(),
+        agent: crate::config::AgentConfig {
+            max_iterations: 50,
+            step_timeout_secs: 10,
+            streaming: false,
+            native_function_calling: false,
+            min_completion_steps: 0,
+            require_verification_before_completion: false,
+            ..Default::default()
+        },
+        safety: crate::config::SafetyConfig {
+            allowed_paths: vec!["./**".to_string(), "/**".to_string()],
+            ..Default::default()
+        },
+        execution_mode: crate::config::ExecutionMode::Yolo,
+        ..Default::default()
+    }
+}
+
+/// [`mock_agent_config`] with explicit context/token/iteration limits, for
+/// tests that exercise budget or failure-mode thresholds.
+pub(crate) fn mock_agent_config_with_limits(
+    endpoint: &str,
+    context_length: usize,
+    max_tokens: usize,
+    max_iterations: usize,
+    step_timeout_secs: u64,
+) -> crate::config::Config {
+    let mut config = mock_agent_config(endpoint);
+    config.context_length = context_length;
+    config.max_tokens = max_tokens;
+    config.agent.max_iterations = max_iterations;
+    config.agent.step_timeout_secs = step_timeout_secs;
+    config
 }

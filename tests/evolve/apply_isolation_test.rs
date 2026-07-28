@@ -23,33 +23,7 @@ use selfware::evolve::apply::{self, ApplyError, ApplyStatus, RejectReason};
 use selfware::evolve::server::EvolveServer;
 use selfware::evolve::Graph;
 
-use crate::post_json;
-
-/// Temp repo with one committed file; returns (dir, HEAD oid).
-fn committed_repository() -> (tempfile::TempDir, String) {
-    let project = tempfile::tempdir().unwrap();
-    let repo = Repository::init(project.path()).unwrap();
-    std::fs::write(project.path().join("README.md"), "initial\n").unwrap();
-
-    let mut index = repo.index().unwrap();
-    index.add_path(std::path::Path::new("README.md")).unwrap();
-    index.write().unwrap();
-    let tree_id = index.write_tree().unwrap();
-    let tree = repo.find_tree(tree_id).unwrap();
-    let signature = Signature::now("Selfware Test", "selfware@example.test").unwrap();
-    let head = repo
-        .commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            "initial commit",
-            &tree,
-            &[],
-        )
-        .unwrap()
-        .to_string();
-    (project, head)
-}
+use crate::{committed_repository, post_json};
 
 /// Temp repo holding a minimal dependency-free Cargo package (so the compile
 /// gate runs offline and fast); returns (dir, HEAD oid).

@@ -1346,22 +1346,6 @@ To call a tool, use this EXACT XML structure:
         }
     }
 
-    /// Attach an evolution event bus. All existing AgentEvents will be
-    /// automatically translated to EvolutionEvents via the bridge emitter.
-    /// The inner emitter (TUI or noop) is preserved — events flow to both.
-    pub fn with_evolution_bus(
-        mut self,
-        bus: evolution_events::EvolutionBus,
-        agent_id: String,
-    ) -> Self {
-        self.events = Arc::new(evolution_events::EvolutionBridgeEmitter::new(
-            bus,
-            agent_id,
-            Arc::clone(&self.events),
-        ));
-        self
-    }
-
     /// Emit an event to the TUI / event listener (no-op when no emitter is configured).
     fn emit_event(&self, event: AgentEvent) {
         self.events.emit(event);
@@ -1782,43 +1766,6 @@ To call a tool, use this EXACT XML structure:
         }
     }
 
-    /// Build LSP-enriched context for a file, helping smaller models understand code semantics.
-    /// Returns a summary of symbols (functions, structs, etc.) with their signatures.
-    async fn _build_lsp_context(&self, file_path: &str) -> Option<String> {
-        // Use the lsp_document_symbols tool to get file structure
-        let args = serde_json::json!({
-            "file": file_path
-        });
-
-        match self.tools.execute("lsp_document_symbols", args).await {
-            Ok(result) => {
-                if let Some(symbols) = result.get("symbols").and_then(|s| s.as_array()) {
-                    if symbols.is_empty() {
-                        return None;
-                    }
-
-                    let mut context = format!("\n## Symbol Outline for `{}`:\n", file_path);
-                    for sym in symbols.iter().take(50) {
-                        // Limit to prevent context bloat
-                        if let (Some(name), Some(kind), Some(line)) = (
-                            sym.get("name").and_then(|n| n.as_str()),
-                            sym.get("kind").and_then(|k| k.as_str()),
-                            sym.get("line").and_then(|l| l.as_u64()),
-                        ) {
-                            context.push_str(&format!("- {} `{}` (line {})\n", kind, name, line));
-                        }
-                    }
-                    return Some(context);
-                }
-                None
-            }
-            Err(e) => {
-                tracing::debug!("LSP context building failed for {}: {}", file_path, e);
-                None
-            }
-        }
-    }
-
     /// Get current execution mode
     #[inline]
     pub fn execution_mode(&self) -> crate::config::ExecutionMode {
@@ -1979,11 +1926,6 @@ To call a tool, use this EXACT XML structure:
         self.last_assistant_response.clear();
     }
 
-    /// Check if plan mode is active.
-    pub fn is_plan_mode(&self) -> bool {
-        self.plan_mode
-    }
-
     /// Toggle plan mode on/off and return the new state.
     pub fn toggle_plan_mode(&mut self) -> bool {
         self.plan_mode = !self.plan_mode;
@@ -2012,11 +1954,6 @@ To call a tool, use this EXACT XML structure:
     /// Check if in structured plan mode (planning or executing)
     pub fn is_in_plan_mode(&self) -> bool {
         self.plan_mode_manager.is_in_plan_mode()
-    }
-
-    /// Check if currently in the planning phase (before approval)
-    pub fn is_planning_phase(&self) -> bool {
-        self.plan_mode_manager.is_planning()
     }
 
     /// Approve the current plan and switch to executing
@@ -2053,11 +1990,6 @@ To call a tool, use this EXACT XML structure:
     /// Get a reference to the hook registry.
     pub fn hook_registry(&self) -> &HookRegistry {
         &self.hook_registry
-    }
-
-    /// Get a mutable reference to the hook registry.
-    pub fn hook_registry_mut(&mut self) -> &mut HookRegistry {
-        &mut self.hook_registry
     }
 
     /// Resume a named chat session by loading messages from the chat store.
@@ -2125,27 +2057,6 @@ To call a tool, use this EXACT XML structure:
         Ok(metrics)
     }
 
-    /// Run compression based on current context usage
-    pub async fn compact_auto_trigger(&mut self) -> Option<compression::CompressionMetrics> {
-        let current_tokens = self.total_tokens_used();
-        let context_window = self.max_context_tokens;
-
-        let metrics = self
-            .compression_orchestrator
-            .check_and_compress(
-                &self.client,
-                &mut self.messages,
-                current_tokens,
-                context_window,
-            )
-            .await;
-
-        if let Some(ref metrics) = metrics {
-            self.account_compression_tokens(metrics);
-        }
-        metrics
-    }
-
     /// Record a file access for FullCompact re-injection
     pub fn record_file_access(&mut self, path: &str) {
         self.compression_orchestrator.record_file_access(path);
@@ -2183,110 +2094,6 @@ To call a tool, use this EXACT XML structure:
     /// Get the compression orchestrator (for advanced usage)
     pub fn compression_orchestrator(&self) -> &CompressionOrchestrator {
         &self.compression_orchestrator
-    }
-
-    /// Get mutable access to the compression orchestrator
-    pub fn compression_orchestrator_mut(&mut self) -> &mut CompressionOrchestrator {
-        &mut self.compression_orchestrator
-    }
-
-    /// Prompt the user for permission to execute a tool.
-    ///
-    /// This method handles interactive prompting for tool execution permission.
-    /// It supports both TUI and CLI modes, and provides options for:
-    /// - Yes: Allow this invocation
-    /// - No: Deny this invocation
-    /// - Always: Remember choice for this session (adds to permission_store)
-    /// - Yolo: Switch execution mode to Yolo for the rest of the session
-    ///
-    /// In non-interactive mode, returns an error suggesting --yolo mode.
-    pub async fn prompt_for_permission(
-        &self,
-        tool_name: &str,
-        reason: &str,
-    ) -> Result<PermissionPromptResult> {
-        // Check if we're in non-interactive mode
-        if !self.is_interactive() {
-            return Err(anyhow::anyhow!(
-                "Tool '{}' requires confirmation in headless mode: {}. \
-                 Re-run with --yolo to auto-approve, or use interactive/TUI mode \
-                 for manual confirmation.",
-                tool_name,
-                reason
-            ));
-        }
-
-        // Check if TUI is active - if so, we need to handle differently
-        if self.has_tui_renderer() {
-            // For TUI mode, emit an event and wait for user response
-            // The TUI will handle displaying the prompt and sending back the response
-            self.emit_event(AgentEvent::PermissionRequested {
-                tool_name: tool_name.to_string(),
-                reason: reason.to_string(),
-            });
-
-            // In TUI mode, we need to wait for the user response via a different mechanism
-            // For now, fall back to CLI prompt by temporarily suspending TUI
-            return self.prompt_for_permission_cli(tool_name, reason).await;
-        }
-
-        // CLI interactive mode
-        self.prompt_for_permission_cli(tool_name, reason).await
-    }
-
-    /// CLI-based permission prompt (used for both CLI and TUI fallback)
-    async fn prompt_for_permission_cli(
-        &self,
-        tool_name: &str,
-        reason: &str,
-    ) -> Result<PermissionPromptResult> {
-        use colored::Colorize;
-        use std::io::{self, Write};
-
-        eprintln!();
-        eprintln!(
-            "{} Tool '{}' requires confirmation",
-            "⚠️ ".bright_yellow(),
-            tool_name.bright_cyan()
-        );
-        eprintln!("  Reason: {}", reason);
-        eprintln!();
-        eprint!("  Allow? [Y]es / [N]o / [A]lways / Y[o]lo mode: ");
-        io::stderr().flush()?;
-
-        // Read user input asynchronously while pausing the ESC listener so it
-        // does not compete for stdin events.
-        let input = execution::read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await?;
-
-        match input.trim().to_lowercase().as_str() {
-            "y" | "yes" => {
-                eprintln!("  {} Allowed.", "✓".bright_green());
-                Ok(PermissionPromptResult::Yes)
-            }
-            "n" | "no" => {
-                eprintln!("  {} Denied.", "✗".bright_red());
-                Ok(PermissionPromptResult::No)
-            }
-            "a" | "always" => {
-                eprintln!("  {} Always allowed for this session.", "✓".bright_green());
-                Ok(PermissionPromptResult::Always)
-            }
-            "o" | "yolo" => {
-                eprintln!(
-                    "  {} Switching to YOLO mode for this session.",
-                    "⚡".bright_red()
-                );
-                // Emit event to request mode change - the agent loop will handle this
-                self.emit_event(AgentEvent::ModeChangeRequested {
-                    mode: crate::config::ExecutionMode::Yolo,
-                });
-                Ok(PermissionPromptResult::Yolo)
-            }
-            _ => {
-                eprintln!("  {} Invalid choice, denying.", "✗".bright_red());
-                Ok(PermissionPromptResult::No)
-            }
-        }
     }
 
     // ========================================================================
@@ -2423,11 +2230,6 @@ To call a tool, use this EXACT XML structure:
             crate::self_healing::ResolutionOutcome::Escalate
                 | crate::self_healing::ResolutionOutcome::Unresolvable
         )
-    }
-
-    /// Returns `true` when rigor mode is currently active.
-    pub fn is_rigor_mode(&self) -> bool {
-        self.rigor_mode
     }
 
     /// Returns whether the completion gate should require verification before
@@ -2583,18 +2385,6 @@ pub enum PermissionPromptResult {
     Always,
     /// User wants to switch to YOLO mode
     Yolo,
-}
-
-impl PermissionPromptResult {
-    /// Returns true if the operation should proceed
-    pub fn is_allowed(&self) -> bool {
-        matches!(
-            self,
-            PermissionPromptResult::Yes
-                | PermissionPromptResult::Always
-                | PermissionPromptResult::Yolo
-        )
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

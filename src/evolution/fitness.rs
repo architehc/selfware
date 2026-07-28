@@ -70,25 +70,6 @@ pub enum Difficulty {
     Expert,
 }
 
-/// A visual scenario for the Visual-SAB benchmark track.
-///
-/// Each scenario describes a visual design task, an optional golden reference
-/// image, and a quality threshold.  During SAB evaluation the agent generates
-/// visual output, a screenshot is captured, and the VLM critic scores it.
-#[derive(Debug, Clone)]
-pub struct VisualScenario {
-    /// Human-readable scenario name (e.g. `"visual_landing_page"`).
-    pub name: String,
-    /// Description / prompt given to the agent.
-    pub description: String,
-    /// Optional golden reference image for comparison.
-    pub reference_image: Option<PathBuf>,
-    /// Minimum overall score (0.0–1.0) to pass.
-    pub quality_threshold: f64,
-    /// How to capture the agent's visual output.
-    pub capture_method: CaptureMethod,
-}
-
 /// Run the full SAB benchmark and return structured results
 pub fn run_sab(selfware_binary: &Path, config: &SabConfig) -> Result<SabResult, FitnessError> {
     let start = Instant::now();

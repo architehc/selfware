@@ -23,27 +23,6 @@ fn create_inline_guardrail(
     }
 }
 
-/// Test helper to create a code block guardrail
-fn create_code_guardrail(
-    name: &str,
-    guardrail_type: GuardrailType,
-    code: &str,
-    action: ViolationAction,
-) -> GuardrailDef {
-    GuardrailDef {
-        name: name.to_string(),
-        guardrail_type,
-        condition: Condition::Code {
-            language: "rust".to_string(),
-            content: code.to_string(),
-        },
-        on_violation: action,
-        description: None,
-        severity: None,
-        tags: Vec::new(),
-    }
-}
-
 #[tokio::test]
 async fn test_pre_agent_guardrail_blocks_execution() {
     let mut enforcer = GuardrailEnforcer::new();

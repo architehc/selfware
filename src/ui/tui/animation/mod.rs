@@ -88,24 +88,11 @@ pub mod timing {
 
     /// Standard transitions
     pub const STANDARD: Duration = Duration::from_millis(300);
-
-    /// Emphasis animations (notifications)
-    pub const EMPHASIS: Duration = Duration::from_millis(500);
-
-    /// Dramatic scene changes
-    pub const DRAMATIC: Duration = Duration::from_millis(1000);
-
-    /// Ambient background animations
-    pub const AMBIENT_MIN: Duration = Duration::from_millis(2000);
-    pub const AMBIENT_MAX: Duration = Duration::from_millis(5000);
 }
 
 /// Color palette for animations
 pub mod colors {
     use ratatui::style::Color;
-
-    /// Background (Deep Navy)
-    pub const BACKGROUND: Color = Color::Rgb(0x1A, 0x1A, 0x2E);
 
     /// Primary (Coral) - Used for agents
     pub const PRIMARY: Color = Color::Rgb(0xFF, 0x6B, 0x6B);

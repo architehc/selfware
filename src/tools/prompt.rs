@@ -52,23 +52,6 @@ pub trait ToolPrompt: Send + Sync {
     fn important_notes(&self) -> Option<String>;
 }
 
-/// Extension trait for converting any Tool to a rich prompt-enabled tool.
-///
-/// This provides a bridge between the basic Tool trait and the
-/// rich ToolPrompt trait.
-pub trait IntoToolPrompt {
-    /// Convert to a ToolPrompt if rich descriptions are available.
-    #[allow(clippy::wrong_self_convention)]
-    fn into_tool_prompt(&self) -> Option<&dyn ToolPrompt>;
-}
-
-/// Blanket implementation for Option<&dyn ToolPrompt>.
-impl IntoToolPrompt for &dyn ToolPrompt {
-    fn into_tool_prompt(&self) -> Option<&dyn ToolPrompt> {
-        Some(*self)
-    }
-}
-
 #[cfg(test)]
 #[path = "../../tests/unit/tools/prompt/prompt_test.rs"]
 mod tests;

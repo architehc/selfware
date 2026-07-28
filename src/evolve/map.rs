@@ -317,21 +317,7 @@ fn render(cards: &[ComponentCard], full_tokens: usize) -> String {
          # or expand(component, symbol) for one symbol's source span.\n\n",
     );
     for card in cards {
-        out.push_str(&format!(
-            "### {}  ({} · {} tok)\n",
-            card.component, card.path, card.tokens
-        ));
-        if let Some(doc) = &card.doc {
-            out.push_str(doc);
-            out.push('\n');
-        }
-        push_symbols(&mut out, "fns", &card.fns);
-        push_symbols(&mut out, "types", &card.types);
-        push_symbols(&mut out, "traits", &card.traits);
-        push_symbols(&mut out, "consts", &card.consts);
-        if card.more > 0 {
-            out.push_str(&format!("(+{} more public symbols)\n", card.more));
-        }
+        out.push_str(&render_card(card));
         out.push('\n');
     }
     out.trim_end().to_string()

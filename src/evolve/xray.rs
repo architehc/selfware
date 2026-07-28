@@ -94,7 +94,7 @@ pub struct ConceptIndex {
     concept_names: HashSet<String>,
 }
 
-fn module_of(path: &str) -> String {
+pub(crate) fn module_of(path: &str) -> String {
     let norm = path.replace('\\', "/");
     // Path may be absolute (`/…/src/tools/mod.rs`) or repo-relative (`src/…`).
     // Take the segment after the last `/src/`, else strip a leading `src/`.

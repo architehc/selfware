@@ -101,17 +101,7 @@ impl StructureAnalyzer {
 }
 
 fn module_of(path: &str) -> String {
-    let p = path.strip_prefix("src/").unwrap_or(path);
-    let p = p.strip_suffix(".rs").unwrap_or(p);
-    let parts: Vec<&str> = p
-        .split('/')
-        .filter(|s| !s.is_empty() && *s != "mod")
-        .collect();
-    if parts.is_empty() {
-        "crate".into()
-    } else {
-        parts.join("::")
-    }
+    super::xray::module_of(path)
 }
 
 /// Parse one file: types → classes, `impl` bodies → methods on the target type,

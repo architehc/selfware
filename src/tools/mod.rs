@@ -775,15 +775,6 @@ impl ToolRegistry {
     pub fn activated_count(&self) -> usize {
         self.activated_tools.len()
     }
-
-    /// Return only read-only tools (tools that don't modify files or state).
-    /// This is used in plan mode to restrict available tools.
-    pub fn filter_by_readonly(&self) -> Vec<&dyn Tool> {
-        self.list_activated()
-            .into_iter()
-            .filter(|tool| tool.is_readonly())
-            .collect()
-    }
 }
 
 impl Default for ToolRegistry {

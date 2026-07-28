@@ -126,20 +126,6 @@ impl ImprovementTarget {
     }
 }
 
-/// A self-editing session
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelfEditSession {
-    pub session_id: String,
-    pub target_id: String,
-    pub git_branch: String,
-    pub checkpoint_commit: Option<String>,
-    pub edits_made: Vec<String>,
-    pub verification_passed: bool,
-    pub status: ImprovementStatus,
-    pub started_at: u64,
-    pub completed_at: Option<u64>,
-}
-
 /// Record of a completed improvement attempt
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImprovementRecord {

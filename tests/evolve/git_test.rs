@@ -1,32 +1,7 @@
-use git2::{Repository, Signature};
+use git2::Repository;
 use selfware::evolve::git::GitEngine;
 
-fn committed_repository() -> (tempfile::TempDir, String) {
-    let project = tempfile::tempdir().unwrap();
-    let repo = Repository::init(project.path()).unwrap();
-    std::fs::write(project.path().join("README.md"), "initial\n").unwrap();
-
-    let mut index = repo.index().unwrap();
-    index.add_path(std::path::Path::new("README.md")).unwrap();
-    index.write().unwrap();
-    let tree_id = index.write_tree().unwrap();
-    let tree = repo.find_tree(tree_id).unwrap();
-    let signature = Signature::now("Selfware Test", "selfware@example.test").unwrap();
-    let head = repo
-        .commit(
-            Some("HEAD"),
-            &signature,
-            &signature,
-            "initial commit",
-            &tree,
-            &[],
-        )
-        .unwrap()
-        .to_string();
-    drop(tree);
-    drop(repo);
-    (project, head)
-}
+use crate::committed_repository;
 
 #[test]
 fn test_branch_preview_does_not_mutate_and_confirm_creates_exact_head() {

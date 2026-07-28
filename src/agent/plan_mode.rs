@@ -6,7 +6,6 @@
 //! control over the plan before execution begins.
 
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
 
 /// Status of an individual plan step
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,9 +349,6 @@ impl PlanModeManager {
         }
     }
 }
-
-/// Thread-safe shared plan mode manager
-pub type SharedPlanModeManager = Arc<RwLock<PlanModeManager>>;
 
 /// List of tool names that are read-only and safe to use in plan mode
 pub const READONLY_TOOLS: &[&str] = &[

@@ -15,7 +15,6 @@
 //! - `xprop` - Window property queries (optional, for better app name detection)
 
 use anyhow::Result;
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::env;
 #[cfg(target_os = "linux")]
@@ -92,25 +91,6 @@ impl DisplayServer {
     pub fn is_supported(&self) -> bool {
         matches!(self, DisplayServer::X11 | DisplayServer::Wayland)
     }
-}
-
-/// Platform-abstracted window management.
-#[async_trait]
-pub trait WindowPlatform: Send + Sync {
-    /// List all visible windows.
-    async fn list_windows(&self) -> Result<Vec<WindowInfo>>;
-    /// Focus (bring to front) a specific window.
-    async fn focus_window(&self, id: &WindowId) -> Result<()>;
-    /// Get the currently active/focused window.
-    async fn get_active_window(&self) -> Result<WindowInfo>;
-    /// Resize a window.
-    async fn resize_window(&self, id: &WindowId, width: u32, height: u32) -> Result<()>;
-    /// Move a window to specific coordinates.
-    async fn move_window(&self, id: &WindowId, x: i32, y: i32) -> Result<()>;
-    /// Minimize a window.
-    async fn minimize_window(&self, id: &WindowId) -> Result<()>;
-    /// Close a window.
-    async fn close_window(&self, id: &WindowId) -> Result<()>;
 }
 
 /// Window manager that uses the appropriate platform backend.

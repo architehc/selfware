@@ -7,15 +7,10 @@ use super::types::{
 use super::*;
 use std::path::PathBuf;
 
-/// Mutex to serialize tests that mutate SELFWARE_* environment variables.
-/// `env::set_var` / `env::remove_var` are process-global, so parallel tests
-/// that rely on specific env values will race without serialization.
-/// All tests that call `clear_selfware_env_vars()` or `set_var(SELFWARE_*)`
-/// should acquire this lock first via `lock_env()`.
-// NOTE: ENV_MUTEX and clear_selfware_env_vars have moved to
-// `crate::config::test_helpers` so that `cli::tests` can share the same lock.
-// This module now re-exports the helpers for backward compatibility within
-// config tests.
+// NOTE: env isolation now lives in `crate::test_support::EnvGuard`
+// (`clear_selfware_env`), which shares the single STATE_LOCK with the cwd /
+// budget / exec guards — the old `config::test_helpers::ENV_MUTEX` was a
+// second, independent lock (a real flake window).
 
 #[test]
 fn test_config_default() {
@@ -1205,10 +1200,9 @@ fn test_keyring_service_constant() {
     assert_eq!(KEYRING_SERVICE, "selfware-api-key");
 }
 
-/// Re-export of [`crate::config::test_helpers::clear_env`] for backward
-/// compatibility within this module.
-fn clear_selfware_env_vars() -> crate::config::test_helpers::EnvGuard {
-    crate::config::test_helpers::clear_env()
+/// Shim onto the shared test-support env guard for this module.
+fn clear_selfware_env_vars() -> crate::test_support::EnvGuard {
+    crate::test_support::EnvGuard::clear_selfware_env()
 }
 
 // ---- RedactedString comprehensive tests ----

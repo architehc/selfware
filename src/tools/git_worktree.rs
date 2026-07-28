@@ -124,29 +124,6 @@ fn generate_worktree_name() -> String {
     format!("worktree_{}", timestamp)
 }
 
-/// Resolve the worktree path, creating default if needed
-#[allow(dead_code)]
-fn resolve_worktree_path(path: Option<&str>) -> Result<PathBuf> {
-    if let Some(p) = path {
-        // Explicit path provided
-        let path_buf = PathBuf::from(p);
-        if path_buf.is_absolute() {
-            Ok(path_buf)
-        } else {
-            // Relative to current directory
-            env::current_dir()
-                .map(|cwd| cwd.join(&path_buf))
-                .context("Failed to resolve relative path")
-        }
-    } else {
-        // Generate default path
-        let name = generate_worktree_name();
-        env::current_dir()
-            .map(|cwd| cwd.join(DEFAULT_WORKTREE_BASE).join(name))
-            .context("Failed to create default worktree path")
-    }
-}
-
 /// Find the git repository root
 async fn find_git_root() -> Result<PathBuf> {
     let output = tokio::process::Command::new("git")

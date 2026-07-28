@@ -856,7 +856,7 @@ mod tests {
 
     /// Set HOME to `dir` for the duration of the returned guard (so the real
     /// ~/.selfware/trusted_repos can't interfere), restoring on drop. Callers
-    /// hold the shared env mutex via `clear_env` to stay serialized.
+    /// hold the shared state lock via `clear_selfware_env` to stay serialized.
     struct HomeGuard(Option<std::ffi::OsString>);
     impl HomeGuard {
         fn set(dir: &Path) -> Self {
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn untrusted_project_config_is_not_handed_to_the_child() {
-        let _env = crate::config::test_helpers::clear_env();
+        let _env = crate::test_support::EnvGuard::clear_selfware_env();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(home.path());
         let project = tempfile::tempdir().unwrap();
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn trusted_project_config_is_handed_to_the_child() {
-        let _env = crate::config::test_helpers::clear_env();
+        let _env = crate::test_support::EnvGuard::clear_selfware_env();
         let home = tempfile::tempdir().unwrap();
         let _home = HomeGuard::set(home.path());
         let project = tempfile::tempdir().unwrap();

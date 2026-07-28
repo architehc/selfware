@@ -304,18 +304,6 @@ impl VisualVerifier {
         parse_diff_response(&raw)
     }
 
-    /// Verify that specific UI elements are present and visible.
-    pub async fn verify_ui_elements(
-        &self,
-        image_base64: &str,
-        elements: &[UiElement],
-    ) -> Result<Vec<ElementVerification>> {
-        let prompt = build_elements_prompt(elements);
-        let body = self.build_single_image_request(&prompt, image_base64)?;
-        let raw = self.call_vlm(&body).await?;
-        parse_elements_response(&raw, elements)
-    }
-
     // -----------------------------------------------------------------------
     // Convenience methods
     // -----------------------------------------------------------------------
@@ -969,57 +957,6 @@ impl VisualStateTracker {
     /// Create a default configuration (20 history, 2 repeats = stuck)
     pub fn default_config() -> Self {
         Self::new(20, 2)
-    }
-
-    /// Record a new state and check for loops
-    pub fn record_state(
-        &mut self,
-        screenshot_path: &Path,
-        semantic_description: String,
-        action_taken: String,
-        action_succeeded: bool,
-    ) -> Result<LoopDetectionResult> {
-        let hash = compute_perceptual_hash(screenshot_path)?;
-        let state = ScreenshotState {
-            hash,
-            semantic_description,
-            timestamp: Utc::now(),
-            action_taken: action_taken.clone(),
-            action_succeeded,
-            screenshot_path: Some(screenshot_path.to_path_buf()),
-        };
-
-        // Check for similar states in history
-        let similar: Vec<_> = self
-            .history
-            .iter()
-            .filter(|h| self.is_same_screen(&state, h))
-            .cloned()
-            .collect();
-
-        let result = if similar.len() >= self.stuck_threshold {
-            // We're stuck in a loop
-            let strategy = self.determine_recovery_strategy(&similar, action_succeeded);
-            LoopDetectionResult::Stuck {
-                loop_pattern: similar,
-                suggested_recovery: strategy,
-            }
-        } else if !similar.is_empty() {
-            // Possible loop forming
-            LoopDetectionResult::Warning {
-                similar_states: similar,
-            }
-        } else {
-            LoopDetectionResult::Proceed
-        };
-
-        // Add to history
-        if self.history.len() >= self.max_history {
-            self.history.pop_front();
-        }
-        self.history.push_back(state);
-
-        Ok(result)
     }
 
     /// Record state with pre-computed hash (for efficiency when hash is already known)

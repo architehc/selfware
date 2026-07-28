@@ -85,14 +85,14 @@ fn test_for_model_none_falls_back_gracefully() {
 fn test_configured_model_slot_used_when_env_absent() {
     // The CLI registers the loaded config's model here instead of the
     // tokenizer reloading the config itself (P2-11).
-    let _guard = crate::config::test_helpers::clear_env();
+    let _guard = crate::test_support::EnvGuard::clear_selfware_env();
     set_configured_model("slot-model");
     assert_eq!(configured_model_name().as_deref(), Some("slot-model"));
 }
 
 #[test]
 fn test_env_var_beats_configured_model_slot() {
-    let _guard = crate::config::test_helpers::clear_env();
+    let _guard = crate::test_support::EnvGuard::clear_selfware_env();
     set_configured_model("slot-model");
     std::env::set_var("SELFWARE_MODEL", "env-model");
     assert_eq!(configured_model_name().as_deref(), Some("env-model"));

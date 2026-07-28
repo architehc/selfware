@@ -414,8 +414,8 @@ fn resolve_config_path_no_original_cwd_falls_back_gracefully() {
 // from `resolve_config_path` whenever `SELFWARE_CONFIG` is set, letting
 // `Config::load` honour the env var.
 
-fn clear_config_env() -> crate::config::test_helpers::EnvGuard {
-    crate::config::test_helpers::clear_env()
+fn clear_config_env() -> crate::test_support::EnvGuard {
+    crate::test_support::EnvGuard::clear_selfware_env()
 }
 
 #[test]

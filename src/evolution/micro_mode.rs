@@ -180,11 +180,6 @@ pub fn validate_micro_hypothesis(hypothesis: &Hypothesis) -> Result<(), String> 
     Ok(())
 }
 
-/// Get the patch length for validation
-fn patch_len(hypothesis: &Hypothesis) -> usize {
-    hypothesis.patch.len()
-}
-
 #[cfg(test)]
 #[path = "../../tests/unit/evolution/micro_mode/micro_mode_test.rs"]
 mod tests;

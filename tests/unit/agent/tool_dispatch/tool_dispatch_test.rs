@@ -319,25 +319,7 @@ async fn file_multi_edit_dispatch_snapshots_undo_and_clears_cache() {
 }
 
 fn test_config(endpoint: String) -> Config {
-    Config {
-        endpoint,
-        model: "mock-model".to_string(),
-        agent: crate::config::AgentConfig {
-            max_iterations: 50,
-            step_timeout_secs: 10,
-            streaming: false,
-            native_function_calling: false,
-            min_completion_steps: 0,
-            require_verification_before_completion: false,
-            ..Default::default()
-        },
-        safety: crate::config::SafetyConfig {
-            allowed_paths: vec!["./**".to_string(), "/**".to_string()],
-            ..Default::default()
-        },
-        execution_mode: crate::config::ExecutionMode::Yolo,
-        ..Default::default()
-    }
+    crate::test_support::mock_agent_config(&endpoint)
 }
 
 // =========================================================================

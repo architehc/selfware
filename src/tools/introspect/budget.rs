@@ -268,10 +268,6 @@ impl PlanBudget {
         self.max_iterations.saturating_sub(self.current_iteration)
     }
 
-    pub fn iteration_exhausted(&self) -> bool {
-        self.current_iteration >= self.max_iterations
-    }
-
     pub fn next_iteration(&mut self) {
         self.current_iteration += 1;
     }

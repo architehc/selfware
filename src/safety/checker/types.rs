@@ -181,15 +181,3 @@ pub(crate) static ENCODED_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(uudecode|gunzip|zcat|gzip\s+-d)\s+.*\|\s*(base64|sh|bash|zsh|perl|python)"#)
         .expect("Invalid regex")
 });
-
-// Pattern to detect suspicious shell variable substitution
-#[allow(dead_code)]
-pub(crate) static SUSPICIOUS_SUBSTITUTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"\$['"][^'"]*['"]|\$\{[^}]+\}|\$[a-zA-Z_][a-zA-Z0-9_]*"#).expect("Invalid regex")
-});
-
-// Pattern to detect standalone variable execution
-#[allow(dead_code)]
-pub(crate) static STANDING_VARIABLE_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"^\s*\$\s*\{?\s*[A-Za-z_][A-Za-z0-9_]*\s*\}?\s*$"#).expect("Invalid regex")
-});

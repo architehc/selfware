@@ -8,33 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A request to mutate a specific function via AST transformation
-#[derive(Debug, Clone)]
-pub struct AstMutationRequest {
-    /// Path to the target file (relative to repo root)
-    pub target_file: PathBuf,
-    /// Name of the function to mutate
-    pub target_fn: String,
-    /// Type of mutation to apply
-    pub mutation_type: MutationType,
-    /// For ReplaceFnBody: the new function body as Rust code
-    pub new_body: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub enum MutationType {
-    /// Replace the entire function body
-    ReplaceFnBody,
-    /// Add a parameter to the function signature
-    AddParameter { name: String, ty: String },
-    /// Wrap the function's core logic in a cache layer
-    WrapInCache { cache_key: String },
-    /// Extract the function into its own module
-    ExtractToModule { module_name: String },
-    /// Inline all constant expressions
-    InlineConstants,
-}
-
 /// Result of an AST mutation attempt
 #[derive(Debug)]
 pub struct AstMutationResult {

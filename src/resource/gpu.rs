@@ -160,15 +160,6 @@ impl GpuManager {
         Ok(total_usage)
     }
 
-    /// Get available GPU memory
-    pub async fn get_available_memory(&self) -> u64 {
-        if let Ok(usage) = self.get_usage().await {
-            usage.memory_total.saturating_sub(usage.memory_used)
-        } else {
-            0
-        }
-    }
-
     /// Monitor GPU continuously
     pub async fn monitor(&self) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(

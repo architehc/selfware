@@ -50,26 +50,61 @@ fn edge(from: &str, to: &str) -> Edge {
     }
 }
 
+/// Concept-layer node with zeroed metrics (classification "concept").
+pub fn concept_node(id: &str) -> Node {
+    Node {
+        id: id.to_string(),
+        layer: NodeLayer::Concept,
+        path: None,
+        tokens: 0,
+        lines: 0,
+        files: 0,
+        coverage: None,
+        dead_code_ratio: None,
+        warning_count: None,
+        complexity: None,
+        inline_test_ranges: 0,
+        inline_test_lines: 0,
+        inline_test_tokens: 0,
+        classification: "concept".to_string(),
+    }
+}
+
+/// Temp repo with one committed file; returns (dir, HEAD oid).
+pub fn committed_repository() -> (tempfile::TempDir, String) {
+    let project = tempfile::tempdir().unwrap();
+    let repo = git2::Repository::init(project.path()).unwrap();
+    std::fs::write(project.path().join("README.md"), "initial\n").unwrap();
+
+    let mut index = repo.index().unwrap();
+    index.add_path(std::path::Path::new("README.md")).unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let signature = git2::Signature::now("Selfware Test", "selfware@example.test").unwrap();
+    let head = repo
+        .commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "initial commit",
+            &tree,
+            &[],
+        )
+        .unwrap()
+        .to_string();
+    (project, head)
+}
+
 /// Graph with one code node, one concept node, and duplicate/depends-on edges.
 fn sample_graph() -> Graph {
     Graph {
         nodes: vec![
             Node::code("agent", "src/agent"),
             Node {
-                id: "cluster-abc".to_string(),
-                layer: NodeLayer::Concept,
-                path: None,
                 tokens: 1200,
-                lines: 0,
                 files: 4,
-                coverage: None,
-                dead_code_ratio: None,
-                warning_count: None,
-                complexity: None,
-                inline_test_ranges: 0,
-                inline_test_lines: 0,
-                inline_test_tokens: 0,
-                classification: "concept".to_string(),
+                ..concept_node("cluster-abc")
             },
         ],
         edges: vec![

@@ -104,11 +104,6 @@ impl ReferenceState {
         self.counter.fetch_add(1, Ordering::Relaxed)
     }
 
-    pub async fn get_reference(&self, key: &str) -> Option<SelfReference> {
-        let refs = self.references.read().await;
-        refs.get(key).cloned()
-    }
-
     pub async fn set_level(&self, level: ReferenceLevel) {
         let mut current = self.current_level.write().await;
         *current = level;

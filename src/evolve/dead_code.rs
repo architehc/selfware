@@ -228,16 +228,41 @@ fn collect_defs(text: &str, rel_path: &str, out: &mut Vec<Def>) {
         let Some(c) = def_re().captures(line) else {
             continue;
         };
-        // A preceding attribute line containing `cfg(` marks platform/feature gating.
-        let prev = if i > 0 { lines[i - 1].trim_start() } else { "" };
-        let cfg_gated = prev.starts_with("#[cfg(") || prev.starts_with("#[cfg_attr(");
+        // Walk back past CONTIGUOUS attribute lines (not just one), tracking
+        // bracket balance so multi-line attributes like
+        //   #[cfg_attr(target_os = "windows",
+        //              ignore = "reason")]
+        //   #[tokio::test]
+        // are all seen (analyzer false-positive class).
+        let mut attrs: Vec<&str> = Vec::new();
+        let mut j = i;
+        let mut open = 0i32;
+        while j > 0 {
+            let prev = lines[j - 1].trim_start();
+            let is_attr_start = prev.starts_with("#[");
+            let in_continuation = open > 0;
+            if !is_attr_start && !in_continuation {
+                break;
+            }
+            for ch in prev.chars() {
+                match ch {
+                    '[' => open += 1,
+                    ']' => open -= 1,
+                    _ => {}
+                }
+            }
+            attrs.push(prev);
+            j -= 1;
+        }
+        let has_attr = |prefix: &str| attrs.iter().any(|a| a.starts_with(prefix));
+        // A preceding attribute containing `cfg(` marks platform/feature gating.
+        let cfg_gated = has_attr("#[cfg(") || has_attr("#[cfg_attr(");
         // Test code is exercised by the harness, not by call sites — the
         // occurrence heuristic can never see it, so it must never be a
-        // dead-code candidate (review round 8: an inline #[test] fn was
-        // confidently flagged with deletion enabled).
-        let is_test = prev.starts_with("#[test")
-            || prev.starts_with("#[tokio::test")
-            || prev.starts_with("#[cfg(test")
+        // dead-code candidate.
+        let is_test = has_attr("#[test")
+            || has_attr("#[tokio::test")
+            || has_attr("#[cfg(test")
             || in_test_range(i);
         out.push(Def {
             name: c["name"].to_string(),

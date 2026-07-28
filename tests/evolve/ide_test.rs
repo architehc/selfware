@@ -34,9 +34,8 @@ fn test_ide_engine_rejects_path_traversal() {
 }
 
 fn temp_root(name: &str) -> PathBuf {
-    let root = std::env::temp_dir().join(format!("selfware-ide-test-{}", name));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+    let _ = name; // callers pass distinct names; tempfile guarantees uniqueness
+    tempfile::tempdir().unwrap().keep()
 }
 
 #[test]

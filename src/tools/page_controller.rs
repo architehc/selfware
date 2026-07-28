@@ -35,9 +35,6 @@ const EMBEDDED_BRIDGE_JS: &str = include_str!("../../scripts/playwright-bridge.j
 // Constants
 // ============================================================================
 
-/// Maximum concurrent pages (tabs) allowed.
-const MAX_PAGES: usize = 5;
-
 /// Default per-action timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 

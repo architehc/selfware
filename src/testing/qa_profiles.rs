@@ -156,23 +156,6 @@ impl Default for QaConfig {
     }
 }
 
-/// Result of a full QA run across all stages.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QaReport {
-    /// Detected language.
-    pub language: String,
-    /// QA profile used.
-    pub profile: QaProfile,
-    /// Individual stage results.
-    pub stages: Vec<QaStageResult>,
-    /// Weighted quality score (0-100).
-    pub score: f64,
-    /// Overall grade.
-    pub grade: QualityGrade,
-    /// Total duration in milliseconds.
-    pub total_duration_ms: u64,
-}
-
 /// Result of a single QA stage (e.g., lint, test).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaStageResult {
