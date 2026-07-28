@@ -9,7 +9,6 @@
 //! This module provides simplified mutation strategies that trade
 //! sophistication for reliability on resource-constrained hardware.
 
-use super::ast_tools;
 use super::tournament::Hypothesis;
 use std::path::{Path, PathBuf};
 

@@ -3408,36 +3408,46 @@ function renderStructured(value, depth = 0, budget = { count: 0, limit: 500 }) {
     return wrapper;
 }
 
-function captureGroundingSnapshot(path) {
-    const documentState = state.openDocuments.get(path);
-    if (!documentState || documentState.dirty) return null;
-    if (typeof documentState.hash !== 'string' || documentState.hash.length === 0) return null;
+// Single snapshot mechanism for both flows: pass `[path]` for a grounding
+// snapshot (one clean, disk-hashed document plus a requestId), or omit `paths`
+// for a clean-workspace snapshot covering every open document.
+function captureSnapshot(paths) {
+    const requested = paths || [...state.openDocuments.keys()];
+    const documents = requested.map((path) => {
+        const documentState = state.openDocuments.get(path);
+        if (!documentState) return null;
+        return {
+            path,
+            documentState,
+            hash: documentState.hash,
+            contentGeneration: documentState.contentGeneration,
+            dirty: documentState.dirty,
+        };
+    });
+    if (documents.some((document) => !document || document.dirty)) return null;
+    if (!paths) return { requestId: null, documents };
+    const [document] = documents;
+    if (typeof document.hash !== 'string' || document.hash.length === 0) return null;
     state.groundingRequest += 1;
-    return {
-        requestId: state.groundingRequest,
-        path,
-        hash: documentState.hash,
-        contentGeneration: documentState.contentGeneration,
-        documentState,
-    };
+    // Grounding snapshots keep the single-document fields at the top level so
+    // callers can read snapshot.path/hash/contentGeneration directly.
+    return { requestId: state.groundingRequest, ...document, documents };
 }
 
-function captureCleanWorkspaceSnapshot() {
-    const documents = [...state.openDocuments.entries()].map(([path, documentState]) => ({
-        path,
-        documentState,
-        hash: documentState.hash,
-        contentGeneration: documentState.contentGeneration,
-        dirty: documentState.dirty,
-    }));
-    if (documents.some((document) => document.dirty)) return null;
-    return documents;
-}
-
-function workspaceSnapshotStaleness(snapshot) {
+function staleness(snapshot) {
+    if (snapshot.requestId !== null) {
+        if (snapshot.requestId !== state.groundingRequest) return 'a newer grounding request started';
+        if (state.activePath !== snapshot.path) return `the active document changed to ${state.activePath || 'none'}`;
+        const current = state.openDocuments.get(snapshot.path);
+        if (!current || current !== snapshot.documentState) return 'the requested document was closed or reloaded';
+        if (current.hash !== snapshot.hash) return 'the saved document hash changed';
+        if (current.contentGeneration !== snapshot.contentGeneration) return 'the editor buffer changed';
+        if (current.dirty) return 'the editor buffer has unsaved changes';
+        return null;
+    }
     const dirtyEntry = [...state.openDocuments.entries()].find(([, documentState]) => documentState.dirty);
     if (dirtyEntry) return `${dirtyEntry[0]} has unsaved changes`;
-    for (const expected of snapshot) {
+    for (const expected of snapshot.documents) {
         const current = state.openDocuments.get(expected.path);
         if (!current || current !== expected.documentState) return `${expected.path} was closed or reloaded`;
         if (current.hash !== expected.hash) return `${expected.path} changed its saved hash`;
@@ -3447,19 +3457,8 @@ function workspaceSnapshotStaleness(snapshot) {
     return null;
 }
 
-function groundingSnapshotStaleness(snapshot) {
-    if (snapshot.requestId !== state.groundingRequest) return 'a newer grounding request started';
-    if (state.activePath !== snapshot.path) return `the active document changed to ${state.activePath || 'none'}`;
-    const current = state.openDocuments.get(snapshot.path);
-    if (!current || current !== snapshot.documentState) return 'the requested document was closed or reloaded';
-    if (current.hash !== snapshot.hash) return 'the saved document hash changed';
-    if (current.contentGeneration !== snapshot.contentGeneration) return 'the editor buffer changed';
-    if (current.dirty) return 'the editor buffer has unsaved changes';
-    return null;
-}
-
 function discardStaleGroundingResponse(result, snapshot, label) {
-    const reason = groundingSnapshotStaleness(snapshot);
+    const reason = staleness(snapshot);
     if (!reason) return false;
     const message = `${label} response discarded because ${reason}. Run the action again for the current snapshot.`;
     appendOutput(`${label} response discarded: ${snapshot.path}`, {
@@ -3486,7 +3485,7 @@ async function runReview() {
         toast('Enter a review question.', 'warning');
         return;
     }
-    const snapshot = captureGroundingSnapshot(path);
+    const snapshot = captureSnapshot([path]);
     if (!snapshot) {
         toast('Save the visible buffer and reload it if its disk hash is unavailable before requesting a grounded review.', 'warning');
         return;
@@ -3549,7 +3548,7 @@ async function runReview() {
 async function previewReviewEvidence() {
     const path = state.activePath;
     if (!path) return;
-    const snapshot = captureGroundingSnapshot(path);
+    const snapshot = captureSnapshot([path]);
     if (!snapshot) {
         toast('Save the visible buffer and reload it if its disk hash is unavailable before previewing disk-backed evidence.', 'warning');
         return;
@@ -3592,7 +3591,7 @@ async function previewReviewEvidence() {
 }
 
 async function loadReadiness() {
-    const workspaceSnapshot = captureCleanWorkspaceSnapshot();
+    const workspaceSnapshot = captureSnapshot();
     if (!workspaceSnapshot) {
         toast('Save all modified buffers before running readiness checks.', 'warning');
         return;
@@ -3609,7 +3608,7 @@ async function loadReadiness() {
 
     try {
         const payload = await request('/api/readiness');
-        const staleReason = workspaceSnapshotStaleness(workspaceSnapshot);
+        const staleReason = staleness(workspaceSnapshot);
         if (staleReason) {
             result.className = 'inspector-result pane-state';
             result.textContent = `Readiness response discarded because ${staleReason}. Run it again for the current buffers.`;
@@ -3872,7 +3871,7 @@ function renderProblems() {
 }
 
 async function runAnalysis(kind, trigger) {
-    const workspaceSnapshot = captureCleanWorkspaceSnapshot();
+    const workspaceSnapshot = captureSnapshot();
     if (!workspaceSnapshot) {
         toast('Save all modified buffers before running compiler feedback.', 'warning');
         return;
@@ -3887,7 +3886,7 @@ async function runAnalysis(kind, trigger) {
 
     try {
         const payload = await request('/api/analysis/run', { method: 'POST', body: { kind } });
-        const staleReason = workspaceSnapshotStaleness(workspaceSnapshot);
+        const staleReason = staleness(workspaceSnapshot);
         if (staleReason) {
             appendOutput(`${label} response discarded`, { discarded: true, reason: staleReason });
             setGlobalStatus(`${label} response discarded as stale`, 'warning');

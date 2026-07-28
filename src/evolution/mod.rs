@@ -31,8 +31,6 @@
 //! 4. All mutations must pass `cargo check` before entering evaluation
 //! 5. Property tests are mandatory for core module mutations
 
-#![allow(dead_code, unused_imports, unused_variables)]
-
 pub mod ast_tools;
 pub mod daemon;
 pub mod fitness;
@@ -42,7 +40,6 @@ pub mod telemetry;
 pub mod tournament;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 /// Files that the evolution engine is NEVER allowed to modify.
 /// This is the cardinal safety invariant — the fitness landscape

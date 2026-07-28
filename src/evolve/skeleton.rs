@@ -62,6 +62,11 @@ pub struct FileSkeleton {
 
 impl FileSkeleton {
     /// Render the skeleton as a compact string for context injection.
+    ///
+    /// Fidelity split (intentional — do not "deduplicate"): this renderer is a
+    /// fast approximate line-scanner for the L2/Lite tier, while
+    /// `evolve::summary::compile_summary` (used by `evolve::map::expand`) is the
+    /// accurate tree-sitter-based renderer. Different cost/accuracy points.
     pub fn render(&self) -> String {
         let mut out = format!("// {}\n", self.path.display());
         for item in &self.items {

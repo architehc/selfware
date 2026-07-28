@@ -7,12 +7,9 @@
 
 use super::ast_tools;
 use super::fitness::{self, SabConfig, SabResult};
-use super::sandbox::SandboxConfig;
 use super::telemetry;
-use super::tournament::{self, Hypothesis, HypothesisResult, TournamentConfig};
-use super::{
-    is_protected, EvolutionConfig, FitnessMetrics, FitnessWeights, GenerationRating, LlmConfig,
-};
+use super::tournament::Hypothesis;
+use super::{is_protected, EvolutionConfig, FitnessMetrics, GenerationRating, LlmConfig};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -1416,6 +1413,7 @@ pub fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
 
 /// Strip line-number prefixes the LLM may have left in the patch.
 /// Matches patterns like "  42| " at the start of context/add/delete lines.
+#[allow(dead_code)] // kept for the next patch-ingestion hardening pass
 fn sanitize_patch(patch: &str) -> String {
     let mut out = String::with_capacity(patch.len());
     for line in patch.lines() {
@@ -1782,6 +1780,7 @@ fn apply_patch_to_worktree(worktree: &Path, patch: &str) -> bool {
     apply_edits(worktree, patch)
 }
 
+#[allow(dead_code)] // safety gate reserved for the direct repo-apply path
 fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
     // Final protected-path gate at the highest-blast-radius point: refuse
     // to apply ANY patch that edits protected files to the real repo, even

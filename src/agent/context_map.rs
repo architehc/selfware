@@ -231,6 +231,10 @@ struct FileEntry {
 // ─── Context Map ────────────────────────────────────────────────────────────
 
 /// Hierarchical context manager that tracks what's loaded and at what cost.
+///
+/// Name collision note: this is the AGENT's token-budgeted L1/L2/L3 context
+/// manager — unrelated to `evolve::map::ContextMap`, which is the compiled
+/// component map (cards + rendered text) for the Map context tier.
 pub struct ContextMap {
     entries: HashMap<PathBuf, FileEntry>,
     /// Total tokens currently used across all entries.

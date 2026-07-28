@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
@@ -134,6 +132,7 @@ impl EncryptionManager {
     /// This enables multi-agent scenarios where different sessions use
     /// different encryption contexts.  The caller is responsible for
     /// deriving the key (e.g. via PBKDF2).
+    #[allow(dead_code)] // multi-session API, not yet wired to a caller
     pub fn new_instance(key: [u8; 32]) -> Self {
         EncryptionManager { key }
     }
@@ -143,6 +142,7 @@ impl EncryptionManager {
     /// Convenience wrapper around [`new_instance`](Self::new_instance)
     /// that derives a 256-bit key via PBKDF2-HMAC-SHA256 with the
     /// installation salt.
+    #[allow(dead_code)] // multi-session API, not yet wired to a caller
     pub fn new_from_password(password: &str) -> Self {
         let key = derive_key(password);
         Self::new_instance(key)

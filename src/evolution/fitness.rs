@@ -5,7 +5,6 @@
 //! daemon cannot modify it, preventing reward hacking.
 
 use super::{FitnessMetrics, FitnessWeights, GenerationRating};
-use crate::orchestration::visual_loop::CaptureMethod;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};

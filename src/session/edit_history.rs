@@ -3,7 +3,11 @@
 //! Tracks all edits with checkpoints, enabling undo/redo
 //! and timeline visualization for the agent's file operations.
 
-#![allow(dead_code, unused_imports, unused_variables)]
+// The undo/redo + timeline API is intentionally built ahead of its wiring
+// (checkpoints are recorded; branch/redo/timeline views have no caller yet),
+// so dead_code is allowed module-wide. Unused imports/variables are NOT
+// blanket-allowed — fix those properly.
+#![allow(dead_code)]
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

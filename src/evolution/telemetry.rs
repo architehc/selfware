@@ -5,8 +5,6 @@
 //! gradient signal to guide mutations toward actual bottlenecks rather than
 //! blind search.
 
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
@@ -155,7 +153,7 @@ fn capture_cpu_hotspots(
     // Run cargo flamegraph and parse the folded stacks
     let flamegraph_path = repo_root.join("target").join("flamegraph.folded");
 
-    let output = Command::new("cargo")
+    let _output = Command::new("cargo")
         .args([
             "flamegraph",
             "--bench",
@@ -222,7 +220,7 @@ fn parse_folded_stacks(path: &Path) -> Result<Vec<CpuHotspot>, TelemetryError> {
 
 fn capture_allocation_profile(
     repo_root: &Path,
-    bench_name: &str,
+    _bench_name: &str,
 ) -> Result<Vec<AllocationHotspot>, TelemetryError> {
     // Strategy 1: Look for DHAT output produced by running the benchmark
     // under `dhat` (e.g. `cargo bench --features dhat`).

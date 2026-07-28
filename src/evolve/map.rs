@@ -42,6 +42,10 @@ pub struct ComponentCard {
 }
 
 /// The compiled map plus its cost and the compression it buys.
+///
+/// Name collision note: this `ContextMap` is the compiled component map for
+/// the Map context tier — unrelated to `agent::context_map::ContextMap`, the
+/// agent's token-budgeted L1/L2/L3 context manager.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextMap {
     pub cards: Vec<ComponentCard>,
@@ -172,6 +176,11 @@ pub fn expand(
         return Some(reduce_source(&src));
     }
     let ast = AstAnalyzer::new().parse_source(&src).ok()?;
+    // Fidelity split (intentional — do not "deduplicate"): expand renders
+    // signatures through the tree-sitter-based `summary::compile_summary`
+    // (accurate, slower), while `skeleton::FileSkeleton::render` stays a fast
+    // approximate line-scanner for the L2/Lite tier. The two renderers serve
+    // different cost/accuracy points.
     Some(crate::evolve::summary::compile_summary(&ast, &src))
 }
 

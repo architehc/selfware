@@ -1,4 +1,10 @@
 //! Deterministic file-level graph for production code, tests, and examples.
+//!
+//! Two-graph model: this is the CANONICAL repository graph — structurally
+//! validated, consumed by the evolve composer and the web UI. New graph
+//! features go here. `analysis::code_graph` is a separate, CLI/visualization
+//! graph that powers `selfware graph` output formats (DOT/Mermaid/ASCII); do
+//! not merge or cross-wire the two.
 
 use anyhow::Result;
 use std::collections::{BTreeSet, HashMap, HashSet};

@@ -3,9 +3,7 @@
 //! Each hypothesis gets its own container with resource limits.
 //! Containers are ephemeral — spun up, evaluated, and destroyed.
 
-#![allow(dead_code, unused_imports, unused_variables)]
-
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 

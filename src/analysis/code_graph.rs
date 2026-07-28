@@ -3,6 +3,11 @@
 //! Interactive dependency graphs, call flow visualization, architecture
 //! diagrams from code, live updating during edits.
 //!
+//! Two-graph model: this is the CLI/visualization graph behind `selfware
+//! graph` (DOT/Mermaid/ASCII output). The CANONICAL, structurally validated
+//! repository graph is `evolve::graph`; new graph features belong there, not
+//! here. Do not merge or cross-wire the two.
+//!
 //! # Features
 //!
 //! - Dependency graphs at module and function level

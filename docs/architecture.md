@@ -2,7 +2,11 @@
 
 This document maps the main runtime flow and module boundaries for contributors.
 
-## High-Level Module Map
+## Core Agent Loop
+
+This map covers the core agent loop only. The full module list (`evolve`,
+`evolution`, `cognitive`, `session`, `mcp`, `lsp`, `swl`, and the rest) lives
+in `src/lib.rs`.
 
 ```text
 ┌───────────────────────────────────────────────────────────────────────┐
@@ -112,9 +116,9 @@ Error occurs in agent loop
 ## Key Contributor Notes
 
 - `src/main.rs` should stay a thin CLI entrypoint that delegates to library modules.
-- `src/agent/mod.rs` is the largest critical path file; refactors should preserve loop behavior and safety semantics.
+- The largest critical-path files are `src/cli/mod.rs` (~4.5k lines), `src/evolve/server.rs` (~3.0k), `src/agent/tool_dispatch/mod.rs` (~2.7k), and `src/agent/mod.rs` (~2.4k); refactors should preserve loop behavior and safety semantics.
 - Prefer adding behavior through focused submodules (`agent/*`, `safety/*`, `self_healing/*`) rather than growing central files.
-- Feature-gated modules (`self_healing`, `tui`, `tokens`) must be guarded with `#[cfg(feature = "...")]`.
+- Feature-gated modules (`tui`, `resilience`, `execution-modes`, `log-analysis`, `self-improvement`, `consolidation`, `bench-harness`, `vlm-bench`, `hot-reload`) must be guarded with `#[cfg(feature = "...")]`. (The old `tokens` feature is gone; `src/tokens.rs` was deleted in the wave-3 cleanup.)
 
 ## Design Rationale & FAQ
 
@@ -128,7 +132,7 @@ Selfware supports both native function calling (OpenAI/Qwen style) and XML-based
 The system is highly modular to support various deployment targets:
 - `tui`: Desktop/CLI interactive use.
 - `resilience`: Long-running server-side "daemon" use where self-healing is critical.
-- `tokens`: Advanced token tracking for cost-sensitive environments.
+- `execution-modes`: Dry-run / confirm / yolo execution control for unattended vs supervised runs.
 
 ### Checkpoint Format
 Checkpoints use a JSON-based format that captures the full mental state, including episodic memory. This allows a task started on one machine to be resumed on another with its "lessons learned" intact. Atomic writes (write-then-rename) are enforced to prevent state corruption during crashes.
