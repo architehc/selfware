@@ -1,22 +1,18 @@
 //! Review protocol: typed outcomes and the one budgeted repair.
 //!
-//! A scripted mock chat endpoint (same raw-TCP pattern as
+//! A scripted mock chat endpoint (the shared `MockLlmServer`, as in
 //! `envelope_evidence_test.rs`) serves per-request canned completions so the
 //! `GroundedAssistant::review` path can be driven through malformed-then-valid,
 //! twice-malformed, empty, and fully-ungrounded model output.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 use axum::http::StatusCode;
 
 use selfware::config::Config;
 use selfware::evolve::assistant::{evidence_from_document, GroundedAssistant, ReviewProtocolError};
 use selfware::evolve::{EvolveServer, Graph, Node};
+use selfware::testing::mock_api::{MockLlmServer, MockResponse};
 
 use crate::{get_json, post_json};
 
@@ -41,101 +37,23 @@ const UNGROUNDED_REVIEW: &str = r#"{
     }]
 }"#;
 
-struct MockState {
-    requests: AtomicUsize,
-    bodies: Mutex<Vec<String>>,
-}
-
 /// Mock OpenAI-compatible endpoint serving `contents` per request (the last
-/// entry repeats when the script is exhausted). Returns the join handle, the
-/// endpoint base URL, and the shared observation state.
-async fn spawn_scripted_mock(
-    contents: Vec<String>,
-) -> (tokio::task::JoinHandle<()>, String, Arc<MockState>) {
-    let state = Arc::new(MockState {
-        requests: AtomicUsize::new(0),
-        bodies: Mutex::new(Vec::new()),
-    });
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let server_state = state.clone();
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                break;
-            };
-            let contents = contents.clone();
-            let state = server_state.clone();
-            tokio::spawn(async move {
-                // Drain the request (headers + content-length body) before
-                // responding so large evidence payloads cannot break the pipe.
-                let mut received = Vec::new();
-                let mut buf = [0u8; 8192];
-                let mut expected: Option<usize> = None;
-                let mut body_start = 0usize;
-                loop {
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        return;
-                    };
-                    if n == 0 {
-                        return;
-                    }
-                    received.extend_from_slice(&buf[..n]);
-                    if expected.is_none() {
-                        if let Some(headers_end) =
-                            received.windows(4).position(|window| window == b"\r\n\r\n")
-                        {
-                            let headers =
-                                String::from_utf8_lossy(&received[..headers_end]).to_lowercase();
-                            let length: usize = headers
-                                .lines()
-                                .find_map(|line| line.strip_prefix("content-length:"))
-                                .and_then(|value| value.trim().parse().ok())
-                                .unwrap_or(0);
-                            body_start = headers_end + 4;
-                            expected = Some(body_start + length);
-                        }
-                    }
-                    if expected.is_some_and(|total| received.len() >= total) {
-                        break;
-                    }
-                }
-                state
-                    .bodies
-                    .lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&received[body_start..]).to_string());
-                let index = state.requests.fetch_add(1, Ordering::SeqCst);
-                let content = &contents[index.min(contents.len() - 1)];
-                let body = json!({
-                    "id": "chatcmpl-test",
-                    "object": "chat.completion",
-                    "created": 0,
-                    "model": "mock-review",
-                    "choices": [{
-                        "index": 0,
-                        "message": { "role": "assistant", "content": content },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": { "prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18 }
-                })
-                .to_string();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            });
-        }
-    });
-
-    (
-        handle,
-        format!("http://127.0.0.1:{}/v1", addr.port()),
-        state,
-    )
+/// entry repeats when the script is exhausted). Returns the server handle —
+/// whose captured request bodies double as the request count — and the
+/// endpoint base URL.
+async fn spawn_scripted_mock(contents: Vec<String>) -> (MockLlmServer, String) {
+    let mut builder = MockLlmServer::builder()
+        .with_model("mock-review")
+        .with_usage(11, 7, 18);
+    for content in &contents {
+        builder = builder.with_response(content.clone());
+    }
+    if let Some(last) = contents.last() {
+        builder = builder.with_default_response(MockResponse::Text(last.clone()));
+    }
+    let server = builder.build().await;
+    let endpoint = format!("{}/v1", server.url());
+    (server, endpoint)
 }
 
 fn assistant(endpoint: &str) -> GroundedAssistant {
@@ -152,7 +70,7 @@ fn fixture_evidence() -> Vec<selfware::evolve::assistant::GroundingEvidence> {
 
 #[tokio::test]
 async fn malformed_once_then_valid_is_repaired_and_succeeds() {
-    let (_mock, endpoint, state) = spawn_scripted_mock(vec![
+    let (mock, endpoint) = spawn_scripted_mock(vec![
         "this is not json".to_string(),
         VALID_REVIEW.to_string(),
     ])
@@ -165,8 +83,8 @@ async fn malformed_once_then_valid_is_repaired_and_succeeds() {
 
     assert_eq!(review.model, "mock-review");
     assert_eq!(review.claims.len(), 1);
-    assert_eq!(state.requests.load(Ordering::SeqCst), 2);
-    let bodies = state.bodies.lock().unwrap();
+    let bodies = mock.captured_request_bodies().await;
+    assert_eq!(bodies.len(), 2);
     let repair_request: Value = serde_json::from_str(&bodies[1]).unwrap();
     let repair_messages = repair_request["messages"].as_array().unwrap();
     assert!(
@@ -187,7 +105,7 @@ async fn malformed_once_then_valid_is_repaired_and_succeeds() {
 
 #[tokio::test]
 async fn malformed_twice_yields_invalid_protocol_error_with_telemetry() {
-    let (_mock, endpoint, state) =
+    let (mock, endpoint) =
         spawn_scripted_mock(vec!["nope".to_string(), "still nope".to_string()]).await;
 
     let err = assistant(&endpoint)
@@ -207,12 +125,12 @@ async fn malformed_twice_yields_invalid_protocol_error_with_telemetry() {
     // Accumulated across original + repair call (2 requests x 18);
     // last-call-only reporting was the old dishonest underreport.
     assert_eq!(body["usage"]["total_tokens"], 36);
-    assert_eq!(state.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.captured_request_bodies().await.len(), 2);
 }
 
 #[tokio::test]
 async fn empty_review_yields_empty_protocol_error() {
-    let (_mock, endpoint, state) =
+    let (mock, endpoint) =
         spawn_scripted_mock(vec![r#"{"claims": [], "recommendations": []}"#.to_string()]).await;
 
     let err = assistant(&endpoint)
@@ -230,12 +148,12 @@ async fn empty_review_yields_empty_protocol_error() {
     assert!(body["latency_ms"].is_number());
     assert_eq!(body["usage"]["total_tokens"], 18);
     // Valid JSON on the first attempt: no repair call.
-    assert_eq!(state.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.captured_request_bodies().await.len(), 1);
 }
 
 #[tokio::test]
 async fn fully_ungrounded_review_yields_ungrounded_protocol_error() {
-    let (_mock, endpoint, state) = spawn_scripted_mock(vec![UNGROUNDED_REVIEW.to_string()]).await;
+    let (mock, endpoint) = spawn_scripted_mock(vec![UNGROUNDED_REVIEW.to_string()]).await;
 
     let err = assistant(&endpoint)
         .review("Review this file", fixture_evidence(), true)
@@ -257,7 +175,7 @@ async fn fully_ungrounded_review_yields_ungrounded_protocol_error() {
     assert_eq!(body["model"], "mock-review");
     assert!(body["latency_ms"].is_number());
     assert_eq!(body["usage"]["total_tokens"], 18);
-    assert_eq!(state.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(mock.captured_request_bodies().await.len(), 1);
 }
 
 // --- HTTP mapping: trust_state on 200s, typed 422 bodies (spec §2.1, §3.1) ---
@@ -304,7 +222,7 @@ async fn post_review(server: &EvolveServer) -> (StatusCode, Value) {
 
 #[tokio::test]
 async fn clean_review_reports_structural_trust_state() {
-    let (_mock, endpoint, _state) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
+    let (_mock, endpoint) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
     let (_dir, server) = review_server(&endpoint, "pub fn grounded() {}\n").await;
 
     let (status, body) = post_review(&server).await;
@@ -325,7 +243,7 @@ async fn partial_evidence_review_reports_degraded_trust_state() {
     let content = (1..=900)
         .map(|line| format!("pub fn item_{line}() {{}}\n"))
         .collect::<String>();
-    let (_mock, endpoint, _state) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
+    let (_mock, endpoint) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
     let (_dir, server) = review_server(&endpoint, &content).await;
 
     let (status, body) = post_review(&server).await;
@@ -338,7 +256,7 @@ async fn partial_evidence_review_reports_degraded_trust_state() {
 
 #[tokio::test]
 async fn malformed_twice_maps_to_422_with_spec_body() {
-    let (_mock, endpoint, state) =
+    let (mock, endpoint) =
         spawn_scripted_mock(vec!["nope".to_string(), "still nope".to_string()]).await;
     let (_dir, server) = review_server(&endpoint, "pub fn grounded() {}\n").await;
 
@@ -353,12 +271,12 @@ async fn malformed_twice_maps_to_422_with_spec_body() {
     // last-call-only reporting was the old dishonest underreport.
     assert_eq!(body["usage"]["total_tokens"], 36);
     // One budgeted repair, then the typed failure.
-    assert_eq!(state.requests.load(Ordering::SeqCst), 2);
+    assert_eq!(mock.captured_request_bodies().await.len(), 2);
 }
 
 #[tokio::test]
 async fn fully_ungrounded_maps_to_422_with_rejected_items() {
-    let (_mock, endpoint, _state) = spawn_scripted_mock(vec![UNGROUNDED_REVIEW.to_string()]).await;
+    let (_mock, endpoint) = spawn_scripted_mock(vec![UNGROUNDED_REVIEW.to_string()]).await;
     let (_dir, server) = review_server(&endpoint, "pub fn grounded() {}\n").await;
 
     let (status, body) = post_review(&server).await;

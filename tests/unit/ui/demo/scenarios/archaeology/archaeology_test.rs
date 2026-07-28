@@ -1,5 +1,5 @@
 use super::*;
-use crate::demo::DemoConfig;
+use crate::ui::demo::DemoConfig;
 
 #[test]
 fn test_archaeology_scenario_new() {

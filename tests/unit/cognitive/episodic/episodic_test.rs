@@ -1,5 +1,5 @@
 use super::*;
-use crate::vector_store::MockEmbeddingProvider;
+use crate::analysis::vector_store::MockEmbeddingProvider;
 use std::sync::Arc;
 use tempfile::tempdir;
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::demo::DemoConfig;
+use crate::ui::demo::DemoConfig;
 
 #[test]
 fn test_factory_scenario_new() {

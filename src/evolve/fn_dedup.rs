@@ -143,68 +143,17 @@ impl FnDedupAnalyzer {
     }
 }
 
-/// Extract top-level and nested `fn` bodies from a source file via brace
-/// matching. Records the normalized line set and a hash for each body large
-/// enough to matter.
+/// Extract top-level and nested `fn` bodies from a source file. Body spans come
+/// from [`super::context_reduce::scan_fn_bodies`] — the same string-literal-aware
+/// brace matching used for context dedup, so a brace inside a string literal no
+/// longer truncates or over-extends a body. Records the normalized line set and
+/// a hash for each body large enough to matter.
 fn extract_functions(text: &str, rel_path: &str, out: &mut Vec<FnBody>) {
-    let bytes = text.as_bytes();
-    let mut search = 0;
-    while search < text.len() {
-        let Some(rel) = text[search..].find("fn ") else {
-            break;
-        };
-        let idx = search + rel;
-        // Require `fn` to start a token (preceded by whitespace or start).
-        let ok_prefix = idx == 0 || matches!(bytes[idx - 1], b' ' | b'\t' | b'\n' | b'(' | b'<');
-        // Find the function name after `fn `.
-        let after = idx + 3;
-        let name: String = text[after..]
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        if !ok_prefix || name.is_empty() {
-            search = idx + 3;
-            continue;
-        }
-        // Find the opening brace of the body (skip signature; bail on `;` which
-        // means a trait method declaration with no body).
-        let mut i = after + name.len();
-        let mut brace_start = None;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'{' => {
-                    brace_start = Some(i);
-                    break;
-                }
-                b';' => break,
-                _ => {}
-            }
-            i += 1;
-        }
-        let Some(bstart) = brace_start else {
-            search = idx + 3;
-            continue;
-        };
-        // Match braces to find the body end.
-        let mut depth = 0usize;
-        let mut j = bstart;
-        while j < bytes.len() {
-            match bytes[j] {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        let body = &text[bstart..(j + 1).min(bytes.len())];
+    for f in super::context_reduce::scan_fn_bodies(text) {
+        let body = &text[f.open..f.close];
         let norm = normalized_lines(body);
         if norm.len() >= MIN_FN_LINES {
-            let line = text[..idx].bytes().filter(|&b| b == b'\n').count() + 1;
+            let line = text[..f.start].bytes().filter(|&b| b == b'\n').count() + 1;
             let mut concat: Vec<&String> = norm.iter().collect();
             concat.sort();
             let joined = concat
@@ -214,7 +163,7 @@ fn extract_functions(text: &str, rel_path: &str, out: &mut Vec<FnBody>) {
                 .join("\n");
             out.push(FnBody {
                 loc: FnLocation {
-                    name,
+                    name: f.name,
                     path: rel_path.to_string(),
                     line,
                     lines: body.lines().count(),
@@ -223,6 +172,5 @@ fn extract_functions(text: &str, rel_path: &str, out: &mut Vec<FnBody>) {
                 lines: norm,
             });
         }
-        search = (j + 1).min(text.len());
     }
 }

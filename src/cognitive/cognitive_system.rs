@@ -8,11 +8,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use crate::analysis::vector_store::EmbeddingBackend;
 use crate::api::types::Message;
 use crate::api::ApiClient;
 use crate::config::Config;
 use crate::token_count::estimate_tokens_with_overhead;
-use crate::vector_store::EmbeddingBackend;
 
 use super::memory_hierarchy::{
     CodeContext, CodeModification, Episode, HierarchicalMemory, Importance, MemoryConfig,

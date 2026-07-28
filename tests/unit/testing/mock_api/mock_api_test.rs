@@ -238,7 +238,12 @@ async fn test_mock_server_custom_model_name() {
 /// Verify that format_chat_response produces valid JSON.
 #[test]
 fn test_format_chat_response_valid_json() {
-    let body = format_chat_response("test-model", "Hello world", None);
+    let body = format_chat_response(
+        "test-model",
+        "Hello world",
+        None,
+        MockServerConfig::default().usage,
+    );
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(&body);
     assert!(parsed.is_ok(), "response body is not valid JSON: {}", body);
 }

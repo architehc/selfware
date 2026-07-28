@@ -3,7 +3,7 @@
 //! Orchestrates demo scenario execution with animation coordination.
 
 use super::{DemoConfig, DemoEvent};
-use crate::tui::animation::{
+use crate::ui::tui::animation::{
     agent_avatar::{ActivityLevel, AgentAvatar, AgentRole},
     message_flow::{MessageFlow, MessageFlowManager, MessageType},
     particles::ParticleSystem,

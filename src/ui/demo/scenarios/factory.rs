@@ -7,9 +7,9 @@
 //! - DevOps prepares deployment
 
 use super::DemoScenario;
-use crate::demo::runner::DemoRunner;
-use crate::tui::animation::agent_avatar::{ActivityLevel, AgentRole};
-use crate::tui::animation::message_flow::MessageType;
+use crate::ui::demo::runner::DemoRunner;
+use crate::ui::tui::animation::agent_avatar::{ActivityLevel, AgentRole};
+use crate::ui::tui::animation::message_flow::MessageType;
 
 /// Feature factory demo - agents build a feature collaboratively
 pub struct FeatureFactoryScenario {

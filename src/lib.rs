@@ -86,7 +86,7 @@ pub(crate) mod orchestration;
 pub mod resource;
 pub(crate) mod session;
 pub mod supervision;
-pub(crate) mod testing;
+pub mod testing;
 
 // Evolution engine — recursive self-improvement via evolutionary mutation
 #[cfg(feature = "self-improvement")]
@@ -104,16 +104,8 @@ pub mod bench_harness;
 #[cfg(feature = "consolidation")]
 pub mod consolidation;
 
-// Backward-compatible re-exports for safety module
-pub use safety::redact;
-
 // Re-export shutdown_tracing for main.rs
 pub use observability::telemetry::shutdown_tracing;
-
-// Backward-compatible re-exports for analysis module
-pub use analysis::analyzer;
-pub use analysis::bm25;
-pub use analysis::vector_store;
 
 // Backward-compatible re-exports for session module
 pub use session::checkpoint;
@@ -190,14 +182,6 @@ pub async fn shutdown_requested() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
-
-// ============================================================================
-// Backward-compatible re-exports for UI submodules
-// ============================================================================
-#[cfg(feature = "tui")]
-pub use ui::demo;
-#[cfg(feature = "tui")]
-pub use ui::tui;
 
 // Let `#[path]`-included unit tests address this crate as `selfware::...`,
 // matching how the `tests/unit` integration target sees it.

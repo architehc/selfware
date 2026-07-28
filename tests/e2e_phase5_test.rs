@@ -8,7 +8,7 @@
 //! - Multi-step coding scenarios
 
 use chrono::Utc;
-use selfware::analyzer::{ErrorAnalyzer, ErrorCategory};
+use selfware::analysis::analyzer::{ErrorAnalyzer, ErrorCategory};
 use selfware::checkpoint::{
     capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus, ToolCallLog,
 };

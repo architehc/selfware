@@ -35,7 +35,7 @@ use std::sync::{
 use std::time::Instant;
 use tracing::{info, warn};
 
-use crate::analyzer::ErrorAnalyzer;
+use crate::analysis::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
 use crate::checkpoint::{CheckpointManager, TaskCheckpoint};

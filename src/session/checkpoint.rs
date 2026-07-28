@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::api::types::Message;
-use crate::redact;
+use crate::safety::redact;
 
 /// Envelope that wraps a checkpoint with an integrity checksum.
 ///

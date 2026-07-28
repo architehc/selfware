@@ -4,11 +4,10 @@
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
 
 use selfware::config::Config;
 use selfware::evolve::{build_envelope, ContextMode, EvolveServer, Graph, Node, TierMeasurer};
+use selfware::testing::mock_api::{MockLlmServer, MockResponse};
 
 use crate::{edge, get_json, post_json};
 
@@ -93,77 +92,19 @@ fn fixture() -> (tempfile::TempDir, Graph) {
     )
 }
 
-/// Mock OpenAI-compatible endpoint returning one canned, grounded review.
-async fn spawn_mock_review_server() -> (tokio::task::JoinHandle<()>, String) {
-    let body = json!({
-        "id": "chatcmpl-test",
-        "object": "chat.completion",
-        "created": 0,
-        "model": "mock-review",
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": "{\"claims\":[{\"text\":\"grounded\",\"evidence_ids\":[\"E1\"]}],\"recommendations\":[]}"
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 }
-    })
-    .to_string();
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let handle = tokio::spawn(async move {
-        loop {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                break;
-            };
-            let body = body.clone();
-            tokio::spawn(async move {
-                // Drain the request (headers + content-length body) before
-                // responding so large evidence payloads cannot break the pipe.
-                let mut received = Vec::new();
-                let mut buf = [0u8; 8192];
-                let mut expected: Option<usize> = None;
-                loop {
-                    let Ok(n) = stream.read(&mut buf).await else {
-                        return;
-                    };
-                    if n == 0 {
-                        return;
-                    }
-                    received.extend_from_slice(&buf[..n]);
-                    if expected.is_none() {
-                        if let Some(headers_end) =
-                            received.windows(4).position(|window| window == b"\r\n\r\n")
-                        {
-                            let headers =
-                                String::from_utf8_lossy(&received[..headers_end]).to_lowercase();
-                            let length: usize = headers
-                                .lines()
-                                .find_map(|line| line.strip_prefix("content-length:"))
-                                .and_then(|value| value.trim().parse().ok())
-                                .unwrap_or(0);
-                            expected = Some(headers_end + 4 + length);
-                        }
-                    }
-                    if expected.is_some_and(|total| received.len() >= total) {
-                        break;
-                    }
-                }
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes()).await;
-                let _ = stream.shutdown().await;
-            });
-        }
-    });
-
-    (handle, format!("http://127.0.0.1:{}/v1", addr.port()))
+/// Mock OpenAI-compatible endpoint returning one canned, grounded review on
+/// every request.
+async fn spawn_mock_review_server() -> (MockLlmServer, String) {
+    const REVIEW: &str =
+        "{\"claims\":[{\"text\":\"grounded\",\"evidence_ids\":[\"E1\"]}],\"recommendations\":[]}";
+    let server = MockLlmServer::builder()
+        .with_model("mock-review")
+        .with_response(REVIEW)
+        .with_default_response(MockResponse::Text(REVIEW.to_string()))
+        .build()
+        .await;
+    let endpoint = format!("{}/v1", server.url());
+    (server, endpoint)
 }
 
 /// Server pinned to `mode` against the fixture, with a 1M window so the

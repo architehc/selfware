@@ -110,6 +110,9 @@ impl DeadCodeAnalyzer {
     pub fn find(&self) -> Result<Vec<DeadSymbol>> {
         let mut defs: Vec<Def> = Vec::new();
         let mut occ: HashMap<String, usize> = HashMap::new();
+        // One tree-sitter parser for the whole run; used to locate `#[cfg(test)]`
+        // ranges (same construction pattern as `evolve::server`).
+        let ast = super::ast::AstAnalyzer::new();
 
         // Definitions come from `src/` (the shippable code we might delete), but
         // *references* are counted across tests and examples too — otherwise a
@@ -131,7 +134,7 @@ impl DeadCodeAnalyzer {
                             .unwrap_or(p)
                             .to_string_lossy()
                             .replace('\\', "/");
-                        collect_defs(&text, &rel, &mut defs);
+                        collect_defs(&text, &rel, &ast, &mut defs);
                     }
                     for m in ident_re().find_iter(&text) {
                         *occ.entry(m.as_str().to_string()).or_default() += 1;
@@ -180,48 +183,16 @@ impl DeadCodeAnalyzer {
     }
 }
 
-fn collect_defs(text: &str, rel_path: &str, out: &mut Vec<Def>) {
+fn collect_defs(text: &str, rel_path: &str, ast: &super::ast::AstAnalyzer, out: &mut Vec<Def>) {
     let lines: Vec<&str> = text.lines().collect();
-    // Track `#[cfg(test)] mod … {` blocks (brace counting) so helpers and
-    // #[test] fns inside test modules are never dead-code candidates.
-    let mut test_ranges: Vec<(usize, usize)> = Vec::new();
-    for (i, line) in lines.iter().enumerate() {
-        let t = line.trim_start();
-        if t.starts_with("#[cfg(test)]") {
-            // Find the opening brace of the following mod/impl block.
-            let mut depth = 0i32;
-            let mut started = false;
-            let mut end = lines.len();
-            for (j, l) in lines.iter().enumerate().skip(i) {
-                for ch in l.chars() {
-                    match ch {
-                        '{' => {
-                            depth += 1;
-                            started = true;
-                        }
-                        '}' => {
-                            depth -= 1;
-                            if started && depth == 0 {
-                                end = j + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if started && depth == 0 {
-                    break;
-                }
-            }
-            if started {
-                test_ranges.push((i, end));
-            }
-        }
-    }
+    // Tree-sitter `#[cfg(test)]` ranges (one-based, inclusive — the same scan
+    // `evolve::server` uses) so helpers and #[test] fns inside test modules are
+    // never dead-code candidates. On a parse failure there are no ranges and the
+    // per-item attribute checks below still exclude directly gated items.
+    let test_ranges: Vec<(usize, usize)> = ast.cfg_test_ranges(text).unwrap_or_default();
     let in_test_range = |line_no: usize| {
-        test_ranges
-            .iter()
-            .any(|&(s, e)| line_no >= s && line_no < e)
+        let line = line_no + 1; // ranges are one-based; line_no is zero-based
+        test_ranges.iter().any(|&(s, e)| line >= s && line <= e)
     };
 
     for (i, line) in lines.iter().enumerate() {

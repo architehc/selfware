@@ -132,18 +132,21 @@ pub fn reduce_source(src: &str) -> String {
 }
 
 /// One `fn NAME { .. }` span, as byte offsets of the body braces.
-struct FnBody {
-    name: String,
+pub(crate) struct FnBody {
+    /// Offset of the `fn` keyword.
+    pub(crate) start: usize,
+    pub(crate) name: String,
     /// Offset of the opening `{`.
-    open: usize,
+    pub(crate) open: usize,
     /// Offset just past the closing `}`.
-    close: usize,
+    pub(crate) close: usize,
 }
 
 /// Locate function bodies in (comment-free) source. Brace matching skips string
 /// literals so a `}` in a string can't close a body early. Intended to run on the
-/// output of `reduce_source`, where comments are already gone.
-fn scan_fn_bodies(content: &str) -> Vec<FnBody> {
+/// output of `reduce_source`, where comments are already gone. Shared with
+/// `fn_dedup`, which runs it on raw source.
+pub(crate) fn scan_fn_bodies(content: &str) -> Vec<FnBody> {
     let b = content.as_bytes();
     let mut out = Vec::new();
     let mut i = 0usize;
@@ -215,7 +218,12 @@ fn scan_fn_bodies(content: &str) -> Vec<FnBody> {
             }
             k += 1;
         };
-        out.push(FnBody { name, open, close });
+        out.push(FnBody {
+            start: i,
+            name,
+            open,
+            close,
+        });
         i = close;
     }
     out

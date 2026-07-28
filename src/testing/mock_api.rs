@@ -61,6 +61,16 @@ pub enum MockResponse {
     },
 }
 
+/// Token-usage numbers embedded in every response body. Tests that assert on
+/// accumulated usage can pin these; the defaults match the historical
+/// hardcoded values.
+#[derive(Debug, Clone, Copy)]
+pub struct MockUsage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
 /// A lightweight mock HTTP server that speaks just enough of the
 /// OpenAI chat-completions protocol to satisfy selfware's API client.
 pub struct MockLlmServer {
@@ -145,6 +155,8 @@ pub struct MockServerConfig {
     pub latency_ms: u64,
     /// Model name included in the JSON response body.
     pub model: String,
+    /// Usage numbers included in the JSON response body.
+    pub usage: MockUsage,
 }
 
 impl Default for MockServerConfig {
@@ -154,6 +166,11 @@ impl Default for MockServerConfig {
             default_response: MockResponse::Text("Hello from MockLlmServer".to_string()),
             latency_ms: 0,
             model: "mock-model".to_string(),
+            usage: MockUsage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+            },
         }
     }
 }
@@ -211,6 +228,21 @@ impl MockLlmServerBuilder {
     /// Override the model name returned in response bodies.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.config.model = model.into();
+        self
+    }
+
+    /// Override the token-usage numbers returned in response bodies.
+    pub fn with_usage(
+        mut self,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
+    ) -> Self {
+        self.config.usage = MockUsage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens,
+        };
         self
     }
 
@@ -275,17 +307,42 @@ async fn handle_connection(
     response_idx: Arc<Mutex<usize>>,
     captured_requests: Arc<Mutex<Vec<String>>>,
 ) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 65536];
-    let n = stream.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
+    // Drain the full request (headers + content-length body) before responding:
+    // a single `read` can return a partial request, which would truncate the
+    // captured body or break the pipe on large payloads.
+    let mut received = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut expected: Option<usize> = None;
+    let mut body_start = 0usize;
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        received.extend_from_slice(&buf[..n]);
+        if expected.is_none() {
+            if let Some(headers_end) = received.windows(4).position(|window| window == b"\r\n\r\n")
+            {
+                let headers = String::from_utf8_lossy(&received[..headers_end]).to_lowercase();
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse().ok())
+                    .unwrap_or(0);
+                body_start = headers_end + 4;
+                expected = Some(body_start + length);
+            }
+        }
+        if expected.is_some_and(|total| received.len() >= total) {
+            break;
+        }
     }
 
-    let request = String::from_utf8_lossy(&buf[..n]);
+    let request = String::from_utf8_lossy(&received);
 
     // Capture the JSON body (everything after the blank line separator).
-    if let Some(body_start) = request.find("\r\n\r\n") {
-        let body = request[body_start + 4..].trim().to_string();
+    if body_start > 0 {
+        let body = request[body_start..].trim().to_string();
         if !body.is_empty() {
             captured_requests.lock().await.push(body);
         }
@@ -325,15 +382,16 @@ async fn handle_connection(
     match mock_response {
         MockResponse::Text(text) => {
             if is_streaming {
-                write_sse_text_response(&mut stream, &text).await?;
+                write_sse_text_response(&mut stream, &text, config.usage).await?;
             } else {
-                let body = format_chat_response(&config.model, &text, None);
+                let body = format_chat_response(&config.model, &text, None, config.usage);
                 write_http_response(&mut stream, 200, &body, &[]).await?;
             }
         }
         MockResponse::ToolCalls(calls) => {
             let tool_calls_json = format_tool_calls(&calls);
-            let body = format_chat_response(&config.model, "", Some(&tool_calls_json));
+            let body =
+                format_chat_response(&config.model, "", Some(&tool_calls_json), config.usage);
             write_http_response(&mut stream, 200, &body, &[]).await?;
         }
         MockResponse::Error { status, body } => {
@@ -357,7 +415,12 @@ async fn handle_connection(
 
 /// Format a JSON body conforming to the OpenAI chat completions response
 /// schema.
-fn format_chat_response(model: &str, content: &str, tool_calls: Option<&str>) -> String {
+fn format_chat_response(
+    model: &str,
+    content: &str,
+    tool_calls: Option<&str>,
+    usage: MockUsage,
+) -> String {
     let tool_calls_field = match tool_calls {
         Some(tc) => format!(r#","tool_calls":{}"#, tc),
         None => String::new(),
@@ -375,8 +438,14 @@ fn format_chat_response(model: &str, content: &str, tool_calls: Option<&str>) ->
     let escaped_content = &escaped_content[1..escaped_content.len() - 1];
 
     format!(
-        r#"{{"id":"mock-resp-1","object":"chat.completion","created":1700000000,"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"{}}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}}}"#,
-        model, escaped_content, tool_calls_field, finish_reason,
+        r#"{{"id":"mock-resp-1","object":"chat.completion","created":1700000000,"model":"{}","choices":[{{"index":0,"message":{{"role":"assistant","content":"{}"{}}},"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+        model,
+        escaped_content,
+        tool_calls_field,
+        finish_reason,
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
     )
 }
 
@@ -386,6 +455,7 @@ fn format_chat_response(model: &str, content: &str, tool_calls: Option<&str>) ->
 async fn write_sse_text_response(
     stream: &mut tokio::net::TcpStream,
     content: &str,
+    usage: MockUsage,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
 
@@ -394,9 +464,9 @@ async fn write_sse_text_response(
 
     let events = format!(
         "data: {{\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{}\"}},\"finish_reason\":null}}]}}\n\n\
-         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}}}\n\n\
+         data: {{\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":{},\"completion_tokens\":{},\"total_tokens\":{}}}}}\n\n\
          data: [DONE]\n\n",
-        escaped
+        escaped, usage.prompt_tokens, usage.completion_tokens, usage.total_tokens,
     );
     let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
     let response = format!(

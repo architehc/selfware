@@ -19,11 +19,11 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
-use crate::token_count::estimate_content_tokens;
-use crate::vector_store::{
+use crate::analysis::vector_store::{
     ChunkType, CodeChunker, CollectionScope, EmbeddingBackend, SearchFilter, SearchResult,
     VectorStore,
 };
+use crate::token_count::estimate_content_tokens;
 
 /// RAG configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -203,7 +203,7 @@ impl HierarchicalMemory {
     /// Create a new hierarchical memory system
     pub async fn new(
         config: MemoryConfig,
-        _embedding: Arc<crate::vector_store::EmbeddingBackend>,
+        _embedding: Arc<crate::analysis::vector_store::EmbeddingBackend>,
     ) -> anyhow::Result<Self> {
         let config = Arc::new(RwLock::new(config));
         let index = Arc::new(MemoryIndex::new());
@@ -238,7 +238,7 @@ impl HierarchicalMemory {
 
     /// Create with default configuration
     pub async fn default() -> anyhow::Result<Self> {
-        use crate::vector_store::{EmbeddingBackend, MockEmbeddingProvider};
+        use crate::analysis::vector_store::{EmbeddingBackend, MockEmbeddingProvider};
         Self::new(
             MemoryConfig::default(),
             Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default())),

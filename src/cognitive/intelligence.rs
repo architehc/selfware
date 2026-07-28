@@ -7,7 +7,7 @@
 //! - Git state monitoring
 //! - Pattern detection for code structure
 
-use crate::bm25::BM25Index;
+use crate::analysis::bm25::BM25Index;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;

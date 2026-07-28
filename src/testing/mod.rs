@@ -8,7 +8,6 @@
 //! - Mock LLM API server (test-only)
 
 pub mod language_qa;
-#[cfg(test)]
 pub mod mock_api;
 pub mod qa_profiles;
 pub mod verification;

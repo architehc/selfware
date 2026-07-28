@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::analysis::vector_store::{EmbeddingBackend, VectorIndex};
 use crate::token_count::estimate_content_tokens;
-use crate::vector_store::{EmbeddingBackend, VectorIndex};
 
 /// Episode type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]

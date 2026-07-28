@@ -3061,8 +3061,8 @@ impl Agent {
 
     /// Handle the `/scan <path>` command: build a RAG index for the given path.
     async fn handle_scan_command(&mut self, path_arg: &str) {
+        use crate::analysis::vector_store::{EmbeddingBackend, TfIdfEmbeddingProvider};
         use crate::cognitive::rag::{RagConfig, RagEngine};
-        use crate::vector_store::{EmbeddingBackend, TfIdfEmbeddingProvider};
 
         let scan_path = std::path::Path::new(path_arg);
         let scan_path = if scan_path.is_relative() {
