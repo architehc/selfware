@@ -164,6 +164,55 @@ pub fn estimate_tokens_with_overhead(content: &str, message_overhead: usize) -> 
     estimate_content_tokens(content) + message_overhead
 }
 
+/// Default token estimate per image when dimensions are unknown.
+/// Based on a 1024×1024 high-detail image: 4 tiles × 170 + 85 = 765.
+pub const DEFAULT_IMAGE_TOKEN_ESTIMATE: usize = 765;
+
+/// Estimate tokens for a string (never returns 0).
+pub fn estimate_tokens(text: &str) -> usize {
+    estimate_content_tokens(text).max(1)
+}
+
+/// Estimate tokens for a list of messages
+pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usize {
+    let mut total = 0;
+
+    for msg in messages {
+        // Role overhead
+        total += 4;
+        // Content (use text_all to capture all text blocks)
+        total += estimate_tokens(&msg.content.text_all());
+        // Image tokens
+        total += msg.content.image_count() * DEFAULT_IMAGE_TOKEN_ESTIMATE;
+        // Tool calls if present
+        if let Some(ref tool_calls) = msg.tool_calls {
+            for call in tool_calls {
+                total += 10; // Overhead per tool call
+                total += estimate_tokens(&call.function.name);
+                total += estimate_tokens(&call.function.arguments);
+            }
+        }
+    }
+
+    total
+}
+
+/// Estimate the token count of tool definitions sent via native function calling.
+/// vLLM/OpenAI count these as input tokens, so they must be included in budget calculations.
+pub fn estimate_tool_definitions_tokens(tools: &[crate::api::types::ToolDefinition]) -> usize {
+    let mut total = 0;
+    for tool in tools {
+        // Each tool definition has overhead + name + description + parameter schema
+        total += 10; // structural overhead (type, function wrapper)
+        total += estimate_tokens(&tool.function.name);
+        total += estimate_tokens(&tool.function.description);
+        // Parameter schema JSON — serialize and estimate
+        let schema_str = serde_json::to_string(&tool.function.parameters).unwrap_or_default();
+        total += estimate_tokens(&schema_str);
+    }
+    total
+}
+
 /// Estimate tokens for raw content.
 ///
 /// Results are cached by content hash to avoid redundant tokenization.

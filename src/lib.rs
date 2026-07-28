@@ -142,7 +142,6 @@ pub mod output;
 pub mod self_healing;
 pub mod templates;
 pub mod token_count;
-pub mod tokens;
 pub mod tool_parser;
 
 // ============================================================================

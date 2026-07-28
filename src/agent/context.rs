@@ -27,8 +27,8 @@ fn safe_tail_start(messages: &[Message], desired: usize) -> usize {
 /// `trim_message_history` use it.
 pub fn estimate_message_tokens(m: &Message) -> usize {
     let mut total = estimate_tokens_with_overhead(&m.content.text_all(), MESSAGE_OVERHEAD_TOKENS)
-        + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE;
-    // Include tool calls if present (must match estimate_messages_tokens in tokens.rs)
+        + m.content.image_count() * crate::token_count::DEFAULT_IMAGE_TOKEN_ESTIMATE;
+    // Include tool calls if present (must match estimate_messages_tokens in token_count.rs)
     if let Some(ref tool_calls) = m.tool_calls {
         for call in tool_calls {
             total += 10; // Overhead per tool call

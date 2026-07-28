@@ -1,46 +1,55 @@
 use super::*;
+use crate::evolve::diagnostics::DiagnosticSpan;
 
-#[test]
-fn test_diagnostic_parsing() {
-    let json = serde_json::json!({
-        "level": "error",
-        "message": "cannot find value `x` in this scope",
-        "spans": [{
-            "is_primary": true,
-            "file_name": "src/main.rs",
-            "line_start": 42,
-            "column_start": 5,
-            "text": [{ "text": "    let y = x + 1;" }]
-        }]
-    });
+fn diag(level: &str, message: &str, span: Option<DiagnosticSpan>) -> CompilerDiagnostic {
+    CompilerDiagnostic {
+        level: level.to_string(),
+        code: None,
+        message: message.to_string(),
+        rendered: None,
+        spans: span.into_iter().collect(),
+    }
+}
 
-    let diag = parse_diagnostic(&json).unwrap();
-    assert_eq!(diag.level, DiagnosticLevel::Error);
-    assert_eq!(diag.line, 42);
-    assert_eq!(diag.file, "src/main.rs");
+fn span(file: &str, line: usize, column: usize, label: Option<&str>) -> DiagnosticSpan {
+    DiagnosticSpan {
+        file: file.to_string(),
+        line_start: line,
+        line_end: line,
+        column_start: column,
+        column_end: column + 1,
+        is_primary: true,
+        label: label.map(str::to_string),
+    }
 }
 
 #[test]
 fn test_error_prompt_formatting() {
-    let result = AstMutationResult::compile_failed(vec![CompilerDiagnostic {
-        level: DiagnosticLevel::Error,
-        message: "mismatched types".to_string(),
-        file: "src/memory.rs".to_string(),
-        line: 301,
-        column: 12,
-        span_text: "fn evict_oldest(&mut self) -> u64".to_string(),
-    }]);
+    let result = AstMutationResult::compile_failed(vec![diag(
+        "error",
+        "mismatched types",
+        Some(span(
+            "src/memory.rs",
+            301,
+            12,
+            Some("fn evict_oldest(&mut self) -> u64"),
+        )),
+    )]);
 
     let prompt = result.error_prompt();
     assert!(prompt.contains("FROST"));
     assert!(prompt.contains("mismatched types"));
     assert!(prompt.contains("memory.rs:301"));
+    assert!(prompt.contains("fn evict_oldest"));
 }
 
 #[test]
 fn test_not_found_result() {
     let result = AstMutationResult::not_found("nonexistent_fn");
     assert!(!result.success);
+    assert_eq!(result.compiler_errors.len(), 1);
+    assert_eq!(result.compiler_errors[0].level, "error");
+    assert!(result.compiler_errors[0].spans.is_empty());
     assert!(result.error_prompt().contains("nonexistent_fn"));
 }
 
@@ -75,59 +84,6 @@ fn test_compile_failed_empty_errors() {
 }
 
 #[test]
-fn test_diagnostic_parsing_missing_primary() {
-    let json = serde_json::json!({
-        "level": "error",
-        "message": "some error",
-        "spans": [{
-            "is_primary": false,
-            "file_name": "src/main.rs",
-            "line_start": 1,
-            "column_start": 1,
-            "text": [{ "text": "code" }]
-        }]
-    });
-    // No primary span → parse_diagnostic returns None
-    assert!(parse_diagnostic(&json).is_none());
-}
-
-#[test]
-fn test_diagnostic_parsing_unknown_level() {
-    let json = serde_json::json!({
-        "level": "ice",
-        "message": "internal compiler error",
-        "spans": [{
-            "is_primary": true,
-            "file_name": "src/main.rs",
-            "line_start": 1,
-            "column_start": 1,
-            "text": [{ "text": "code" }]
-        }]
-    });
-    assert!(parse_diagnostic(&json).is_none());
-}
-
-#[test]
-fn test_diagnostic_parsing_missing_fields() {
-    // Completely empty JSON
-    let json = serde_json::json!({});
-    assert!(parse_diagnostic(&json).is_none());
-
-    // Has level but no message
-    let json = serde_json::json!({
-        "level": "error"
-    });
-    assert!(parse_diagnostic(&json).is_none());
-
-    // Has level and message but no spans
-    let json = serde_json::json!({
-        "level": "error",
-        "message": "test"
-    });
-    assert!(parse_diagnostic(&json).is_none());
-}
-
-#[test]
 fn test_uuid_short_uniqueness() {
     let a = uuid_short();
     // Small sleep to ensure different nanos
@@ -139,54 +95,32 @@ fn test_uuid_short_uniqueness() {
 #[test]
 fn test_error_prompt_multiple_errors() {
     let result = AstMutationResult::compile_failed(vec![
-        CompilerDiagnostic {
-            level: DiagnosticLevel::Error,
-            message: "type mismatch".to_string(),
-            file: "src/lib.rs".to_string(),
-            line: 10,
-            column: 5,
-            span_text: "let x: u32 = \"hello\"".to_string(),
-        },
-        CompilerDiagnostic {
-            level: DiagnosticLevel::Warning,
-            message: "unused variable".to_string(),
-            file: "src/lib.rs".to_string(),
-            line: 20,
-            column: 9,
-            span_text: String::new(), // empty span
-        },
+        diag(
+            "error",
+            "type mismatch",
+            Some(span("src/lib.rs", 10, 5, Some("let x: u32 = \"hello\""))),
+        ),
+        diag(
+            "warning",
+            "unused variable",
+            Some(span("src/lib.rs", 20, 9, None)),
+        ),
     ]);
     let prompt = result.error_prompt();
     assert!(prompt.contains("type mismatch"));
     assert!(prompt.contains("unused variable"));
     assert!(prompt.contains("lib.rs:10"));
     assert!(prompt.contains("lib.rs:20"));
-    // span_text present only for first error
+    // span label present only for first error
     assert!(prompt.contains("let x: u32"));
 }
 
 #[test]
-fn test_diagnostic_all_levels() {
-    for (level_str, expected) in [
-        ("error", DiagnosticLevel::Error),
-        ("warning", DiagnosticLevel::Warning),
-        ("note", DiagnosticLevel::Note),
-        ("help", DiagnosticLevel::Help),
-    ] {
-        let json = serde_json::json!({
-            "level": level_str,
-            "message": "test message",
-            "spans": [{
-                "is_primary": true,
-                "file_name": "test.rs",
-                "line_start": 1,
-                "column_start": 1,
-                "text": [{ "text": "code" }]
-            }]
-        });
-        let diag = parse_diagnostic(&json).unwrap();
-        assert_eq!(diag.level, expected);
-    }
+fn test_error_prompt_without_spans() {
+    // Diagnostics with no spans still render level + message.
+    let result = AstMutationResult::compile_failed(vec![diag("error", "link failure", None)]);
+    let prompt = result.error_prompt();
+    assert!(prompt.contains("[error] link failure"));
 }
 
 #[test]

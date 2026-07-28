@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::evolve::diagnostics::CompilerDiagnostic;
+
 /// Result of an AST mutation attempt
 #[derive(Debug)]
 pub struct AstMutationResult {
@@ -19,24 +21,6 @@ pub struct AstMutationResult {
     pub diff: String,
     /// Path to the git worktree containing the mutation
     pub worktree_path: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompilerDiagnostic {
-    pub level: DiagnosticLevel,
-    pub message: String,
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    pub span_text: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum DiagnosticLevel {
-    Error,
-    Warning,
-    Note,
-    Help,
 }
 
 impl AstMutationResult {
@@ -53,12 +37,11 @@ impl AstMutationResult {
         Self {
             success: false,
             compiler_errors: vec![CompilerDiagnostic {
-                level: DiagnosticLevel::Error,
+                level: "error".to_string(),
+                code: None,
                 message: format!("Function `{}` not found in target file", fn_name),
-                file: String::new(),
-                line: 0,
-                column: 0,
-                span_text: String::new(),
+                rendered: None,
+                spans: Vec::new(),
             }],
             diff: String::new(),
             worktree_path: None,
@@ -72,12 +55,22 @@ impl AstMutationResult {
         }
         let mut prompt = String::from("FROST ❄️ — Compiler rejected mutation:\n\n");
         for err in &self.compiler_errors {
-            prompt.push_str(&format!(
-                "  [{:?}] {}:{},{}: {}\n",
-                err.level, err.file, err.line, err.column, err.message
-            ));
-            if !err.span_text.is_empty() {
-                prompt.push_str(&format!("         | {}\n", err.span_text));
+            let primary = err
+                .spans
+                .iter()
+                .find(|s| s.is_primary)
+                .or(err.spans.first());
+            match primary {
+                Some(span) => prompt.push_str(&format!(
+                    "  [{}] {}:{},{}: {}\n",
+                    err.level, span.file, span.line_start, span.column_start, err.message
+                )),
+                None => prompt.push_str(&format!("  [{}] {}\n", err.level, err.message)),
+            }
+            if let Some(label) = primary.and_then(|s| s.label.as_deref()) {
+                if !label.is_empty() {
+                    prompt.push_str(&format!("         | {}\n", label));
+                }
             }
         }
         prompt
@@ -136,62 +129,6 @@ pub fn cleanup_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wo
     }
 
     Ok(())
-}
-
-/// Run `cargo check` and parse JSON diagnostics
-pub fn cargo_check_json(working_dir: &Path) -> Result<Vec<CompilerDiagnostic>, String> {
-    let output = Command::new("cargo")
-        .args(["check", "--message-format=json"])
-        .current_dir(working_dir)
-        .output()
-        .map_err(|e| format!("Failed to run cargo check: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut diagnostics = Vec::new();
-
-    for line in stdout.lines() {
-        if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
-            if msg["reason"] == "compiler-message" {
-                if let Some(diag) = parse_diagnostic(&msg["message"]) {
-                    diagnostics.push(diag);
-                }
-            }
-        }
-    }
-
-    Ok(diagnostics)
-}
-
-fn parse_diagnostic(msg: &serde_json::Value) -> Option<CompilerDiagnostic> {
-    let level = match msg["level"].as_str()? {
-        "error" => DiagnosticLevel::Error,
-        "warning" => DiagnosticLevel::Warning,
-        "note" => DiagnosticLevel::Note,
-        "help" => DiagnosticLevel::Help,
-        _ => return None,
-    };
-
-    let message = msg["message"].as_str()?.to_string();
-
-    // Extract primary span
-    let spans = msg["spans"].as_array()?;
-    let primary = spans
-        .iter()
-        .find(|s| s["is_primary"].as_bool() == Some(true))?;
-
-    Some(CompilerDiagnostic {
-        level,
-        message,
-        file: primary["file_name"].as_str().unwrap_or("").to_string(),
-        line: primary["line_start"].as_u64().unwrap_or(0) as u32,
-        column: primary["column_start"].as_u64().unwrap_or(0) as u32,
-        span_text: primary["text"]
-            .as_array()
-            .and_then(|t| t.first())
-            .and_then(|t| t["text"].as_str())
-            .unwrap_or("")
-            .to_string(),
-    })
 }
 
 fn uuid_short() -> String {

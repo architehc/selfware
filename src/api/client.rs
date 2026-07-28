@@ -11,7 +11,7 @@ use crate::errors::ApiError;
 use crate::supervision::circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError,
 };
-use crate::tokens::{estimate_messages_tokens, estimate_tool_definitions_tokens};
+use crate::token_count::{estimate_messages_tokens, estimate_tool_definitions_tokens};
 
 /// Helper: token estimate for an optional tool list, returning 0 when `None`.
 fn estimate_tool_definitions_tokens_opt(tools: Option<&Vec<ToolDefinition>>) -> usize {

@@ -12,7 +12,19 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::broadcast;
 
-use crate::analysis::tier_allocator::ContextTier;
+/// Context tier assigned to a file based on its DAG distance from the focus
+/// node. Consumed by the evolution event bus (`AgentFocus` / `TierUpdate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ContextTier {
+    /// L1: Role + public surface count + dependency list (~50 tokens)
+    Describe,
+    /// L2: Struct/enum signatures, entry points, error patterns (~200 tokens)
+    Work,
+    /// L3: Import/export boundaries, trait impls, shared types (~400 tokens)
+    Integrate,
+    /// L4: Full architecture detail, unsafe blocks, test coverage (~800 tokens)
+    Edit,
+}
 
 // ─── Event Types ────────────────────────────────────────────────────────────
 

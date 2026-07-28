@@ -117,7 +117,7 @@ impl Agent {
     pub(super) fn trim_message_history(&mut self) {
         // Use the same estimator as the API (includes tool_calls tokens)
         // This ensures trim budget matches the actual API input_tokens calculation
-        use crate::tokens::estimate_messages_tokens;
+        use crate::token_count::estimate_messages_tokens;
         let total: usize = estimate_messages_tokens(&self.messages);
         if total <= self.max_context_tokens {
             return;
@@ -708,7 +708,7 @@ impl Agent {
                 let text_tokens =
                     crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4);
                 let image_tokens =
-                    m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE;
+                    m.content.image_count() * crate::token_count::DEFAULT_IMAGE_TOKEN_ESTIMATE;
                 text_tokens + image_tokens
             })
             .sum()

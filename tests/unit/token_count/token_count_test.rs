@@ -98,3 +98,48 @@ fn test_env_var_beats_configured_model_slot() {
     assert_eq!(configured_model_name().as_deref(), Some("env-model"));
     // The guard re-clears SELFWARE_MODEL on drop.
 }
+
+// ---- Ported from tests/unit/tokens (wave-3 D1): estimate_messages_tokens ----
+
+#[test]
+fn test_estimate_messages_tokens_simple() {
+    use crate::api::types::Message;
+
+    let messages = vec![
+        Message::system("You are a helpful assistant"),
+        Message::user("Hello, how are you?"),
+        Message::assistant("I'm doing well, thank you!"),
+    ];
+
+    let estimate = estimate_messages_tokens(&messages);
+    // At least 4 tokens overhead per message (3 messages) + content
+    assert!(estimate > 12);
+}
+
+#[test]
+fn test_estimate_messages_tokens_with_tool_calls() {
+    use crate::api::types::{Message, ToolCall, ToolFunction};
+
+    let mut msg = Message::assistant("Let me read that file for you.");
+    msg.tool_calls = Some(vec![ToolCall {
+        id: "call_1".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_read".to_string(),
+            arguments: r#"{"path": "test.txt"}"#.to_string(),
+        },
+    }]);
+
+    let messages = vec![msg];
+    let estimate = estimate_messages_tokens(&messages);
+
+    // Should include tool call overhead
+    assert!(estimate > 20);
+}
+
+#[test]
+fn test_estimate_messages_tokens_empty() {
+    let messages: Vec<crate::api::types::Message> = vec![];
+    let estimate = estimate_messages_tokens(&messages);
+    assert_eq!(estimate, 0);
+}

@@ -5,9 +5,7 @@
 //!
 //! This module is PROTECTED from self-modification.
 
-#![allow(dead_code, unused_imports, unused_variables)]
-
-use super::ast_tools::{self, AstMutationResult};
+use super::ast_tools;
 use super::fitness::{self, SabConfig, SabResult};
 use super::sandbox::SandboxConfig;
 use super::telemetry;
