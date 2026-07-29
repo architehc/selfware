@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-07-28
+
+### Removed (mega dedup cleanup, −6,027 lines)
+- **tokens.rs cost/budget/model-selection subsystem** (1,489 src + 1,620 test lines): zero production callers; surviving estimators moved to `token_count.rs`
+- **tier_allocator** duplicate tier system (1,200 lines incl. example/tests); `ContextTier` enum moved to its only consumer
+- Dead deps `lru`, `tokio-test`; dead `tokens` feature flag; ~30 zero-caller items (permission prompts, run_rust_qa, WindowPlatform, plan-mode accessors, dead types across tools/resource/swl/ui)
+- Duplicated test fixtures → shared helpers; hand-rolled mock LLM servers → public `testing::MockLlmServer`; lib.rs re-export shims (redact/analysis/ui)
+- Whole-file `#![allow(dead_code)]` blankets (narrowed to targeted annotations)
+
+### Changed
+- **bench_harness + vlm_bench classified as tooling** — no longer shipped in context tiers (measured −80.7k full / −10.3k lite tokens; they stay navigable in the graph)
+- fn-body scanner unified (fn_dedup delegates to the string-aware implementation — brace-in-string hashes now correct)
+- dead-code analyzer uses tree-sitter cfg-test detection; diagnostics unified on `evolve::diagnostics`
+- EnvGuard test lock merged (parallel-test flake window eliminated)
+- `docs/DEBLOAT_STATE.md` measured token baseline; architecture.md + CONSOLIDATION_PLAN.md refreshed
+
 ## [0.6.5] - 2026-07-27
 
 ### Added
@@ -222,7 +238,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.5...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.6...HEAD
+[0.6.6]: https://github.com/architehc/selfware/compare/v0.6.5...v0.6.6
 [0.6.5]: https://github.com/architehc/selfware/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/architehc/selfware/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/architehc/selfware/compare/v0.6.2...v0.6.3
