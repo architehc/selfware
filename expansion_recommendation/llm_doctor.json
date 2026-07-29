@@ -1,0 +1,291 @@
+{
+  "node_id": "llm_doctor",
+  "category": "tooling",
+  "shipped_in_bulk": false,
+  "reachable_via_expand": true,
+  "context_capacity_load": "600k_tokens",
+  "touch_canvas_modeling": {
+    "node_color": "#7c3aed",
+    "touch_gesture_navigation": [
+      "Single-tap: Select node and open quick stats HUD",
+      "Double-tap: Expand/collapse child components on touch canvas",
+      "Long-press: Open interactive visual configuration wheel",
+      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
+      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
+    ],
+    "visual_card_state": "Tooling Subgraph Node (LLM_DOCTOR)",
+    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
+  },
+  "loop_impact_analysis": {
+    "primary_loop_phase": "Delegated Tooling Extension",
+    "state_mutation_scope": "Mutates loop state via llm_doctor context boundaries.",
+    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
+  },
+  "recommendations_for_engine": [
+    "Optimize llm_doctor token accounting for 600k context scale using measured envelope tiering.",
+    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
+    "Enforce strict state invariants so expanding llm_doctor dynamically does not invalidate active turn execution."
+  ],
+  "examples": [
+    {
+      "example_id": 1,
+      "title": "Llm_doctor - Initial Handshake & Warm Start",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "SessionToken",
+        "ContextEnvelope",
+        "ConfigGuard",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during initial handshake & warm start.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 2,
+      "title": "Llm_doctor - High Token Load (600k Context)",
+      "loop_scenario": "Modeling llm_doctor under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "ContextWindow",
+        "TokenUsage",
+        "EnvelopeTier",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during high token load (600k context).",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 3,
+      "title": "Llm_doctor - Parallel Async Loop Execution",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "AsyncTask",
+        "LoopGuard",
+        "WorkerChannel",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during parallel async loop execution.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 4,
+      "title": "Llm_doctor - Error Recovery & Retry Loop",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "ErrorState",
+        "RetryBudget",
+        "FallbackStrategy",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during error recovery & retry loop.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 5,
+      "title": "Llm_doctor - Touch Canvas Node Expansion",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "VisualNode",
+        "GestureEvent",
+        "ExpandedViewport",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during touch canvas node expansion.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 6,
+      "title": "Llm_doctor - State Mutation & Checkpoint",
+      "loop_scenario": "Modeling llm_doctor under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "TurnState",
+        "DeltaDiff",
+        "CheckpointHash",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during state mutation & checkpoint.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 7,
+      "title": "Llm_doctor - Stream Chunk Processing",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "StreamChunk",
+        "TokenAccumulator",
+        "UIEvent",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during stream chunk processing.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 8,
+      "title": "Llm_doctor - Interactive User Interruption",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "PauseSignal",
+        "UserPrompt",
+        "InterruptState",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during interactive user interruption.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 9,
+      "title": "Llm_doctor - Subagent Delegation",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Subagent Delegation' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "SubagentTask",
+        "ParentSession",
+        "ResponseFuture",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during subagent delegation.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 10,
+      "title": "Llm_doctor - Safety Policy Interception",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "PolicyCheck",
+        "ToolCall",
+        "AuditRecord",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during safety policy interception.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 11,
+      "title": "Llm_doctor - Context Pruning & Compaction",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "MemoryIndex",
+        "SummaryNode",
+        "PrunedTokens",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during context pruning & compaction.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 12,
+      "title": "Llm_doctor - Touch Drag-and-Drop Workflow",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "CanvasNode",
+        "ConnectorEdge",
+        "TouchPointer",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 13,
+      "title": "Llm_doctor - Multi-turn Memory Consolidation",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "WorkingMemory",
+        "ShortTermTier",
+        "LongTermTier",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 14,
+      "title": "Llm_doctor - Isolated Branch Staging",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "ShadowWorktree",
+        "StagedDiff",
+        "APPLY_LOCK",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during isolated branch staging.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 15,
+      "title": "Llm_doctor - Real-time Telemetry Emission",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "MetricPoint",
+        "EventBus",
+        "LogStream",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during real-time telemetry emission.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 16,
+      "title": "Llm_doctor - Tool Result Spilling & Parsing",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "SpillFile",
+        "SummaryBadge",
+        "ToolResult",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during tool result spilling & parsing.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 17,
+      "title": "Llm_doctor - Dynamic Constraint Adaptation",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "FitnessScore",
+        "TierMeasurer",
+        "BudgetCut",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 18,
+      "title": "Llm_doctor - Gesture-based Node Filter",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "FilterQuery",
+        "ComponentCard",
+        "UIState",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during gesture-based node filter.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 19,
+      "title": "Llm_doctor - Fail-safe Fallback Trigger",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "FallbackPayload",
+        "EmergencyState",
+        "HealthBadge",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+    },
+    {
+      "example_id": 20,
+      "title": "Llm_doctor - Final Turn Consensus & Exit",
+      "loop_scenario": "Modeling llm_doctor under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
+      "objects_on_loop": [
+        "FinalAnswer",
+        "SessionExit",
+        "AuditSummary",
+        "Llm_doctorPayload"
+      ],
+      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during final turn consensus & exit.",
+      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+    }
+  ]
+}

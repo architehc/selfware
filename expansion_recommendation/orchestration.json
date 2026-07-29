@@ -1,0 +1,168 @@
+{
+  "module": "orchestration",
+  "generated": "2026-07-28",
+  "full_tokens": 39488,
+  "loop_role": "Orchestration turns the single-agent loop into a programmable fabric: WorkflowExecutor runs declarative multi-step plans (act/verify), MultiAgentChat and Swarm fan work out to parallel agents with trust-weighted consensus, and VisualFeedbackLoop closes an autonomous act→capture→evaluate→iterate cycle.",
+  "examples": [
+    {
+      "id": "orchestration-01",
+      "title": "Execute a declarative workflow as the loop's act engine",
+      "loop_role": "Model WorkflowExecutor::execute as the loop's act-stage dispatcher: the plan stage emits a Workflow (steps + depends_on edges), the executor topologically walks WorkflowStep nodes, and each completed step returns a StepResult that the verify stage inspects before the loop continues. Wire new_with_config to SafetyConfig so shell/tool steps inherit the same guardrails as the interactive loop, and use new_dry_run to let the plan stage rehearse without side effects.",
+      "affects": "Writes into WorkflowContext.step_results and aggregates WorkflowTelemetry (llm_calls, prompt_tokens, estimated_cost_usd, failed_steps) — the loop's budget ledger. Depends_on ordering constrains parallelism; required=false steps let failures degrade instead of aborting, which changes what the verify stage must re-check.",
+      "touch_ux": "Render as a large rounded rectangle (deep indigo) containing the step DAG as child nodes; edges from the plan node in, and one edge per step out to a verify node. Tap expands the DAG; long-press opens the Workflow YAML; pinch collapses to a single badge showing completed_steps/failed_steps live from WorkflowTelemetry.",
+      "pointer": "src/orchestration/workflows.rs::WorkflowExecutor::execute"
+    },
+    {
+      "id": "orchestration-02",
+      "title": "Compose steps from the StepType palette",
+      "loop_role": "Treat each StepType variant as a distinct loop-stage primitive: Tool and Shell are act, Llm is plan/perceive (a nested inference call), Condition and Loop are plan-time control flow, SubWorkflow is recursive plan composition, Input and Pause are human checkpoints, Guardrail is a verify-stage assertion. A loop modeler builds an agent behavior by snapping these primitives onto the canvas rather than writing a ReAct loop by hand.",
+      "affects": "Each variant touches loop objects differently: Llm steps grow the token budget via LlmCallOutput.usage, Shell steps risk the filesystem (substitute_shell_safe exists precisely for that), Pause suspends the loop awaiting trust input, and Guardrail can veto a step with on_violation=block before it mutates anything.",
+      "touch_ux": "A horizontal palette of shape-coded chips: hexagon for Tool, terminal glyph for Shell, spark for Llm, diamond for Condition, loop-arrow for Loop, hand icon for Pause, shield for Guardrail. Drag a chip onto the canvas to instantiate a WorkflowStep node; long-press a chip to see its serde schema; a red shield badge counts active Guardrail steps.",
+      "pointer": "src/orchestration/workflows.rs::StepType"
+    },
+    {
+      "id": "orchestration-03",
+      "title": "Bind the variable bag with WorkflowContext",
+      "loop_role": "WorkflowContext is the loop's working memory slot for one run: plan seeds it with WorkflowInput values via set_var, act-stage steps read them through substitute, and later steps consume earlier outputs via get_var. Model it as the data plane running underneath the control plane of step ordering.",
+      "affects": "Carries variables, step_results, recursion_depth, executing_steps (cycle detection), workflow_call_stack, and a bounded logs VecDeque — i.e. the entire evidence trail of the run. substitute vs substitute_shell_safe is a trust boundary: the safe variant exists so LLM-produced VarValue strings cannot inject shell syntax, protecting the act stage from its own tool results.",
+      "touch_ux": "Show as a translucent pouch node attached beneath the workflow rectangle, filled with key=value pills. Tap a pill to reveal provenance (which step_id wrote it); long-press offers 'copy as shell-safe' vs 'raw'; a small lock icon on pills that only ever flowed through substitute_shell_safe.",
+      "pointer": "src/orchestration/workflows.rs::WorkflowContext"
+    },
+    {
+      "id": "orchestration-04",
+      "title": "Branch plans with evaluate_condition",
+      "loop_role": "The Condition step with evaluate_condition is how the plan stage encodes data-dependent routing without an LLM call: a boolean expression over WorkflowContext.variables picks then_steps or else_steps, and those steps are marked in control_flow_managed_steps so the top-level pass skips them. Wire it when the loop needs deterministic branching (cheaper and more honest than asking the model to choose).",
+      "affects": "Zero token cost — this is the budget-friendly alternative to an Llm routing step. It determines which StepResults will exist downstream, so verify must tolerate absent branches; skipped steps appear in telemetry.skipped_steps rather than failed_steps, keeping the honesty signal clean.",
+      "touch_ux": "Diamond node with two colored exit edges (green then / amber else); the edge not taken renders as a faded dashed line with a 'skipped' tag. Tap toggles which branch's downstream nodes are highlighted; live badge shows the evaluated expression result (true/false) once executed.",
+      "pointer": "src/orchestration/workflows.rs::WorkflowContext::evaluate_condition"
+    },
+    {
+      "id": "orchestration-05",
+      "title": "Meter budget with WorkflowTelemetry",
+      "loop_role": "WorkflowTelemetry is the measured-budget instrument the evolve stage reads: each Llm step's LlmCallOutput (usage, model, estimated_cost_usd) is folded into running totals, so the loop can decide mid-run whether to continue, degrade to a cheaper model, or abort. This implements the repo's measured-not-estimated rule — token accounting comes from real LlmTokenUsage, not heuristics.",
+      "affects": "Fields llm_calls, llm_latency_ms, prompt_tokens, completion_tokens, total_tokens, estimated_cost_usd directly size the cost of the current plan; completed_steps/failed_steps/skipped_steps give the verify stage an honest outcome breakdown. A workflow that skips 8 of 10 steps should never render green — this telemetry is what prevents that lie.",
+      "touch_ux": "A slim gauge strip pinned to the top edge of the workflow node: token bar filling toward budget, cost counter in USD, and a three-segment step tally (green/gray/red). Pinch on the strip opens a per-step cost breakdown; long-press exports the WorkflowTelemetry JSON for the evolve stage.",
+      "pointer": "src/orchestration/workflows.rs::WorkflowTelemetry"
+    },
+    {
+      "id": "orchestration-06",
+      "title": "Retry flaky steps with RetryConfig",
+      "loop_role": "RetryConfig (max_attempts, delay_secs, exponential) is the verify-stage's first line of self-healing: when an act step fails, the executor re-enters it with backoff before escalating the failure to the loop. Model it as a small verify→act feedback arc attached to a single step rather than a whole-loop restart.",
+      "affects": "retry_count on StepResult records how hard the loop had to work — a step that succeeds on attempt 4 is not the same trust signal as one that succeeds on attempt 1, and downstream consensus (swarm trust_score) should weigh it accordingly. Retries multiply cost: each attempt of an Llm step adds to WorkflowTelemetry, so exponential backoff is also a budget damper.",
+      "touch_ux": "A circular arrow ring around the step node, with tick marks lighting up per attempt; the ring pulses during delay_secs. Tap shows attempt history with errors; long-press edits max_attempts with a slider; the ring turns red when attempts exhaust.",
+      "pointer": "src/orchestration/workflows.rs::RetryConfig"
+    },
+    {
+      "id": "orchestration-07",
+      "title": "Insert human checkpoints with Pause and Input",
+      "loop_role": "StepType::Pause and StepType::Input are the loop's trust checkpoints: Pause suspends execution until a human confirms (act-stage gate before irreversible steps), and Input prompts for a VarValue that flows into substitute for downstream steps. Model them as the only sanctioned way the autonomous loop yields control.",
+      "affects": "Freezes the loop's clock (elapsed_ms keeps counting, so dashboards show honest wall-time) and creates a trust artifact: the human's confirmation or input value becomes part of WorkflowContext.variables, auditable later. Unlike Guardrail these never auto-resolve — the loop genuinely waits, which a touch UI must surface as a blocking, attention-demanding state.",
+      "touch_ux": "Pause renders as an octagonal stop-sign node that physically blocks the flow line (edges behind it dim); it emits a haptic pulse on arrival and requires a deliberate two-finger tap to resume. Input renders as a text-field card sliding up from the bottom; both show a waiting timer badge.",
+      "pointer": "src/orchestration/workflows.rs::StepType::Pause"
+    },
+    {
+      "id": "orchestration-08",
+      "title": "Enforce trust boundaries with Guardrail steps",
+      "loop_role": "StepType::Guardrail is a verify-stage assertion embedded in the plan: evaluate the condition against WorkflowContext, and on violation apply on_violation — block (fail the step), warn, log, or alert — tagged with severity from info to critical. Wire it before any act step whose blast radius exceeds the loop's current trust state, e.g. before Shell steps in a refactor workflow.",
+      "affects": "A blocking guardrail converts a bad plan into a typed StepResult.error instead of an untyped catastrophe — honest status over optimistic success. Non-blocking modes still write LogEntry evidence with severity, so the evolve stage can learn which plans routinely trip guardrails without having aborted the run.",
+      "touch_ux": "Shield-shaped node clamped onto an edge (not in-line), colored by severity (blue info → red critical). When tripped, the shield flashes and the edge it guards shows a crack animation; tap reveals condition, action taken, and the LogEntry; long-press toggles block→warn for the next run only.",
+      "pointer": "src/orchestration/workflows.rs::StepType::Guardrail"
+    },
+    {
+      "id": "orchestration-09",
+      "title": "Compose plans recursively with SubWorkflow",
+      "loop_role": "StepType::SubWorkflow lets the plan stage treat a whole Workflow as a single step: inputs are mapped in, the callee runs against its own WorkflowContext, and outputs surface to the caller. The loop must respect the two hard guards: MAX_RECURSION_DEPTH (10) and the workflow_call_stack cycle detector, which turn runaway recursion into typed DependencyError values.",
+      "affects": "Recursion multiplies budget — telemetry from nested executions must roll up or the cost badge lies. The call stack is the loop's checkpoint object for the composition: a cycle is a definition error (is_definition_error), reported as such rather than retried, keeping failure semantics honest.",
+      "touch_ux": "A workflow node containing a miniature nested canvas (like a picture-in-picture); a depth gauge at its corner shows recursion_depth/10. Cycles render as a red loop-back edge that physically cannot be drawn — the canvas rejects the gesture with a shake. Tap dives into the child canvas; pinch zooms back out.",
+      "pointer": "src/orchestration/workflows.rs::DependencyError"
+    },
+    {
+      "id": "orchestration-10",
+      "title": "Boot from WorkflowTemplates presets",
+      "loop_role": "WorkflowTemplates::tdd, debug, review, and refactor are pre-wired loop programs: tdd sequences test-write → implement → verify, review chains analysis → critique → report. The plan stage should offer these as starting scaffolds the user clones and edits, rather than generating workflows from scratch — and any change that deletes or weakens a preset requires explicit sign-off per the repo's review-gate rule.",
+      "affects": "Presets define the default shape of evidence: tdd's structure guarantees a failing-test artifact exists before the implement step runs, giving the verify stage something concrete to check. They carry no runtime budget of their own, but they bias how many Llm steps a typical run contains.",
+      "touch_ux": "A template gallery shelf at the canvas edge: four cards with miniature DAG previews (red-green cycle glyph for tdd, magnifier for debug, checklist for review, wrench for refactor). Drag a card onto the canvas to instantiate; long-press shows the full step list before committing; a lock badge marks presets as protected against silent deletion.",
+      "pointer": "src/orchestration/workflows/templates.rs::WorkflowTemplates"
+    },
+    {
+      "id": "orchestration-11",
+      "title": "Report honest outcomes with WorkflowResult",
+      "loop_role": "WorkflowResult is the verify stage's verdict object: is_success is only true when every required step passed, and failed_steps enumerates the StepResults that didn't — never a bare 'ok'. Model the loop so the final trust badge is derived from this struct, not from the absence of a crash.",
+      "affects": "get_output exposes declared WorkflowOutput bindings (name → VarValue from), making the workflow's contract explicit; partial failures leave failed_steps populated while outputs may still be readable, so consumers can distinguish 'succeeded', 'degraded', and 'failed' instead of a binary lie.",
+      "touch_ux": "On completion the workflow node resolves into a verdict stamp: green check only if is_success, amber wedge per failed step otherwise. Tap the stamp to flip the node over and reveal the failed_steps list with their error strings; the stamp stays visible in the canvas history — past runs can't be quietly repainted.",
+      "pointer": "src/orchestration/workflows.rs::WorkflowResult"
+    },
+    {
+      "id": "orchestration-12",
+      "title": "Cap the evidence trail at the log boundary",
+      "loop_role": "WorkflowContext.logs is a VecDeque<LogEntry> hard-capped at MAX_WORKFLOW_LOG_ENTRIES (1000): the remember stage keeps a rolling window of timestamped, level-tagged, step-attributed evidence. Model log writes as first-class loop events, but teach the UI that old entries evict — persistent memory must be promoted elsewhere (e.g. SharedMemory or the evolution log), not assumed from the workflow log.",
+      "affects": "Bounding the log protects the context window and memory footprint of long workflows, at the cost of losing early evidence; LogLevel filtering (Debug..Error) lets the verify stage decide what's worth surfacing. Eviction is silent, so any audit-critical evidence must be written through Log steps at Warn+ or exported before the cap bites.",
+      "touch_ux": "A scrolling ticker along the workflow node's bottom edge, color-coded by LogLevel, with a subtle 'oldest entries evicted' notch when the 1000-entry cap trims. Two-finger drag scrubs time; tap an entry jumps the canvas to the step_id that emitted it.",
+      "pointer": "src/orchestration/workflows.rs::LogEntry"
+    },
+    {
+      "id": "orchestration-13",
+      "title": "Fan out one-shot agents with MultiAgentChat",
+      "loop_role": "MultiAgentChat::run_task is the loop's parallel-perceive primitive: initialize_agents builds one AgentInstance per AgentRole (each seeded with role.system_prompt()), then every agent makes exactly one non-streaming chat completion — no tools, no ReAct loop — and aggregate_results concatenates the verdicts in completion order. Use it when the plan stage wants N independent perspectives (review, security, performance) before committing to an act.",
+      "affects": "Each agent is a full prompt_tokens+completion_tokens spend, so total_usage is the budget object to watch; results aggregate verbatim (no LLM merge step), which keeps the evidence trail honest — the UI can attribute every claim to a named agent. MultiAgentFailurePolicy decides whether one agent's failure voids the fan-out or degrades it.",
+      "touch_ux": "A hub node that bursts into N satellite dots (one per AgentInstance, colored by AgentStatus: gray Idle, blue Working, green Completed, red Failed); satellites fly back with result cards. Tap a satellite to read its verbatim AgentResult; pinch re-fuses the swarm into the hub; badge shows live Usage totals.",
+      "pointer": "src/orchestration/multiagent/chat.rs::MultiAgentChat::run_task"
+    },
+    {
+      "id": "orchestration-14",
+      "title": "Throttle fan-out with MultiAgentConfig",
+      "loop_role": "MultiAgentConfig is the budget gate in front of fan-out: max_concurrency (clamped to MAX_CONCURRENT_AGENTS by a tokio Semaphore), roles, timeout_secs, temperature, and max_tokens per agent, with with_concurrency/with_roles builders. The plan stage sets these before run_task; the loop treats the semaphore as a hard parallelism budget shared with everything else competing for the API.",
+      "affects": "Directly bounds peak token spend rate and API pressure; timeout_secs and is_agent_healthy (HEARTBEAT_TIMEOUT of 300s) define when a silent agent is declared failed rather than waited on forever — an honesty mechanism for the fan-out's trust state.",
+      "touch_ux": "A settings dial attached to the fan-out hub: rotating it changes max_concurrency with the semaphore visualized as permit slots filling/emptying in real time. Long-press opens per-role toggles (AgentRole chips); a thermometer badge shows current in-flight completions vs permits.",
+      "pointer": "src/orchestration/multiagent/config.rs::MultiAgentConfig"
+    },
+    {
+      "id": "orchestration-15",
+      "title": "Stream swarm progress over MultiAgentEvent",
+      "loop_role": "MultiAgentEvent (AgentStarted/AgentCompleted/AgentFailed/AllCompleted) is the loop's live-telemetry bus for fan-out: with_events attaches an mpsc channel, and emit uses try_send so a full channel drops events with a tracing warn instead of blocking agents. Model it as a lossy, back-pressure-safe feed into the perceive stage of whatever UI or supervisor is watching.",
+      "affects": "Because drops are possible, the event stream is a visualization aid, not an audit log — ground truth remains AgentInstance.status and the results Vec. This is an explicit honesty trade: the loop prefers dropping a progress badge over stalling an agent, and the UI must render gaps rather than fabricate continuity.",
+      "touch_ux": "Events render as ephemeral ripple pulses traveling from satellites to the hub; when the channel saturates, the canvas shows a small 'events dropped' cloud icon rather than pretending the stream is complete. Tap the cloud to jump to authoritative AgentStatus instead.",
+      "pointer": "src/orchestration/multiagent/types.rs::MultiAgentEvent"
+    },
+    {
+      "id": "orchestration-16",
+      "title": "Coordinate long-lived workers with Swarm",
+      "loop_role": "Swarm is the loop's persistent multi-agent controller: queue_task/assign_task/complete_task/fail_task run a stateful task lifecycle across Agent workers filtered by agents_by_role or idle_agents, while set_resource_pressure gates task dispatch on crate::resource::ResourcePressure. Where MultiAgentChat is one-shot fan-out, Swarm is the plan→act→verify cycle amortized over a standing workforce.",
+      "affects": "SwarmStats (total_agents, agents_by_status, pending_decisions, queued_tasks, average_trust) is the dashboard object the evolve stage reads to rebalance the workforce. complete_task(success) feeds back into Agent.trust_score, so every task outcome mutates the swarm's future routing — the loop literally learns who to trust.",
+      "touch_ux": "A kanban-like cluster node: queued tasks as cards in an inlet tray, agents as pawns that cards stick to when assigned. Drag a card onto a pawn to assign_task manually; the cluster header shows SwarmStats badges including an average_trust meter that drifts as tasks complete.",
+      "pointer": "src/orchestration/swarm/coordinator.rs::Swarm"
+    },
+    {
+      "id": "orchestration-17",
+      "title": "Resolve contested plans by weighted consensus",
+      "loop_role": "Decision + Vote implement the loop's verify-stage arbitration for swarms: create_decision poses a question with options, vote adds confidence-weighted ballots, and resolve_with_threshold computes weighted_score per option — Vote::weighted_value = confidence × role priority × voter trust_score — requiring the winner to clear consensus_threshold (default 0.6). When votes conflict, ConflictStrategy (PriorityWins, ConfidenceWins, MajorityWins, HumanIntervention, AcceptAll) decides the fallback, and sweep_timed_out_decisions fails stalled ballots honestly as TimedOut.",
+      "affects": "This is where trust state becomes load-bearing: a high-trust agent's vote outweighs a novice's, so the loop's memory of past task outcomes (complete_task adjusting trust_score) directly shapes future plans. HumanIntervention converts deadlock into a checkpoint object instead of a silent coin-flip.",
+      "touch_ux": "A balance-scale node: options as pans, votes as weighted beads dropping in with size ∝ weighted_value; the threshold renders as a fill line the winning pan must cross. Tap a bead to see voter, confidence, and trust; if the scale stalls past decision_timeout_secs, it greys out with a TimedOut stamp.",
+      "pointer": "src/orchestration/swarm/types.rs::Decision::resolve_with_threshold"
+    },
+    {
+      "id": "orchestration-18",
+      "title": "Evolve routing with Agent trust_score",
+      "loop_role": "Agent::complete_task is the evolve stage in miniature: success bumps trust_score by 0.1 (ceiling 1.0), failure drops it by 0.1 (floor 0.05 — a failing agent is distrusted but never fully voiceless). Combined with success_rate and supports_vision (capability gating against Config.models), the loop's next plan should route tasks to agents whose measured track record fits the task.",
+      "affects": "trust_score feeds Decision weighted voting and SwarmStats.average_trust, so it propagates from individual outcomes into consensus and dashboards. The 0.05 floor is a deliberate honesty device: the loop keeps a written record that the agent exists and failed, rather than deleting it and erasing the evidence.",
+      "touch_ux": "Each agent pawn wears a trust ring (arc filling 0.05–1.0, green→red gradient) that animates ±0.1 on every task completion. Long-press the pawn for its full history: tasks_completed, tasks_failed, success_rate; pinch compares two pawns' rings side by side before manual assignment.",
+      "pointer": "src/orchestration/swarm/types.rs::Agent::complete_task"
+    },
+    {
+      "id": "orchestration-19",
+      "title": "Share evidence through SharedMemory",
+      "loop_role": "SharedMemory is the remember stage for swarm runs: agents write keyed MemoryEntry values (with author attribution), read/peek them in later steps, and organize recall with tag/find_by_tag. Every mutation appends a MemoryAccess record (agent, action, timestamp) to access_log, giving the verify stage an audit trail of who knew what when.",
+      "affects": "It's the shared blackboard that keeps parallel agents from re-deriving each other's context — reducing duplicated prompt tokens across the fan-out. But nothing is size-capped per entry, so the loop should promote only distilled facts here; the access_log grows monotonically and is itself an object the evolve stage can mine for collaboration patterns.",
+      "touch_ux": "A corkboard node pinned beside the swarm cluster: entries as sticky notes, color-grouped by tag. Dropping a note plays a pulse along edges to every agent that subsequently reads it; a filmstrip under the board replays access_log. Long-press a note to see its author and full read history.",
+      "pointer": "src/orchestration/swarm/memory.rs::SharedMemory"
+    },
+    {
+      "id": "orchestration-20",
+      "title": "Close the loop with VisualFeedbackLoop",
+      "loop_role": "VisualFeedbackLoop is a fully wired perceive→act→verify micro-loop: act edits code/assets, perceive captures via CaptureMethod (Screen, Window, BrowserUrl), verify sends the screenshot to a vision model with build_critic_prompt and parses a VisualScore via parse_critic_response, and the loop iterates until overall ≥ quality_threshold (0.8) or max_iterations (5). VisualScore::compute_overall weights readability 0.25 over the other 0.20/0.15 dimensions.",
+      "affects": "Each iteration costs one vision-model call plus a screenshot — budget grows linearly with iterations, and score_history preserves every VisualScore so the verify stage can show a trend instead of a single number. threshold_met=false after 5 iterations is an honest 'not good enough' verdict, not a failure to hide; suggestions feed the next act step as concrete tool input.",
+      "touch_ux": "A spiral-shaped loop node: each revolution is one iteration, stamped with the captured thumbnail and its overall score, spiraling inward toward the 0.8 threshold bullseye. Tap a revolution to expand the five-dimension radar (composition, hierarchy, readability, consistency, accessibility); the spiral exits green when threshold_met, or unwinds flat in amber when iterations exhaust.",
+      "pointer": "src/orchestration/visual_loop.rs::VisualFeedbackLoop"
+    }
+  ]
+}

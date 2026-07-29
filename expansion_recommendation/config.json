@@ -1,0 +1,168 @@
+{
+  "module": "config",
+  "generated": "2026-07-28",
+  "full_tokens": 39768,
+  "loop_role": "Config is the bootstrap contract of the agent loop: it decides which model and endpoint the loop talks to, how large the context budget is, which credentials may leave the machine, and which gates (verification, mutation, iteration limits) constrain act and verify stages before the loop is allowed to run.",
+  "examples": [
+    {
+      "id": "config-01",
+      "title": "Bootstrap the loop through Config::load",
+      "loop_role": "Config::load is the pre-loop perceive stage: it layers defaults, selfware.toml files, env vars, and CLI overrides into one Config that every subsequent loop stage reads. Model the loop as 'no loop node activates until load returns', with load fanning out to plan (budget), act (safety paths), and verify (gates).",
+      "affects": "Produces the single Config object that sizes the context window (context_length), arms the trust state (api_key, sources), and enables checkpoints via agent limits. A failed load aborts the loop before any tool result or budget is consumed — the cheapest failure in the system.",
+      "touch_ux": "Render as the large rounded 'origin' node at the left edge of the canvas, steel-blue, with one outgoing edge to every loop stage node. Tap opens the layered config diff; long-press replays the load order as an animation showing defaults being overwritten; pinch zooms into the raw TOML. Live badge: 'config OK' or a red count of load errors.",
+      "pointer": "src/config/loader.rs::Config::load"
+    },
+    {
+      "id": "config-02",
+      "title": "Size the context window with derive_context_budget",
+      "loop_role": "Wire this into the plan stage: before the first LLM call, derive_context_budget converts context_length and max_tokens into the concrete (budget, reserve) pair the agent loop enforces every turn. The canvas should show it as a one-time edge from the config node into the planner that sets the planner's capacity.",
+      "affects": "Directly sets the context window budget object the loop meters against; it shares the MIN_CONVERSATION_TOKENS floor (2048) with the wizard validation so runtime and setup agree on 'too small to run'. If the derived budget is below the floor, the loop refuses to start rather than silently truncating tool results.",
+      "touch_ux": "A horizontal gauge node attached to the plan stage: a filled bar showing derived budget vs context_length, amber when near the MIN_CONVERSATION_TOKENS floor. Tap shows the arithmetic; drag on the bar proposes a new max_tokens and live-updates dependent edges; badge shows the derived budget in k-tokens.",
+      "pointer": "src/config/mod.rs::Config::derive_context_budget"
+    },
+    {
+      "id": "config-03",
+      "title": "Reject unfit wizard configs with check_generated_context_fit",
+      "loop_role": "This is the verify stage applied to configuration itself: after auto_config or unpack generates a candidate Config, check_generated_context_fit validates that the detected context window actually fits a conversation before the config is persisted. Model it as a gate node on the 'generate → persist' edge of the setup loop.",
+      "affects": "Protects the loop's context window object from poisoned setup: a generated config with a bogus context_length would make every later turn overflow or truncate evidence. It uses the same MIN_CONVERSATION_TOKENS constant as the runtime derivation, so a config that passes the wizard cannot fail the agent's own check.",
+      "touch_ux": "A shield-shaped node sitting between the 'generated config' card and the 'save' button, green when the fit check passes. Tap reveals why a candidate was rejected (with the measured numbers); long-press shows the shared MIN_CONVERSATION_TOKENS contract; a failing shield pulses red and blocks the save edge.",
+      "pointer": "src/config/mod.rs::Config::check_generated_context_fit"
+    },
+    {
+      "id": "config-04",
+      "title": "Fall back honestly for unknown models",
+      "loop_role": "UNKNOWN_MODEL_CONTEXT_LENGTH (32768) is the honesty fallback in the plan stage: when no built-in profile recognizes the model and the user set nothing, the loop plans against a conservative 32k window instead of the 1M default that would fabricate a ~630k budget. Wire it as the default branch of the model-recognition decision node.",
+      "affects": "Keeps the context budget object truthful: an overstated budget would let the loop overfill the window and lose tool results and evidence mid-task. The fallback exists precisely so auto-config and unpack can later overwrite it with the real value detected from the endpoint's /models response.",
+      "touch_ux": "A small gray '?' chip on the model node labeled 'unknown model → 32k assumed'. Tap explains the assumption and offers a one-touch 'probe endpoint' action that hands off to auto_config; the chip turns solid colored once a measured context_length replaces the fallback. Badge: 'assumed' vs 'measured'.",
+      "pointer": "src/config/mod.rs::UNKNOWN_MODEL_CONTEXT_LENGTH"
+    },
+    {
+      "id": "config-05",
+      "title": "Redact secrets in every rendered view with RedactedString",
+      "loop_role": "RedactedString wraps Config.api_key so Display and Debug both emit [REDACTED]; it belongs to the remember stage, governing what checkpoints, logs, and turn artifacts may persist. Model it as a filter node that sits on every edge from the loop to storage or telemetry.",
+      "affects": "Protects the trust state on the loop: without it, a single debug dump of Config would leak the credential into checkpoint files and logs. The only escape hatch is the explicit .expose() call, which makes every legitimate use greppable and auditable.",
+      "touch_ux": "A keyhole icon node with a frosted-glass fill; any telemetry panel or checkpoint preview connected to it shows '[REDACTED]' where the key would be. Long-press (with confirmation) reveals the exposed value briefly for debugging; all other interactions never surface it. Badge: 'secrets redacted' with a count of wrapped fields.",
+      "pointer": "src/config/model.rs::RedactedString"
+    },
+    {
+      "id": "config-06",
+      "title": "Switch model identities with resolve_model",
+      "loop_role": "resolve_model looks up named ModelProfile entries from [models.*] TOML sections (e.g. 'coder', 'vision'), letting the loop re-point its act stage at a different endpoint/model per task. Model it as a switch node: the loop's LLM-call edge routes through whichever profile the current task selects, with a 'default' profile auto-generated from top-level fields.",
+      "affects": "Changes the objects the loop can perceive and produce: a profile with supports_vision() true unlocks image evidence in the verify stage, and effective_native_function_calling() decides whether tool calls arrive as structured tool_calls or parsed text — altering how act results are validated.",
+      "touch_ux": "A rotary-dial node with one detent per named profile; the active detent is highlighted and its edges (endpoint, vision capability, calling mode) light up. Swipe rotates between profiles; tap the detent to inspect the ModelProfile fields; pinch compares two profiles side by side. Badge: active profile name plus a camera glyph when vision is supported.",
+      "pointer": "src/config/loader.rs::Config::resolve_model"
+    },
+    {
+      "id": "config-07",
+      "title": "Match a built-in ModelDefaultsProfile before planning",
+      "loop_role": "match_profile + apply_profile run at load time (pre-plan): builtin_profiles ships glob-keyed rules like 'qwen3.6-*' that fill in temperature, max_tokens, native_function_calling, and extra_body for model families whose defaults otherwise score 0/10 on SWE-bench Pro. Wire it as a normalization node between raw TOML parse and budget derivation.",
+      "affects": "Reshapes every LLM request the act stage sends: presence_penalty, top_p, enable_thinking via extra_body merge change both tool-call reliability and how much of the context budget thinking consumes. Profiles are static — no network calls — so this node never delays loop startup; live detection belongs to auto_config.",
+      "touch_ux": "A stencil node that stamps the model node with the matched pattern (e.g. 'qwen3.6-*'). Tap shows which fields the stamp filled; the stencil is transparent where the user's explicit values show through. Long-press lists all builtin_profiles and highlights the first match. Badge: matched profile name, or 'no profile' in gray.",
+      "pointer": "src/config/model_profiles.rs::match_profile"
+    },
+    {
+      "id": "config-08",
+      "title": "Honor explicit user config over profiles",
+      "loop_role": "UserExplicitFields and AppliedFields implement the precedence rule 'explicit user config always wins': apply_profile only fills fields the user did NOT set, and records what it did fill in Config.matched_profile and matched_profile_applied. Model this as the arbitration logic inside the normalization node — a core honesty property of the plan stage.",
+      "affects": "Keeps the trust state inspectable: the loop can always answer 'why is temperature 0.6?' — profile-filled fields are enumerated in AppliedFields.render() so the UI never presents an inferred value as a user choice. This is what makes generated configs reviewable instead of magical.",
+      "touch_ux": "On the config inspector card, user-set fields render as solid chips and profile-filled fields as outlined chips with the stencil glyph. Tap an outlined chip to promote it to an explicit override (edge back to the TOML node); long-press reverts to the profile value. Badge: '3 fields from profile qwen3.6'.",
+      "pointer": "src/config/model_profiles.rs::AppliedFields"
+    },
+    {
+      "id": "config-09",
+      "title": "Probe an endpoint with AutoConfigurator",
+      "loop_role": "AutoConfigurator is an active perceive stage for setup: new(endpoint, api_key) then fetch_models and run_tests issue real requests to classify BackendType (Vllm, Sglang, Ollama, LlamaServer, OpenAI) and populate DetectionResults — function_calling, streaming, chat_works, thinking_supported, thinking_eats_tokens — before generate_config writes the result.",
+      "affects": "Converts assumptions into measurements on the loop's core objects: detected max_model_len replaces UNKNOWN_MODEL_CONTEXT_LENGTH in the context budget, detected function_calling arms native tool calling in the act stage, and thinking_eats_tokens warns the budget planner that reasoning consumes the same window as content.",
+      "touch_ux": "A radar node that emits animated ping rings toward an endpoint node; each completed test lands as a check mark on a DetectionResults panel (chat, streaming, tools, thinking). Tap a check to see the raw probe evidence; a spinner badge shows tests remaining. Failed probes render as hollow marks, never green.",
+      "pointer": "src/config/auto_config.rs::AutoConfigurator"
+    },
+    {
+      "id": "config-10",
+      "title": "Zero-touch calibrate a local model with unpack",
+      "loop_role": "unpack's auto_calibrate is the full bootstrap loop for local-first users: scan_local_endpoints probes LM Studio, Ollama, and generic ports (8000/8080/3000/5000), auto-starts backends, pulls a hardware-matched model via llmfit rank_models_by_fit, then saves a Config. Model it as a self-contained sub-loop that terminates by handing a valid Config to Config::load.",
+      "affects": "Produces DiscoveredEndpoint records (provider, endpoint, model, context_length, multimodal) that ground the loop's context window and capability flags in hardware reality — a machine that fits a 7B model gets a config whose budget the verify stage can actually honor, instead of an over-ambitious default.",
+      "touch_ux": "A 'magic box' onboarding node: while scanning, it shows a carousel of discovered DiscoveredEndpoint cards the user can swipe through; tap a card to select it, and the box stamps out a ready config node. Long-press reveals the llmfit fit-ranking rationale. Badge: 'found 2 local endpoints' or 'nothing running — start one?'.",
+      "pointer": "src/config/unpack.rs::auto_calibrate"
+    },
+    {
+      "id": "config-11",
+      "title": "Gate credential use on repository trust",
+      "loop_role": "is_config_trusted and add_trusted_config implement the credential-origin gate: a checkout-local selfware.toml can redirect the endpoint, so a globally exported SELFWARE_API_KEY is withheld from remote endpoints chosen by untrusted configs. Wire this as a gate node on the edge from 'config loaded' to 'credential released', consulted before the first authenticated act.",
+      "affects": "Directly guards the trust state: trusted paths are stored one canonical path per line in ~/.selfware/trusted_repos (0600, parent 0700), and add_trusted_config is idempotent so the gate cannot be double-armed by accident. An untrusted redirect downgrades the loop to unauthenticated or local-only operation rather than leaking the key.",
+      "touch_ux": "A lock node on the credential edge, closed by default for project-local configs. Tap explains why the key is withheld and shows the canonical config path; a deliberate long-press-and-hold gesture (with haptic confirm) trusts the repo and opens the lock. Badge: 'trusted' / 'untrusted' with the config's provenance path.",
+      "pointer": "src/config/trust.rs::is_config_trusted"
+    },
+    {
+      "id": "config-12",
+      "title": "Block plaintext credential leaks at the choke point",
+      "loop_role": "assert_credential_endpoint_safe is the single choke point every authenticated request path calls before sending: it bails when a credential exists AND the endpoint is insecure — is_insecure_remote_endpoint (plaintext http to a non-local host, scheme-parsed so 'HTTP://' can't bypass) or endpoint_has_userinfo (user:pass@host URLs). Model it as a mandatory gate inside the act stage's HTTP-call edge.",
+      "affects": "Prevents the loop's trust state from being exfiltrated by a malicious or careless endpoint config; because it fails closed with a typed error naming the endpoint, the loop surfaces an honest refusal instead of a mysterious 401 trail. Local loopback http remains allowed so local vLLM/Ollama loops are unaffected.",
+      "touch_ux": "A red octagon stop node embedded directly in the request edge; when armed and triggered, the edge itself is drawn cut, with the refusal message on the severed ends. Tap shows the exact rule matched (plaintext-remote vs userinfo); there is no gesture to bypass it from the canvas — only editing the endpoint or removing the credential reopens the edge. Badge: 'credential safe' shield or 'blocked'.",
+      "pointer": "src/config/api_key.rs::assert_credential_endpoint_safe"
+    },
+    {
+      "id": "config-13",
+      "title": "Resolve API keys across env, keyring, and file",
+      "loop_role": "ApiKeySource (None/EnvVar/Keyring/ConfigFile) tracks where the credential came from, while load_api_key_from_keyring, save_api_key_to_keyring, and set_api_key_for_endpoint store keys scoped per-endpoint via keyring_account_for_endpoint (scheme://host:port). Model this as a resolver chain feeding the act stage, ordered env → keyring → config file.",
+      "affects": "Shapes the trust state and its diagnostics: per-endpoint keyring scoping means a checkout that switches endpoints cannot retrieve a key saved for another host, and knowing the source lets the loop warn honestly when a key lives in plaintext TOML. The scheme in the account name blocks an http URL from fetching an https-stored key.",
+      "touch_ux": "A three-lane resolver node (env / keyring / config file) with the winning lane illuminated. Tap a lane to see the ApiKeySource and the scoped account name; long-press the keyring lane offers 'move key to keyring' to migrate a plaintext key. Badge: source icon plus a warning dot when the source is ConfigFile.",
+      "pointer": "src/config/api_key.rs::ApiKeySource"
+    },
+    {
+      "id": "config-14",
+      "title": "Partition the token budget with AgentConfig ratios",
+      "loop_role": "AgentConfig's token_budget, token_safety_margin, and the three context ratios (context_content_ratio, context_compression_ratio, context_thinking_ratio) define how the plan stage partitions every turn's window among content, compression headroom, and thinking. Wire it as the settings panel of the budget gauge node from derive_context_budget.",
+      "affects": "Determines when compression triggers (content exceeding its ratio), how much room the remember stage has to summarize, and how much reasoning the model may spend — an unbalanced split starves either tool results (evidence) or thinking quality. token_safety_margin absorbs tool definitions and system-prompt overhead so the budget is honest about non-conversation costs.",
+      "touch_ux": "A three-slice pie node (content / compression / thinking) drawn on top of the budget gauge; drag slice boundaries to retune ratios and watch dependent loop edges re-thicken. Tap a slice for its exact fraction and default source; pinch overlays a live turn's actual usage against the plan. Badge: current content fill percentage.",
+      "pointer": "src/config/agent.rs::AgentConfig"
+    },
+    {
+      "id": "config-15",
+      "title": "Break read-only loops with ReadLoopPolicy",
+      "loop_role": "ReadLoopPolicy governs the act stage when a mutation-required task keeps issuing read-only tools: Nudge preserves the historical block-and-hint behavior, while ForceMutation (the default for SWE-style tasks) requires the next action to mutate state and aborts if the model keeps reading. Model it as a gate on the act→verify edge that classifies each tool call read vs write.",
+      "affects": "Protects the loop's budget and evidence quality: an agent stuck reading burns token_budget without producing mutations the verify stage can check. ForceMutation converts an infinite read spiral into a bounded, honest abort with the loop's iteration count and checkpoint intact.",
+      "touch_ux": "A valve node on the act edge that turns amber after repeated read-only calls and snaps shut under ForceMutation. Tap shows the recent read/write histogram; long-press toggles the policy (Nudge ↔ ForceMutation) with the trade-off stated. Badge: consecutive read-only count.",
+      "pointer": "src/config/agent.rs::ReadLoopPolicy"
+    },
+    {
+      "id": "config-16",
+      "title": "Require verification before completion",
+      "loop_role": "require_verification_before_completion and min_completion_steps are verify-stage completion gates: the loop may not accept task completion until at least one successful cargo_check/cargo_test/cargo_clippy has run and a minimum number of execution steps has passed. Model them as the exit criteria of the verify node — the edge to 'done' only opens when both fire.",
+      "affects": "Directly enforces the honest-status rule on the loop's outcome object: no green completion badge without performed checks. The gate is project-type-aware — skipped when there is no Cargo.toml or only non-Rust tools ran — so it hardens evidence requirements without punishing browser/vision-only loops.",
+      "touch_ux": "A finish-line node with two checkboxes (min steps, verification passed) that must both fill before the 'complete' edge activates. Tap shows which verification ran and its result; a premature completion attempt makes the line flash and shows what's missing. Badge: 'verified ✓' naming the actual check that passed, never a bare green.",
+      "pointer": "src/config/agent.rs::AgentConfig"
+    },
+    {
+      "id": "config-17",
+      "title": "Tune compression fidelity with compression_detail",
+      "loop_role": "compression_detail ('names' ~90% reduction, 'signatures' ~70%, 'full' LLM-summarized ~50%) configures the remember stage: when context exceeds its content ratio, this setting decides how much structure survives downgrade. Model it as the fidelity dial on the compression node that sits between the context window and long-term memory.",
+      "affects": "Trades context window space against evidence fidelity: 'names' frees the most budget for continued acting but strips signatures the planner may need for accurate edits; 'full' preserves the most but consumes LLM tokens to summarize. The choice propagates into what future turns can recall about earlier tool results.",
+      "touch_ux": "A fader node with three detents (names / signatures / full) annotated with their reduction percentages. Sliding the fader live-recomputes the projected context savings on connected budget edges; tap a detent to preview a sample module compressed at that level. Badge: active level plus tokens reclaimed in the last compression.",
+      "pointer": "src/config/agent.rs::AgentConfig"
+    },
+    {
+      "id": "config-18",
+      "title": "Explain every value with ConfigSources provenance",
+      "loop_role": "ConfigSources records a dotted-field → ConfigSource map populated by Config::load, so any stage can answer 'where did this value come from' via source_of. Model it as metadata flowing alongside the Config node — the loop's honesty layer for setup, consulted whenever the UI or a diagnostic asserts why a limit exists.",
+      "affects": "Makes the trust state and budget auditable: when a loop refuses to start (context too small) or behaves unexpectedly (temperature from a profile), provenance turns the refusal into a specific, checkable claim ('context_length from ./selfware.toml') instead of an opaque error. It is transient (serde skip) — recomputed each load, never persisted stale.",
+      "touch_ux": "Every value chip on the canvas carries a tiny source ribbon (default / file / env / CLI / profile). Tap the ribbon to jump the camera to the originating file node and line; a two-finger tap on the config node overlays the full provenance map as colored edges from each source. Badge: count of non-default sources in play.",
+      "pointer": "src/config/provenance.rs::ConfigSources"
+    },
+    {
+      "id": "config-19",
+      "title": "Stream loop telemetry through DebugConfig channels",
+      "loop_role": "DebugConfig unifies request/response/gate/turn logging with should_log_requests, should_log_responses, should_log_gates, and should_log_turns, layered defaults → TOML → CLI --debug → SELFWARE_DEBUG_* env (force-on only). Model it as the observability bus tapping every loop stage edge the user subscribes to.",
+      "affects": "Controls what evidence the loop leaves behind: enabling turns/responses captures model output for post-mortem checkpoints, while leaving channels off keeps sensitive traffic out of logs (paired with RedactedString for keys). Env overrides being force-on only means a checkout-local TOML cannot silently disable logging the user armed.",
+      "touch_ux": "A mixer node with four channel faders (requests, responses, gates, turns); raising a fader draws a live telemetry wire from that stage to a console panel at the canvas edge. Tap a fader shows its layer stack and current winner; the env-forced state renders with a padlock. Badge: active channel count.",
+      "pointer": "src/config/debug.rs::DebugConfig"
+    },
+    {
+      "id": "config-20",
+      "title": "Select prompt identity with PromptProfile",
+      "loop_role": "PromptProfile picks the system_prompt and task_prompt used in benchmark and agent modes (including SwebenchProInstance handling behind the bench-harness feature), shaping the plan stage's instructions before the first token is spent. Model it as a template node feeding the system-prompt slot of the context window on loop start.",
+      "affects": "Occupies a fixed slice of the context budget (the safety margin exists partly for this overhead) and steers act-stage behavior: a bench profile demands patch-style output while the agent profile encourages tool use, changing what the verify stage should expect as evidence. default_prompt_profile in AgentConfig sets the fallback.",
+      "touch_ux": "A card-deck node where each card is a profile; the active card sits on top with its system prompt peeking out. Swipe to switch decks, tap to read the full prompt text, long-press to diff two profiles. Badge: profile name and its measured token cost against the budget.",
+      "pointer": "src/config/prompt_profiles.rs::PromptProfile"
+    }
+  ]
+}

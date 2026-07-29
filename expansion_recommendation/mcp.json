@@ -1,0 +1,410 @@
+{
+  "component": "mcp",
+  "tier": "tooling",
+  "loop_stage": "act",
+  "summary": "The MCP subsystem is selfware's bridge to and from the Model Context Protocol (JSON-RPC 2.0 over stdio). As a client (McpClient over StdioTransport) it spawns third-party servers, performs the initialize handshake, discovers their tools via tools/list, and wraps each remote tool as an McpTool that plugs into the native ToolRegistry — extending the loop's action space with external capabilities. As a server (McpServer / run_mcp_server), selfware itself exposes its own tools and project resources to external agents. On the loop it is primarily an 'act' node: it enlarges what a ToolCall can reach and how Evidence flows in from outside the engine, while its handshake and capability negotiation touch 'perceive'.",
+  "loop_objects": ["McpTool", "McpClient", "McpServer", "StdioTransport", "JsonRpcRequest", "JsonRpcResponse", "JsonRpcError", "Framing", "McpServerConfig", "ToolCall", "ToolRegistry", "Evidence"],
+  "context_basis": "Recommendations were formed by reading src/mcp/ (client.rs, transport.rs, tool_bridge.rs, discovery.rs, server.rs, mod.rs) in the context of the full engine's ~600k-token budget framing, so each move accounts for how MCP tools compete for the same budget and ToolRegistry as native tools.",
+  "examples": [
+    {
+      "id": "mcp-01",
+      "title": "Spawn a server and handshake before acting",
+      "loop_stage": "perceive",
+      "pattern": "perceive-then-plan",
+      "intent": "Bring an external MCP server online so its tools become visible to the loop before any acting happens.",
+      "how_it_shapes_the_loop": "McpClient::connect spawns the child via StdioTransport and runs initialize within init_timeout_secs; until the handshake returns serverInfo the server's tools do not exist on the canvas, so the planner cannot yet route ToolCalls to them.",
+      "loop_objects_touched": ["McpClient", "StdioTransport", "McpServerConfig", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["McpServerConfig", "config loader"],
+        "outputs_to": ["McpClient", "discovery.discover_tools"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag a server-config chip onto the canvas to instantiate a connection node; a spawn edge grows from it toward the loop's tool bus.",
+        "visual": "Node renders greyed with a spinning ring during the initialize handshake, then snaps to solid teal once serverInfo arrives."
+      },
+      "mini_scenario": "The loop starts, connect() spawns the github MCP server, the handshake completes in 1.2s, and the node lights up ready to serve tools.",
+      "pitfall": "Do not let init_timeout_secs sit below 5s — connect() floors it at .max(5); a too-tight timeout kills a healthy but slow-booting server."
+    },
+    {
+      "id": "mcp-02",
+      "title": "Discover remote tools into the registry",
+      "loop_stage": "perceive",
+      "pattern": "capability-intake",
+      "intent": "Enumerate what the connected server can do and materialize each as an actionable node.",
+      "how_it_shapes_the_loop": "discover_tools calls list_tools (tools/list) and wraps each schema in an McpTool with a name prefixed mcp_<server>_<tool>; these enter the ToolRegistry so the planner's action space grows without recompiling.",
+      "loop_objects_touched": ["McpTool", "McpClient", "ToolRegistry"],
+      "wiring": {
+        "inputs_from": ["McpClient (post-handshake)"],
+        "outputs_to": ["ToolRegistry", "planner action space"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread two fingers over the connection node to fan its remote tools out as a cluster of child tool-nodes.",
+        "visual": "Each discovered tool blooms outward with a mcp_ badge; the count pill on the parent updates to the tool total."
+      },
+      "mini_scenario": "After connecting, discover_tools returns 7 schemas; the canvas fans out mcp_github_create_issue, mcp_github_list_prs, and five more.",
+      "pitfall": "Names collide across servers if you drop the prefix — always keep mcp_<server>_ so two servers exposing 'search' stay distinct in the registry."
+    },
+    {
+      "id": "mcp-03",
+      "title": "Route a ToolCall to a remote server",
+      "loop_stage": "act",
+      "pattern": "delegate-to-external",
+      "intent": "Execute a step of the plan by invoking a tool that physically runs in another process.",
+      "how_it_shapes_the_loop": "McpTool::execute forwards to McpClient::call_tool (tools/call); the loop's act step now spans a process boundary, so its latency and failure modes are governed by the transport, not local code.",
+      "loop_objects_touched": ["McpTool", "ToolCall", "McpClient", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["planner ToolCall"],
+        "outputs_to": ["McpClient.call_tool", "Evidence"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a remote tool-node to fire its execute; a pulse travels down the transport edge to the server process.",
+        "visual": "The edge animates a moving dot toward the external server glyph; the node flashes amber while in-flight."
+      },
+      "mini_scenario": "The plan calls mcp_github_create_issue; the tap fires call_tool, the request crosses stdio, and the issue URL returns as Evidence.",
+      "pitfall": "Every call_tool holds a 60s transport timeout — don't wire a long-running remote op into a tight loop iteration without budgeting for that ceiling."
+    },
+    {
+      "id": "mcp-04",
+      "title": "Treat isError results as failures, not evidence",
+      "loop_stage": "verify",
+      "pattern": "honest-failure-flag",
+      "intent": "Prevent a tool-level error from being mistaken for a successful result and cached.",
+      "how_it_shapes_the_loop": "call_tool inspects isError and stamps success:false so downstream success detection and the result cache never replay an error as a win; the verify step can branch to ErrorRecovery.",
+      "loop_objects_touched": ["McpClient", "JsonRpcResponse", "Evidence"],
+      "wiring": {
+        "inputs_from": ["McpClient.call_tool raw result"],
+        "outputs_to": ["verify gate", "result cache"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a completed tool-node to reveal its raw MCP content and the derived success flag.",
+        "visual": "A red isError ribbon overlays the node when success is false, distinct from the green success ring."
+      },
+      "mini_scenario": "mcp_db_query returns content with isError:true; call_tool flags success:false, so verify routes the loop into recovery instead of caching the payload.",
+      "pitfall": "Never cache on the presence of content alone — an isError result still carries a content array; gate caching on success:false."
+    },
+    {
+      "id": "mcp-05",
+      "title": "Negotiate framing without recompiling",
+      "loop_stage": "foundation",
+      "pattern": "wire-adapt",
+      "intent": "Talk to a legacy server that speaks Content-Length headers instead of newline-delimited JSON-RPC.",
+      "how_it_shapes_the_loop": "with_framing sets the outbound Framing per McpServerConfig; the read path auto-detects either framing, so a mismatched server no longer silently stalls the loop's perceive step.",
+      "loop_objects_touched": ["Framing", "StdioTransport", "McpServerConfig"],
+      "wiring": {
+        "inputs_from": ["McpServerConfig.framing"],
+        "outputs_to": ["StdioTransport write path"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotate the connection node to toggle its outbound framing between NewlineDelimited and ContentLength.",
+        "visual": "A small dial badge rotates between two glyphs; the send-edge restyles solid vs. dashed to reflect framing."
+      },
+      "mini_scenario": "A legacy LSP-derived MCP server hangs on newline framing; rotating to ContentLength gets the handshake through.",
+      "pitfall": "Only override send framing — never force the read side; the auto-detector already handles servers that reply in the other framing."
+    },
+    {
+      "id": "mcp-06",
+      "title": "Match responses by request id",
+      "loop_stage": "foundation",
+      "pattern": "correlate-async",
+      "intent": "Keep concurrent in-flight requests from cross-wiring their responses.",
+      "how_it_shapes_the_loop": "StdioTransport assigns a monotonic next_id per JsonRpcRequest and parks a oneshot in `pending`; the background reader routes each JsonRpcResponse by id, so parallel act nodes stay independent.",
+      "loop_objects_touched": ["StdioTransport", "JsonRpcRequest", "JsonRpcResponse"],
+      "wiring": {
+        "inputs_from": ["concurrent request() callers"],
+        "outputs_to": ["pending oneshot channels"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the transport node to collapse all in-flight requests into a single correlation lane showing id-to-response pairing.",
+        "visual": "Each pending id appears as a numbered token on the lane; tokens vanish as their responses land."
+      },
+      "mini_scenario": "Two tools fire at once (id=4, id=5); the reader delivers each response to its own oneshot, so neither loop branch reads the other's result.",
+      "pitfall": "On write failure or timeout you must remove the pending id — a leaked slot accumulates one dead entry per failed request over the loop's lifetime."
+    },
+    {
+      "id": "mcp-07",
+      "title": "Sanitize the server's environment before spawn",
+      "loop_stage": "foundation",
+      "pattern": "credential-firewall",
+      "intent": "Stop third-party server code from inheriting the operator's secrets.",
+      "how_it_shapes_the_loop": "StdioTransport::spawn calls sanitize_command_env before applying the declared env, so the child never sees SELFWARE_API_KEY; the loop can safely delegate acts to untrusted code.",
+      "loop_objects_touched": ["StdioTransport", "McpServerConfig"],
+      "wiring": {
+        "inputs_from": ["McpServerConfig.env", "process_env sanitizer"],
+        "outputs_to": ["child process environment"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the spawn edge to inspect the sanitized env that will be handed to the child.",
+        "visual": "Inherited secrets render struck-through in red; only the declared env vars glow green as passed."
+      },
+      "mini_scenario": "A community MCP server is spawned; sanitize_command_env clears the inherited AWS and API keys, and only the two env vars in its config reach it.",
+      "pitfall": "Do not re-export secrets via McpServerConfig.env as a shortcut — that defeats the firewall the sanitizer exists to enforce."
+    },
+    {
+      "id": "mcp-08",
+      "title": "Expose selfware's own tools as a server",
+      "loop_stage": "act",
+      "pattern": "invert-the-boundary",
+      "intent": "Let an external agent drive selfware's ToolRegistry over MCP.",
+      "how_it_shapes_the_loop": "run_mcp_server builds an McpServer wrapping the ToolRegistry and serves tools/list and tools/call over stdio; the loop's action space becomes the remote agent's, inverting client and host roles.",
+      "loop_objects_touched": ["McpServer", "ToolRegistry", "ToolCall"],
+      "wiring": {
+        "inputs_from": ["external MCP client requests"],
+        "outputs_to": ["ToolRegistry.execute", "JsonRpcResponse"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick the whole tool cluster outward past the canvas edge to publish it as a servable surface.",
+        "visual": "The cluster gains a broadcast halo and an inbound-arrow glyph indicating requests now flow in from outside."
+      },
+      "mini_scenario": "Claude connects to `selfware mcp-server`, calls tools/list, and invokes file_read remotely; McpServer executes it against the local registry.",
+      "pitfall": "The registry is behind an RwLock — hold only a read lock for execute and take the write lock solely for activate(), or concurrent clients will contend."
+    },
+    {
+      "id": "mcp-09",
+      "title": "Gate all methods behind initialize",
+      "loop_stage": "control",
+      "pattern": "gate-before-act",
+      "intent": "Refuse tool calls until the client has completed the handshake.",
+      "how_it_shapes_the_loop": "McpServer::handle_request checks the `initialized` AtomicBool and rejects everything except initialize/ping/shutdown until it flips true, so no act runs on an unnegotiated session.",
+      "loop_objects_touched": ["McpServer", "JsonRpcRequest", "JsonRpcError"],
+      "wiring": {
+        "inputs_from": ["incoming JsonRpcRequest"],
+        "outputs_to": ["ToolRegistry (only when initialized)"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the gate node to preview which methods are permitted in the current session state.",
+        "visual": "Locked methods show a padlock; they unlock with a green flash when the initialized flag flips."
+      },
+      "mini_scenario": "A client calls tools/call before initialize; handle_request returns an INVALID_REQUEST-style refusal until the handshake lands.",
+      "pitfall": "Keep initialize/ping/shutdown outside the gate — locking those too would deadlock the handshake that opens the gate."
+    },
+    {
+      "id": "mcp-10",
+      "title": "Validate arguments against the tool schema",
+      "loop_stage": "verify",
+      "pattern": "schema-guard",
+      "intent": "Reject malformed remote tool arguments before touching the registry.",
+      "how_it_shapes_the_loop": "On tools/call McpServer runs validate_tool_arguments_schema and returns INVALID_PARAMS with the tool name and args in error.data, short-circuiting the act before ToolRegistry::execute.",
+      "loop_objects_touched": ["McpServer", "JsonRpcError", "ToolCall"],
+      "wiring": {
+        "inputs_from": ["tools/call params.arguments"],
+        "outputs_to": ["ToolRegistry.execute (only on valid args)"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the validation node to see the schema diffed against the incoming arguments.",
+        "visual": "Missing or mistyped fields highlight red in the schema overlay; a matching set glows green."
+      },
+      "mini_scenario": "An external client omits a required 'path' field on file_read; validation returns INVALID_PARAMS and the tool never runs.",
+      "pitfall": "Return the JSON-RPC error code -32602, not a tool-level success:false — a schema violation is a protocol fault, not a tool outcome."
+    },
+    {
+      "id": "mcp-11",
+      "title": "Refuse destructive tools without explicit opt-in",
+      "loop_stage": "control",
+      "pattern": "destructive-opt-in",
+      "intent": "Block destructive registry tools from being triggered remotely by default.",
+      "how_it_shapes_the_loop": "McpServer checks Tool::is_destructive and refuses unless SELFWARE_MCP_ALLOW_DESTRUCTIVE=1, returning the refusal as a normal tool error so the remote loop can surface the reason and adapt.",
+      "loop_objects_touched": ["McpServer", "ToolCall", "ToolRegistry"],
+      "wiring": {
+        "inputs_from": ["tools/call for a destructive tool"],
+        "outputs_to": ["remote client (refusal) or ToolRegistry.execute"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap a destructive tool-node to toggle the ALLOW_DESTRUCTIVE gate for the session.",
+        "visual": "Destructive nodes wear a red hazard stripe; enabling the flag swaps it for an unlocked-but-warned amber outline."
+      },
+      "mini_scenario": "A remote agent calls shell rm; without the env flag McpServer returns a tool error explaining the block instead of deleting anything.",
+      "pitfall": "Return the block as a tool error (isError), not a protocol error — the client should read the reason, not just see a dead method."
+    },
+    {
+      "id": "mcp-12",
+      "title": "Activate deferred tools on first call",
+      "loop_stage": "act",
+      "pattern": "lazy-activation",
+      "intent": "Make advertised-but-deferred tools callable the moment an external client asks for one.",
+      "how_it_shapes_the_loop": "If a tool exists but isn't activated, McpServer takes a brief write lock, calls registry.activate, drops the lock, then executes — mirroring the agent's own discovery so every advertised tool is reachable.",
+      "loop_objects_touched": ["McpServer", "ToolRegistry", "ToolCall"],
+      "wiring": {
+        "inputs_from": ["tools/call for a deferred tool"],
+        "outputs_to": ["ToolRegistry.activate then execute"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a dimmed (deferred) tool-node; it brightens as activation loads its schema, then fires.",
+        "visual": "Deferred nodes render translucent; a brief write-lock glyph appears, then the node solidifies and pulses."
+      },
+      "mini_scenario": "A client calls an MCP resources tool for the first time; the server activates it under a short write lock, releases, and executes in the same request.",
+      "pitfall": "Release the write lock before execute — holding it across the tool run serializes all clients and stalls the server loop."
+    },
+    {
+      "id": "mcp-13",
+      "title": "Expose project resources over MCP",
+      "loop_stage": "perceive",
+      "pattern": "resource-surface",
+      "intent": "Let a remote agent perceive the project's files, structure, and config without local access.",
+      "how_it_shapes_the_loop": "McpServer serves resources/list and resources/read for selfware://project/files, /structure, /file/<path>, and /config, feeding the remote loop's perceive step with grounded project state.",
+      "loop_objects_touched": ["McpServer", "Evidence"],
+      "wiring": {
+        "inputs_from": ["resources/read URI"],
+        "outputs_to": ["remote client perceive step"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread over the server node to unfold its four resource URIs as a readable panel.",
+        "visual": "Each URI renders as a card; the config card carries a redaction shield glyph."
+      },
+      "mini_scenario": "A remote agent reads selfware://project/structure to orient, then reads selfware://project/file/src/main.rs to plan an edit.",
+      "pitfall": "File reads canonicalize both path and root and enforce starts_with — never bypass that check or a symlink lets a client escape the project."
+    },
+    {
+      "id": "mcp-14",
+      "title": "Redact secrets from content-serving tools",
+      "loop_stage": "control",
+      "pattern": "leak-guard",
+      "intent": "Keep credentials out of results returned to an external client.",
+      "how_it_shapes_the_loop": "After executing file_read, grep_search, or git_diff, McpServer runs redact_secrets on the content before framing the response, so no act leaks a key across the MCP boundary.",
+      "loop_objects_touched": ["McpServer", "Evidence"],
+      "wiring": {
+        "inputs_from": ["ToolRegistry.execute content"],
+        "outputs_to": ["JsonRpcResponse to remote client"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the response edge to preview the redacted-vs-raw content diff.",
+        "visual": "Redacted spans render as blurred bars; the edge carries a shield badge when redaction fired."
+      },
+      "mini_scenario": "A remote grep_search hits a line containing an API key; redact_secrets masks it before the JsonRpcResponse leaves the server.",
+      "pitfall": "Apply redaction only to content-serving tools and config — running it blindly on structured tool output can corrupt legitimate payloads."
+    },
+    {
+      "id": "mcp-15",
+      "title": "Bound concurrency with a serving semaphore",
+      "loop_stage": "control",
+      "pattern": "budget-scoped-fanout",
+      "intent": "Cap how many external requests run at once so the server can't be flooded.",
+      "how_it_shapes_the_loop": "serve_io spawns handler tasks under a 32-permit semaphore and serializes output through a single writer, so inbound fanout stays within a fixed budget and frames never interleave.",
+      "loop_objects_touched": ["McpServer", "JsonRpcRequest", "JsonRpcResponse"],
+      "wiring": {
+        "inputs_from": ["stdin request stream"],
+        "outputs_to": ["bounded handler tasks", "single writer task"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the server node to reveal the permit meter and the queue of waiting requests.",
+        "visual": "A 32-slot gauge fills as permits are taken; overflow requests stack in a translucent queue below."
+      },
+      "mini_scenario": "Forty requests arrive; 32 run immediately and 8 wait for permits, while the lone writer drains responses in frame order.",
+      "pitfall": "Don't let handler tasks write directly to stdout — bypassing the single writer lets two responses interleave and corrupt framing."
+    },
+    {
+      "id": "mcp-16",
+      "title": "Shut down a client cleanly",
+      "loop_stage": "control",
+      "pattern": "graceful-teardown",
+      "intent": "End a server connection without leaking the child process or reader task.",
+      "how_it_shapes_the_loop": "shutdown sends a shutdown request then a notifications/exit, waits briefly, kills the child, and aborts the reader; the loop reclaims the process budget it borrowed for that server.",
+      "loop_objects_touched": ["McpClient", "StdioTransport"],
+      "wiring": {
+        "inputs_from": ["loop teardown / connection failure"],
+        "outputs_to": ["child process reaping", "reader task abort"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick the connection node off the canvas to trigger its graceful shutdown sequence.",
+        "visual": "Node plays a shrink-and-fade; a brief exit glyph confirms the child was reaped."
+      },
+      "mini_scenario": "The task completes; shutdown() asks the server to exit, then start_kill guarantees the process is gone even if it ignored the request.",
+      "pitfall": "Drop also reaps via try_lock + start_kill — rely on that safety net, but still call shutdown() explicitly so the server gets its graceful exit chance."
+    },
+    {
+      "id": "mcp-17",
+      "title": "Send a fire-and-forget notification",
+      "loop_stage": "act",
+      "pattern": "one-way-signal",
+      "intent": "Signal the server without occupying the request/response correlation table.",
+      "how_it_shapes_the_loop": "notify writes a JSON-RPC message with no id (e.g. notifications/initialized), so it never parks a oneshot in `pending` — the loop advances without awaiting a reply.",
+      "loop_objects_touched": ["StdioTransport", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["client lifecycle events"],
+        "outputs_to": ["server (no response)"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick a small pulse from the client node toward the server to emit a one-way notification.",
+        "visual": "A thin dashed pulse travels the edge and dissipates with no return animation, marking no reply expected."
+      },
+      "mini_scenario": "After initialize succeeds, the client fires notifications/initialized so the server knows the handshake is complete.",
+      "pitfall": "Never assign an id to a notification — a server that tries to respond to one produces an orphan response the reader can only log and drop."
+    },
+    {
+      "id": "mcp-18",
+      "title": "Drain stderr so the server can't deadlock",
+      "loop_stage": "foundation",
+      "pattern": "backpressure-relief",
+      "intent": "Prevent a chatty server from filling its stderr pipe and blocking.",
+      "how_it_shapes_the_loop": "spawn takes the child's stderr and drains it on a background task into tracing; without this a full OS pipe buffer would stall the server and freeze every act routed through it.",
+      "loop_objects_touched": ["StdioTransport"],
+      "wiring": {
+        "inputs_from": ["child process stderr"],
+        "outputs_to": ["tracing logs"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the transport node to open a live stderr tail from the drained server.",
+        "visual": "A scrolling log strip appears beneath the node; a warning tint shows if the drain task has exited."
+      },
+      "mini_scenario": "A verbose server logs heavily on stderr; the drain task keeps the pipe empty so the JSON-RPC exchange on stdout never blocks.",
+      "pitfall": "Never leave stderr piped-but-unread — the buffer fills, the child blocks on write, and the whole loop hangs waiting for a response that can't come."
+    },
+    {
+      "id": "mcp-19",
+      "title": "Surface JSON-RPC errors as loop failures",
+      "loop_stage": "verify",
+      "pattern": "error-propagation",
+      "intent": "Turn a protocol-level error into an explicit loop failure the planner can react to.",
+      "how_it_shapes_the_loop": "When a JsonRpcResponse carries an error, request() bails with the JsonRpcError code and message; the act fails loudly rather than returning an empty result, letting verify branch to recovery.",
+      "loop_objects_touched": ["JsonRpcError", "JsonRpcResponse", "StdioTransport"],
+      "wiring": {
+        "inputs_from": ["server JsonRpcResponse.error"],
+        "outputs_to": ["verify gate / ErrorRecovery"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a failed edge to read the JSON-RPC error code and message inline.",
+        "visual": "The edge turns red and displays a [code] message chip; the node gains an error badge."
+      },
+      "mini_scenario": "tools/list returns a -32603 internal error; request() bails, the tool-node shows the error, and the loop re-plans without that server.",
+      "pitfall": "A response with neither result nor error is still a fault — request() must error on a missing result, not hand back a silent null."
+    },
+    {
+      "id": "mcp-20",
+      "title": "Compose two servers into one action space",
+      "loop_stage": "act",
+      "pattern": "capability-federation",
+      "intent": "Blend tools from multiple MCP servers into a single planner-visible toolset.",
+      "how_it_shapes_the_loop": "Each server's discover_tools contributes prefix-namespaced McpTools into the same ToolRegistry, so a single plan can chain mcp_github_* and mcp_db_* steps as if they were native.",
+      "loop_objects_touched": ["McpTool", "McpClient", "ToolRegistry", "ToolCall"],
+      "wiring": {
+        "inputs_from": ["multiple McpClient connections"],
+        "outputs_to": ["unified ToolRegistry", "planner"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw a connection from a github tool-node to a db tool-node to sequence a cross-server plan step.",
+        "visual": "The linking edge shows two distinct server-color segments meeting at a junction, marking the federation boundary."
+      },
+      "mini_scenario": "A plan reads an issue via mcp_github_get_issue, then writes a row via mcp_db_insert — two servers, one loop iteration.",
+      "pitfall": "Federated tools share the engine's single budget and registry — a slow server's 60s timeout stalls the whole chain, so order fast tools first."
+    }
+  ]
+}

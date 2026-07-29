@@ -1,0 +1,168 @@
+{
+  "module": "tools",
+  "generated": "2026-07-28",
+  "full_tokens": 155100,
+  "loop_role": "The act-stage armature of the agent loop: every capability the model can invoke is a Tool implementation collected in ToolRegistry, whose dispatch, schema validation, safety gating, and result truncation shape what the loop can do and how much of the context window each action costs.",
+  "examples": [
+    {
+      "id": "tools-01",
+      "title": "Model tool dispatch as the act-stage spine",
+      "loop_role": "Wire the plan→act boundary around the Tool trait lifecycle documented in src/tools/mod.rs: the LLM emits a call, the registry resolves it via ToolRegistry::get_activated, validate_tool_arguments_schema checks required fields, the safety layer gates on metadata().risk_level, then Tool::execute returns JSON fed back as the next-turn observation. Model each loop iteration as plan (model picks a tool name) → act (Tool::execute) → perceive (JSON result injected into conversation).",
+      "affects": "Tool::execute results become tool messages in the context window, so every act-stage node directly mutates context occupancy. The trait's is_readonly()/is_destructive()/risk_level() defaults delegate to safety::default_tool_metadata(name), meaning trust state for gating is derived per-tool-name — a misnamed tool inherits the wrong confirmation policy. ToolRegistry::execute refuses inactive tools with a typed 'Unknown or inactive tool' error rather than executing deferred ones silently.",
+      "touch_ux": "Render the Tool trait as a small hexagonal 'socket' node that every tool node snaps into; color the socket by risk_level (green read-only, amber write, red destructive). Tap a socket to see the live dispatch pipeline (resolve → validate → gate → execute) as an animated edge from the plan node; long-press shows the schema contract; pinch-zoom into a socket reveals the last execute() latency and result size badge.",
+      "pointer": "src/tools/mod.rs::Tool"
+    },
+    {
+      "id": "tools-02",
+      "title": "Split the registry into critical and deferred tiers",
+      "loop_role": "Model context-window pressure at loop start: ToolRegistry::with_safety_config registers only CRITICAL_TOOLS (file ops, shell_exec, grep_search, glob_find, tool_search) as always-on and parks ~70 more tools (git, cargo, container, browser, LSP, knowledge) as deferred. Wire this to the plan stage by having the loop emit critical_definitions() into the system prompt and grow activated_tools only when tool_search activates a deferred tool mid-loop.",
+      "affects": "This is the module's biggest context-window lever: deferred loading cuts tool-schema tokens by 60-80% per the ToolRegistry docs, trading a small discovery latency for thousands of tokens of headroom each turn. activated_count()/total_count() give the exact trust/budget telemetry: how much schema surface the model is currently paying for. register_critical immediately inserts into activated_tools; register() defaults to deferred, so third-party tools never silently inflate the prompt.",
+      "touch_ux": "Draw the registry as a two-zone harbor: a bright inner dock (critical, always visible) and a dimmed outer anchorage of deferred tool chips. Dragging a chip from anchorage to dock = activate(); the chip glows and a token-cost badge (+N schema tokens) animates onto the context-window meter. Pinch out to see the full fleet; tap the dock counter to see activated_count vs total_count.",
+      "pointer": "src/tools/mod.rs::ToolRegistry"
+    },
+    {
+      "id": "tools-03",
+      "title": "Let the model discover tools on demand",
+      "loop_role": "Plug ToolSearchTool into the plan stage as the loop's self-expansion mechanism: when the model needs a capability outside the critical set (e.g. cargo_check for verification), it calls tool_search, gets ToolSearchResult entries (name, description, schema, is_critical, category), and the registry's activate() makes the tool callable in subsequent turns. Model it as a perceive→plan feedback edge: discovery result becomes new plan affordances.",
+      "affects": "The search tokenizes queries and normalizes underscores to spaces so 'cargo check' finds 'cargo_check' — a fix for a real failure where the model couldn't discover its verification tool. The shared Arc<RwLock<Vec<ToolSearchResult>>> index is rebuilt by rebuild_search_index() after registration, so trust depends on index freshness: a stale index returns placeholder results. Each activation permanently grows the schema payload in the context window for the rest of the session.",
+      "touch_ux": "Render tool_search as a magnifying-glass node orbiting the registry harbor. Tap it to open a search field; results appear as draggable chips with category-colored edges to their domain (git=blue, container=teal). Long-press a result to preview its schema before committing; the node shows a live badge of how many deferred tools it has surfaced this session.",
+      "pointer": "src/tools/tool_search.rs::ToolSearchTool"
+    },
+    {
+      "id": "tools-04",
+      "title": "Steer the first action with task classification",
+      "loop_role": "Insert task_focus at loop entry, before the first plan: classify_task() maps the user's task text to a TaskType (Read, Edit, Test, Refactor, Ship, Visual, General), reorder_tools() sorts the tool list so primary_tools come first, and preamble() injects steering text like 'START by using file_read... Do NOT explore the repository first'. Wire it as a plan-stage prior that biases which act node fires first without removing any capability.",
+      "affects": "Affects tool-selection latency and wasted turns, not correctness: it reorders rather than filters, so trust state is unchanged (all tools remain callable). The preamble strings are prescriptive and name specific tools to avoid (e.g. 'Do NOT call git_status, context_status, or process_list' for Read tasks), which reduces irrelevant tool calls that would otherwise bloat the context window with unused results.",
+      "touch_ux": "Show TaskType as a compass node at the loop's entry gate, its needle pointing at the classified type. Tap to override the classification manually; the connected tool chips physically reorder on the canvas with primary tools sliding to the front. Long-press reveals the preamble text as an editable card; badge shows the current TaskType and its primary tool list.",
+      "pointer": "src/tools/task_focus.rs::TaskType"
+    },
+    {
+      "id": "tools-05",
+      "title": "Fail tool calls with typed schema errors",
+      "loop_role": "Place validate_tool_arguments_schema on the plan→act edge as a pre-execution gate: before Tool::execute runs, object-shaped schemas must receive JSON objects and all top-level required fields must be present and non-null. In loop terms this converts malformed model output into a cheap perceive-stage correction signal instead of an expensive failed act.",
+      "affects": "Directly implements the honesty rule: the bail message names the tool and the exact missing fields ('Schema validation failed for tool X: missing required field(s): path'), so the model gets actionable, truthful feedback rather than an untyped 500 or a silently mis-executed call. It is intentionally conservative — only top-level required/type checks — so it catches garbage without rejecting valid-but-unusual arguments.",
+      "touch_ux": "Render as a funnel-shaped filter node on every edge entering a tool socket. Passing calls flow through green; rejected calls bounce back as red boomerang edges to the plan node, carrying the missing-field list as a readable tooltip. Tap the funnel to see a rolling count of rejected vs accepted calls per tool; pinch to inspect the schema diff for a specific rejection.",
+      "pointer": "src/tools/mod.rs::validate_tool_arguments_schema"
+    },
+    {
+      "id": "tools-06",
+      "title": "Page oversized tool output instead of flooding context",
+      "loop_role": "Wire truncate_with_pagination into the act→perceive return path: when a tool result exceeds the page limit, return one page plus PaginationInfo (offset, limit, total_chars, has_more) so the model can request subsequent pages on later turns. Model it as a loop-internal iteration: perceive a page → plan whether more is needed → re-invoke with a new offset.",
+      "affects": "Protects the context window from single catastrophic tool results (a 500KB file read becomes a bounded page plus metadata). The has_more flag is an honesty surface: the model is explicitly told more data exists rather than being handed silently truncated content. Char-boundary-safe paging via chars().skip/take keeps multi-byte content intact, so paginated slices never corrupt evidence.",
+      "touch_ux": "Render large results as a scrollable filmstrip node attached to the producing tool; each frame is one page with its offset range labeled. Swipe horizontally to page through (issuing the next-offset call visually); a progress ring shows offset/total_chars. The has_more badge glows amber until the last page is consumed, signaling incomplete evidence on the loop.",
+      "pointer": "src/tools/mod.rs::truncate_with_pagination"
+    },
+    {
+      "id": "tools-07",
+      "title": "Gate shell execution behind the danger-pattern denylist",
+      "loop_role": "Model ShellExec as the loop's highest-blast-radius act node: before running any command it is checked against DANGEROUS_SHELL_PATTERNS via find_dangerous_shell_pattern (reverse shells, fork bombs, rm -rf /, disk overwrites), with word-boundary matching so 'shellcheck' and 'sha256sum' don't false-positive. Wire it as act with a mandatory safety sub-stage between the model's intent and process spawn.",
+      "affects": "Defines the trust boundary for the entire act stage: a matched pattern blocks execution deterministically regardless of model confidence. ShellExec also intercepts simple sed -i substitutions and replays them through the file tools' atomic write path (write_atomic) with staleness checks — so a shell edit participates in the same file-state consistency protocol as file_edit, keeping later reads trustworthy. Timeout enforcement bounds how long an act node can occupy the loop.",
+      "touch_ux": "Render ShellExec as a reactor-core node: outer ring pulses while a command runs, core shows the command text scrolling. A red shield halo appears when the denylist fires; tap the shield to see exactly which pattern matched. Long-press shows the safety metadata (risk_level, destructive); a live badge shows running time against the timeout limit.",
+      "pointer": "src/tools/shell_exec/mod.rs::ShellExec"
+    },
+    {
+      "id": "tools-08",
+      "title": "Run interactive programs in persistent PTY sessions",
+      "loop_role": "Use PtyShellTool when the act stage needs stateful, multi-turn interaction (REPLs, interactive debuggers, SSH): send_command writes to the PTY, read_output polls what arrived, is_alive detects session death, and close tears down. Model it as a long-lived act node spanning many loop iterations, with perceive steps (read_output) interleaved between acts (send_command).",
+      "affects": "Unlike one-shot ShellExec, a PtySession accumulates terminal state across turns — CommandOutput chunks arrive incrementally, so the loop must budget for repeated polling reads entering the context window. is_alive() is the honesty check: a dead session must surface as such rather than returning empty output that the model might misread as success. resize() keeps line-wrapping truthful for curses-style apps.",
+      "touch_ux": "Render as a terminal-window node with a persistent tether edge to the act stage — the tether stays lit across loop iterations until close(). Tap to open a mini terminal view; long-press shows the session transcript; a heartbeat badge shows is_alive() green/gray with bytes-read counter. Dragging the tether to a new command chip queues the next send_command.",
+      "pointer": "src/tools/pty_shell.rs::PtySession"
+    },
+    {
+      "id": "tools-09",
+      "title": "Edit files atomically with staleness protection",
+      "loop_role": "Wire FileEdit/FileMultiEdit as the canonical act-stage mutation nodes: the model perceives via FileRead, plans a delta, then acts via FileEdit with exact old_str/new_str matching. FileMultiEdit batches several deltas into one act, and DirectoryTree feeds the perceive stage with structural ground truth before any edit is planned.",
+      "affects": "The file module is the largest tool surface (~10k tokens) and owns write consistency: write_atomic prevents half-written files from ever being observed by later perceive steps, and is_file_stale guards against editing a file that changed since it was read — a direct trust mechanism ensuring the evidence an edit was planned against is still valid. All file tools accept with_safety_config so per-instance SafetyConfig replaces the deprecated global fallback, making gating reproducible across checkpoints.",
+      "touch_ux": "Render FileEdit as a scalpel node: it only attaches to a file card that shows a fresh-read checkmark (is_file_stale = false); a stale file card shows a broken-link badge and refuses the edge until re-read. Tap the scalpel to preview the diff hunk inline; two-finger tap commits; FileMultiEdit renders as a fanned stack of scalpel cards applied as one gesture.",
+      "pointer": "src/tools/file.rs::FileEdit"
+    },
+    {
+      "id": "tools-10",
+      "title": "Apply unified diffs as first-class patch acts",
+      "loop_role": "Offer PatchApply as an alternative act node when the model's plan is already expressed as a unified diff (e.g. from an EvolutionPlanner diff plan or an external review). It bridges plan artifacts directly to filesystem mutation without re-deriving old_str anchors, so model it as plan(diff) → act(PatchApply) → verify(cargo_check).",
+      "affects": "Small surface (1 type, ~1.4k tokens) but changes the evidence shape on the loop: the patch text itself becomes the auditable artifact between plan and act, which is stronger trust evidence than a sequence of opaque edits — a reviewer (human or agent) can inspect exactly what will change. Failed hunks surface as errors rather than partial silent application, keeping the honesty contract.",
+      "touch_ux": "Render as a quilt-patch node that accepts a diff card dragged onto it. Before application it fans out into per-hunk chips laid over the target file cards; each hunk chip shows green (applies cleanly) or red (conflict). Tap a red hunk to see the conflict; a single tap on 'apply' commits only when all hunks are green, or shows which failed.",
+      "pointer": "src/tools/patch_apply.rs::PatchApply"
+    },
+    {
+      "id": "tools-11",
+      "title": "Verify with structured cargo results, not raw output",
+      "loop_role": "Place CargoTest/CargoCheck/CargoClippy in the verify stage: after act-stage edits, the loop calls cargo_check for compilation truth and cargo_test for behavioral truth, then parse_cargo_json_messages converts cargo's JSON message stream into typed CompilerError, TestSummary, FailureDetail, and ClippyLint values that feed the next plan iteration.",
+      "affects": "This is the module's core honesty machinery: TestStatus, Severity, and LintLevel give the loop graded trust states instead of pass/fail vibes — a FailureDetail names the failing test, and CompilerError carries severity, so 'verified' always means something specific. Structured parsing also compresses verify-stage evidence: a TestSummary occupies far fewer context tokens than raw cargo output while retaining everything the planner needs.",
+      "touch_ux": "Render each cargo tool as a gauge cluster: green/amber/red dials for check, clippy lint counts by LintLevel, and a test histogram. Tap a red segment to expand the exact CompilerError or FailureDetail card; drag that card onto the plan node to seed the next fix iteration. Badge shows TestSummary pass/fail counts and last-run freshness.",
+      "pointer": "src/tools/cargo.rs::CargoTest"
+    },
+    {
+      "id": "tools-12",
+      "title": "Cluster build errors into actionable groups",
+      "loop_role": "Wire ErrorAnalyzer into the verify→plan feedback edge: after cargo tools produce raw error sets, group_by_cause() clusters them into ErrorGroup values, most_actionable() picks the fix that unblocks the most downstream errors, and suggest_fix()/prioritize() order the repair queue. This converts a wall of diagnostics into a ranked plan backlog.",
+      "affects": "Changes what the plan stage sees: instead of N raw errors consuming context individually, the loop perceives a few ErrorGroup summaries — a context-window saving and a correctness win, since fixing root causes first avoids whack-a-mole edits. summarize_by_category gives telemetry on error composition (type errors vs borrow errors vs missing imports) that can steer which tools the next iteration activates.",
+      "touch_ux": "Render as a prism node: a beam of raw error chips enters from the cargo gauge cluster and exits as a few colored ErrorGroup clusters. Tap a cluster to expand its members; the most_actionable() pick is highlighted with a crown badge. Pinch to collapse clusters back into a single priority list edge feeding the plan node.",
+      "pointer": "src/tools/analyzer.rs::ErrorAnalyzer"
+    },
+    {
+      "id": "tools-13",
+      "title": "Give the model a live context budget gauge",
+      "loop_role": "Plug ContextBudgetTool and ContextActionTool into the plan stage as self-awareness: ContextBudgetTool reports the combined budget snapshot from the MEMORY_USED_TOKENS / CONTEXT_MAP_USED_TOKENS / TOTAL_BUDGET atomics (published via update_memory_tokens/update_context_map_tokens), and ContextActionTool calls estimate_action_cost() with a ContextAction (Inspect ~6% of file tokens, full read 100%) plus cost_multiplier() before committing to an expensive perceive.",
+      "affects": "Makes budget a first-class object on the loop: the model can plan 'inspect signatures first, full-read only the two relevant files' using ActionCostEstimate, directly implementing measured-not-estimated context sizing. The atomic counters are the single source of truth merging ContextMap and AgentMemory accounting, avoiding double-counted usage. is_cargo_op() lets cost estimates factor in build-side effects, not just token cost.",
+      "touch_ux": "Render as a fuel-gauge node permanently docked at the canvas edge, needle driven by the atomic counters. Every tool node emits a faint cost-preview edge to the gauge when hovered; tapping ContextActionTool opens a 'what will this cost?' sheet showing ActionCostEstimate per ContextAction. The gauge flashes amber past ~80% utilization and suggests downgrade paths.",
+      "pointer": "src/tools/codemap.rs::ContextBudgetTool"
+    },
+    {
+      "id": "tools-14",
+      "title": "Downgrade introspection depth to fit token budget",
+      "loop_role": "Model code introspection as budget-bounded perceive: CodeIntrospect uses TokenBudget (total/used/reserved) and per-file FileEstimate values to choose a Depth — Overview (~50 tokens/file), Signatures (~200), Dependencies (~300), Full (~1000+). When the budget can't afford Full, Depth::downgrade() steps down to Signatures then Overview, and suggest_depth_for_file picks the best affordable depth per file. PlanBudget::next_iteration() drives multi-pass refinement.",
+      "affects": "Hard-codes the measured-not-estimated rule: estimates flow through token_count::estimate_content_tokens, reserve() holds back a percentage for output formatting, and exhausted()/utilization_pct() give exact budget telemetry. The downgrade chain is the trust-preserving degradation path — the loop always returns *some* grounded view of the code with an honest depth label rather than silently omitting files or overflowing the window.",
+      "touch_ux": "Render each inspected file as a layered onion node: outer ring = Overview, inner rings = Signatures/Dependencies/Full. Pinch in to deepen (spend budget), pinch out to downgrade; the ring you can afford glows, unaffordable rings are greyed with their token price. The TokenBudget shows as a draining battery badge shared across all onion nodes.",
+      "pointer": "src/tools/introspect/budget.rs::TokenBudget"
+    },
+    {
+      "id": "tools-15",
+      "title": "Ground plans in ranked code search",
+      "loop_role": "Wire CodeQueryEngine and LocalizeIssue into the perceive→plan grounding step: CodeQueryEngine builds a BM25 index (build_index, extract_keywords) and returns RankedResult lists, while LocalizeIssue ranks Candidate files/functions/tests for a bug description. The plan stage then reads only the top candidates instead of exploring the repo breadth-first.",
+      "affects": "Improves evidence quality per context token: ranked candidates mean the first file_read calls land on relevant code, cutting both turns and tokens. RankedResult scores are inspectable, so the loop (and the user) can see *why* a file was chosen — an auditability surface for trust state. The query engine's find_related_symbols links candidates to their symbol neighbors, giving the planner a ready-made expansion frontier.",
+      "touch_ux": "Render as a radar node: ping it with a query and concentric rings light up candidate file nodes, brightness ∝ BM25 score. Tap a blip to preview the Candidate card (file, function, score); drag a blip into the context window meter to load it. The radar shows a badge of indexed files vs total, making coverage gaps visible.",
+      "pointer": "src/tools/introspect/query.rs::CodeQueryEngine"
+    },
+    {
+      "id": "tools-16",
+      "title": "Plan self-evolution with impact analysis",
+      "loop_role": "Connect EvolutionPlanner to the evolve stage: generate_plan() produces an EvolutionPlan of PlanPhase steps with ActionType operations, and analyze_impact() computes ImpactAnalysis with CallerInfo (who calls this symbol) and a RiskLevel before any code changes. Model it as remember/evolve → plan: the agent proposes a change to its own codebase, sees blast radius, then sequences the act steps.",
+      "affects": "This is the tool layer of self-modification trust: RiskLevel grades each planned action so the safety layer can require confirmation proportional to blast radius, and CallerInfo makes the consequence graph explicit evidence on the loop rather than the model's guess. The plan artifact (EvolutionPlan) is itself a checkpoint-able object — the loop can pause, get human sign-off per the review-gate rule, and resume with the exact same plan.",
+      "touch_ux": "Render as a blueprint node emitting a ripple simulation: tapping analyze_impact sends animated rings out through the code graph, painting affected caller nodes by RiskLevel (green→red). The EvolutionPlan renders as a vertical stack of PlanPhase cards; swipe to reorder, long-press a phase to inspect its ActionType list, and a 'requires sign-off' seal appears on red phases.",
+      "pointer": "src/tools/introspect/planner.rs::EvolutionPlanner"
+    },
+    {
+      "id": "tools-17",
+      "title": "Persist learnings in the knowledge graph",
+      "loop_role": "Wire the knowledge tools into the remember stage: KnowledgeAutoExtract distills observations into KnowledgeNode values (typed by NodeType) after acts complete, KnowledgeRelate adds KnowledgeEdge relations (RelationType), and KnowledgeQuery retrieves them in later loops as grounding context. KnowledgeExport/KnowledgeClear bracket sessions; KnowledgeStats reports graph size.",
+      "affects": "Converts ephemeral loop state into durable cross-loop memory: nodes added in loop N become perceive-stage evidence in loop N+1 without re-deriving them, saving context tokens on repeated investigation. GraphStats gives memory telemetry (node/edge counts) so the loop can budget recall injection. Because recall is injected into prompts, stale or wrong edges are a trust hazard — KnowledgeRemove exists so the loop can retract disproven beliefs explicitly rather than letting them linger.",
+      "touch_ux": "Render as a constellation panel: each KnowledgeNode is a star colored by NodeType, edges drawn as RelationType-styled links. Tap a star for its provenance (which loop iteration created it); long-press to retract (KnowledgeRemove) with a confirm; pinch to zoom from constellation to a single subgraph. Badge shows GraphStats node/edge totals and extraction events this session.",
+      "pointer": "src/tools/knowledge.rs::KnowledgeGraph"
+    },
+    {
+      "id": "tools-18",
+      "title": "Perceive code precisely through LSP",
+      "loop_role": "Attach the LSP tool wrappers to the perceive stage as precision instruments: create_lsp_tools spawns an LspClientHandle for the project root and registers LspGotoDefinitionTool, LspFindReferencesTool, LspDocumentSymbolsTool, and LspHoverTool; create_extra_lsp_tools adds LspDiagnosticsTool, LspWorkspaceSymbolsTool, and LspGotoImplementationTool. Use them when grep-level grounding is too coarse — e.g. verify-stage diagnostics straight from the language server.",
+      "affects": "Upgrades evidence fidelity on the loop: references and diagnostics come from the compiler front-end rather than regex, so rename/refactor plans (via LspFindReferencesTool) carry exact caller sets, and LspDiagnosticsTool gives verify-stage truth without a full cargo run — cheaper in tokens and time. The shared LspClientHandle with shutdown() manages the language-server lifecycle; a dead server must degrade honestly (error result) rather than fabricate empty responses.",
+      "touch_ux": "Render as a satellite dish node tethered to the project-root card; when the server is live the dish glows and file nodes gain 'go to def' / 'find refs' affordance dots. Tap a dot to fire the query and draw the resulting reference edges on the canvas; long-press the dish to restart/shutdown the server. Badge shows server status and outstanding diagnostic count.",
+      "pointer": "src/tools/lsp_tools.rs::LspClientHandle"
+    },
+    {
+      "id": "tools-19",
+      "title": "Checkpoint and isolate work with git tools",
+      "loop_role": "Wire GitCheckpoint into the loop's checkpoint mechanic: before a risky act sequence (e.g. an EvolutionPlanner phase), create a checkpoint so verify-stage failure can roll back to known-good state. EnterWorktreeTool/ExitWorktreeTool move the whole loop into an isolated worktree (get_current_worktree/is_in_worktree track position), letting experimental changes proceed without touching the user's working tree; GitStatus/GitDiff provide perceive-stage ground truth about what the loop has changed.",
+      "affects": "Defines recoverability on the loop: checkpoints are the concrete objects trust state refers to when the UI claims 'safe to proceed'. Worktree isolation changes the filesystem object every file tool acts on, so the loop's file-state consistency (staleness checks, atomic writes) must be re-anchored on entry/exit — EnterWorktreeTool/ExitWorktreeTool are the edges that re-anchor it. All git tools carry with_safety_config so commit/push gating follows the configured policy rather than ambient globals.",
+      "touch_ux": "Render GitCheckpoint as a camera node: tap to snapshot — a ghost copy of the canvas freezes beside the live one, and a 'rewind' scrubber edge appears. Worktrees render as parallel canvas layers; swipe vertically to switch layers (enter/exit), with the active layer labeled by get_current_worktree. Badge shows uncommitted-change count from GitStatus and checkpoint freshness.",
+      "pointer": "src/tools/git.rs::GitCheckpoint"
+    },
+    {
+      "id": "tools-20",
+      "title": "Ask the human before guessing",
+      "loop_role": "Insert ClarificationTool (ask_user) as an explicit plan-stage escape hatch: when the task direction is genuinely ambiguous, the loop pauses its act cycle and asks the human one question, then folds the answer into the next plan. It is rate-limited (max_asks per session, default 3), disableable via UiConfig::allow_clarification, and headless-safe — with no TTY it returns a null answer and the agent proceeds on its best assumption instead of blocking.",
+      "affects": "A direct honesty mechanism: the loop may surface 'I don't know which you meant' as a first-class outcome instead of confidently acting on a coin flip. The atomic asked counter (asked_count()) bounds how often the loop can interrupt, so clarification can't become a crutch that stalls autonomy; the null-answer path keeps headless trust state truthful by recording that the question went unanswered rather than fabricating consent.",
+      "touch_ux": "Render as a speech-bubble node that rises from the plan stage and pulses until answered. Tap to type the answer inline; the remaining-questions badge (max_asks - asked_count) counts down visibly. In headless mode the bubble renders greyed with a 'no TTY — proceeding on assumption' tag, and the unanswered question is archived as a card on the remember panel.",
+      "pointer": "src/tools/clarify.rs::ClarificationTool"
+    }
+  ]
+}

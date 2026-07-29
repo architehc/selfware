@@ -1,0 +1,410 @@
+{
+  "component": "lsp",
+  "tier": "tooling",
+  "loop_stage": "perceive",
+  "summary": "The LSP subsystem gives the loop semantic code intelligence by speaking Language Server Protocol (JSON-RPC 2.0 / Content-Length over stdio) to external language servers. As a client (LspClient) it lazily launches rust-analyzer, pyright, typescript-language-server, or gopls based on file extension, opens documents, and answers goto_definition, find_references, document_symbols, hover, workspace_symbol, goto_implementation, and diagnostics. As a server (SelfwareLspServer / run_lsp_server) selfware itself answers documentSymbol, workspace/symbol, definition, and hover from its ProjectIntelligence symbol index so editors like Zed can query it. On the loop it is primarily a 'perceive' node — it turns positions and queries into grounded Symbols, Locations, Hovers, and Diagnostics — while diagnostics feed the 'verify' stage.",
+  "loop_objects": ["LspClient", "SelfwareLspServer", "Location", "SymbolInfo", "Symbol", "Diagnostic", "Hover", "Language", "JsonRpcRequest", "ProjectIntelligence", "Evidence"],
+  "context_basis": "Recommendations were formed by reading src/lsp/ (client.rs, server.rs, mod.rs) in the context of the full engine's ~600k-token budget framing, so each move accounts for how a precise LSP fact replaces reading whole files and thereby conserves the loop's token budget.",
+  "examples": [
+    {
+      "id": "lsp-01",
+      "title": "Lazily launch the right server by file extension",
+      "loop_stage": "perceive",
+      "pattern": "lazy-perceive",
+      "intent": "Bring semantic intelligence online for a file only when the loop first touches it.",
+      "how_it_shapes_the_loop": "LspClient defers spawning until a query arrives, then Language::from_path picks the language and server_candidates the binary; the first working candidate becomes the connection, so the loop pays server-start cost only for languages it actually inspects.",
+      "loop_objects_touched": ["LspClient", "Language"],
+      "wiring": {
+        "inputs_from": ["file path from planner", "PATH via binary_exists"],
+        "outputs_to": ["LspServerConnection", "downstream queries"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag a source file onto the LSP node to bind it; the node auto-selects and launches the matching language server.",
+        "visual": "A language glyph (Rust/Py/TS/Go) fades in and the node ring spins during spawn, then settles solid."
+      },
+      "mini_scenario": "The loop queries src/main.rs; from_path returns Rust, rust-analyzer is found on PATH, and the connection comes up on demand.",
+      "pitfall": "If no candidate binary exists, the client errors — don't wire an LSP query as a hard dependency without a fallback to plain file reads."
+    },
+    {
+      "id": "lsp-02",
+      "title": "Open a document before querying it",
+      "loop_stage": "perceive",
+      "pattern": "sync-then-query",
+      "intent": "Give the server the file content so its answers reflect the loop's working state.",
+      "how_it_shapes_the_loop": "did_open sends textDocument/didOpen with the current content; the server indexes it so subsequent goto/hover/diagnostics operate on what the loop sees, not stale disk state.",
+      "loop_objects_touched": ["LspClient"],
+      "wiring": {
+        "inputs_from": ["file content buffer"],
+        "outputs_to": ["language server document store"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the file chip on the LSP node to push its buffer to the server (didOpen).",
+        "visual": "The chip flashes then wears a small open-book badge indicating the document is synced."
+      },
+      "mini_scenario": "Before asking for symbols, did_open streams the edited buffer so document_symbols reflects the uncommitted change.",
+      "pitfall": "Query without did_open and the server may answer from stale or absent content — always sync the buffer first."
+    },
+    {
+      "id": "lsp-03",
+      "title": "Jump to a definition to ground a plan",
+      "loop_stage": "perceive",
+      "pattern": "perceive-then-plan",
+      "intent": "Resolve where a symbol is defined so the loop edits the right place.",
+      "how_it_shapes_the_loop": "goto_definition returns Vec<Location> {file,line,column}; the planner uses the precise site instead of grepping, so the next act step targets exact coordinates.",
+      "loop_objects_touched": ["LspClient", "Location"],
+      "wiring": {
+        "inputs_from": ["cursor position (file,line,col)"],
+        "outputs_to": ["planner target Location"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap a symbol token on the code preview to jump the canvas to its definition node.",
+        "visual": "A comet edge arcs from the call site to the definition node, which pulses on arrival."
+      },
+      "mini_scenario": "The plan needs to change fn parse(); goto_definition returns parser.rs:88:4 and the edit step targets it directly.",
+      "pitfall": "Multiple Locations can come back for overloaded or ambiguous symbols — don't assume the first is authoritative without checking the file."
+    },
+    {
+      "id": "lsp-04",
+      "title": "Find references before a risky rename",
+      "loop_stage": "perceive",
+      "pattern": "blast-radius-scan",
+      "intent": "Enumerate every use of a symbol so a rename or signature change is complete.",
+      "how_it_shapes_the_loop": "find_references returns all Locations touching the symbol; the loop expands its edit plan to cover each site, turning a single edit into a bounded multi-site act.",
+      "loop_objects_touched": ["LspClient", "Location"],
+      "wiring": {
+        "inputs_from": ["symbol position"],
+        "outputs_to": ["multi-site edit plan"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread over a symbol node to fan out every reference as a constellation of call-site nodes.",
+        "visual": "Reference nodes bloom outward, each labeled file:line, connected by faint edges to the origin."
+      },
+      "mini_scenario": "Renaming Config::load, find_references surfaces 12 call sites; the plan edits all 12 in one pass.",
+      "pitfall": "References are a snapshot — if the loop edits files between the scan and the act, re-query, or a stale Location misses a moved use."
+    },
+    {
+      "id": "lsp-05",
+      "title": "Outline a file with document symbols",
+      "loop_stage": "perceive",
+      "pattern": "structure-first",
+      "intent": "Get a file's shape without reading its full text into the budget.",
+      "how_it_shapes_the_loop": "document_symbols returns Vec<SymbolInfo> {name,kind,line,column}; the loop perceives the file's functions/structs/methods cheaply and plans against the outline rather than the raw source.",
+      "loop_objects_touched": ["LspClient", "SymbolInfo"],
+      "wiring": {
+        "inputs_from": ["opened document"],
+        "outputs_to": ["planner outline / navigation map"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch a file node to collapse its full text into a compact symbol outline strip.",
+        "visual": "Lines of code fold into labeled kind-colored rows (fn/struct/method), preserving order and indentation."
+      },
+      "mini_scenario": "Instead of reading 900 lines, the loop pulls document_symbols and sees the 14 functions it needs to reason about.",
+      "pitfall": "SymbolInfo.kind is a human-readable string, not an enum — match on the exact strings the server emits, not assumed variants."
+    },
+    {
+      "id": "lsp-06",
+      "title": "Hover for a signature instead of reading source",
+      "loop_stage": "perceive",
+      "pattern": "budget-saving-probe",
+      "intent": "Learn a symbol's type/signature with a single cheap probe.",
+      "how_it_shapes_the_loop": "hover returns Option<String> markdown; the loop resolves a signature or type in one small evidence packet rather than opening the defining file, conserving token budget.",
+      "loop_objects_touched": ["LspClient", "Hover"],
+      "wiring": {
+        "inputs_from": ["symbol position"],
+        "outputs_to": ["Evidence (signature)"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a symbol token to float its hover card with type and doc inline.",
+        "visual": "A markdown tooltip lifts above the token with a soft glow; empty hovers show a muted 'no info' state."
+      },
+      "mini_scenario": "The loop hovers `db.query` and gets the full generic signature, so it calls it correctly without reading the crate.",
+      "pitfall": "hover returns None legitimately when the server has nothing — treat None as 'unknown', not as an error to recover from."
+    },
+    {
+      "id": "lsp-07",
+      "title": "Collect diagnostics as a verify gate",
+      "loop_stage": "verify",
+      "pattern": "gate-before-commit",
+      "intent": "Check whether an edit introduced errors before the loop advances.",
+      "how_it_shapes_the_loop": "diagnostics returns the cached Vec<Diagnostic> from the last textDocument/publishDiagnostics; an error-severity entry fails the verify gate and can route the loop to ErrorRecovery.",
+      "loop_objects_touched": ["LspClient", "Diagnostic"],
+      "wiring": {
+        "inputs_from": ["publishDiagnostics notifications"],
+        "outputs_to": ["verify gate / ErrorRecovery"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the diagnostics badge on a file node to list current errors and warnings.",
+        "visual": "The node ring turns red on any error-severity diagnostic, amber on warnings, green when clean."
+      },
+      "mini_scenario": "After an edit, diagnostics shows an error at line 40; the verify gate blocks the commit and the loop fixes it.",
+      "pitfall": "Diagnostics are cached from the last publish — after an edit, give the server a moment to re-publish or you'll gate on stale results."
+    },
+    {
+      "id": "lsp-08",
+      "title": "Search the workspace for a symbol",
+      "loop_stage": "perceive",
+      "pattern": "global-locate",
+      "intent": "Find a symbol by name across the whole project without knowing its file.",
+      "how_it_shapes_the_loop": "workspace_symbol(query) returns matching Vec<SymbolInfo> project-wide; the loop locates an entity from a name alone, seeding a plan without a prior file target.",
+      "loop_objects_touched": ["LspClient", "SymbolInfo"],
+      "wiring": {
+        "inputs_from": ["symbol name query"],
+        "outputs_to": ["candidate Locations for the planner"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw from a search bubble to the LSP node to run a workspace symbol query.",
+        "visual": "Matching symbol nodes light up across the canvas map, ranked by relevance with count badge."
+      },
+      "mini_scenario": "The loop searches 'Budget' and workspace_symbol returns the struct plus its methods across three files.",
+      "pitfall": "Broad queries can return many matches — narrow the query or the planner wastes budget triaging noise."
+    },
+    {
+      "id": "lsp-09",
+      "title": "Go to implementation from a trait",
+      "loop_stage": "perceive",
+      "pattern": "abstraction-to-concrete",
+      "intent": "Resolve which concrete type implements an interface at a call site.",
+      "how_it_shapes_the_loop": "goto_implementation returns implementation Locations; the loop bridges from a trait/interface to real code, so it can reason about actual behavior rather than the abstract signature.",
+      "loop_objects_touched": ["LspClient", "Location"],
+      "wiring": {
+        "inputs_from": ["trait/interface position"],
+        "outputs_to": ["concrete impl Locations"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap a trait node to fan out to its implementor nodes.",
+        "visual": "Dashed abstraction edges resolve into solid edges pointing at each concrete impl node."
+      },
+      "mini_scenario": "The plan hits Tool::execute; goto_implementation lists McpTool and the native tools that implement it.",
+      "pitfall": "Not all servers implement goto_implementation richly — handle an empty result as 'server can't answer', not 'no implementors'."
+    },
+    {
+      "id": "lsp-10",
+      "title": "Map diagnostic severity to loop response",
+      "loop_stage": "verify",
+      "pattern": "severity-routing",
+      "intent": "Let error vs warning vs hint drive different loop branches.",
+      "how_it_shapes_the_loop": "Diagnostic.severity is 'error'|'warning'|'info'|'hint' (mapped from numeric 1–4); the verify step blocks on error, notes warnings, and lets hints inform learn without halting.",
+      "loop_objects_touched": ["Diagnostic"],
+      "wiring": {
+        "inputs_from": ["publishDiagnostics severity codes"],
+        "outputs_to": ["verify branch / learn notes"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the diagnostics badge to break the count down by severity tier.",
+        "visual": "A stacked bar shows red/amber/blue/grey segments for error/warning/info/hint counts."
+      },
+      "mini_scenario": "An edit yields one warning and two hints but no error; the loop commits and records the hints for later cleanup.",
+      "pitfall": "Don't halt on warnings by default — over-strict gating on non-error severities stalls otherwise-valid progress."
+    },
+    {
+      "id": "lsp-11",
+      "title": "Close documents to bound server state",
+      "loop_stage": "control",
+      "pattern": "resource-hygiene",
+      "intent": "Release documents the loop is done with so server memory stays bounded.",
+      "how_it_shapes_the_loop": "did_close sends textDocument/didClose; over a long loop this keeps the language server's open-document set from growing without limit as files are visited and abandoned.",
+      "loop_objects_touched": ["LspClient"],
+      "wiring": {
+        "inputs_from": ["completed file work"],
+        "outputs_to": ["language server document store (release)"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick a synced file chip off the LSP node to close its document.",
+        "visual": "The open-book badge closes and the chip dims to indicate the server released it."
+      },
+      "mini_scenario": "After editing and verifying config.rs, the loop closes it so the server isn't holding dozens of stale buffers.",
+      "pitfall": "Close only what you're finished with — closing a file mid-plan drops its diagnostics and forces a re-open."
+    },
+    {
+      "id": "lsp-12",
+      "title": "Shut down all servers on loop teardown",
+      "loop_stage": "control",
+      "pattern": "graceful-teardown",
+      "intent": "Reclaim every language-server process when the loop ends.",
+      "how_it_shapes_the_loop": "shutdown sends the shutdown request then exit notification and kills each process; the loop returns the process budget it borrowed across all launched languages.",
+      "loop_objects_touched": ["LspClient", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["loop completion signal"],
+        "outputs_to": ["language server processes (reaped)"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick the LSP node to the canvas edge to tear down all its connections at once.",
+        "visual": "Each language sub-node shrinks and fades in sequence; a final exit glyph confirms full teardown."
+      },
+      "mini_scenario": "The task finishes having used rust-analyzer and gopls; shutdown reaps both processes cleanly.",
+      "pitfall": "Skipping shutdown leaks a long-lived language server per language — always tear down even on the error path."
+    },
+    {
+      "id": "lsp-13",
+      "title": "Serve selfware's own symbol index over LSP",
+      "loop_stage": "act",
+      "pattern": "invert-the-boundary",
+      "intent": "Let an editor query selfware's ProjectIntelligence as if it were a language server.",
+      "how_it_shapes_the_loop": "run_lsp_server starts SelfwareLspServer answering documentSymbol, workspace/symbol, definition, and hover from ProjectIntelligence; the loop's perception layer becomes an external editor's, inverting client and host.",
+      "loop_objects_touched": ["SelfwareLspServer", "ProjectIntelligence", "Symbol"],
+      "wiring": {
+        "inputs_from": ["editor JSON-RPC requests"],
+        "outputs_to": ["ProjectIntelligence queries", "LSP responses"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick the symbol-index node outward past the canvas edge to publish it as an LSP surface.",
+        "visual": "The node gains a broadcast halo and an inbound-arrow glyph as editor requests begin flowing in."
+      },
+      "mini_scenario": "Zed connects to selfware's LSP server and workspace/symbol returns the CodeGraph symbols from ProjectIntelligence.",
+      "pitfall": "ProjectIntelligence is refreshed per request (no cache) — that keeps results fresh but adds latency, so don't fan out one request per keystroke."
+    },
+    {
+      "id": "lsp-14",
+      "title": "Resolve a token at a cursor position",
+      "loop_stage": "perceive",
+      "pattern": "position-to-symbol",
+      "intent": "Turn a raw (line,column) into the identifier the user means.",
+      "how_it_shapes_the_loop": "SelfwareLspServer walks identifier characters (alphanumeric + underscore) around the position, with a fallback to the previous char, so definition/hover resolve even when the cursor sits at a token boundary.",
+      "loop_objects_touched": ["SelfwareLspServer", "Symbol"],
+      "wiring": {
+        "inputs_from": ["textDocument/definition or hover position"],
+        "outputs_to": ["ProjectIntelligence symbol lookup"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap precisely on a token in the code preview to resolve the identifier under the point.",
+        "visual": "The resolved identifier highlights with a selection box; a boundary-fallback shows a small left-arrow hint."
+      },
+      "mini_scenario": "The cursor lands just past `parse`; the fallback checks the previous char, resolves `parse`, and hover returns its signature.",
+      "pitfall": "Positions are 1-indexed line/column in this server — off-by-one indexing silently resolves the wrong token."
+    },
+    {
+      "id": "lsp-15",
+      "title": "Format hover as signature plus location",
+      "loop_stage": "perceive",
+      "pattern": "compact-evidence",
+      "intent": "Return just enough context — the signature and where it lives — as one markdown packet.",
+      "how_it_shapes_the_loop": "SelfwareLspServer builds hover markdown as `signature\\nfile:line` from the matched Symbol; the loop gets a self-contained Evidence card it can quote without a follow-up read.",
+      "loop_objects_touched": ["SelfwareLspServer", "Symbol", "Hover"],
+      "wiring": {
+        "inputs_from": ["ProjectIntelligence Symbol"],
+        "outputs_to": ["MarkupContent hover response"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a symbol node to surface its formatted hover card.",
+        "visual": "A markdown card shows the signature on top and a dimmed file:line footer beneath."
+      },
+      "mini_scenario": "Hovering a struct returns `pub struct Budget { ... }` plus `resource/budget.rs:22`, enough to reason without opening the file.",
+      "pitfall": "Keep the hover compact — dumping the whole symbol body defeats the budget savings the hover exists to provide."
+    },
+    {
+      "id": "lsp-16",
+      "title": "Auto-detect Content-Length framing on the wire",
+      "loop_stage": "foundation",
+      "pattern": "wire-adapt",
+      "intent": "Read LSP-framed messages regardless of how the peer chunks its writes.",
+      "how_it_shapes_the_loop": "Both LSP client and server frame with Content-Length headers via the shared mcp::transport read/write helpers; the loop's perceive channel stays intact even when a header and body arrive in separate reads.",
+      "loop_objects_touched": ["LspClient", "SelfwareLspServer", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["stdio byte stream"],
+        "outputs_to": ["parsed JSON-RPC messages"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the transport node to inspect the header/body framing of the last message.",
+        "visual": "A framed envelope glyph shows the Content-Length header split from its JSON body."
+      },
+      "mini_scenario": "rust-analyzer sends a header line then the body in a second write; read_message assembles both into one JSON-RPC message.",
+      "pitfall": "LSP uses Content-Length framing, not newline-delimited — mixing MCP's default newline framing here truncates messages."
+    },
+    {
+      "id": "lsp-17",
+      "title": "Sanitize the server environment for toolchain vars only",
+      "loop_stage": "foundation",
+      "pattern": "credential-firewall",
+      "intent": "Launch a language server with just the toolchain discovery vars it needs and no secrets.",
+      "how_it_shapes_the_loop": "The client clears secrets (SELFWARE_API_KEY, AWS_*, GITHUB_TOKEN) and whitelists only CARGO_HOME, RUSTUP_HOME, NODE_PATH, PYTHONPATH, VIRTUAL_ENV, GOPATH, GOROOT, JAVA_HOME, so the loop can perceive safely via third-party servers.",
+      "loop_objects_touched": ["LspClient", "Language"],
+      "wiring": {
+        "inputs_from": ["process environment", "toolchain whitelist"],
+        "outputs_to": ["language server subprocess env"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the language sub-node to inspect the sanitized env passed to its server.",
+        "visual": "Secret vars render struck-through in red; whitelisted toolchain vars glow green as passed through."
+      },
+      "mini_scenario": "gopls launches seeing GOPATH and GOROOT but not the operator's GITHUB_TOKEN, so it can resolve modules without touching credentials.",
+      "pitfall": "A server that needs an unlisted var to find its toolchain will fail quietly — extend the whitelist deliberately, never disable the firewall."
+    },
+    {
+      "id": "lsp-18",
+      "title": "Time out a stalled server query",
+      "loop_stage": "control",
+      "pattern": "bounded-wait",
+      "intent": "Keep a hung language server from freezing the loop's perceive step.",
+      "how_it_shapes_the_loop": "Each request awaits its oneshot with a 30s timeout; on expiry the client returns an explicit error so the loop can fall back to a file read rather than blocking indefinitely.",
+      "loop_objects_touched": ["LspClient", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["pending request oneshot"],
+        "outputs_to": ["timeout error / fallback path"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap an in-flight query edge to see its remaining timeout countdown.",
+        "visual": "A thinning ring counts down around the edge; at zero it snaps red with a timeout badge."
+      },
+      "mini_scenario": "rust-analyzer is still indexing and a goto_definition hangs; at 30s the client errors and the loop reads the file directly.",
+      "pitfall": "A cold server can exceed 30s during initial indexing — don't treat the first timeout as a fatal server failure, retry once."
+    },
+    {
+      "id": "lsp-19",
+      "title": "Suppress responses for notifications",
+      "loop_stage": "foundation",
+      "pattern": "id-gated-reply",
+      "intent": "Reply only to requests, never to fire-and-forget notifications.",
+      "how_it_shapes_the_loop": "SelfwareLspServer sends a JsonRpcResponse only when the incoming request carries an id; didOpen/didChange/didClose and initialized are accepted silently, keeping the loop's message flow correct.",
+      "loop_objects_touched": ["SelfwareLspServer", "JsonRpcRequest"],
+      "wiring": {
+        "inputs_from": ["client notifications and requests"],
+        "outputs_to": ["responses only for id-bearing requests"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick a notification pulse at the server node; it absorbs without emitting a reply edge.",
+        "visual": "Notification pulses fade into the node with no return animation; id-bearing requests spawn a reply edge."
+      },
+      "mini_scenario": "The editor streams didChange notifications as the user types; the server updates state and answers none of them.",
+      "pitfall": "Emitting a response to a notification confuses the client's correlation table — check for id before ever writing a reply."
+    },
+    {
+      "id": "lsp-20",
+      "title": "Convert file URIs safely across the boundary",
+      "loop_stage": "foundation",
+      "pattern": "path-uri-bridge",
+      "intent": "Translate between file:// URIs and filesystem paths without corrupting either.",
+      "how_it_shapes_the_loop": "uri_to_path and path_to_uri use url::Url so definitions and symbols cross the LSP boundary as valid file:// URIs; the loop's Locations resolve to real paths the act step can open.",
+      "loop_objects_touched": ["SelfwareLspServer", "Location", "Symbol"],
+      "wiring": {
+        "inputs_from": ["file:// URIs from editor", "Symbol.file paths"],
+        "outputs_to": ["filesystem paths / Location URIs"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap a Location node to expand its file:// URI and resolved path side by side.",
+        "visual": "The URI and path render as paired chips; a mismatch highlights amber if conversion fails."
+      },
+      "mini_scenario": "A definition response carries file:///Users/ivo/selfware/src/main.rs; uri_to_path resolves it and the edit step opens the file.",
+      "pitfall": "Hand-splicing file:// strings breaks on spaces and special characters — always round-trip through url::Url, never string concatenation."
+    }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "artifact": "expansion_recommendation",
+  "purpose": "Predefined, random-access, preloaded loop-modeling examples per selfware component. Each component file teaches how to model an agentic loop with that component: the role it plays on the loop, how it reshapes loop control/state/budget, which loop-objects it touches, and how a user would compose it on a touch-screen visual-coding canvas (drag nodes, draw connections, pinch to zoom the loop).",
+  "audience": "a touch-screen visual programming environment where the user navigates a spatial canvas of loop-stage nodes with gestures",
+  "loop_model": {
+    "stages": ["perceive", "reason", "act", "verify", "learn", "control", "foundation"],
+    "note": "The selfware loop is a budget-guarded state machine: Planning -> Executing -> (ErrorRecovery) -> Completed/Failed. 'control' = the loop driver/budget/state machine; 'foundation' = cross-cutting substrate (config, errors, hooks)."
+  },
+  "file_shape": {
+    "component": "string — the component id (e.g. 'agent')",
+    "tier": "'full' (ships in the engine bulk) | 'tooling' (in the graph, reachable via expand, not shipped in bulk)",
+    "loop_stage": "the primary loop stage this component serves",
+    "summary": "one-paragraph: what this component is and its role on the loop",
+    "loop_objects": ["the canonical loop-objects this component reads/writes (e.g. AgentState, ToolCall, Budget, Evidence, Checkpoint, Message, Plan)"],
+    "context_basis": "note that recommendations were formed with the component read in the context of the full engine (~600k budget framing)",
+    "examples": "array of exactly 20 example objects (see example_shape)"
+  },
+  "example_shape": {
+    "id": "'<component>-01' .. '<component>-20'",
+    "title": "short imperative title of the loop-modeling move",
+    "loop_stage": "perceive|reason|act|verify|learn|control|foundation",
+    "pattern": "named loop-modeling pattern (e.g. 'gate-before-act', 'budget-scoped-fanout', 'perceive-then-plan')",
+    "intent": "what you are trying to achieve on the loop",
+    "how_it_shapes_the_loop": "concretely how this component changes loop control, iteration, state transitions, or budget",
+    "loop_objects_touched": ["subset of the component's loop_objects this example uses"],
+    "wiring": {
+      "inputs_from": ["upstream component or loop-object feeding this node"],
+      "outputs_to": ["downstream component or loop-object this node feeds"]
+    },
+    "touch_interaction": {
+      "gesture": "tap|double-tap|drag|long-press|pinch|spread|two-finger-rotate|draw-connection|flick",
+      "canvas_action": "what happens on the spatial canvas when the user performs the gesture",
+      "visual": "how the node/edge renders and animates (color, pulse, badge, glow) to reflect loop state"
+    },
+    "mini_scenario": "1-2 sentence concrete flow showing the component in a running loop",
+    "pitfall": "an invariant to preserve or a common mistake when wiring this on the loop"
+  },
+  "rules": [
+    "Exactly 20 examples per component.",
+    "Examples must be grounded in the component's actual responsibilities (read the source).",
+    "Cover a spread of loop stages and gestures; do not repeat the same pattern 20 times.",
+    "Valid JSON, UTF-8, no trailing commas.",
+    "loop_objects must be real concepts the component deals with, not invented."
+  ]
+}

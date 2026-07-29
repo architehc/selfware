@@ -1,0 +1,410 @@
+{
+  "component": "devops",
+  "tier": "tooling",
+  "loop_stage": "act",
+  "summary": "DevOps is the loop's long-lived-process substrate: ProcessManager starts, health-checks, tails, restarts, and shuts down background processes (dev servers, watchers, DBs) so they persist across agent steps. It turns ephemeral shell calls into ManagedProcess objects with health-check regex patterns, bounded log buffers, port reservation, and auto-restart with backoff, giving the loop stable services to act against without re-spawning them each iteration.",
+  "loop_objects": ["ProcessConfig", "ManagedProcess", "ProcessStatus", "LogLine", "ProcessSummary", "ProcessInventory", "ProcessReconcileReport", "PortReservation"],
+  "context_basis": "recommendations were formed with src/devops/process_manager.rs read in the context of the full engine (~600k budget framing), where managed processes must survive many loop iterations and feed bounded log tails back into the agent's context.",
+  "examples": [
+    {
+      "id": "devops-01",
+      "title": "Start a dev server as a ManagedProcess",
+      "loop_stage": "act",
+      "pattern": "spawn-persistent-service",
+      "intent": "Launch `npm run dev` once and keep it alive across all subsequent loop steps.",
+      "how_it_shapes_the_loop": "ProcessManager.start spawns the child under a ProcessConfig and tracks it as a ManagedProcess, so later iterations act against a running server instead of re-spawning it.",
+      "loop_objects_touched": ["ProcessConfig", "ManagedProcess", "ProcessStatus"],
+      "wiring": {
+        "inputs_from": ["reason-stage decision to run a service"],
+        "outputs_to": ["ManagedProcess registry", "verify stage"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a command chip onto the process lane spawns a new process node bound to that command.",
+        "visual": "The node appears in Starting yellow, then transitions to Running green once spawned."
+      },
+      "mini_scenario": "The agent drags 'npm run dev' into the process lane; a ManagedProcess starts and stays alive for the rest of the loop.",
+      "pitfall": "A ProcessConfig id must be unique; reusing an id for a second start collides with the existing ManagedProcess entry."
+    },
+    {
+      "id": "devops-02",
+      "title": "Gate readiness on a health-check regex",
+      "loop_stage": "verify",
+      "pattern": "regex-readiness-gate",
+      "intent": "Only proceed once the process prints its ready marker.",
+      "how_it_shapes_the_loop": "The health_check_pattern (e.g. 'Compiled successfully|Ready on http') sets health_matched, so the loop blocks on readiness before the act stage hits the service.",
+      "loop_objects_touched": ["ProcessConfig", "ManagedProcess", "LogLine"],
+      "wiring": {
+        "inputs_from": ["process stdout LogLine stream"],
+        "outputs_to": ["verify-stage readiness gate"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the process node opens its health-pattern editor.",
+        "visual": "A progress ring spins until the regex matches, then snaps to a solid green 'ready' badge."
+      },
+      "mini_scenario": "The loop waits until 'Ready on http://localhost:3000' matches, then runs the browser test step.",
+      "pitfall": "Health check has a timeout (default 60s); a too-strict pattern that never matches leaves the process HealthCheckFailed."
+    },
+    {
+      "id": "devops-03",
+      "title": "Tail the last N log lines into agent context",
+      "loop_stage": "perceive",
+      "pattern": "bounded-log-tail",
+      "intent": "Give the LLM the most recent process output without unbounded context growth.",
+      "how_it_shapes_the_loop": "The log_buffer keeps up to MAX_LOG_LINES (500) LogLines; recent_logs feeds a bounded tail into the perceive stage each iteration.",
+      "loop_objects_touched": ["LogLine", "ManagedProcess", "ProcessSummary"],
+      "wiring": {
+        "inputs_from": ["process stdout/stderr streams"],
+        "outputs_to": ["perceive stage / agent context"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking up on the process node scrolls its live log tail.",
+        "visual": "Stderr lines tint red, stdout lines grey; the buffer caps and older lines fade off the top."
+      },
+      "mini_scenario": "After an edit, the agent reads the last 40 tailed lines and sees a fresh compile error to fix.",
+      "pitfall": "Each line is capped at MAX_LOG_LINE_LEN (10KB); a single huge line is truncated, so don't rely on full payloads in logs."
+    },
+    {
+      "id": "devops-04",
+      "title": "Auto-restart a crashed process with backoff",
+      "loop_stage": "control",
+      "pattern": "self-heal-on-crash",
+      "intent": "Keep a flaky service available without manual intervention.",
+      "how_it_shapes_the_loop": "When auto_restart is set, a Crashed status transitions to Restarting{attempt} up to max_restart_attempts, so the loop keeps acting against a service that recovers itself.",
+      "loop_objects_touched": ["ProcessStatus", "ManagedProcess", "ProcessConfig"],
+      "wiring": {
+        "inputs_from": ["child process exit signal"],
+        "outputs_to": ["ManagedProcess restart_count", "control state"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the process node reveals restart policy and current attempt count.",
+        "visual": "On crash the node flashes red then pulses amber 'Restarting (2/5)' while backing off."
+      },
+      "mini_scenario": "The dev server crashes on a bad import; it auto-restarts on attempt 2 after the agent fixes the file.",
+      "pitfall": "max_restart_attempts of 0 means unlimited; a persistently broken service can restart-loop forever and burn resources."
+    },
+    {
+      "id": "devops-05",
+      "title": "Reserve a port before binding",
+      "loop_stage": "control",
+      "pattern": "reserve-before-bind",
+      "intent": "Avoid port conflicts when spinning up multiple services.",
+      "how_it_shapes_the_loop": "A PortReservation holds a TcpListener with a TTL (PORT_RESERVATION_TTL, 30s), so the control stage can claim a port before the process actually binds it.",
+      "loop_objects_touched": ["PortReservation", "ProcessConfig", "ProcessInventory"],
+      "wiring": {
+        "inputs_from": ["expected_port from ProcessConfig"],
+        "outputs_to": ["ProcessInventory.reserved_ports"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the port pin on a process node reserves that port and shows the countdown.",
+        "visual": "A small port chip glows blue with a shrinking TTL ring; conflicting ports flash red."
+      },
+      "mini_scenario": "Before starting a second server, port 3001 is reserved so it won't collide with the running one on 3000.",
+      "pitfall": "Reservations expire after 30s; if the process doesn't bind in time the port is released and can be taken by another."
+    },
+    {
+      "id": "devops-06",
+      "title": "Gracefully shut down and clean up",
+      "loop_stage": "control",
+      "pattern": "graceful-teardown",
+      "intent": "Terminate a process and release its resources at loop end.",
+      "how_it_shapes_the_loop": "ProcessManager.stop drives a ManagedProcess to Stopped with cleanup, so terminal loop states don't leak orphaned children or held ports.",
+      "loop_objects_touched": ["ManagedProcess", "ProcessStatus", "PortReservation"],
+      "wiring": {
+        "inputs_from": ["control terminal state"],
+        "outputs_to": ["OS process table", "released ports"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking a process node off the lane sends a graceful stop.",
+        "visual": "The node dims to grey 'Stopped' and its port chip detaches and fades."
+      },
+      "mini_scenario": "On loop completion the dev server is stopped cleanly and port 3000 is freed for the next run.",
+      "pitfall": "Skipping stop on Failed exits leaves orphaned children; always tear down in both Completed and Failed paths."
+    },
+    {
+      "id": "devops-07",
+      "title": "Snapshot the process fleet as an inventory",
+      "loop_stage": "observe",
+      "pattern": "fleet-snapshot",
+      "intent": "Get one structured view of every managed process for the loop to reason over.",
+      "how_it_shapes_the_loop": "try_inventory builds a ProcessInventory (totals by status + per-process summaries), giving the observe stage a single serializable picture of all background services.",
+      "loop_objects_touched": ["ProcessInventory", "ProcessSummary", "ProcessStatus"],
+      "wiring": {
+        "inputs_from": ["ManagedProcess registry"],
+        "outputs_to": ["observe stage", "operator dashboard"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the process lane collapses all nodes into one inventory summary card.",
+        "visual": "A card shows counts: running/starting/restarting/inactive, each with a colored tally."
+      },
+      "mini_scenario": "The inventory reports 2 running, 1 restarting, and reserved ports [3000,3001] for the operator overlay.",
+      "pitfall": "try_inventory takes a log_lines arg per process; requesting large tails for many processes bloats the snapshot."
+    },
+    {
+      "id": "devops-08",
+      "title": "Reconcile drifted process state",
+      "loop_stage": "verify",
+      "pattern": "reconcile-drift",
+      "intent": "Detect processes that exited or leaked and clean the registry.",
+      "how_it_shapes_the_loop": "reconcile scans handles and produces a ProcessReconcileReport (orphaned, exited, cleared, removed), keeping the loop's model of live services true to reality.",
+      "loop_objects_touched": ["ProcessReconcileReport", "ManagedProcess", "ProcessStatus"],
+      "wiring": {
+        "inputs_from": ["OS process handles", "ManagedProcess registry"],
+        "outputs_to": ["cleaned registry", "verify stage"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the reconcile dial re-scans the fleet and updates each node's real status.",
+        "visual": "Nodes briefly desaturate during scan, then those found dead collapse with a puff animation."
+      },
+      "mini_scenario": "Reconcile finds a server that exited silently, marks 1 exited and clears its handle so the loop stops treating it as live.",
+      "pitfall": "Reconcile mutates the registry; running it mid-start can race a process still transitioning through Starting."
+    },
+    {
+      "id": "devops-09",
+      "title": "Restart on a health-marker regression",
+      "loop_stage": "control",
+      "pattern": "unhealthy-then-restart",
+      "intent": "Recover when a running process stops meeting its health signal.",
+      "how_it_shapes_the_loop": "A process that flips to HealthCheckFailed can be driven back through Restarting, so control heals degraded services without operator input.",
+      "loop_objects_touched": ["ProcessStatus", "ManagedProcess", "LogLine"],
+      "wiring": {
+        "inputs_from": ["health_matched regression from log stream"],
+        "outputs_to": ["control restart path"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing an unhealthy node offers a 'restart' action.",
+        "visual": "The health badge flips from green to red; a restart triggers the amber Restarting pulse."
+      },
+      "mini_scenario": "A watcher stops emitting 'Compiled successfully' after a broken change; the loop restarts it once fixed.",
+      "pitfall": "Restarting resets health_matched; downstream verify must re-wait for readiness rather than assume the old ready state."
+    },
+    {
+      "id": "devops-10",
+      "title": "Pass environment into the ProcessConfig",
+      "loop_stage": "foundation",
+      "pattern": "scoped-env-injection",
+      "intent": "Give a service the env vars it needs without polluting the global environment.",
+      "how_it_shapes_the_loop": "ProcessConfig.env carries a scoped HashMap into the spawned child, so foundation-level config flows to exactly the process that needs it.",
+      "loop_objects_touched": ["ProcessConfig", "ManagedProcess"],
+      "wiring": {
+        "inputs_from": ["config / secrets store"],
+        "outputs_to": ["spawned child environment"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the env slot opens a key/value sheet for that process.",
+        "visual": "Env keys render as small pills on the node's underside; secret values show masked."
+      },
+      "mini_scenario": "The dev server node gets NODE_ENV=development and a masked API key injected via its ProcessConfig.env.",
+      "pitfall": "Env is per-process, not inherited-plus; forgetting to include PATH-critical vars can make the child fail to find its binary."
+    },
+    {
+      "id": "devops-11",
+      "title": "Set the working directory for a service",
+      "loop_stage": "foundation",
+      "pattern": "cwd-scoped-spawn",
+      "intent": "Run a process in the correct project subdirectory.",
+      "how_it_shapes_the_loop": "ProcessConfig.cwd anchors the spawned process to a directory, so relative paths in the service resolve correctly across every loop iteration.",
+      "loop_objects_touched": ["ProcessConfig", "ManagedProcess"],
+      "wiring": {
+        "inputs_from": ["reason-stage project path"],
+        "outputs_to": ["spawned child working directory"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a folder node onto a process node sets its cwd.",
+        "visual": "The process node shows a small folder tag with the directory basename."
+      },
+      "mini_scenario": "The frontend server is pinned to cwd=./web so its relative config and asset paths resolve.",
+      "pitfall": "A missing/unreadable cwd makes spawn fail immediately; validate the path before wiring it into ProcessConfig."
+    },
+    {
+      "id": "devops-12",
+      "title": "Distinguish stdout from stderr in the tail",
+      "loop_stage": "perceive",
+      "pattern": "stream-tagged-tail",
+      "intent": "Let the agent tell normal output from error output.",
+      "how_it_shapes_the_loop": "Each LogLine carries a LogStream (Stdout/Stderr) tag, so the perceive stage can weight stderr more heavily when deciding whether the service is failing.",
+      "loop_objects_touched": ["LogLine", "LogStream"],
+      "wiring": {
+        "inputs_from": ["child stdout + stderr pipes"],
+        "outputs_to": ["perceive stage triage"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the stderr filter toggle shows only error-stream lines.",
+        "visual": "Stderr lines carry a red left-bar; the toggle badge counts unread stderr lines."
+      },
+      "mini_scenario": "A warning on stdout is ignored, but a stderr LogLine 'panic: index out of bounds' triggers a fix step.",
+      "pitfall": "Some tools log errors to stdout; don't assume stderr==error, cross-check with the log level in the content."
+    },
+    {
+      "id": "devops-13",
+      "title": "Track uptime for a running service",
+      "loop_stage": "observe",
+      "pattern": "uptime-tracking",
+      "intent": "Know how long a service has been stable.",
+      "how_it_shapes_the_loop": "ProcessSummary.uptime_secs derives from started_at, giving the observe stage a stability signal to gate long-running act steps.",
+      "loop_objects_touched": ["ProcessSummary", "ManagedProcess", "ProcessStatus"],
+      "wiring": {
+        "inputs_from": ["ManagedProcess.started_at"],
+        "outputs_to": ["observe stage stability heuristic"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the process node's clock badge shows uptime and restart count.",
+        "visual": "An uptime counter ticks upward; a recent restart resets it and briefly flashes."
+      },
+      "mini_scenario": "The server shows 240s uptime with 0 restarts, so the loop trusts it for a heavy integration test.",
+      "pitfall": "Uptime resets on restart; a high restart_count with low uptime means unstable, not fresh-and-healthy."
+    },
+    {
+      "id": "devops-14",
+      "title": "Detect a port conflict before start",
+      "loop_stage": "verify",
+      "pattern": "preflight-port-check",
+      "intent": "Fail fast when the expected port is already taken.",
+      "how_it_shapes_the_loop": "expected_port plus the reservation listener lets the verify stage detect a conflict up front instead of after a half-started process, avoiding a wasted iteration.",
+      "loop_objects_touched": ["ProcessConfig", "PortReservation", "ProcessInventory"],
+      "wiring": {
+        "inputs_from": ["expected_port", "reserved_ports inventory"],
+        "outputs_to": ["verify-stage go/no-go"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the port pin runs a bind test on that port.",
+        "visual": "A green check if free, a red X with 'in use' if the bind fails."
+      },
+      "mini_scenario": "Before starting, port 3000 fails its bind test; the loop picks 3001 instead of crashing on start.",
+      "pitfall": "A free port at check time can be taken before spawn; treat the check as advisory, not a hard guarantee."
+    },
+    {
+      "id": "devops-15",
+      "title": "Serialize a process for a session snapshot",
+      "loop_stage": "foundation",
+      "pattern": "serializable-state",
+      "intent": "Persist the fleet's shape across a session boundary.",
+      "how_it_shapes_the_loop": "ProcessSummary is Serialize/Deserialize, so the foundation layer can snapshot the fleet's config and status into a session and restore intent later.",
+      "loop_objects_touched": ["ProcessSummary", "ProcessInventory", "ProcessConfig"],
+      "wiring": {
+        "inputs_from": ["ManagedProcess registry"],
+        "outputs_to": ["session snapshot store"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the whole lane into a snapshot node freezes the fleet's serialized state.",
+        "visual": "The lane collapses into a single disk-icon card labeled with process count."
+      },
+      "mini_scenario": "A session snapshot records the two servers' configs and ports so a resumed loop knows what should be running.",
+      "pitfall": "The live Child handle is not serializable; a restored snapshot describes intent but must re-spawn to get running processes."
+    },
+    {
+      "id": "devops-16",
+      "title": "Run a one-shot build as a managed step",
+      "loop_stage": "act",
+      "pattern": "managed-oneshot",
+      "intent": "Run a finite build/test command and capture its full output.",
+      "how_it_shapes_the_loop": "A ProcessConfig with no health pattern runs to completion; its exit and log_buffer feed the verify stage a clean pass/fail with captured logs.",
+      "loop_objects_touched": ["ProcessConfig", "ProcessStatus", "LogLine"],
+      "wiring": {
+        "inputs_from": ["act-stage build command"],
+        "outputs_to": ["verify stage exit code + logs"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a build chip in and out marks it as one-shot rather than persistent.",
+        "visual": "The node shows a single-run icon and self-collapses to Stopped when the build exits."
+      },
+      "mini_scenario": "`cargo build` runs as a managed one-shot; on exit the loop reads the captured errors and the node collapses.",
+      "pitfall": "Don't set auto_restart on a one-shot; a completed build reported as Crashed would restart-loop endlessly."
+    },
+    {
+      "id": "devops-17",
+      "title": "Backoff-limit restart storms",
+      "loop_stage": "control",
+      "pattern": "cap-the-restarts",
+      "intent": "Stop a hopeless service from consuming the loop in restart churn.",
+      "how_it_shapes_the_loop": "restart_count against max_restart_attempts bounds the Restarting cycle; once exceeded the process stays Crashed, letting control escalate instead of spinning.",
+      "loop_objects_touched": ["ProcessStatus", "ManagedProcess", "ProcessConfig"],
+      "wiring": {
+        "inputs_from": ["repeated crash signals"],
+        "outputs_to": ["control escalation / ErrorRecovery"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the restart badge shows attempts used vs the cap.",
+        "visual": "The attempt counter fills a small bar; hitting the cap turns the node solid red 'Crashed'."
+      },
+      "mini_scenario": "After 5 failed restarts the node stays Crashed and control routes the failure to the agent for diagnosis.",
+      "pitfall": "Escalate on cap-reached; silently leaving a Crashed process means the loop acts against a dead service."
+    },
+    {
+      "id": "devops-18",
+      "title": "Feed compile errors from the tail into the fix loop",
+      "loop_stage": "reason",
+      "pattern": "log-to-fix",
+      "intent": "Close the loop from service output back to a code edit.",
+      "how_it_shapes_the_loop": "The bounded recent_logs of a watcher become reason-stage input, so the loop's next act (an edit) is chosen from the freshest error the process reported.",
+      "loop_objects_touched": ["LogLine", "ProcessSummary", "ManagedProcess"],
+      "wiring": {
+        "inputs_from": ["process log tail"],
+        "outputs_to": ["reason stage edit decision"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing an edge from the process log tail to the reason node routes errors into planning.",
+        "visual": "Red error lines flow along the edge into the reason node, which pulses as it ingests them."
+      },
+      "mini_scenario": "The watcher tails 'expected `;`, found `}`'; the reason node plans an edit at that file and line.",
+      "pitfall": "Tails are bounded (500 lines); a burst that scrolls the real error off the top can mislead the fix decision."
+    },
+    {
+      "id": "devops-19",
+      "title": "Keep a database connection alive across steps",
+      "loop_stage": "foundation",
+      "pattern": "persistent-dependency",
+      "intent": "Avoid reconnecting an expensive dependency every iteration.",
+      "how_it_shapes_the_loop": "A long-running DB process managed once stays Running across steps, so the foundation layer offers a stable connection rather than paying setup cost each loop.",
+      "loop_objects_touched": ["ManagedProcess", "ProcessStatus", "ProcessConfig"],
+      "wiring": {
+        "inputs_from": ["reason-stage dependency need"],
+        "outputs_to": ["act-stage queries across iterations"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the DB node pins it as a shared dependency for all act nodes.",
+        "visual": "A persistent link icon connects the DB node to the loop spine; it glows steady green."
+      },
+      "mini_scenario": "A local Postgres stays Running so each test step reuses it instead of spinning up a fresh container.",
+      "pitfall": "Persistent dependencies must still be stopped at teardown; a leaked DB process holds its port and data locks."
+    },
+    {
+      "id": "devops-20",
+      "title": "Reconcile before restoring a session",
+      "loop_stage": "verify",
+      "pattern": "reconcile-then-resume",
+      "intent": "Sync the registry with reality before trusting a restored fleet.",
+      "how_it_shapes_the_loop": "Running reconcile on resume produces a ProcessReconcileReport that prunes dead handles and reserved ports, so the resumed loop's verify stage starts from an accurate fleet.",
+      "loop_objects_touched": ["ProcessReconcileReport", "ProcessInventory", "ProcessStatus"],
+      "wiring": {
+        "inputs_from": ["restored session snapshot", "OS handles"]  ,
+        "outputs_to": ["accurate ProcessInventory", "verify stage"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the reconcile dial on resume re-scans and rebuilds the lane from live processes.",
+        "visual": "Ghosted restored nodes solidify if alive or vanish if the reconcile finds them gone."
+      },
+      "mini_scenario": "On resume, reconcile finds 1 of 2 restored servers actually dead, removes it, and frees its reserved port.",
+      "pitfall": "Trusting a raw restored snapshot skips reconcile; the loop then acts against processes that no longer exist."
+    }
+  ]
+}

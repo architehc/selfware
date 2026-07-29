@@ -1,0 +1,168 @@
+{
+  "module": "cognitive",
+  "generated": "2026-07-28",
+  "full_tokens": 113975,
+  "loop_role": "The cognitive layer is the agent's mind around the act stage: it assembles what the model sees (RAG, memory hierarchy, token budget), tracks where the loop is (PDVR cognitive state), remembers what happened (episodic memory, dream consolidation), and rewrites the loop itself (self-edit, RSI orchestration).",
+  "examples": [
+    {
+      "id": "cognitive-01",
+      "title": "Assemble LLM context through CognitiveSystem::build_context",
+      "loop_role": "Model build_context as the perceive-stage gateway node sitting between remember and plan: every loop iteration calls it with a query plus ContextBuildOptions (task_type, include_self_ref, max_tokens, force_self_improvement) and it returns an LlmContext that becomes the prompt. Wire it so the plan node never reads memory directly — it always pulls through this node.",
+      "affects": "Owns the context window object: LlmContext carries working (WorkingContext), episodic (Vec<Episode>), semantic (CodeContext), optional SelfImprovementContext, and estimated_tokens measured via estimate_tokens_with_overhead. It mutates budget state (set_task_type) and enforces the TOTAL_CONTEXT_TOKENS - 100_000 response reserve, so context size is honest accounting, not a guess.",
+      "touch_ux": "A wide funnel-shaped node colored indigo, positioned on the canvas between the memory cluster and the plan node. Inbound edges from HierarchicalMemory, TokenBudgetAllocator, and SelfReferenceSystem; one outbound edge labeled with estimated_tokens feeding the LLM call. Tap opens the LlmContext breakdown as stacked segments; pinch on the segments re-weights max_tokens live; long-press toggles force_self_improvement. Badge shows estimated_tokens vs max_tokens as a filling ring.",
+      "pointer": "src/cognitive/cognitive_system.rs::CognitiveSystem::build_context"
+    },
+    {
+      "id": "cognitive-02",
+      "title": "Allocate context budget per TaskType with TokenBudgetAllocator",
+      "loop_role": "Model the allocator as a dials node attached to the plan stage: before each iteration the loop sets TaskType (Conversation, CodeAnalysis, Debugging, SelfImprovement, ...) and the allocator converts AllocationRatios into a concrete TokenBudget via to_token_allocation. Wire adapt() to run in the evolve stage so real UsageSnapshot history reshapes future allocations.",
+      "affects": "Directly sizes every object on the loop: working_memory, episodic_memory, semantic_memory and response_reserve fields of TokenBudget cap how much context each layer may contribute. AdaptationResult and BudgetStats give the loop an auditable record of why the window was split the way it was — key for honest 'why did you forget X' answers.",
+      "touch_ux": "A circular dial node in amber with four arc segments (working/episodic/semantic/reserve) matching AllocationRatios. Dragging a segment boundary calls force_allocation; tapping cycles TaskType presets (each preset animates the arcs to its default ratios); long-press opens set_adaptation_enabled and threshold controls. Badge shows current TaskType icon plus a small 'adapting' pulse when adapt() recently fired.",
+      "pointer": "src/cognitive/token_budget.rs::TokenBudgetAllocator"
+    },
+    {
+      "id": "cognitive-03",
+      "title": "Bridge remember and perceive with HierarchicalMemory",
+      "loop_role": "Model HierarchicalMemory as the central memory bus node: the act stage pushes observations in through add/add_message/record_episode, and the next perceive stage pulls them back through retrieve_relevant and retrieve_code_context. index_codebase wires it to the workspace at session start.",
+      "affects": "Shapes tool results into durable objects: every message and episode is stored under an Importance tier and counted against MemoryUsage, and compress_if_needed plus is_within_budget give the loop a backpressure signal — when they trip, the canvas should treat context as degraded trust, not silently drop content.",
+      "touch_ux": "A three-tier stacked-cylinder node in teal, one cylinder per hierarchy level, with animated particles flowing down (store) and up (retrieve). Tap a tier to list its entries; two-finger drag between tiers triggers promote; pinch zooms from tier view into individual entries. Edges: inbound from act/tool-result nodes, outbound to CognitiveSystem.build_context. Badge shows MemoryStats counts and a red rim when is_within_budget returns false.",
+      "pointer": "src/cognitive/memory_hierarchy.rs::HierarchicalMemory"
+    },
+    {
+      "id": "cognitive-04",
+      "title": "Promote hot memories via ShortTermMemory::check_promotion",
+      "loop_role": "Model short-term memory as a buffer node on the remember stage with a promotion edge to long-term: after each act/verify cycle, check_promotion decides which WorkingMemory entries earned durability. Wire the loop so nothing reaches long-term storage without passing this gate.",
+      "affects": "Controls the half-life of tool results and evidence: entries in ShortTermMemory and WorkingMemory are cheap to query but volatile; promotion is the only path that makes an observation survive session end, so this gate directly defines what the agent can honestly claim to 'remember' later.",
+      "touch_ux": "A shallow tray node in light teal that visibly fills with entries as the loop acts; entries nearing promotion glow at the rim. Swipe up on an entry forces promote; tap inspects it; long-press calls remove or clear. A pulsing upward edge to LongTermMemory animates whenever check_promotion fires. Badge shows count vs capacity and the number of promotion candidates.",
+      "pointer": "src/cognitive/memory_hierarchy/short_term.rs::ShortTermMemory::check_promotion"
+    },
+    {
+      "id": "cognitive-05",
+      "title": "Consolidate and archive with LongTermMemory",
+      "loop_role": "Model LongTermMemory as the deep-storage node at the bottom of the remember stage: it receives promoted entries, answers query calls during perceive, and runs consolidate during the evolve stage (or dream phase) to merge and dedupe. ArchiveMemory hangs off it as the cold-storage sink.",
+      "affects": "Defines the agent's long-horizon evidence base: store/retrieve/update/remove operate on durable entries, and consolidate shrinks the store so retrieval stays relevant and cheap — a bloated long-term store degrades every future context window the loop builds.",
+      "touch_ux": "A deep vault node in dark teal, rendered below ShortTermMemory with the promotion edge feeding its top. Tap opens a searchable entry list; pinch zooms a timeline of entry ages; long-press triggers consolidate with a before/after count animation. A thin downward edge leads to an ArchiveMemory drawer node. Badge shows entries count and last-consolidation timestamp.",
+      "pointer": "src/cognitive/memory_hierarchy/long_term.rs::LongTermMemory::consolidate"
+    },
+    {
+      "id": "cognitive-06",
+      "title": "Record loop episodes with episodic EpisodicMemory",
+      "loop_role": "Model Episode capture as the remember-stage scribe: each completed loop iteration ends with add_episode carrying an EpisodeType, Importance, EpisodeOutcome, and tags built via with_outcome/with_tag. The plan stage of later iterations queries it through relevance_score-ranked search so past outcomes bias new plans.",
+      "affects": "Turns raw loop history into ranked evidence: recency_score and relevance_score decide which past episodes surface into the context window, and Pattern extraction (PatternType) lets the loop cite 'this failed twice before' as concrete evidence instead of vibes — a trust primitive for plan justification.",
+      "touch_ux": "A filmstrip node in coral, each frame an Episode with an EpisodeType glyph and Importance-driven saturation. Scrubbing horizontally moves through time; tap a frame expands searchable_text and outcome; long-press retags importance. Outbound edges to the plan node are labeled with relevance_score. Badge shows episode count and the Session active/ended state.",
+      "pointer": "src/cognitive/episodic.rs::Episode"
+    },
+    {
+      "id": "cognitive-07",
+      "title": "Gate dream consolidation with DreamTrigger's three gates",
+      "loop_role": "Model the dream system as a scheduler node attached to the evolve stage: should_run_dream_check_gates only fires when all three gates pass (24h elapsed, 5 sessions recorded via record_session_end, consolidation lock acquired). Wire session teardown to record_session_end and loop startup to the gate check.",
+      "affects": "Regulates memory bloat and contradiction, which is a trust property: the four DreamPhase steps (Orient, Gather, Consolidate, Prune & Index) cap MEMORY.md at 200 lines / 25KB and prune entries stale beyond 90 days, so the memory injected into future context windows stays honest instead of growing unbounded and self-contradictory.",
+      "touch_ux": "A moon-icon node in deep purple that sits dormant at the canvas edge. Its badge shows the three gates as three small lights (hours_until_next, sessions_until_next, lock free) that turn green as they pass; when all three light up the node glows and offers a 'dream now' tap target. Long-press opens DreamConfig editing; during a run, a progress ring sweeps through the four DreamPhase labels.",
+      "pointer": "src/cognitive/dream.rs::should_run_dream"
+    },
+    {
+      "id": "cognitive-08",
+      "title": "Run AutoDream as a background loop process",
+      "loop_role": "Model dream_subprocess as an off-loop worker: check_and_spawn_autodream runs at session end, spawn_autodream forks the consolidation subprocess, and the main loop continues unblocked while AutoDreamHandle tracks it (is_running, wait_with_timeout, kill). get_dream_status feeds the result back into the next session's perceive stage.",
+      "affects": "Keeps consolidation cost off the interactive loop's budget: the dream burns tokens in a separate process configured via AutoDreamConfig (with_model, with_endpoint), so the main loop's TokenBudget is untouched — but the loop must honestly surface DreamStatus so the user knows memory changed between sessions.",
+      "touch_ux": "A satellite node orbiting the moon (DreamTrigger) node, connected by a dashed 'subprocess' edge. While running, the satellite spins and its badge shows elapsed time against wait_with_timeout; tap shows live DreamStatus; swipe down kills it (kill) with a confirmation; a green check badge appears when wait_with_timeout completes cleanly. Spawned state is visually distinct from idle so users never mistake a running dream for a hung loop.",
+      "pointer": "src/cognitive/dream_subprocess.rs::spawn_autodream"
+    },
+    {
+      "id": "cognitive-09",
+      "title": "Inject consolidated memory via MemorySystem::format_for_prompt",
+      "loop_role": "Model MemorySystem as a perceive-stage injector: at loop startup, discover and load_consolidated_memory find MEMORY.md, workspace guidance, and consolidated files, then format_for_prompt renders them into the system prompt. DreamIntegratedMemorySystem couples it to dream_status so the loop knows how fresh the injected memory is.",
+      "affects": "Adds a persistent, file-backed layer to the context window that survives process restarts — unlike HierarchicalMemory this is plain markdown, so it is cheap in tokens but must be kept small (dream pruning exists precisely because this text lands in every prompt). force_dream gives the user a manual trust-repair lever when the files drift.",
+      "touch_ux": "A document-stack node in parchment yellow pinned near the perceive stage, with one sheet per MemoryFile/WorkspaceGuidanceFile. Tap flips through sheets rendered as markdown; a small moon glyph on the stack shows dream freshness from dream_status (green after a recent dream, gray when stale); long-press triggers force_dream. Badge shows total injected token estimate from format_consolidated_for_prompt.",
+      "pointer": "src/cognitive/memory_system.rs::DreamIntegratedMemorySystem"
+    },
+    {
+      "id": "cognitive-10",
+      "title": "Drive the PDVR cycle with CognitiveState",
+      "loop_role": "Model CognitiveState as the spine of the whole canvas: cycle_phase (CyclePhase::Plan → Do → Verify → Reflect) is advanced by advance_phase, and the three plan levels — StrategicGoal, TacticalPlan, OperationalPlan with PlanStep/StepStatus — map directly onto plan and act stages. Because WorkingMemory 'survives compression', wire it as the authoritative loop state that context compression must never drop.",
+      "affects": "This is the checkpoint object: load/save persist the full state to JSON, upsert_strategic_goal/set_active_tactical_plan/set_operational_plan structure intent, and start/complete/fail_operational_step attach per-step StepStatus and notes — giving the loop verifiable evidence of what was planned vs done, the substrate for honest status reporting.",
+      "touch_ux": "A large circular cycle node at canvas center with four quadrant segments (Plan/Do/Verify/Reflect), the active quadrant highlighted in blue. Inside the ring, three concentric rings render strategic/tactical/operational plans; tap a PlanStep marks it or shows its notes; swipe clockwise calls advance_phase; long-press a failed step (red StepStatus) offers retry or replan. Badge shows current phase name and count of InProgress vs Failed steps.",
+      "pointer": "src/cognitive/state.rs::CognitiveState"
+    },
+    {
+      "id": "cognitive-11",
+      "title": "Run the RSI outer loop with RSIOrchestrator",
+      "loop_role": "Model RSIOrchestrator as a meta-loop node wrapping the entire evolve stage: run_loop repeatedly selects self-improvement targets, applies them in a sandbox, and benchmarks — while stop, max_iterations_per_run, and the consecutive-failure circuit breaker bound it. Wire its inputs from SelfEditOrchestrator, MetaLearner, and MetricsStore.",
+      "affects": "Directly a budget and trust object: each iteration runs two paid e2e benchmark suites, so max_iterations_per_run (default 10, env SELFWARE_RSI_MAX_ITERATIONS_PER_RUN) is literally a cost ceiling, and RSIState persisted atomically to .selfware/rsi_state.json makes the loop resumable and auditable — consecutive_failures tripping the breaker is the loop honestly admitting it is not improving.",
+      "touch_ux": "A thick orbital ring node in red-orange encircling the normal loop, with tick marks for total_iterations. The badge shows 'iteration n/max' and a circuit-breaker meter filling toward 5 consecutive failures (flashing when close). Tap pauses via stop; pinch sets max_iterations_per_run; long-press shows the restored RSIState and state file path. Edges run inward to SelfEditOrchestrator and MetricsStore.",
+      "pointer": "src/cognitive/rsi_orchestrator.rs::RSIOrchestrator"
+    },
+    {
+      "id": "cognitive-12",
+      "title": "Select and apply self-edits with SelfEditOrchestrator",
+      "loop_role": "Model SelfEditOrchestrator as the act stage of the self-improvement sub-loop: analyze_self and select_target produce ImprovementTargets ranked by priority = impact * confidence, build_improvement_prompt drafts the change, and apply_target_in_sandbox executes it. Wire evaluate and record_result into the verify stage so ImprovementStatus flows Proposed → InProgress → Verified/RolledBack.",
+      "affects": "Turns loop telemetry into concrete mutations: ImprovementSource (CodeSmell, ErrorPattern, MetricsRegression, LLMReflection) tags each target with its evidence, ImprovementRecord and AppliedMutation form an audit trail in history, and the status machine makes rollback a first-class outcome — the honesty contract for self-modification.",
+      "touch_ux": "A scalpel-and-crosshair node in magenta. Tap opens a ranked deck of ImprovementTarget cards sorted by priority, each showing its ImprovementSource icon and impact/confidence bars; swipe right approves (Proposed → Approved), swipe left rejects. A dashed edge leads to the CompilationSandbox node when apply_target_in_sandbox runs. Badge shows counts per ImprovementStatus, with RolledBack items rendered as ghost cards.",
+      "pointer": "src/cognitive/self_edit.rs::SelfEditOrchestrator"
+    },
+    {
+      "id": "cognitive-13",
+      "title": "Verify mutations in a CompilationSandbox",
+      "loop_role": "Model CompilationSandbox as the verify-stage gate for every self-edit: check, test, and verify run the candidate code in an isolated work_dir, and only a passing CompileResult lets the mutation leave the sandbox. Wire cleanup to fire on both success and failure paths.",
+      "affects": "This is the trust boundary of self-modification: CompileResult is the typed evidence that a mutation actually compiles and passes tests before touching the real tree — no green badge should ever be rendered without one, matching the repo rule that success must name what was verified.",
+      "touch_ux": "A glass-walled chamber node in steel gray; an incoming mutation card visibly enters the chamber, and three sequential check-lights (check/test/verify) animate. Green chamber glow means CompileResult passed, red cracks mean failure with the card bounced back along a rollback edge. Tap shows the full CompileResult log; long-press runs cleanup manually. Badge shows pass/fail of the last verification.",
+      "pointer": "src/cognitive/compilation_manager.rs::CompilationSandbox"
+    },
+    {
+      "id": "cognitive-14",
+      "title": "Weight improvement strategies with MetaLearner",
+      "loop_role": "Model MetaLearner as the evolve-stage strategist: after each RSI iteration, update_weights ingests outcomes and analyze_strategies recomputes StrategyScore per strategy, and weight_priority biases which improvement strategy the next iteration tries first. Wire in_cooldown as a suppressor edge so losing strategies back off automatically.",
+      "affects": "Shapes future loop behavior rather than current context: StrategyScore.success_rate and priority_weight determine which kinds of self-edits consume the (expensive) RSI budget, so meta-learning is the mechanism that keeps the evolve stage cost-effective instead of retrying failing approaches.",
+      "touch_ux": "A balance-scale node in violet, each pan holding strategy chips sized by priority_weight. Chips in cooldown render with a frost overlay and countdown; tap a chip shows its StrategyScore history; dragging a chip between pans manually adjusts weights. An inbound edge from MetricsStore feeds outcomes. Badge shows the current top strategy and its success_rate.",
+      "pointer": "src/cognitive/meta_learning.rs::MetaLearner"
+    },
+    {
+      "id": "cognitive-15",
+      "title": "Learn from prompts, tools, and errors with SelfImprovementEngine",
+      "loop_role": "Model SelfImprovementEngine as three parallel learner nodes on the reflect stage: PromptOptimizer records PromptRecords and evolves prompts (evolve_prompt, best_patterns_for), ToolSelectionLearner turns ToolUsageRecords into ToolStats for the act stage's tool choices, and ErrorPatternLearner matches new failures against ErrorPatterns to emit ErrorWarnings before the loop repeats a known mistake.",
+      "affects": "Closes the loop on its own behavior: PromptTournamentResult and PromptVariantScore give measurable prompt deltas, ToolStats bias which tools get invoked (changing tool results downstream), and ErrorWarning injects preemptive caution into the plan stage — each learner converts loop exhaust into better future context and actions.",
+      "touch_ux": "A tri-lobed node, each lobe a different color (blue prompt, green tool, red error) with its own glyph. Tap a lobe drills into that learner's stats (PromptOptimizerStats, ToolLearnerStats, ErrorLearnerStats); the error lobe pulses when an ErrorWarning fires and draws a caution edge to the plan node. Pinch collapses the lobes into one aggregate ImprovementStats badge showing records processed.",
+      "pointer": "src/cognitive/self_improvement.rs::SelfImprovementEngine"
+    },
+    {
+      "id": "cognitive-16",
+      "title": "Retrieve code context with RagEngine and FileWatcher",
+      "loop_role": "Model RagEngine as the perceive-stage retriever for user code: build_index at session start, update_index incrementally as FileWatcher.scan_changes reports FileChanges, and retrieve/context_for_files answer each loop iteration's query with RetrievedContext ranked by score. Wire RagConfig.min_score and top_k as the quality gate on what enters the window.",
+      "affects": "Fills the semantic slice of the context window within budget: RagConfig.max_context_tokens (default 8000) and max_chunk_tokens bound how much retrieved code competes with memory layers, token estimates go through estimate_content_tokens (measured, not heuristic), and dedup_threshold keeps near-duplicate chunks from wasting the window.",
+      "touch_ux": "A radar-dish node in sky blue that periodically sweeps (the sweep animates on scan_changes). Tap shows the last RetrievedContext list with per-chunk score bars; dragging the min_score slider live-filters which chunks would have been admitted; long-press rebuilds the index (build_index). Inbound edges from changed files (FileChange), outbound edge to build_context labeled with actual tokens. Badge shows RagStats: indexed_files count and tracked_count.",
+      "pointer": "src/cognitive/rag.rs::RagEngine"
+    },
+    {
+      "id": "cognitive-17",
+      "title": "Mine code smells from the KnowledgeGraph",
+      "loop_role": "Model KnowledgeGraph as an offline analysis node feeding the evolve stage: RustEntityExtractor builds Entities and Relations from the codebase, SmellDetector produces CodeSmellInstances, and PatternRecognizer plus SemanticLinker enrich the graph. Wire smell output as ImprovementSource::CodeSmell inputs to SelfEditOrchestrator so analysis becomes actionable targets.",
+      "affects": "Provides the evidence layer for self-improvement proposals: every CodeSmellInstance carries a location and smell kind (CodeSmell enum), and Pattern confidence values let the loop rank what to fix — this keeps improvement proposals grounded in detected structure rather than LLM whim.",
+      "touch_ux": "A constellation node in graphite: entities are stars, RelationType edges are connecting lines, and smells appear as pulsing red halos on affected stars. Tap a star shows the Entity with documentation and signature; tap a halo shows the CodeSmellInstance with a 'promote to improvement target' button that spawns an edge to the SelfEditOrchestrator node. Pinch zooms from file-level to symbol-level clusters. Badge shows entity count and open smell count.",
+      "pointer": "src/cognitive/knowledge_graph.rs::SmellDetector"
+    },
+    {
+      "id": "cognitive-18",
+      "title": "Scale detail to the user with CognitiveLoadReducer",
+      "loop_role": "Model CognitiveLoadReducer as the presentation-stage companion of the loop: it does not change what the loop does, it changes how loop output is rendered — DetailLevel (more_detail/less_detail) controls ProgressiveContent depth, FocusMode and DistractionFilter hide everything except the FocusArea the user is working on, and SimplifiedView offers SuggestedActions instead of raw dumps.",
+      "affects": "Protects the human side of the loop budget: while TokenBudgetAllocator manages model tokens, this manages user attention — ContextSummary and Priority-ranked FocusItems decide which evidence, errors, and checkpoints the user actually sees, so verbosity never buries the one failing step that matters.",
+      "touch_ux": "This node IS the touch layer's native idiom: a lens node in soft gray. Pinch in/out maps directly to more_detail/less_detail, re-rendering all other nodes' labels at the new DetailLevel; tap toggles FocusMode on the currently selected node, dimming Distractions; long-press shows SuggestedActions for the focused item. Badge shows the active DetailLevel and count of filtered distractions.",
+      "pointer": "src/cognitive/load.rs::CognitiveLoadReducer"
+    },
+    {
+      "id": "cognitive-19",
+      "title": "Gate self-modification through SelfReferenceSystem",
+      "loop_role": "Model SelfReferenceSystem as the loop's self-awareness and safety interlock: read_own_code (SourceRetrievalOptions) lets the perceive stage inspect the agent's own source, ModificationEngine.propose/validate/execute runs every self-change through a validation gate, and protect/is_protected marks untouchable files. Wire track_modification into the remember stage so the SelfModel stays accurate.",
+      "affects": "This is the honesty backbone for self-reference: ProposedModification carries explicit reasoning and RiskLevel, ValidationResult is typed evidence before execute, and the SelfModel (modules, capabilities) plus get_recent_modifications let the agent truthfully answer 'what are you and what have you changed about yourself' instead of confabulating.",
+      "touch_ux": "A mirror-shaped node in silver with a padlock clasp. Tap reflects the SelfModel (capabilities and module list); attempting to drag an edit onto a protected file bounces off with a lock animation (is_protected); long-press a ProposedModification shows reasoning and RiskLevel color (green→red) before an explicit execute gesture. Edges: inbound from plan (proposals), outbound to CompilationSandbox (validation). Badge shows ReferenceLevel and count of unvalidated proposals.",
+      "pointer": "src/cognitive/self_reference.rs::SelfReferenceSystem"
+    },
+    {
+      "id": "cognitive-20",
+      "title": "Teach the user with the learning mode curriculum",
+      "loop_role": "Model the learning module as a side-loop attached to the reflect stage: CodeExplainer turns the code the loop just touched into CodeExplanations at a chosen ExplanationLevel, ConceptExtractor harvests Concepts into a Curriculum with prerequisites, and QuizGenerator checks understanding with QuizQuestions — wire it to activate when the user switches the session into education mode.",
+      "affects": "Changes the loop's output objects rather than its state: Lesson, Exercise, and QuizResult become first-class artifacts alongside code changes, Difficulty ordering and prerequisite edges in the Curriculum sequence what the user sees, and history tracks which concepts are known so explanations do not repeat — the loop optimizes for user comprehension, not just task completion.",
+      "touch_ux": "A graduation-cap node in warm orange attached to the reflect quadrant by a dotted 'explain' edge. Tap explains the currently selected code node (inline speech-bubble overlay at the active ExplanationLevel); swipe up/down raises or lowers Difficulty; pinch on the Curriculum shows the concept dependency graph with known concepts filled in; long-press starts a Quiz as a modal card deck. Badge shows concepts known vs total in the active Curriculum.",
+      "pointer": "src/cognitive/learning.rs::CodeExplainer"
+    }
+  ]
+}

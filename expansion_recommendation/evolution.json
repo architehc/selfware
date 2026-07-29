@@ -1,0 +1,168 @@
+{
+  "module": "evolution",
+  "generated": "2026-07-28",
+  "full_tokens": 33631,
+  "loop_role": "The self-improvement meta-loop: it runs outside the per-task agent loop and evolves the agent itself by mutating its source, compile-gating every mutation, scoring survivors against SAB fitness, and committing only verified winners.",
+  "examples": [
+    {
+      "id": "evolution-01",
+      "title": "Model the daemon as a super-loop around the agent loop",
+      "loop_role": "`evolve` is a full outer loop that maps cleanly onto the same six stages: perceive (telemetry capture) → plan (hypothesis generation) → act (apply patch in shadow worktree) → verify (fmt/check/test/clippy gates, then SAB) → remember (hall_of_fame + git-tag checkpoints) → evolve (commit the tested diff as the new baseline). Model it as a loop node that contains the inner agent loop as a sub-node — each generation spawns `population_size` inner loops in worktrees and selects one survivor.",
+      "affects": "Reads and rewrites the codebase itself, so its objects are `Hypothesis` patches, `FitnessMetrics` snapshots, and `GenerationWinner` checkpoints rather than tool results. It mutates the trust state of the whole system: only a winner whose `composite` score beats the baseline AND passes `winner_test_count_gate` may update the baseline. Budget is bounded by `DEFAULT_TOKEN_BUDGET` (500k) and `DEFAULT_TIMEOUT_SECS` (3600) per generation.",
+      "touch_ux": "Render as a large segmented ring (the generation cycle) that encloses miniature agent-loop nodes, one per hypothesis. Live badge shows current generation number and baseline composite score. Tap a segment to zoom into that generation's pipeline; pinch-out returns to the hall-of-fame timeline. A pulsing gold segment marks the active generation; committed generations glow green (BLOOM), rejected ones are greyed out (FROST).",
+      "pointer": "src/evolution/daemon.rs::evolve"
+    },
+    {
+      "id": "evolution-02",
+      "title": "Feed telemetry as the perceive-stage gradient signal",
+      "loop_role": "`telemetry::capture` is the perceive stage of the evolution loop: before hypotheses are generated, it profiles the repo (`capture_cpu_hotspots`, `capture_allocation_profile`, `capture_benchmark_deltas`, `capture_test_summary`) into a `TelemetrySnapshot`. Wire its output directly into the plan stage — the snapshot is what turns blind mutation search into gradient-guided search aimed at real `CpuHotspot` functions.",
+      "affects": "Produces evidence objects (`CpuHotspot` with cpu_percent/call_count/avg_duration_us, `AllocationHotspot` with allocs_per_call/peak_live_bytes, `BenchmarkDelta` with delta_percent, `TestSummary`) that become the empirical grounding for every plan-stage decision. Without it the LLM mutates blindly; with it, hypotheses cite measurable bottlenecks. Failure degrades gracefully — `evolve` calls `.ok()` and proceeds with an empty prompt, an honest-degradation pattern worth surfacing in the UI.",
+      "touch_ux": "A radar/flame-graph hybrid node in 'perceive' position feeding the hypothesis generator. Heat-colored cells per hotspot function (red = high cpu_percent, orange = allocation churn). Tap a cell to pin that hotspot as the target for the next generation; long-press shows the raw `BenchmarkDelta` numbers with 🔴/🟢 trend icons. Badge: count of active hotspots and worst regression delta_percent.",
+      "pointer": "src/evolution/telemetry.rs::capture"
+    },
+    {
+      "id": "evolution-03",
+      "title": "Inject telemetry into context with to_agent_prompt",
+      "loop_role": "`to_agent_prompt` is the context-window bridge between perceive and plan: it serializes the `TelemetrySnapshot` into a capped (~4KB buffer) natural-language section with top-10 CPU hotspots, top-5 allocation hotspots, and benchmark deltas. In a modeled loop it is the 'compress evidence for the planner' edge — treat it as a lossy projection node whose output token cost is bounded and predictable.",
+      "affects": "Directly shapes the context window of the hypothesis-generating LLM: only the top N entries survive, so it trades completeness for budget safety (`String::with_capacity(4096)`). The 🔴 SLOWER / 🟢 FASTER / ⚪ STABLE thresholds (±2%) define which benchmark deltas even register as signal, so objects below the threshold are invisible to the planner — an intentional information-forgetting policy.",
+      "touch_ux": "Show as a funnel-shaped node on the edge between the telemetry radar and the prompt assembler, with a visible 'top-10 / top-5' cut line. Pinch on the funnel adjusts the take-N limits (conceptually); tap reveals the exact prompt text the LLM will see. Badge: rendered prompt size in KB so the user sees the context cost of perception at a glance.",
+      "pointer": "src/evolution/telemetry.rs::to_agent_prompt"
+    },
+    {
+      "id": "evolution-04",
+      "title": "Assemble the mutation plan with build_system_prompt and build_user_prompt",
+      "loop_role": "These two functions are the plan stage's prompt factory: `build_system_prompt(population_size)` fixes the mutation contract (JSON schema, protected-path rules), and `build_user_prompt(telemetry, history, source_context)` stitches the perceive output, the hall-of-fame history, and `read_mutation_targets` source context into one request. In loop modeling, place them as the composition node where perceive (telemetry) and remember (history) edges converge before the LLM call.",
+      "affects": "Determines the entire context window of the planner: source context is capped (`MAX_TOTAL_SOURCE_CHARS` at 896) and line-numbered (`add_line_numbers`) so the LLM's search-and-replace edits can be validated against numbered lines. The history edge carries only surviving `GenerationWinner` descriptions, so the planner's memory is biased toward what worked — a selection-pressure object, not a full log.",
+      "touch_ux": "A document-stack node where three colored edges (telemetry blue, history gold, source green) merge. Tap flips through the stack to inspect each section's token share; long-press edits the section budget allocation. Badge: total prompt characters vs the source-char cap, turning amber as it approaches the limit.",
+      "pointer": "src/evolution/daemon.rs::build_user_prompt"
+    },
+    {
+      "id": "evolution-05",
+      "title": "Parse LLM output defensively with parse_hypotheses_response",
+      "loop_role": "`parse_hypotheses_response` is the plan→act boundary validator: it extracts `Hypothesis` structs (id, description, patch, target_files, property_test) from raw LLM text. Wire it as a filter node on the plan edge — malformed or empty responses yield zero hypotheses, and `evolve` responds with a 5-second backoff and retry rather than crashing, which the loop model should represent as a retry edge back to plan.",
+      "affects": "Protects downstream objects from garbage: only structurally valid `Hypothesis` values reach the act stage, so worktrees, sandboxes, and the token budget are never spent on unparseable plans. This is the honesty boundary for LLM output — the system never pretends a truncated JSON array is a plan; an empty generation is logged and retried, not faked.",
+      "touch_ux": "A sieve-shaped node between the LLM call and the worktree spawner, tinted by parse health: green when all hypotheses parse, amber for partial, red with a retry-count badge when empty. Tap shows rejected raw fragments with the reason; the retry edge animates as a looping arrow with the 5s backoff timer visible.",
+      "pointer": "src/evolution/daemon.rs::parse_hypotheses_response"
+    },
+    {
+      "id": "evolution-06",
+      "title": "Gate mutations through the compiler with AstMutationResult::error_prompt",
+      "loop_role": "`AstMutationResult` models the compile-gate micro-loop inside the verify stage: a mutation either compiles (`success: true`, carries `diff` and `worktree_path`) or returns `compile_failed`/`not_found` with structured `CompilerDiagnostic` spans. `error_prompt()` formats those diagnostics back into agent-readable text — wire it as the verify→plan feedback edge so the next hypothesis attempt sees exactly which file:line:column the compiler rejected.",
+      "affects": "Turns compiler errors into first-class evidence objects with primary spans and labels instead of opaque stderr, keeping the feedback loop honest: the agent sees the real rejection reason prefixed with 'FROST ❄️'. It also bounds wasted budget — invalid mutations die at `cargo check` before consuming sandbox or SAB evaluation cycles, which the module docs call 'the laws of physics that prune invalid mutations'.",
+      "touch_ux": "A hexagonal gate node on the verify edge; passing mutations flow through green, rejected ones bounce back along a red feedback edge carrying the formatted diagnostic. Tap the gate to see the `CompilerDiagnostic` list with file:line:column chips; long-press pins a rejection into the visible working set so the user watches the agent correct it. Badge: compile-failure count this generation.",
+      "pointer": "src/evolution/ast_tools.rs::AstMutationResult::error_prompt"
+    },
+    {
+      "id": "evolution-07",
+      "title": "Isolate every mutation in a shadow worktree",
+      "loop_role": "`create_shadow_worktree` (and its named variant) is the act stage's isolation primitive: each hypothesis gets a detached `git worktree` under `.worktrees/evolution-*` so mutation, fmt, check, and test never touch the real working tree. In the loop model, draw one worktree node per hypothesis fanning out from the act stage, with `cleanup_worktree` (or the daemon's `WorktreeGuard`) as the guaranteed collapse edge on every outcome — success, skip, or panic.",
+      "affects": "Keeps the user's working tree and checkpoints untouched while mutations run — the trust invariant is that a FROST generation leaves zero residue (the `WorktreeGuard` was added precisely because panics used to leak worktrees). The tested diff is captured from the worktree (`capture_tested_diff`) so the committed bytes exactly equal the tested bytes, including the fmt auto-fix — no drift between evidence and checkpoint.",
+      "touch_ux": "Render each worktree as a translucent clone of the repo node orbiting the main repo; the tested diff shows as a glowing thread pulled from worktree back to repo only on BLOOM. Tap a worktree to diff it against HEAD; swipe it away to force cleanup. Badge: live worktree count under `.worktrees/` — it should always drain to zero at generation end.",
+      "pointer": "src/evolution/ast_tools.rs::create_shadow_worktree"
+    },
+    {
+      "id": "evolution-08",
+      "title": "Run parallel selection with run_tournament",
+      "loop_role": "`run_tournament` is the act/verify stage executed as a bracket: all `Hypothesis` values are evaluated concurrently in sandboxes with a `Semaphore` capping parallelism at `TournamentConfig.max_parallel` (default 4), then ranked by composite fitness into `HypothesisResult` values. Model it as a fan-out/fan-in node: the semaphore is the concurrency throttle edge, and the sort-by-fitness is the selection edge into remember/evolve.",
+      "affects": "Each `HypothesisResult` carries the full evidence chain — `compiled`, `sandbox_result`, `sab_result`, `fitness`, `composite_score`, `rating`, and the original `patch` — so selection is auditable, not a bare winner announcement. The semaphore directly bounds resource budget (CPU/memory per `SandboxConfig`), and the per-hypothesis `timeout` (default 1h) bounds wall-clock budget.",
+      "touch_ux": "A tournament bracket visualization: hypothesis cards enter from the left, pair off through sandbox lanes, losers dim to grey FROST cards, the winner card enlarges with its composite_score. Pinch zooms between bracket overview and a single lane's sandbox output. Live badge: semaphore slots in use (e.g. '3/4 sandboxes') and elapsed time against the timeout ring.",
+      "pointer": "src/evolution/tournament.rs::run_tournament"
+    },
+    {
+      "id": "evolution-09",
+      "title": "Evaluate hypotheses in throwaway Docker sandboxes",
+      "loop_role": "`Sandbox::create`/`apply_patch`/`evaluate`/`destroy` form the verify stage's hermetic environment: the repo is copied (excluding `target/`, which is bind-mounted for cache) into a temp dir mounted read-write at `/workspace`, the patch is applied there, and compile+test run inside a network-disabled container. Wire it as the isolated verify node — `is_expired` plus `destroy` guarantee the environment is ephemeral regardless of outcome.",
+      "affects": "`SandboxConfig` (cpus '2', memory '4g', network false, 1h timeout) is the hard budget envelope for verification, and `SandboxResult` is the evidence object: `compiled`, `tests_passed`/`tests_total`, `peak_memory_bytes`, `exit_code`, plus full stdout/stderr for audit. Because the real repo is never mounted writable, sandbox evaluation cannot corrupt checkpoints — the trust boundary is structural, not promised.",
+      "touch_ux": "A container-shaped node with a visible resource gauge ring (CPU/memory from `SandboxConfig`) and a network-icon struck through. Inside it, stream `ExecResult` output live. Tap expands stdout/stderr panes; long-press offers 'destroy now'. Badge: peak_memory_bytes vs the 4g limit, plus a countdown to the timeout.",
+      "pointer": "src/evolution/sandbox.rs::Sandbox::create"
+    },
+    {
+      "id": "evolution-10",
+      "title": "Score candidates with the Meta-SAB fitness function",
+      "loop_role": "`run_sab` is the heavyweight verify stage: it shells out to the SAB runner (`system_tests/projecte2e/run_full_sab.sh`) against the mutated release binary and parses the JSON report into `SabResult` with per-scenario `ScenarioScore` values (difficulty, score, tests_passed, tokens_used, duration). Model it as the gold-standard evidence node that only activates when `SELFWARE_EVOLVE_SAB` is set — the daemon otherwise falls back to compile+test metrics, and the loop model should show both verify paths explicitly.",
+      "affects": "Produces the `sab_score` that dominates fitness (weight 0.50 in `FitnessWeights::default`), and `build_fitness_metrics` folds it with real binary size and test counts into `FitnessMetrics`. Honesty behavior: if the SAB run fails, `FitnessError::SabRunFailed` propagates and the daemon logs a warning and falls back — the UI must show which evidence source a score came from, since a synthetic-baseline score is not comparable to a real SAB score.",
+      "touch_ux": "A trophy-pedestal node holding 12 scenario tiles colored by `Difficulty` (Easy→Expert gradient). Tap a tile for its `ScenarioScore` breakdown; the aggregate_score sits on top with its derived `GenerationRating` flower. Badge: 'SAB' vs 'compile+test' evidence-source label so the user always knows what the number means, plus wall_clock against the 30+ minute expectation.",
+      "pointer": "src/evolution/fitness.rs::run_sab"
+    },
+    {
+      "id": "evolution-11",
+      "title": "Rank generations with FitnessWeights::composite and fitness_delta",
+      "loop_role": "`FitnessWeights::composite` is the evolve stage's scalarization function: it normalizes each `FitnessMetrics` dimension (sab_score, token efficiency vs budget, latency vs timeout, coverage, binary size, visual score) and returns one comparable number; `fitness_delta` is the signed edge between two generations. Model these as the comparator node where the candidate's metrics edge meets the baseline's metrics edge — the sign of the delta decides commit vs rollback.",
+      "affects": "Defines what 'better' means for every object on the loop: token efficiency is measured as `1 - tokens_used/token_budget`, so it directly prices context-window spend into fitness; binary bloat and coverage regressions pull the composite down even when SAB improves. Default weights (0.50/0.25/0.15/0.05/0.05, visual opt-in at 0.0) sum to 1.0, so the UI can show exactly which dimension moved a decision — the selection is explainable, not a black box.",
+      "touch_ux": "A balance-scale node with six weighted arms labeled per `FitnessWeights` field; the needle shows the composite delta sign. Dragging an arm's weight (in a what-if mode) re-computes the delta live without touching the real config. Tap the needle for the per-dimension normalized breakdown. Badge: signed delta (e.g. '+3.2') in green or red.",
+      "pointer": "src/evolution/mod.rs::FitnessWeights::composite"
+    },
+    {
+      "id": "evolution-12",
+      "title": "Badge every outcome with GenerationRating",
+      "loop_role": "`GenerationRating` (Bloom/Grow/Wilt/Frost) is the trust-state vocabulary of the whole evolution loop: `rating_from_score` maps composite scores (85+/60+/30+ bands) onto garden-metaphor outcomes, and the daemon logs `log_bloom`/`log_frost` per generation. Use it as the canonical status enum on every evolve-stage edge — commit edges carry BLOOM, rollback edges carry FROST, and marginal survivors carry GROW/WILT without a commit.",
+      "affects": "Gives honest, non-binary semantics to outcomes: WILT means 'below baseline but within tolerance' — visible degradation, not hidden failure — and FROST covers compile failure explicitly so a generation that never ran is never painted as a neutral result. The rating is stored in `SabResult.rating` and `HypothesisResult.rating`, so evidence objects carry their own trust label end to end.",
+      "touch_ux": "The primary color language of the canvas: BLOOM 🌸 pink, GROW 🌿 green, WILT 🥀 amber, FROST ❄️ blue-grey. Every generation ring segment, hypothesis card, and hall-of-fame entry uses this palette, so the user reads run health by color alone. Tap the flower badge on any node for the exact score band that produced it.",
+      "pointer": "src/evolution/mod.rs::GenerationRating"
+    },
+    {
+      "id": "evolution-13",
+      "title": "Enforce the cardinal invariant with is_protected",
+      "loop_role": "`PROTECTED_PATHS` + `is_protected` are the trust boundary drawn around the loop itself: `src/evolution/`, `src/safety/`, `system_tests/`, `benches/sab_`, and `tests/` can never be mutated, so the agent cannot rewrite its own fitness function or weaken the tests that judge it. Model it as a shield ring around the act stage — every mutation edge must pass through it before a worktree is even created.",
+      "affects": "Prevents reward hacking structurally: because `tests/` and `benches/` are protected, a mutation cannot inflate its own `FitnessMetrics` by deleting tests or softening benchmarks. The check canonicalizes paths via `crate::safety::checker::normalize_path` so symlink, `..`, and Windows UNC tricks cannot bypass it — the trust guarantee holds against adversarial path construction, not just honest mistakes.",
+      "touch_ux": "A red shield ring encircling the protected subtree of the repo map; any mutation edge that touches it is severed with a visible 'rejected' stamp. Tap the ring lists the five protected prefixes and shows the canonicalization trace for a rejected path. Badge: count of protected-path rejections this run — a non-zero count is a signal worth staring at, not noise.",
+      "pointer": "src/evolution/mod.rs::is_protected"
+    },
+    {
+      "id": "evolution-14",
+      "title": "Audit the patch, not the metadata, with patch_edited_paths",
+      "loop_role": "`patch_edited_paths` + `hypothesis_touches_protected` are the honesty layer of the safety filter: the LLM-declared `Hypothesis.target_files` list is untrusted free-form metadata, so the daemon parses the actual payload — every `file` field in search-and-replace JSON edits and every `+++ b/<path>` / `--- a/<path>` header in unified diffs — and gates on that. Wire it as an audit node sitting between plan and act, labeled 'verify claims against payload'.",
+      "affects": "Closes a concrete trust hole: a hypothesis with an empty or benign `target_files` array previously passed the filter while its patch edited anything in the repo (noted as 'Evolution P1' in the source). Now the protected-path gate operates on ground truth, so the evidence (the diff) and the safety decision can never disagree. This is the module's clearest example of the 'honest status over optimistic success' rule.",
+      "touch_ux": "A magnifying-glass node on the safety edge showing two columns: 'LLM claims' (target_files) vs 'patch actually edits' (parsed paths), with mismatches highlighted red. Tap a mismatch row to see the exact diff header that betrayed the claim. Badge: mismatch count — when it's non-zero the node pulses, because the model is actively misdeclaring its edits.",
+      "pointer": "src/evolution/daemon.rs::patch_edited_paths"
+    },
+    {
+      "id": "evolution-15",
+      "title": "Block reward hacking with winner_test_count_gate",
+      "loop_role": "`winner_test_count_gate` is a hard gate on the evolve/commit edge: even when a winner's composite score beats the baseline, the commit is refused if the candidate runs fewer tests than the baseline. Model it as the final checkpoint on the commit edge, after the fitness comparator — a second, independent veto that answers a different question ('did you game the metric?') than the comparator's ('are you better?').",
+      "affects": "Enforces the invariant the `SafetyConfig.min_test_count` field promised but never implemented: deleting tests inflates pass ratio and coverage-normalized fitness, so the gate treats test-count regression as disqualifying regardless of score. When it fires, the generation ends as FROST with the reason logged to `.evolution-log.jsonl` — a refused commit is a first-class, visible outcome, not a silent skip.",
+      "touch_ux": "A red octagon (stop sign) node sitting on the commit edge just before the git node. When armed-and-passing it shows a thin green outline; when it fires, it blocks the edge with the reason banner ('winner regressed test count: X < Y'). Tap for the exact baseline vs candidate `tests_passed` numbers. Badge: lifetime veto count for the run.",
+      "pointer": "src/evolution/daemon.rs::winner_test_count_gate"
+    },
+    {
+      "id": "evolution-16",
+      "title": "Auto-tier small models with is_micro_model",
+      "loop_role": "`is_micro_model` is the budget-aware router at the top of the plan stage: it detects 0.8B-4B models by word-bounded size tokens (so '32b' doesn't false-match '2b') and switches the loop into micro mode — sequential evaluation, clamped population (≤3), simplified prompts. Model it as a mode-switch node that rewires the loop topology: tournament parallelism collapses to a serial lane when active.",
+      "affects": "Resizes the entire budget envelope for constrained hardware: `MICRO_MAX_CONTEXT_CHARS` (12_000 ≈ 4K tokens) replaces the default source-context cap, `MICRO_MAX_FILES` (3) limits how much of the repo enters the context window, and `MICRO_MAX_EDITS` (2) shrinks the patch surface so small models don't fumble multi-step search-and-replace. The trust benefit: the system adapts its ask to the model's demonstrated limits instead of letting it fail silently on complex JSON.",
+      "touch_ux": "A toggle-switch node labeled with the detected model size ('1.5b → micro mode'); flipping state visibly reconfigures downstream nodes — the tournament bracket collapses to a single-file lane and context gauges shrink. Tap shows the word-boundary match that triggered it (useful when a model name surprises). Badge: active tier (MICRO / FULL) always visible on the loop ring.",
+      "pointer": "src/evolution/micro_mode.rs::is_micro_model"
+    },
+    {
+      "id": "evolution-17",
+      "title": "Pack minimal context with select_micro_targets and build_micro_context",
+      "loop_role": "`select_micro_targets` and `build_micro_context` are the perceive/plan context-packers for the micro tier: they sort mutation-target files by size ascending, keep the smallest 3, and render a tight prompt via `build_micro_system_prompt` with an explicit JSON schema and copy-paste-exact search strings. `validate_micro_hypothesis` then checks the small model's output before it reaches the act stage. Wire all three as a dedicated micro-pipeline sub-loop.",
+      "affects": "Directly governs context-window spend on weak hardware: smallest-files-first selection maximizes the chance the whole file fits in 12K chars, and the explicit-schema system prompt trades sophistication for parse reliability (fewer `parse_hypotheses_response` failures → fewer wasted generation retries → less budget burned on backoff loops). Validation keeps malformed micro-hypotheses out of the worktree stage.",
+      "touch_ux": "A compression-bag node showing candidate files as blocks sorted by size, with the three that fit inside the 12K budget highlighted. Pinch adjusts the file count (conceptually) and watches blocks pop out of the bag. Tap shows the exact micro system prompt with its JSON schema. Badge: packed context size vs `MICRO_MAX_CONTEXT_CHARS`.",
+      "pointer": "src/evolution/micro_mode.rs::select_micro_targets"
+    },
+    {
+      "id": "evolution-18",
+      "title": "Remember winners in the GenerationWinner hall of fame",
+      "loop_role": "`GenerationWinner` + `format_evolution_history` are the remember stage: every committed mutation (generation, description, composite_score, sab_delta, token_delta, patch, git_tag) is appended to `hall_of_fame` and re-rendered into the next generation's user prompt. Wire it as a memory node with two edges: a write edge from the commit stage and a read edge back into `build_user_prompt` — the loop literally plans from its own history.",
+      "affects": "Shapes the planner's context window with a curated success log: `EvolutionResult.improvements` accumulates only verified winners, so the LLM sees what actually raised fitness (with deltas) rather than the full graveyard of failures — failure detail lives in `.evolution-log.jsonl` instead. The `git_tag` field anchors each winner to a checkpoint, making the memory traversable: any BLOOM can be checked out and re-measured.",
+      "touch_ux": "A timeline/laurel-strip node along the bottom of the canvas: each winner is a flower token stamped with generation number and sab_delta; pinch scrolls generations, tap a flower reveals its patch and composite_score, long-press offers 'check out this git tag'. Badge: total BLOOM count and cumulative sab_delta across the run.",
+      "pointer": "src/evolution/daemon.rs::GenerationWinner"
+    },
+    {
+      "id": "evolution-19",
+      "title": "Checkpoint progress with EvolutionConfig and git tags",
+      "loop_role": "`EvolutionConfig` is the loop's control panel — `generations` (0 = infinite), `population_size`, `parallel_eval`, and `checkpoint_interval` define loop shape, while `mutation_targets`, `fitness_weights`, `safety`, and `llm` define its constraints. The checkpoint_interval drives the git-tag edge on the evolve stage: every Nth BLOOM generation tags the repo, producing rollback anchors. Model it as the configuration node whose edges parameterize every other node.",
+      "affects": "Every budget and trust knob lives here: `SafetyConfig` sets `min_test_count` (5000), `max_binary_size_mb` (50), and `rollback_on_any_test_failure`; `MutationTargets` whitelists the config keys, prompt logic, tool code, and cognitive files the agent may touch — everything else is implicitly out of scope. `LlmConfig` caps hypothesis generation at `max_tokens` (16384) and its `Debug` impl redacts the api_key, so even dry-run logs can't leak credentials into the evidence trail.",
+      "touch_ux": "A control-console node with sliders for generations/population/parallel_eval and a lockable panel for the safety section (protected paths require an explicit unlock gesture). Tap `LlmConfig` shows the redacted key exactly as logs would render it. Badge: checkpoint countdown ('next tag in 2 generations').",
+      "pointer": "src/evolution/mod.rs::EvolutionConfig"
+    },
+    {
+      "id": "evolution-20",
+      "title": "Stream live allocation pressure with TrackingAllocator",
+      "loop_role": "`TrackingAllocator` + `AllocStats` are the live-sensing instruments behind the perceive stage: installed as a global allocator, they count `total_allocs`/`total_deallocs` and track `current_live_bytes`/`peak_live_bytes` during benchmarks, feeding `AllocationHotspot` entries into the `TelemetrySnapshot`. Model it as a sensor node embedded inside the act/verify execution itself — perception that runs while the candidate works, not after.",
+      "affects": "Adds a memory-pressure dimension to evidence that CPU profiling misses: `peak_live_bytes` per function identifies allocation churn that inflates both latency (fitness weight 0.15) and, in sandboxed evaluation, the `peak_memory_bytes` measured against the 4g container limit. Because stats are global (`global_alloc_stats`), they measure the real running process rather than an estimate — measured, not estimated, per the repo's working agreements.",
+      "touch_ux": "A waveform/oscilloscope node riding on the verify stage's edge, drawing live_bytes as a scrolling trace with the peak marked. Tap freezes the trace and lists the top `AllocationHotspot` functions; long-press resets the baseline counters. Badge: current_live_bytes with an upward arrow when approaching peak_live_bytes.",
+      "pointer": "src/evolution/telemetry.rs::TrackingAllocator"
+    }
+  ]
+}

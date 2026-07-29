@@ -1,0 +1,168 @@
+{
+  "module": "api",
+  "generated": "2026-07-28",
+  "full_tokens": 23520,
+  "loop_role": "The api module is the agent loop's only billable egress point: it turns the loop's context (Vec<Message> plus ToolDefinition list) into a provider request and turns the provider's response back into loop objects (ChatResponse, StreamChunk, ToolCall, Usage), while enforcing retry, circuit-breaker, and wall-clock budget policy at that boundary.",
+  "examples": [
+    {
+      "id": "api-01",
+      "title": "Model ApiClient as the loop's single act-stage egress node",
+      "loop_role": "Place ApiClient at the act stage boundary: every plan-stage decision that needs the model funnels through ApiClient::chat / chat_stream / completion, so the loop has exactly one node where messages+tools leave and ChatResponse/StreamingResponse re-enters. Wire the perceive stage upstream (it assembles Vec<Message>) and the verify stage downstream (it consumes the returned ChatResponse).",
+      "affects": "ApiClient owns the two reqwest clients (total-timeout `client` for FIM completion, unbounded `stream_client` for chat), the RetryConfig, the shared CircuitBreaker, and the run-level wall_budget_start anchor. Every clone shares the same wall anchor, so context window pressure, token budget consumption, and elapsed wall time all converge on this one object; nothing else on the loop should issue HTTP to the provider.",
+      "touch_ux": "A large rounded hexagon in provider-blue, sitting on the right edge of the loop between the context node and the response node. Tap opens the live request inspector (model, endpoint, estimated tokens); long-press pins a request/response diff panel; pinch-out splits it into its four call paths (chat, chat_stream, chat_with_profile, completion). Badge shows live requests-in-flight count and the shared wall-clock anchor elapsed time.",
+      "pointer": "src/api/client.rs::ApiClient"
+    },
+    {
+      "id": "api-02",
+      "title": "Use LlmClient as the verify-stage simulation seam",
+      "loop_role": "Model LlmClient as a pluggable port between plan and act: in production it is bound to ApiClient, in loop rehearsals and unit tests it is bound to MockLlmClient, which replays a queue of pre-configured ChatResponse values. This lets the verify stage run the whole loop against recorded model turns without billing or network.",
+      "affects": "Because the trait only exposes chat() and chat_stream() (both taking Vec<Message>, Option<Vec<ToolDefinition>>, ThinkingMode), any checkpoint of the loop's context can be replayed deterministically. Trust state stays honest: a mocked run can be flagged as simulated because the MockLlmClient explicitly errors on streaming rather than pretending to stream.",
+      "touch_ux": "A dashed-outline socket shape attached to the ApiClient hexagon. Dragging a 'recorded run' chip onto the socket swaps the binding to MockLlmClient and tints the whole loop amber (simulation mode); dragging it off restores live mode. Tap shows the queued response count remaining; the badge reads LIVE or REPLAY with the replay cursor position.",
+      "pointer": "src/api/mod.rs::LlmClient"
+    },
+    {
+      "id": "api-03",
+      "title": "Capture per-turn evidence with chat_with_meta and ChatMetadata",
+      "loop_role": "Route the act stage through ApiClient::chat_with_meta when the turn must be auditable: it returns (ChatResponse, ChatMetadata) where ChatMetadata carries the exact request_body that was POSTed, elapsed_ms, finish_reason, and the prompt/completion/total token counts plus optional cost. Wire its output into the verify stage's evidence store and the remember stage's turn artifacts.",
+      "affects": "ChatMetadata is the loop's receipt for a billed call: request_body feeds turn-artifact checkpoints, elapsed_ms feeds latency telemetry, and the Usage-derived token fields feed the token/cost budget. chat_with_meta also emits ProgressEvent::LlmRequestSent with the estimated outgoing tokens (estimate_messages_tokens + estimate_tool_definitions_tokens) before sending, so the budget sees intent before the bill arrives.",
+      "touch_ux": "A receipt-shaped card that peels off the ApiClient node each time a call completes. Tap expands it into the sanitized request body JSON; long-press copies the exact body for replay; swipe-left files it into the turn's evidence stack. Badge shows elapsed_ms and total_tokens; a red corner folds if finish_reason is anything but 'stop'.",
+      "pointer": "src/api/client.rs::chat_with_meta"
+    },
+    {
+      "id": "api-04",
+      "title": "Stream the act stage through chat_stream and StreamingResponse",
+      "loop_role": "For interactive loops, model the act stage as a flow rather than a single return: chat_stream hands back a StreamingResponse that into_channel() converts into an mpsc::Receiver<Result<StreamChunk>>, letting the perceive stage render tokens as they arrive and the act stage dispatch tool calls mid-stream.",
+      "affects": "StreamingResponse carries the per-chunk stall timeout plus an absolute deadline derived from the run's wall budget, so a provider that drips chunks forever cannot outlive agent.max_wall_secs. A static STREAM_SEMAPHORE (100 permits) bounds concurrent streams across the whole loop, protecting the budget and local resources when swarm-style loops fan out.",
+      "touch_ux": "An animated conduit pipe leaving the ApiClient hexagon, flowing StreamChunk particles toward the response node. Pinch on the pipe zooms into the raw SSE event log; tap a particle to inspect one chunk; a two-finger hold pauses consumption (backpressure via the channel). Badge shows chunks/sec, buffered bytes, and the remaining absolute deadline as a shrinking ring.",
+      "pointer": "src/api/streaming.rs::StreamingResponse"
+    },
+    {
+      "id": "api-05",
+      "title": "Render StreamChunk variants as distinct loop signals",
+      "loop_role": "Treat each StreamChunk variant as a different loop-stage message: Content feeds the perceive stage's live transcript, Reasoning feeds a separate thinking lane (never mixed into tool-parsed text), ToolCall crosses directly into the act stage's dispatch queue, Usage lands on the budget object, FinishReason arms the verify stage, and Error/Done close the turn.",
+      "affects": "The enum is the loop's contract for mid-flight state: StreamChunk::Usage arrives because the request sets stream_options.include_usage, so token budgets update on every provider; StreamChunk::Error carries a provider error mid-response and must propagate as a typed failure rather than being swallowed into content; FinishReason('length') is the signal that the context window truncated output.",
+      "touch_ux": "Color-coded chips on the stream conduit: gray text chips, purple reasoning chips, green tool-call chips with a wrench glyph, gold usage chips. Tap a tool-call chip to jump to the dispatched tool node; tap the gold chip to open the budget ledger. The Usage chip shows a warning halo when Usage::validate flagged inconsistency.",
+      "pointer": "src/api/streaming.rs::StreamChunk"
+    },
+    {
+      "id": "api-06",
+      "title": "Let ToolCallAccumulator trigger mid-stream act dispatches",
+      "loop_role": "Model ToolCallAccumulator as the bridge from perceive to act inside a single stream: it reassembles ToolCallDelta fragments by index and emits a complete ToolCall the moment id+name exist and the accumulated arguments parse as valid JSON — so the loop can dispatch a tool while the model is still generating later chunks.",
+      "affects": "This changes loop latency structure: tool results can begin filling the context window before the turn's content finishes. On timeout, deadline expiry, or stream error, the accumulator is flushed before the error is sent, so partial-but-complete tool calls are never lost — the act stage sees every dispatchable call and the error arrives after them, keeping evidence ordering honest.",
+      "touch_ux": "A small assembly-gear node sitting on the stream conduit, with one input socket per in-flight tool-call index. Each socket fills like a progress pie as argument JSON accumulates; when it completes, a green ToolCall chip pops out toward the tool-dispatch node. Long-press shows the raw accumulated arguments string mid-assembly.",
+      "pointer": "src/api/streaming.rs::ToolCallAccumulator"
+    },
+    {
+      "id": "api-07",
+      "title": "Tune RetryConfig as the loop's resilience dial",
+      "loop_role": "Place RetryConfig on the act stage's failure edge: is_retryable_status (429/5xx) and network errors loop back through exponential backoff with ±25% jitter, honoring server Retry-After headers capped at max_delay_ms, before the error is allowed to reach the loop's error-recovery stage. Model it as a sub-cycle inside act, not as loop failure.",
+      "affects": "Every retry re-sends the full message history, so retries are budget multipliers: the retry loop is explicitly gated by wall_budget_stop() so a retry wait can never outlive the run budget, and delay doubling is skipped when Retry-After was honored. RetryConfig::from_settings maps config.retry (max_retries, base_delay_ms, max_delay_ms) onto the 429/500/502/503/504 code list.",
+      "touch_ux": "A circular retry dial wrapped around the ApiClient hexagon, with one tick per attempt that fills red as attempts are consumed. Tap the dial to see the backoff schedule and jitter range; a server-imposed Retry-After wait renders as a blue tick labeled 'server'. Badge shows attempt n/max and next sleep in ms; the dial grays out when the wall budget veto is armed.",
+      "pointer": "src/api/client.rs::RetryConfig"
+    },
+    {
+      "id": "api-08",
+      "title": "Classify WallClockBudgetExceeded as a budget stop, never a network error",
+      "loop_role": "Give the budget its own terminal edge out of the act stage: wall_budget_stop() is checked before every billable request and every retry, and returns WallClockBudgetExceeded carrying elapsed_secs and limit_secs with the canonical 'Wall-clock timeout: <elapsed>s >= <limit>s' message — the same wording as Agent::enforce_hard_budgets — so the loop's recovery logic files it as a stop, not as a transient fault to reroute.",
+      "affects": "This type is the honesty guard on the budget object: because it is deliberately NOT ApiError::Network, error recovery cannot 'recover' an expired run into more billed requests. The shared wall_budget_start anchor (Mutex<Option<Instant>>, latched on first billable request, shared across clones) means one budget window bounds the whole run including all retries and profile calls.",
+      "touch_ux": "A hard red wall node at the loop's boundary, with a countdown ring fed by the shared anchor. When it trips, the edge from ApiClient turns into a blunt stop bar (not a dashed retry edge), visually teaching that budget stops don't bounce. Tap shows elapsed vs limit; long-press exports the run's billing timeline up to the stop.",
+      "pointer": "src/api/client.rs::WallClockBudgetExceeded"
+    },
+    {
+      "id": "api-09",
+      "title": "Surface circuit-breaker state as provider trust",
+      "loop_role": "Model the CircuitBreaker (wrapping send_with_retry and completion) as the loop's trust-state node for the provider: repeated operation failures open the circuit, and while open the act stage fails fast with 'Circuit breaker is open - API is unavailable' instead of hammering a sick endpoint — a signal the plan stage should route around (profile failover) rather than retry.",
+      "affects": "CircuitBreakerError::CircuitOpen is mapped to ApiError::Network at the boundary, while OperationFailed passes the inner error through unchanged — so downstream classification still sees the real cause. An open circuit protects the token budget (no billed attempts against a dead provider) and should degrade the loop's trust badge for that endpoint until the breaker half-closes.",
+      "touch_ux": "A breaker-switch glyph fused onto the ApiClient hexagon's output edge: green closed, orange half-open, red open with a visible gap in the edge. Tap toggles a detail card showing recent failure counts; the open state pulses a 'fail-fast' animation showing dropped requests. Badge shows breaker state and failure streak length.",
+      "pointer": "src/api/client.rs::send_with_retry"
+    },
+    {
+      "id": "api-10",
+      "title": "Attach tools as a plan-stage policy decision",
+      "loop_role": "Model tool_calling::attach_tools as the plan stage's tool-exposure gate: it writes body.tools and, only when native_function_calling is set, body.tool_choice='auto'. When native FC is off, tools still ride in the body (for auto-detecting backends) but the model is expected to emit XML in content prompted by the system message — two distinct loop contracts from one flag.",
+      "affects": "The attached ToolDefinition list is billed into the context window: build_chat_body adds estimate_tool_definitions_tokens to the input count and refuses the request with ApiError::ContextOverflow when input+512 exceeds context_length. Tool choice policy therefore directly consumes the budget object and can shrink available output tokens (max_tokens is clamped to context_length minus input).",
+      "touch_ux": "A toolbox node docked to the request-builder edge, showing each ToolDefinition as a small key chip with its token cost. Toggle a switch to flip native_function_calling and watch the edge relabel from 'tools+tool_choice' to 'tools-only (XML fallback)'. Pinch reveals the token subtotal the tools add to the outgoing prompt.",
+      "pointer": "src/api/tool_calling.rs::attach_tools"
+    },
+    {
+      "id": "api-11",
+      "title": "Normalize every tool call through extract_tool_calls",
+      "loop_role": "Place extract_tool_calls at the act stage's intake: whatever the provider returned, the loop sees only OpenAI-style ToolCall objects. Native message.tool_calls win when present; otherwise the content text is parsed by the multi-format parser and each ParsedToolCall is converted by parsed_to_tool_call with a synthetic 'parsed_<uuid>' id matching the streaming fallback convention.",
+      "affects": "This is a trust normalization point: downstream evidence and checkpoints never need to know whether a call came from the native field or an XML blob, but the synthetic 'parsed_' id prefix preserves provenance for debugging. Because the fallback runs even when native FC was requested, quirky backends (sglang quants, older vLLM) don't silently drop the loop's planned actions.",
+      "touch_ux": "A funnel node on the response edge with two input lanes — a solid 'native' lane and a dashed 'text-parsed' lane — merging into uniform ToolCall chips. Parsed chips carry a tiny 'parsed_' tag; tap a chip to see which lane produced it and the raw source text. Badge counts calls per turn split by lane.",
+      "pointer": "src/api/tool_calling.rs::extract_tool_calls"
+    },
+    {
+      "id": "api-12",
+      "title": "Use extract_tool_calls_from_text on the streaming fallback path",
+      "loop_role": "Wire extract_tool_calls_from_text into the streaming act stage where the caller has already split content from reasoning (agent/assistant_response.rs passes the assembled text directly): it applies the same multi-format parser to raw text so streamed turns get identical tool normalization as non-streamed turns.",
+      "affects": "Keeps evidence consistent across loop modes: a turn run streaming and the same turn run non-streaming produce the same Vec<ToolCall> shape, so checkpoints are comparable. Reasoning content is explicitly excluded from parsing (the caller splits it out), preventing thinking text from ever being misread as a tool invocation — an honesty guard on act-stage inputs.",
+      "touch_ux": "A text-scanner node sitting below the stream conduit, activated only when the native lane is empty. It shows a magnifier sweeping the content text; found XML/JSON tool blocks highlight in place and pop out as parsed_ chips. Tap pauses the sweep to show the raw span; badge shows blocks found vs blocks rejected as malformed.",
+      "pointer": "src/api/tool_calling.rs::extract_tool_calls_from_text"
+    },
+    {
+      "id": "api-13",
+      "title": "Drive ThinkingMode as a plan-stage budget lever",
+      "loop_role": "Model ThinkingMode (Enabled / Disabled / Budget(usize)) on the plan stage's cost-quality tradeoff: Disabled prepends the DISABLED_THINKING_SYSTEM_MESSAGE system instruction to the outgoing messages; Budget(n) injects a thinking.budget_tokens field into the request body; Enabled leaves the request untouched.",
+      "affects": "Directly shapes the context window and budget: the disabled-thinking system message adds prompt tokens to every request, while Budget caps the reasoning the provider bills. Reasoning that does come back lands in Message.reasoning_content, which sanitize_assistant_content later recycles as filler for otherwise-empty assistant messages — so thinking mode also affects future context hygiene.",
+      "touch_ux": "A three-position slider (brain icon) on the plan node: full brain, slashed brain, brain with a token counter. Sliding to Budget opens a numeric scrubber; sliding to Disabled shows the exact system message that will be prepended ghosted into the request preview. Badge shows current mode and, in Budget mode, the cap.",
+      "pointer": "src/api/mod.rs::ThinkingMode"
+    },
+    {
+      "id": "api-14",
+      "title": "Run canonicalize_message_order as pre-flight context hygiene",
+      "loop_role": "Model canonicalize_message_order as the perceive stage's final gate before act: it merges multiple system messages into one at position 0, inserts a 'Continue with the task.' user message when none exists, and via sanitize_assistant_content gives empty-content assistant messages a minimal body (their reasoning, else '(no textual output)') — preventing strict backends (SGLang, Moonshot/Kimi) from 400ing every subsequent turn.",
+      "affects": "This mutates the context window object itself before billing: message order, role coverage, and assistant content are normalized so one bad turn (a pure-thinking step) cannot poison the loop into an error-retry amplifier. It is applied on every send path — chat, chat_stream, and chat_with_profile — so checkpoints taken after a send reflect exactly what the provider saw.",
+      "touch_ux": "A conveyor-belt node just before ApiClient where Message cards visibly reorder: system cards fuse and slide to the front, a stub user card materializes if the lane is empty, hollow assistant cards get filled with gray reasoning text. Tap any card to diff before/after; badge counts each normalization applied this turn.",
+      "pointer": "src/api/mod.rs::canonicalize_message_order"
+    },
+    {
+      "id": "api-15",
+      "title": "Guard request shape with merge_extra_body allowlists",
+      "loop_role": "Model merge_extra_body as a trust gate on the act stage's request builder: RESERVED_EXTRA_BODY_KEYS (model, messages, tools, tool_choice, stream, max_tokens, temperature, thinking) can never be overridden from config, and only ALLOWED_EXTRA_BODY_KEYS (sampling params, vLLM/SGLang guided-* extensions, OpenRouter routing directives) may be merged — anything else bails with a typed error before any bytes are billed.",
+      "affects": "Protects both the budget and the trust state: keys like logprobs, logit_bias, n, user, or response_format are rejected because they could leak data or alter behavior silently, and reserved-key overrides would let config silently rewrite the loop's own context or tool policy. The error names the offending key and the allowed set, keeping failures actionable.",
+      "touch_ux": "A customs-checkpoint node on the request edge: allowed keys flow through on a green lane with their values visible, reserved keys hit a red barrier, unknown keys hit a gray barrier with the full allowed list on tap. Long-press an allowed key to see why it's considered safe (e.g. 'routing, not content').",
+      "pointer": "src/api/mod.rs::merge_extra_body"
+    },
+    {
+      "id": "api-16",
+      "title": "Treat Message and MessageContent as the loop's context currency",
+      "loop_role": "Model Message as the object every loop stage reads and writes: perceive builds Message::user / user_multimodal, act appends Message::assistant / assistant_with_reasoning and Message::tool results, remember checkpoints the Vec<Message>. MessageContent (Text vs Blocks of ContentBlock/ImageUrl) is the multimodal payload, with image_count/has_images/strip_images controlling what may cross to vision-less backends.",
+      "affects": "Message is the context window made concrete: estimate_messages_tokens measures it for budget projection, strip_images rewrites it for capability downgrade, and ToolCall::validate_structure / Message::validate gate malformed entries before dispatch or send. text_all() is the canonical plain-text view used by tool-call text parsing, so reasoning never leaks into tool extraction.",
+      "touch_ux": "Stackable message cards on a timeline rail: blue user, green assistant (with a purple reasoning flap that folds out), orange tool-result, gray system. Pinch a card to toggle between rendered content and token count view; long-press an image block shows the ImageUrl payload. Multimodal cards show an eye glyph that greys when strip_images would drop them.",
+      "pointer": "src/api/types.rs::Message"
+    },
+    {
+      "id": "api-17",
+      "title": "Route failover through chat_with_profile and ModelProfile",
+      "loop_role": "Model chat_with_profile as the act stage's alternate-route edge: when the plan or recovery stage selects a different ModelProfile (swarm helper, cheaper model, vision-less fallback), this path re-applies the same normalization, context budgeting, and tool attachment against the profile's own endpoint, api_key, context_length, and max_tokens — so rerouted calls cannot silently diverge from main-path policy.",
+      "affects": "Capability honesty is enforced on the context object: when !profile.supports_vision() every message is rewritten via strip_images before sending, and the profile's own context_length triggers its own ContextOverflow check. effective_native_function_calling inherits the parent's flag unless the profile overrides it, fixing the silent native-FC-off divergence for swarm traffic.",
+      "touch_ux": "A fork node on the act edge with one branch per configured ModelProfile, each labeled with model name and context_length. Dragging the active token onto a branch reroutes; vision-incapable branches show image blocks dissolving out of the message preview. Badge shows the active profile and its remaining output-token headroom.",
+      "pointer": "src/api/client.rs::chat_with_profile"
+    },
+    {
+      "id": "api-18",
+      "title": "Validate Usage before trusting the budget ledger",
+      "loop_role": "Wire Usage::validate into the verify stage's accounting: any response or usage chunk where prompt_tokens + completion_tokens != total_tokens is rejected rather than booked. The non-streaming path logs a warning and uses the response anyway; the streaming collect() path ignores inconsistent chunks and zeroes a bad final usage — measured, never estimated or silently trusted.",
+      "affects": "This is the honesty boundary on the budget object: token and cost budgets downstream consume Usage (and its OpenRouter-only cost field, requested via usage.include only on openrouter.ai endpoints), so a provider that miscounts cannot corrupt the run's ledger. Zeroed usage is a visible downgrade, not a fabricated number.",
+      "touch_ux": "A ledger-scale node on the budget rail: each arriving Usage chip is weighed, and mismatched chips land in a red 'rejected' tray showing the arithmetic (a + b != total). The accepted stack shows running totals; the rejected tray is tappable for the raw chunk. Badge shows accepted/rejected usage counts for the run.",
+      "pointer": "src/api/types.rs::Usage"
+    },
+    {
+      "id": "api-19",
+      "title": "Gate tool dispatch with ToolCall::validate_structure",
+      "loop_role": "Place validate_structure at the act stage's dispatch gate: before the executor runs anything, the ToolCall must have a non-empty id, call_type == 'function', a non-empty function name, and arguments that parse as JSON. Malformed calls bail with a typed error naming the exact defect instead of reaching a tool with garbage input.",
+      "affects": "Protects tool results and evidence integrity: a rejected call never produces a fake tool Message in the context window, and the error text ('Tool call arguments for X are not valid JSON') becomes honest failure evidence for the verify stage rather than a confusing downstream tool error. Complements ToolDefinition/FunctionDefinition, which declare the schema the model was shown.",
+      "touch_ux": "A turnstile node between the tool-call funnel and the tool executor: valid ToolCall chips pass with a green stamp; invalid ones are diverted into a red bin showing the failed check (empty id, wrong type, bad name, bad JSON). Tap a rejected chip to see the raw arguments string with the JSON error position marked.",
+      "pointer": "src/api/types.rs::ToolCall"
+    },
+    {
+      "id": "api-20",
+      "title": "Probe the environment with detect_backend before planning",
+      "loop_role": "Model detect_backend as a perceive-stage environment probe: a blocking GET on /v1/models inspects the Server header and body for llama.cpp, SGLang, or vLLM tell-tales and returns a lower-case label (or 'unknown'), giving the plan stage a real backend identity to inform decisions like native FC reliability and tool-format expectations.",
+      "affects": "Backend identity feeds trust calibration: known backends have known tool-calling quirks (the exact reason extract_tool_calls keeps its text fallback), so the loop can set expectations per backend rather than discovering them as failures. An 'unknown' result is itself honest evidence — the plan stage should treat tool behavior as unverified, not assumed.",
+      "touch_ux": "A radar-dish node at the loop's entry, sweeping the configured endpoint and stamping the ApiClient hexagon with the detected backend glyph (llama, sglang, vllm, or a question mark). Tap re-runs the probe; long-press shows the raw /v1/models response evidence. Badge shows backend label and probe age.",
+      "pointer": "src/api/client.rs::detect_backend"
+    }
+  ]
+}

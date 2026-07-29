@@ -1,0 +1,410 @@
+{
+  "component": "observability",
+  "tier": "tooling",
+  "loop_stage": "observe",
+  "summary": "Observability is the loop's instrumentation substrate: it wraps every tool execution in a timed tracing span (track_tool_execution), accounts token/cost budget via TokenUsage, exports Prometheus counters and workflow metrics, parses and correlates logs (LogEntry, LogParser, AnomalyDetector, RootCauseAnalyzer, AlertCorrelator), and redacts secrets before anything is written. It does not drive the loop; it perceives what the loop is doing so control and learn stages have evidence to act on.",
+  "loop_objects": ["LogEntry", "TokenUsage", "Dashboard", "Metrics", "Span", "Anomaly", "RootCause", "Alert", "PatternStats", "WorkflowRun", "SamplingRate"],
+  "context_basis": "recommendations were formed with src/observability/ (dashboard.rs, telemetry.rs, log_analysis.rs) read in the context of the full engine (~600k budget framing), where TokenUsage is the shared cost ledger and telemetry spans wrap the tool-execution hot path.",
+  "examples": [
+    {
+      "id": "observability-01",
+      "title": "Wrap each tool call in a timed span",
+      "loop_stage": "observe",
+      "pattern": "instrument-the-act",
+      "intent": "Get duration and success/failure evidence for every act-stage tool execution without editing each tool.",
+      "how_it_shapes_the_loop": "track_tool_execution enters a tool.execute span around the act node, records duration_ms and success, and increments tool_executions/tool_errors so the loop emits structured evidence on every iteration.",
+      "loop_objects_touched": ["Span", "Metrics"],
+      "wiring": {
+        "inputs_from": ["ToolCall from the act stage"],
+        "outputs_to": ["Span evidence for the verify stage", "Metrics counters"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing an act node clamps a telemetry ring around it, opening the live span timeline for that tool.",
+        "visual": "The node grows a thin pulsing ring that turns green on success and red on the error field being set."
+      },
+      "mini_scenario": "The agent runs a shell tool; the span records 240ms and success=true, and the verify node reads that span before proceeding.",
+      "pitfall": "The span records success/failure by field; if you swallow the inner error you break the observe signal even though the tool 'ran'."
+    },
+    {
+      "id": "observability-02",
+      "title": "Meter the loop with a shared TokenUsage ledger",
+      "loop_stage": "observe",
+      "pattern": "shared-cost-ledger",
+      "intent": "Keep one running total of input/output tokens and cost across the whole loop.",
+      "how_it_shapes_the_loop": "TokenUsage.add folds each LLM call's usage into a single accumulator; control can read total/cost each iteration to decide whether to keep looping.",
+      "loop_objects_touched": ["TokenUsage", "Dashboard"],
+      "wiring": {
+        "inputs_from": ["reason-stage LLM responses"],
+        "outputs_to": ["Budget guard in control", "Dashboard overlay"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the cost overlay expands it into a per-call breakdown of input vs output tokens.",
+        "visual": "A translucent cost badge floats over the loop; the dollar figure ticks up and glows amber as it nears the budget line."
+      },
+      "mini_scenario": "After three LLM turns TokenUsage shows 41k in / 6k out ($0.58); the pinch reveals turn 2 was the expensive one.",
+      "pitfall": "TokenUsage.add only sums cost when both sides have Some(cost); mixing costed and uncosted usage silently drops the cost total."
+    },
+    {
+      "id": "observability-03",
+      "title": "Attach a per-1k cost model to raw token counts",
+      "loop_stage": "observe",
+      "pattern": "rate-attach",
+      "intent": "Turn bare token counts into dollars using the configured input/output rates.",
+      "how_it_shapes_the_loop": "TokenUsage.with_cost multiplies input/1000 and output/1000 by the model rates, giving the budget guard a monetary signal instead of an opaque token count.",
+      "loop_objects_touched": ["TokenUsage"],
+      "wiring": {
+        "inputs_from": ["TokenUsage counts", "model rate config"],
+        "outputs_to": ["control budget guard"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the cost badge toggles between token view and dollar view.",
+        "visual": "The badge flips with a coin-spin animation; dollar view tints green under budget, red over."
+      },
+      "mini_scenario": "with_cost(0.003, 0.015) turns 41k/6k tokens into $0.213, which control compares to the $2 ceiling.",
+      "pitfall": "Rates are per-1000 tokens; passing per-million rates inflates cost 1000x and prematurely trips the budget."
+    },
+    {
+      "id": "observability-04",
+      "title": "Parse raw process output into LogEntry",
+      "loop_stage": "perceive",
+      "pattern": "structure-the-stream",
+      "intent": "Convert unstructured stdout/stderr lines into typed LogEntry records for analysis.",
+      "how_it_shapes_the_loop": "LogParser.parse maps each line to a LogEntry with level/source/message, so downstream perceive nodes reason over structured levels instead of raw text.",
+      "loop_objects_touched": ["LogEntry", "PatternStats"],
+      "wiring": {
+        "inputs_from": ["process/tool stdout stream"],
+        "outputs_to": ["PatternDetector", "AnomalyDetector"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a raw-log node onto a parser node draws the parse edge and starts structuring.",
+        "visual": "Log lines animate from grey text blocks into colored level-tagged chips as they pass through the parser."
+      },
+      "mini_scenario": "A `cargo build` line 'error[E0432]: unresolved import' becomes a LogEntry{level:Error} feeding the anomaly detector.",
+      "pitfall": "parse returns Option; unparseable lines yield None and are dropped, so a malformed format can silently blind the whole pipeline."
+    },
+    {
+      "id": "observability-05",
+      "title": "Detect anomalies against the error baseline",
+      "loop_stage": "observe",
+      "pattern": "baseline-deviation",
+      "intent": "Flag when error rate or log behavior deviates from the learned baseline.",
+      "how_it_shapes_the_loop": "AnomalyDetector.analyze compares an incoming LogEntry to error_baseline and emits an Anomaly with severity, signaling control to consider recovery.",
+      "loop_objects_touched": ["LogEntry", "Anomaly", "PatternStats"],
+      "wiring": {
+        "inputs_from": ["LogEntry stream from parser"],
+        "outputs_to": ["control ErrorRecovery trigger", "Alert correlator"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the anomaly badge lists recent anomalies with their severity and suggested action.",
+        "visual": "The node pulses orange-to-red proportional to severity when a new Anomaly crosses threshold."
+      },
+      "mini_scenario": "Error rate jumps from a 2% baseline to 30%; an Anomaly{severity:0.9} fires and nudges the loop toward recovery.",
+      "pitfall": "Baseline is learned from history; feeding it a burst of errors as 'normal' raises the baseline and desensitizes detection."
+    },
+    {
+      "id": "observability-06",
+      "title": "Correlate related errors into one Alert",
+      "loop_stage": "observe",
+      "pattern": "correlate-window",
+      "intent": "Collapse a storm of related log errors into a single actionable Alert.",
+      "how_it_shapes_the_loop": "AlertCorrelator.process groups entries within a time window, so control reacts to one Alert rather than N duplicate error signals per iteration.",
+      "loop_objects_touched": ["Alert", "LogEntry", "Anomaly"],
+      "wiring": {
+        "inputs_from": ["Anomaly + LogEntry stream"],
+        "outputs_to": ["control decision node", "operator notification"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading an Alert node fans it into the underlying correlated log entries.",
+        "visual": "A single red alert chip expands into a cluster of thinner error chips connected by hairlines."
+      },
+      "mini_scenario": "Twelve 'connection refused' lines within 5s collapse into one open Alert{severity:High} for the control node.",
+      "pitfall": "The correlation window is fixed; too-short a window splits one incident into many alerts, too-long buries new incidents."
+    },
+    {
+      "id": "observability-07",
+      "title": "Rank recurring log patterns",
+      "loop_stage": "learn",
+      "pattern": "top-k-patterns",
+      "intent": "Surface the most frequent (and most error-prone) log patterns for post-run learning.",
+      "how_it_shapes_the_loop": "PatternDetector.top_patterns / error_patterns rank LogPattern frequency, feeding the learn stage a compact map of what dominated this run.",
+      "loop_objects_touched": ["PatternStats", "LogEntry"],
+      "wiring": {
+        "inputs_from": ["LogEntry stream"],
+        "outputs_to": ["learn-stage summary", "self_improvement"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking up the pattern panel scrolls the ranked pattern list.",
+        "visual": "Patterns render as bars; error patterns tint red and float to the top of the stack."
+      },
+      "mini_scenario": "top_patterns(5) reveals 'retrying request' fired 87 times, telling learn the endpoint was flaky.",
+      "pitfall": "Patterns below the detector threshold are never promoted; a rare-but-fatal pattern can hide beneath the ranking cutoff."
+    },
+    {
+      "id": "observability-08",
+      "title": "Diagnose root cause from an entry batch",
+      "loop_stage": "reason",
+      "pattern": "rule-based-diagnosis",
+      "intent": "Turn a batch of log entries into candidate RootCause diagnoses.",
+      "how_it_shapes_the_loop": "RootCauseAnalyzer.analyze runs AnalysisRules over a LogEntry slice and returns RootCause records with a category, giving the reason stage a hypothesis to act on.",
+      "loop_objects_touched": ["RootCause", "LogEntry"],
+      "wiring": {
+        "inputs_from": ["batched LogEntry from a failed step"],
+        "outputs_to": ["reason-stage plan revision"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping a failure node opens the ranked RootCause list for that batch.",
+        "visual": "Each RootCause renders as a category-tinted card; the top card glows to mark highest confidence."
+      },
+      "mini_scenario": "A batch of OOM lines yields RootCause{category:Resource}, steering reason to lower the context size.",
+      "pitfall": "Analysis is rule-based; a novel failure with no matching rule returns an empty vec and looks like 'no cause'."
+    },
+    {
+      "id": "observability-09",
+      "title": "Sample non-error events to cap log volume",
+      "loop_stage": "control",
+      "pattern": "sampled-observation",
+      "intent": "Reduce telemetry volume under load without losing error signal.",
+      "how_it_shapes_the_loop": "set_sampling_rate + should_sample gate record_success/record_state_transition so only a fraction of non-error events are logged; errors always pass.",
+      "loop_objects_touched": ["SamplingRate", "Span", "Metrics"],
+      "wiring": {
+        "inputs_from": ["control load signal"],
+        "outputs_to": ["telemetry sink volume"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the sampling dial adjusts the rate from 0 to 100%.",
+        "visual": "A circular gauge fills; below 100% the observe nodes dim slightly to signal partial visibility."
+      },
+      "mini_scenario": "Under a burst, sampling drops to 10%; state transitions log sparsely but every error still surfaces.",
+      "pitfall": "Sampling only applies to non-error events; setting rate to 0 blinds success/transition telemetry entirely, hiding progress."
+    },
+    {
+      "id": "observability-10",
+      "title": "Redact secrets before any log write",
+      "loop_stage": "foundation",
+      "pattern": "redact-at-the-sink",
+      "intent": "Guarantee API keys and passwords never reach a log line regardless of call site.",
+      "how_it_shapes_the_loop": "RedactingMakeWriter wraps both stderr and file layers so redact_secrets runs on every formatted line, making redaction a substrate guarantee rather than a per-call responsibility.",
+      "loop_objects_touched": ["LogEntry", "Span"],
+      "wiring": {
+        "inputs_from": ["every tracing call site"],
+        "outputs_to": ["stderr + rolling file sink"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the shield icon on the sink node shows which patterns are being redacted.",
+        "visual": "Redacted spans render '[REDACTED]' in a locked grey pill; the sink node wears a small shield badge."
+      },
+      "mini_scenario": "An auth error body echoes 'Bearer sk-abc...'; the writer rewrites it to '[REDACTED]' before it hits disk.",
+      "pitfall": "Redaction buffers per event and flushes whole; bypassing the MakeWriter (e.g. println!) skips redaction entirely."
+    },
+    {
+      "id": "observability-11",
+      "title": "Sanitize text to block log injection",
+      "loop_stage": "foundation",
+      "pattern": "escape-control-chars",
+      "intent": "Prevent attacker-supplied newlines from forging fake log entries.",
+      "how_it_shapes_the_loop": "sanitize_for_log escapes control characters in tool names, states, and errors before they enter a Span, keeping the observe stream tamper-resistant.",
+      "loop_objects_touched": ["Span", "LogEntry"],
+      "wiring": {
+        "inputs_from": ["untrusted tool_name / error strings"],
+        "outputs_to": ["Span fields", "telemetry sink"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing a suspicious log chip reveals the raw vs sanitized form side by side.",
+        "visual": "Escaped sequences like '\\n' render in a monospace highlight to show where sanitization fired."
+      },
+      "mini_scenario": "A tool name containing an embedded newline is escaped to '\\n' so it cannot spawn a fake INFO line.",
+      "pitfall": "Only sanitized strings are safe; recording a raw untrusted string into a span field bypasses this protection."
+    },
+    {
+      "id": "observability-12",
+      "title": "Bound in-memory logs with rotation",
+      "loop_stage": "control",
+      "pattern": "rotate-at-limit",
+      "intent": "Stop unbounded log growth from exhausting memory during a long loop.",
+      "how_it_shapes_the_loop": "rotate_if_needed discards the oldest half once LOG_ENTRY_COUNT exceeds MAX_LOG_ENTRIES, bounding observe-stage memory so the loop can run indefinitely.",
+      "loop_objects_touched": ["LogEntry", "Metrics"],
+      "wiring": {
+        "inputs_from": ["increment_log_count from record_* helpers"],
+        "outputs_to": ["bounded in-memory buffer"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the log buffer node triggers a manual rotation preview.",
+        "visual": "The buffer bar fills toward MAX; at the limit it snaps back to half length with a sweep animation."
+      },
+      "mini_scenario": "At 100k entries rotation halves the count to 50k and logs the event, freeing memory mid-run.",
+      "pitfall": "Rotation only resets the counter; callers with their own buffers must drain when it returns true or they keep growing."
+    },
+    {
+      "id": "observability-13",
+      "title": "Record a whole workflow run as one metric event",
+      "loop_stage": "learn",
+      "pattern": "run-level-summary",
+      "intent": "Emit one durable record per workflow with duration, calls, tokens, and cost.",
+      "how_it_shapes_the_loop": "record_workflow_run writes counters and histograms labeled by workflow/status, giving the learn stage a comparable per-run summary across the loop's lifetime.",
+      "loop_objects_touched": ["WorkflowRun", "TokenUsage", "Metrics"],
+      "wiring": {
+        "inputs_from": ["completed loop with its TokenUsage total"],
+        "outputs_to": ["Prometheus", "trend analysis"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the workflow node collapses per-step detail into a single run summary card.",
+        "visual": "The card shows duration, cost, and status; failed runs get a red left border."
+      },
+      "mini_scenario": "A completed refactor workflow records 18s, 9 LLM calls, 52k tokens, $0.71 tagged status=success.",
+      "pitfall": "Status and workflow become metric labels; unbounded/dynamic label values cause Prometheus cardinality blowup."
+    },
+    {
+      "id": "observability-14",
+      "title": "Serve metrics over a Prometheus endpoint",
+      "loop_stage": "observe",
+      "pattern": "export-for-scrape",
+      "intent": "Make loop counters externally scrapable in daemon mode.",
+      "how_it_shapes_the_loop": "start_prometheus_exporter installs the global recorder and binds an HTTP listener, so every increment_* call in the loop becomes externally visible without extra wiring.",
+      "loop_objects_touched": ["Metrics", "TokenUsage"],
+      "wiring": {
+        "inputs_from": ["all increment_* / counter! call sites"],
+        "outputs_to": ["external Prometheus scraper"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing a connection from the metrics node to an external-monitor pin binds the scrape endpoint.",
+        "visual": "A dashed outbound edge animates flowing dots toward an external globe icon."
+      },
+      "mini_scenario": "Binding 127.0.0.1:9090 lets a scraper read selfware_tool_executions_total live during the loop.",
+      "pitfall": "Only described series get HELP text; describing a counter that is never incremented advertises an empty series."
+    },
+    {
+      "id": "observability-15",
+      "title": "Log agent state transitions",
+      "loop_stage": "observe",
+      "pattern": "trace-the-state-machine",
+      "intent": "Make each Planning->Executing->Completed transition visible as it happens.",
+      "how_it_shapes_the_loop": "record_state_transition sanitizes and (subject to sampling) logs from/to states, turning the control state machine into an observable trace.",
+      "loop_objects_touched": ["Span", "LogEntry"],
+      "wiring": {
+        "inputs_from": ["control state machine"],
+        "outputs_to": ["telemetry sink", "timeline UI"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging along the loop's spine scrubs a timeline of recorded state transitions.",
+        "visual": "Each transition is a node on a horizontal rail; the active one glows and pulses."
+      },
+      "mini_scenario": "The trace shows Planning->Executing->ErrorRecovery->Executing, revealing the loop retried once.",
+      "pitfall": "Transitions are sampled like other non-error events; at low sampling you can lose transitions and misread the state history."
+    },
+    {
+      "id": "observability-16",
+      "title": "Enter a per-step agent span",
+      "loop_stage": "observe",
+      "pattern": "span-per-iteration",
+      "intent": "Give each loop iteration its own span scope for nested tool timing.",
+      "how_it_shapes_the_loop": "enter_agent_step opens an agent.step span carrying state and step index, so all tool spans in that iteration nest under one parent for clean attribution.",
+      "loop_objects_touched": ["Span"],
+      "wiring": {
+        "inputs_from": ["control loop counter + state"],
+        "outputs_to": ["nested tool.execute spans"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading a step node reveals the nested tool spans that ran inside that iteration.",
+        "visual": "A parent bar unfolds into a flame-graph of child spans sized by duration."
+      },
+      "mini_scenario": "Step 4's span nests three tool spans; the spread shows one shell call ate 90% of the iteration's time.",
+      "pitfall": "The span is only active while its guard is held; dropping it early detaches later tool spans from the step."
+    },
+    {
+      "id": "observability-17",
+      "title": "Feed anomaly severity into recovery",
+      "loop_stage": "control",
+      "pattern": "observe-to-recover",
+      "intent": "Let observed severity decide whether the loop enters ErrorRecovery.",
+      "how_it_shapes_the_loop": "A high-severity Anomaly from the detector is the trigger that flips control from Executing into ErrorRecovery, closing the observe->control feedback edge.",
+      "loop_objects_touched": ["Anomaly", "Alert", "RootCause"],
+      "wiring": {
+        "inputs_from": ["AnomalyDetector + AlertCorrelator"],
+        "outputs_to": ["control ErrorRecovery state"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing an edge from the anomaly node to the control node arms the recovery trigger.",
+        "visual": "The new edge glows red and thickens when severity crosses the recovery threshold."
+      },
+      "mini_scenario": "An Anomaly{severity:0.85} on repeated tool failures trips the edge and control switches to ErrorRecovery.",
+      "pitfall": "Wire severity, not raw error count; a single benign error firing recovery on every loop causes thrashing."
+    },
+    {
+      "id": "observability-18",
+      "title": "Overlay a live cost/telemetry HUD on the loop",
+      "loop_stage": "observe",
+      "pattern": "always-on-overlay",
+      "intent": "Keep tokens, cost, error rate, and latency visible over the running canvas.",
+      "how_it_shapes_the_loop": "The Dashboard reads TokenUsage.display and Metrics counters continuously, giving the operator (and control heuristics) a real-time budget/health picture without pausing the loop.",
+      "loop_objects_touched": ["Dashboard", "TokenUsage", "Metrics"],
+      "wiring": {
+        "inputs_from": ["TokenUsage accumulator", "Metrics counters"],
+        "outputs_to": ["operator overlay", "control heuristics"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the HUD zooms from a summary badge into detailed per-metric gauges.",
+        "visual": "A frosted overlay hovers over the canvas; gauges breathe as values update, amber near limits."
+      },
+      "mini_scenario": "Mid-loop the HUD reads '47k tokens ($0.66), 3% errors, 210ms avg'; the operator lets it keep running.",
+      "pitfall": "The overlay reflects only what was recorded; if sampling or redaction dropped events the HUD understates true activity."
+    },
+    {
+      "id": "observability-19",
+      "title": "Flush telemetry on graceful shutdown",
+      "loop_stage": "foundation",
+      "pattern": "flush-before-exit",
+      "intent": "Ensure buffered logs reach disk when the loop ends.",
+      "how_it_shapes_the_loop": "shutdown_tracing drops the non-blocking WorkerGuard, flushing the background writer so the final iterations' evidence is not lost on exit.",
+      "loop_objects_touched": ["LogEntry", "Span"],
+      "wiring": {
+        "inputs_from": ["control terminal state (Completed/Failed)"],
+        "outputs_to": ["rolling file sink"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the sink node downward forces a flush-and-close.",
+        "visual": "Buffered log dots stream down into the disk icon, which then locks with a checkmark."
+      },
+      "mini_scenario": "On Completed, shutdown_tracing flushes the last 30 buffered lines that the async appender still held.",
+      "pitfall": "The guard lives in a OnceLock/Mutex; forgetting to call shutdown means the async appender may drop tail logs on exit."
+    },
+    {
+      "id": "observability-20",
+      "title": "Feed run summaries back into self-improvement",
+      "loop_stage": "learn",
+      "pattern": "observe-to-learn",
+      "intent": "Turn accumulated telemetry into inputs the loop learns from across runs.",
+      "how_it_shapes_the_loop": "Top patterns, anomaly summaries, and workflow cost/latency records become the evidence the learn stage hands to self_improvement, closing the observe->learn loop.",
+      "loop_objects_touched": ["PatternStats", "Anomaly", "WorkflowRun", "RootCause"],
+      "wiring": {
+        "inputs_from": ["PatternDetector, AnomalyDetector, workflow metrics"],
+        "outputs_to": ["cognitive/self_improvement"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing an edge from the analysis panel to the learn node exports the run's summaries.",
+        "visual": "A soft blue edge carries pattern/anomaly chips into the learn node, which absorbs them with a ripple."
+      },
+      "mini_scenario": "After a run, the top error pattern and cost summary flow into self_improvement, which lowers next run's default context.",
+      "pitfall": "Learn from summaries, not raw floods; exporting every LogEntry instead of ranked summaries drowns the learner in noise."
+    }
+  ]
+}
