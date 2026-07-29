@@ -502,14 +502,9 @@ fn generate_id() -> String {
     format!("ep-{}", timestamp)
 }
 
-/// Get current timestamp in seconds
-#[allow(dead_code)] // used by cognitive_system tests via `use super::*`
-fn current_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
+// Canonical timestamp helper, used by cognitive_system tests via `use super::*`.
+#[cfg(test)]
+use crate::util::current_timestamp_secs;
 
 /// Format timestamp
 fn format_timestamp(timestamp: u64) -> String {

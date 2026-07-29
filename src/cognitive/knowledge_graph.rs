@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Atomic counter for unique entity IDs
 static ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -659,12 +658,7 @@ impl Default for KnowledgeGraph {
 impl KnowledgeGraph {
     /// Save the knowledge graph to a JSON file
     pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        crate::util::save_json_pretty(self, path)
     }
 
     /// Load the knowledge graph from a JSON file
@@ -696,10 +690,7 @@ impl KnowledgeGraph {
 
     /// Get current epoch seconds for access tracking.
     fn now_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
+        crate::util::current_timestamp_secs()
     }
 
     /// Touch an entity to mark it as recently used.

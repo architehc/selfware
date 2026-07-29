@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use tracing::{debug, info};
 
 use crate::cognitive::memory_hierarchy::{MemoryUsage, TokenBudget};
+use crate::util::current_timestamp_secs;
 
 /// Task types for specialized token allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -478,13 +479,6 @@ pub struct BudgetStats {
     pub avg_working_usage: f32,
     pub avg_episodic_usage: f32,
     pub avg_semantic_usage: f32,
-}
-
-fn current_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 // ============================================================================

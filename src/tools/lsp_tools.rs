@@ -17,6 +17,42 @@ use crate::config::SafetyConfig;
 use crate::lsp::LspClient;
 use crate::tools::file::{resolve_safety_config, validate_tool_path};
 
+/// Shared input schema for the LSP tools that take `file`, `line`, `column`.
+fn position_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["file", "line", "column"],
+        "properties": {
+            "file": {
+                "type": "string",
+                "description": "Path to the source file"
+            },
+            "line": {
+                "type": "integer",
+                "description": "Zero-based line number"
+            },
+            "column": {
+                "type": "integer",
+                "description": "Zero-based column number (character offset)"
+            }
+        }
+    })
+}
+
+/// Shared input schema for the LSP tools that take only `file`.
+fn file_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["file"],
+        "properties": {
+            "file": {
+                "type": "string",
+                "description": "Path to the source file"
+            }
+        }
+    })
+}
+
 /// Shared, lazily-initialized LSP client.
 ///
 /// All four LSP tools hold an `Arc` to the same `LspClientHandle`, which
@@ -142,24 +178,7 @@ impl Tool for LspGotoDefinitionTool {
     }
 
     fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["file", "line", "column"],
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the source file"
-                },
-                "line": {
-                    "type": "integer",
-                    "description": "Zero-based line number"
-                },
-                "column": {
-                    "type": "integer",
-                    "description": "Zero-based column number (character offset)"
-                }
-            }
-        })
+        position_schema()
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
@@ -218,24 +237,7 @@ impl Tool for LspFindReferencesTool {
     }
 
     fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["file", "line", "column"],
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the source file"
-                },
-                "line": {
-                    "type": "integer",
-                    "description": "Zero-based line number"
-                },
-                "column": {
-                    "type": "integer",
-                    "description": "Zero-based column number (character offset)"
-                }
-            }
-        })
+        position_schema()
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
@@ -287,16 +289,7 @@ impl Tool for LspDocumentSymbolsTool {
     }
 
     fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["file"],
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the source file"
-                }
-            }
-        })
+        file_schema()
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
@@ -344,24 +337,7 @@ impl Tool for LspHoverTool {
     }
 
     fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["file", "line", "column"],
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the source file"
-                },
-                "line": {
-                    "type": "integer",
-                    "description": "Zero-based line number"
-                },
-                "column": {
-                    "type": "integer",
-                    "description": "Zero-based column number (character offset)"
-                }
-            }
-        })
+        position_schema()
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
@@ -441,16 +417,7 @@ impl Tool for LspDiagnosticsTool {
     }
 
     fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["file"],
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the source file"
-                }
-            }
-        })
+        file_schema()
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
@@ -606,24 +573,7 @@ impl Tool for LspGotoImplementationTool {
     }
 
     fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "required": ["file", "line", "column"],
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the source file"
-                },
-                "line": {
-                    "type": "integer",
-                    "description": "Zero-based line number"
-                },
-                "column": {
-                    "type": "integer",
-                    "description": "Zero-based column number (character offset)"
-                }
-            }
-        })
+        position_schema()
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {

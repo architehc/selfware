@@ -306,7 +306,7 @@ fn colorize_risk(risk: &str) -> colored::ColoredString {
 }
 
 /// Truncate a string for display
-fn truncate_str(s: &str, max_len: usize) -> String {
+pub(crate) fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {

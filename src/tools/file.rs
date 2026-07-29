@@ -136,7 +136,7 @@ pub(crate) async fn read_file_with_encoding(path: &Path) -> Result<(String, Vec<
 }
 
 /// Detect the line ending style of existing content.
-fn detect_line_ending(text: &str) -> &'static str {
+pub(crate) fn detect_line_ending(text: &str) -> &'static str {
     if text.contains("\r\n") {
         "\r\n"
     } else {

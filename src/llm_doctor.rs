@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use crate::api::merge_extra_body;
 use crate::config::Config;
 use crate::doctor::{config_checks, CheckStatus as DoctorCheckStatus};
+use crate::testing::verification::truncate_str;
 
 // ── Timeout applied to every HTTP probe ──────────────────────────────────────
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1739,14 +1740,6 @@ fn print_recommendations(
         "|                                                     |".cyan()
     );
     println!("{}", border_bot);
-}
-
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
-    }
 }
 
 #[derive(Debug)]

@@ -17,8 +17,9 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info};
 
 // ---------------------------------------------------------------------------
-// Wire framing (newline-delimited JSON-RPC and LSP-style Content-Length,
-// mirrors server.rs)
+// Wire framing (newline-delimited JSON-RPC and LSP-style Content-Length).
+// Canonical home shared by this transport, the MCP server (mcp/server.rs),
+// and the LSP server (lsp/server.rs).
 // ---------------------------------------------------------------------------
 
 /// Wire framing for JSON-RPC messages.

@@ -24,7 +24,7 @@ pub mod prompt;
 const REGEX_CACHE_MAX: usize = 64;
 
 /// Maximum length of a user-supplied regex pattern (bytes).
-const MAX_PATTERN_LENGTH: usize = 1_000;
+pub(crate) const MAX_PATTERN_LENGTH: usize = 1_000;
 
 /// Maximum compiled regex size (bytes).
 const MAX_REGEX_SIZE: usize = 1 << 20; // 1 MB
@@ -36,7 +36,7 @@ static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> = Lazy::new(|| Mutex::ne
 const GREP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Return a cached `Regex` for `pattern`, compiling and caching it on first use.
-fn cached_regex(pattern: &str) -> Result<Regex> {
+pub(crate) fn cached_regex(pattern: &str) -> Result<Regex> {
     if pattern.len() > MAX_PATTERN_LENGTH {
         anyhow::bail!(
             "Regex pattern too long ({} bytes, max {})",

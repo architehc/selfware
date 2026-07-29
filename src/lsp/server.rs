@@ -6,11 +6,12 @@
 //! offer symbol search, outline, go-to-definition, and hover.
 
 use crate::cognitive::intelligence::{ProjectIntelligence, SearchResult, Symbol, SymbolKind};
+use crate::mcp::transport::write_message;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tracing::{debug, info};
 use url::Url;
 
@@ -389,14 +390,6 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
     Ok(Some(
         String::from_utf8(buf).context("message was not valid UTF-8")?,
     ))
-}
-
-async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &str) -> Result<()> {
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(body.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
 }
 
 fn extract_root(params: Option<&Value>) -> Option<PathBuf> {

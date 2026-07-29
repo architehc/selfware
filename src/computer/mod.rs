@@ -13,6 +13,7 @@ pub mod keyboard;
 pub mod mouse;
 pub mod screen;
 pub mod window;
+pub(crate) mod xdotool;
 
 pub use keyboard::KeyboardController;
 pub use mouse::MouseController;

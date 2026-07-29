@@ -143,6 +143,7 @@ pub mod self_healing;
 pub mod templates;
 pub mod token_count;
 pub mod tool_parser;
+pub mod util;
 
 // ============================================================================
 // Global shutdown coordination

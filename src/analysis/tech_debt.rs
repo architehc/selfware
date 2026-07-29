@@ -7,17 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::util::{current_timestamp_secs, save_json_pretty};
 
 static DEBT_COUNTER: AtomicU64 = AtomicU64::new(1);
 static ROADMAP_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 // ============================================================================
 // Debt Quantification
@@ -132,7 +126,7 @@ pub struct DebtItem {
 impl DebtItem {
     pub fn new(debt_type: DebtType, title: impl Into<String>) -> Self {
         let id = format!("debt_{}", DEBT_COUNTER.fetch_add(1, Ordering::SeqCst));
-        let now = current_timestamp();
+        let now = current_timestamp_secs();
         Self {
             id,
             debt_type,
@@ -456,7 +450,7 @@ impl RefactoringRoadmap {
             total_hours: 0.0,
             total_cost: 0.0,
             annual_savings: 0.0,
-            created_at: current_timestamp(),
+            created_at: current_timestamp_secs(),
         }
     }
 
@@ -579,8 +573,8 @@ impl FileStats {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
-            created_at: current_timestamp(),
-            last_modified: current_timestamp(),
+            created_at: current_timestamp_secs(),
+            last_modified: current_timestamp_secs(),
             total_commits: 0,
             unique_authors: 1,
             lines_added: 0,
@@ -592,7 +586,7 @@ impl FileStats {
 
     /// Calculate age in days
     pub fn age_days(&self) -> u64 {
-        (current_timestamp() - self.created_at) / 86400
+        (current_timestamp_secs() - self.created_at) / 86400
     }
 
     /// Calculate churn rate (changes per month)
@@ -883,12 +877,7 @@ impl DebtTracker {
 
     /// Save tracker state to a JSON file.
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
-        Ok(())
+        save_json_pretty(self, path)
     }
 
     /// Load tracker state from a JSON file.

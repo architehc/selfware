@@ -7,18 +7,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::util::current_timestamp_secs;
 
 static CONCEPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QUIZ_COUNTER: AtomicU64 = AtomicU64::new(1);
 static LESSON_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn current_timestamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
 
 // ============================================================================
 // Explain-as-You-Code Mode
@@ -889,7 +883,7 @@ impl Quiz {
             questions: Vec::new(),
             time_limit_mins: None,
             passing_score: 70,
-            created_at: current_timestamp(),
+            created_at: current_timestamp_secs(),
         }
     }
 
@@ -975,7 +969,7 @@ impl QuizResult {
             percentage,
             passed: percentage >= quiz.passing_score as f64,
             time_taken_secs,
-            completed_at: current_timestamp(),
+            completed_at: current_timestamp_secs(),
             incorrect_questions: incorrect,
         }
     }

@@ -528,7 +528,16 @@ pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Vec<f32>>;
 
     /// Generate embeddings for multiple texts
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    ///
+    /// Default implementation embeds one text at a time; providers with a
+    /// native batch endpoint (e.g. `HttpEmbeddingProvider`) override this.
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let mut results = Vec::with_capacity(texts.len());
+        for text in texts {
+            results.push(self.embed(text).await?);
+        }
+        Ok(results)
+    }
 
     /// Get embedding dimension
     fn dimension(&self) -> usize;
@@ -574,14 +583,6 @@ impl EmbeddingProvider for MockEmbeddingProvider {
         }
 
         Ok(embedding)
-    }
-
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            results.push(self.embed(text).await?);
-        }
-        Ok(results)
     }
 
     fn dimension(&self) -> usize {
@@ -713,14 +714,6 @@ impl EmbeddingProvider for TfIdfEmbeddingProvider {
         }
 
         Ok(embedding)
-    }
-
-    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            results.push(self.embed(text).await?);
-        }
-        Ok(results)
     }
 
     fn dimension(&self) -> usize {

@@ -8,7 +8,7 @@
 //! LSP-style `Content-Length` headers (legacy clients). Every response is
 //! written in the same framing as the request that produced it.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::BufReader;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tracing::{debug, info};
 
@@ -78,44 +78,20 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ---------------------------------------------------------------------------
 // Wire framing (newline-delimited JSON-RPC and LSP-style Content-Length)
+//
+// The framing primitives live in `crate::mcp::transport` — the canonical
+// home shared by the MCP client transport, this server, and the LSP server.
+// The framing of each incoming message is auto-detected per message, and
+// each response is written in the same framing as the request that produced
+// it.
 // ---------------------------------------------------------------------------
 
-/// Wire framing detected for an incoming message.
-///
-/// The MCP stdio spec (protocol 2024-11-05) frames messages as
-/// newline-delimited JSON-RPC, but this server historically spoke (and some
-/// LSP-derived clients still speak) `Content-Length` header framing. The
-/// framing is auto-detected per message, and each response is written in the
-/// same framing as the request that produced it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Framing {
-    /// LSP-style `Content-Length: <n>\r\n\r\n<body>`.
-    ContentLength,
-    /// One JSON-RPC message per line (MCP stdio spec, 2024-11-05).
-    NewlineDelimited,
-}
-
-/// Peek at the buffered bytes to detect which framing the peer is using.
-///
-/// A header-framed message always starts with `Content-Length:`, while a
-/// newline-delimited JSON-RPC message is a single JSON object on one line —
-/// and a JSON document can never start with `C`. The first byte therefore
-/// decides unambiguously, even if the peer's write arrived in several chunks.
-/// Returns `Ok(None)` on EOF.
-async fn detect_framing<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> Result<Option<Framing>> {
-    let buf = reader.fill_buf().await?;
-    if buf.is_empty() {
-        // EOF
-        return Ok(None);
-    }
-    Ok(Some(if buf[0] == b'C' {
-        Framing::ContentLength
-    } else {
-        Framing::NewlineDelimited
-    }))
-}
+#[cfg(test)]
+use crate::mcp::transport::write_message;
+use crate::mcp::transport::{
+    detect_framing, read_content_length_message, read_newline_message, write_framed_message,
+    Framing,
+};
 
 /// Read the next message from `reader`, auto-detecting its framing.
 ///
@@ -139,104 +115,6 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
         Framing::NewlineDelimited => read_newline_message(reader).await?,
     };
     Ok(body.map(|body| (body, framing)))
-}
-
-/// Read a single Content-Length framed message from `reader`.
-///
-/// The format is:
-/// ```text
-/// Content-Length: <n>\r\n
-/// \r\n
-/// <n bytes of JSON>
-/// ```
-///
-/// Returns `Ok(None)` on EOF, `Ok(Some(body))` on a successful read, and
-/// `Err` when headers are malformed or the body is truncated.
-async fn read_content_length_message<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> Result<Option<String>> {
-    let mut content_length: Option<usize> = None;
-
-    // Read headers until we hit the empty line.
-    loop {
-        let mut header_line = String::new();
-        let bytes_read = reader.read_line(&mut header_line).await?;
-        if bytes_read == 0 {
-            // EOF
-            return Ok(None);
-        }
-
-        let trimmed = header_line.trim();
-        if trimmed.is_empty() {
-            // End of headers.
-            break;
-        }
-
-        if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .context("Invalid Content-Length value")?,
-            );
-        }
-        // Ignore other headers (e.g. Content-Type).
-    }
-
-    let length = content_length.context("Missing Content-Length header")?;
-
-    let mut buf = vec![0u8; length];
-    reader.read_exact(&mut buf).await?;
-
-    String::from_utf8(buf)
-        .context("Message body is not valid UTF-8")
-        .map(Some)
-}
-
-/// Read a single newline-delimited JSON-RPC message (one line).
-///
-/// Per the MCP stdio spec (2024-11-05), messages are UTF-8 JSON-RPC with no
-/// embedded newlines, delimited by `\n`. Returns `Ok(None)` on EOF.
-async fn read_newline_message<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> Result<Option<String>> {
-    let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line).await?;
-    if bytes_read == 0 {
-        // EOF
-        return Ok(None);
-    }
-    Ok(Some(line.trim().to_string()))
-}
-
-/// Write a Content-Length framed message to `writer`.
-async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &str) -> Result<()> {
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(body.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-/// Write a message to `writer` using the requested framing.
-///
-/// Responses must use the framing of the request they answer. The compact
-/// `serde_json` serialization escapes control characters inside strings, so
-/// a newline-delimited body never contains a raw `\n` of its own.
-async fn write_framed_message<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    body: &str,
-    framing: Framing,
-) -> Result<()> {
-    match framing {
-        Framing::ContentLength => write_message(writer, body).await,
-        Framing::NewlineDelimited => {
-            writer.write_all(body.as_bytes()).await?;
-            writer.write_all(b"\n").await?;
-            writer.flush().await?;
-            Ok(())
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

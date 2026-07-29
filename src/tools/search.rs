@@ -2,64 +2,16 @@ use super::Tool;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
 use tracing::instrument;
 use walkdir::WalkDir;
 
-/// Maximum number of compiled regex patterns to cache.
-const REGEX_CACHE_MAX: usize = 64;
-
-/// Maximum length of a user-supplied regex pattern (bytes).
-/// Prevents denial-of-service via extremely large or complex patterns.
-const MAX_PATTERN_LENGTH: usize = 1_000;
-
-/// Maximum compiled regex size (bytes). Limits memory consumed by
-/// pathological patterns that expand into large automata.
-const MAX_REGEX_SIZE: usize = 1 << 20; // 1 MB
-
-/// Global cache of compiled regex patterns, keyed by their source string.
-/// When the cache exceeds [`REGEX_CACHE_MAX`] entries, it is cleared entirely
-/// (simple but bounded eviction strategy).
-static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> = Lazy::new(|| Mutex::new(HashMap::new()));
-
-/// Return a cached `Regex` for `pattern`, compiling and caching it on first use.
-///
-/// Applies size limits to prevent ReDoS attacks from pathological patterns.
-fn cached_regex(pattern: &str) -> Result<Regex> {
-    if pattern.len() > MAX_PATTERN_LENGTH {
-        anyhow::bail!(
-            "Regex pattern too long ({} bytes, max {})",
-            pattern.len(),
-            MAX_PATTERN_LENGTH
-        );
-    }
-
-    let mut cache = REGEX_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-    if let Some(re) = cache.get(pattern) {
-        return Ok(re.clone());
-    }
-
-    let re = RegexBuilder::new(pattern)
-        .size_limit(MAX_REGEX_SIZE)
-        .build()
-        .context("Invalid or too-complex regex pattern")?;
-
-    // Evict all entries when the cache is full to stay bounded.
-    if cache.len() >= REGEX_CACHE_MAX {
-        cache.clear();
-    }
-
-    cache.insert(pattern.to_owned(), re.clone());
-    Ok(re)
-}
+use crate::tools::grep_search::cached_regex;
+#[cfg(test)]
+use crate::tools::grep_search::MAX_PATTERN_LENGTH;
 
 /// Re-export the canonical `grep_search` tool from `tools::grep_search` so
 /// there is only one `GrepSearch` implementation in the codebase.

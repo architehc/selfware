@@ -14,6 +14,8 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
+use crate::safety::dry_run::truncate_str;
+
 use super::TuiPalette;
 
 /// Convert HeadingLevel to usize for repeat operations
@@ -531,16 +533,6 @@ impl<'a> RenderState<'a> {
     fn finish(mut self) -> Text<'static> {
         self.flush_line();
         Text::from(self.lines)
-    }
-}
-
-/// Truncate a string to max length with ellipsis
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        let end = s.floor_char_boundary(max_len.saturating_sub(3));
-        format!("{}...", &s[..end])
     }
 }
 

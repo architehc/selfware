@@ -867,8 +867,11 @@ impl SafetyChecker {
         Ok(())
     }
 
-    /// Check HTTP request URL for SSRF
-    fn check_http_request_url(&self, url: &str) -> Result<()> {
+    /// Check an endpoint URL for SSRF.
+    ///
+    /// Shared body of the HTTP-request, browser, and vision-endpoint checks
+    /// (page-control URLs additionally allow `file://`, so they are separate).
+    fn check_endpoint_url(&self, url: &str) -> Result<()> {
         self.check_url_ssrf_with_options(
             url,
             UrlSafetyOptions {
@@ -879,16 +882,14 @@ impl SafetyChecker {
         )
     }
 
+    /// Check HTTP request URL for SSRF
+    fn check_http_request_url(&self, url: &str) -> Result<()> {
+        self.check_endpoint_url(url)
+    }
+
     /// Check browser URL
     fn check_browser_url(&self, url: &str) -> Result<()> {
-        self.check_url_ssrf_with_options(
-            url,
-            UrlSafetyOptions {
-                allow_file_scheme: false,
-                allow_localhost: true,
-            },
-            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
-        )
+        self.check_endpoint_url(url)
     }
 
     /// Check page control URL
@@ -914,14 +915,7 @@ impl SafetyChecker {
 
     /// Check vision endpoint URL
     fn check_vision_endpoint_url(&self, url: &str) -> Result<()> {
-        self.check_url_ssrf_with_options(
-            url,
-            UrlSafetyOptions {
-                allow_file_scheme: false,
-                allow_localhost: true,
-            },
-            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
-        )
+        self.check_endpoint_url(url)
     }
 
     /// Check URL for SSRF with options

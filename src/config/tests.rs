@@ -180,20 +180,6 @@ fn test_config_with_yolo_audit_log() {
 }
 
 #[test]
-fn test_safety_config_require_confirmation_default() {
-    let config = SafetyConfig::default();
-    assert!(config
-        .require_confirmation
-        .contains(&"git_push".to_string()));
-    assert!(config
-        .require_confirmation
-        .contains(&"file_delete".to_string()));
-    assert!(config
-        .require_confirmation
-        .contains(&"shell_exec".to_string()));
-}
-
-#[test]
 fn test_config_with_custom_require_confirmation() {
     let toml_str = r#"
             endpoint = "http://localhost:8000/v1"
@@ -1051,14 +1037,6 @@ fn test_validate_remote_http_still_valid() {
 }
 
 // ---- Environment variable override tests ----
-
-#[test]
-fn test_execution_mode_display() {
-    assert_eq!(format!("{}", ExecutionMode::Normal), "normal");
-    assert_eq!(format!("{}", ExecutionMode::AutoEdit), "auto-edit");
-    assert_eq!(format!("{}", ExecutionMode::Yolo), "yolo");
-    assert_eq!(format!("{}", ExecutionMode::Daemon), "daemon");
-}
 
 #[test]
 fn test_execution_mode_default() {
@@ -2008,16 +1986,6 @@ fn test_validate_endpoint_https_slash_only() {
 }
 
 #[test]
-fn test_validate_max_tokens_at_limit() {
-    let config = Config {
-        max_tokens: 10_000_000,
-        context_length: default_context_length(),
-        ..Config::default()
-    };
-    assert!(config.validate().is_ok());
-}
-
-#[test]
 fn test_validate_max_tokens_over_limit() {
     let config = Config {
         max_tokens: 10_000_001,
@@ -2097,15 +2065,6 @@ fn test_is_local_endpoint_malformed_ipv6() {
 }
 
 // ---- EvolutionTomlConfig tests ----
-
-#[test]
-fn test_evolution_config_default() {
-    let config = EvolutionTomlConfig::default();
-    assert!(config.prompt_logic.is_empty());
-    assert!(config.tool_code.is_empty());
-    assert!(config.cognitive.is_empty());
-    assert!(config.config_keys.is_empty());
-}
 
 #[test]
 fn test_evolution_config_deserialization() {

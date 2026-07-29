@@ -147,7 +147,7 @@ fn test_file_stats() {
     let mut stats = FileStats::new("src/main.rs");
     stats.total_commits = 50;
     stats.bug_fixes = 10;
-    stats.created_at = current_timestamp() - (180 * 86400); // 180 days ago
+    stats.created_at = current_timestamp_secs() - (180 * 86400); // 180 days ago
 
     assert!(stats.age_days() >= 180);
     assert!(stats.churn_rate() > 0.0);
@@ -160,7 +160,7 @@ fn test_file_stats_hotspot() {
     stats.total_commits = 100;
     stats.bug_fixes = 30;
     stats.unique_authors = 5;
-    stats.created_at = current_timestamp() - (30 * 86400);
+    stats.created_at = current_timestamp_secs() - (30 * 86400);
 
     assert!(stats.hotspot_score() > 0.0);
 }
@@ -173,14 +173,14 @@ fn test_churn_analyzer_hotspots() {
     hot.total_commits = 100;
     hot.bug_fixes = 30;
     hot.unique_authors = 5;
-    hot.created_at = current_timestamp() - 86400;
+    hot.created_at = current_timestamp_secs() - 86400;
     analyzer.add_file(hot);
 
     let mut stable = FileStats::new("stable.rs");
     stable.total_commits = 5;
     stable.bug_fixes = 0;
     stable.unique_authors = 1;
-    stable.created_at = current_timestamp() - (365 * 86400);
+    stable.created_at = current_timestamp_secs() - (365 * 86400);
     analyzer.add_file(stable);
 
     let hotspots = analyzer.hotspots(10);
@@ -387,7 +387,7 @@ fn test_churn_analyzer_age_correlation() {
     let mut file = FileStats::new("test.rs");
     file.total_commits = 50;
     file.bug_fixes = 10;
-    file.created_at = current_timestamp() - (180 * 86400);
+    file.created_at = current_timestamp_secs() - (180 * 86400);
     analyzer.add_file(file);
 
     let correlation = analyzer.correlate_age_debt();
