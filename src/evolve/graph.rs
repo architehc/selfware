@@ -80,20 +80,41 @@ impl GraphBuilder {
             // ship something. Web assets, data, config, scripts, and vendored
             // files — even under `src` — become Auxiliary so they don't
             // inflate the code token tiers.
-            // Benchmark tooling under src/ is tooling, not product code:
-            // excluding it from the code tiers saves ~77k full / ~10k lite
-            // tokens of context that never describes the product
-            // (DEBLOAT_STATE.md). swl/ is the experimental workflow-language
-            // runtime — used by CLI/orchestration but not product context
-            // (−46k full tokens).
+            // Tooling vs product logic. Product context tiers exist to let a
+            // model reason about the product; these layers are presentation,
+            // operations, or scaffolding that a review agent does not need in
+            // bulk (they remain in the graph and are reachable on demand via
+            // expand). bench/vlm/swl are tooling runtimes; the rest are the
+            // presentation+ops layer (DEBLOAT_STATE.md).
             let is_tooling_module = {
                 let module = relative
                     .components()
                     .nth(1)
-                    .and_then(|c| c.as_os_str().to_str());
+                    .and_then(|c| c.as_os_str().to_str())
+                    .map(|m| m.strip_suffix(".rs").unwrap_or(m));
                 matches!(
                     module,
-                    Some("bench_harness") | Some("vlm_bench") | Some("swl")
+                    Some("bench_harness")
+                        | Some("vlm_bench")
+                        | Some("swl")
+                        | Some("ui")
+                        | Some("computer")
+                        | Some("testing")
+                        | Some("observability")
+                        | Some("devops")
+                        | Some("doctor")
+                        | Some("llm_doctor")
+                        | Some("bin")
+                        | Some("resource")
+                        | Some("input")
+                        | Some("output")
+                        | Some("supervision")
+                        | Some("self_healing")
+                        | Some("mcp")
+                        | Some("lsp")
+                        | Some("consolidation")
+                        | Some("templates")
+                        | Some("interview")
                 )
             };
             let is_code = matches!(source_set, SourceSet::Code)

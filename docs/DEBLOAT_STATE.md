@@ -9,14 +9,14 @@
 
 | Metric | Baseline | Previous (2026-07-25) | Delta |
 |---|---|---|---|
-| Full (all Code nodes) | 1,282,200 | 1,359,882 | −77,682 (bench/vlm + swl exclusions) |
-| Lite (skeletons/verbatim) | 205,479 | 172,243 | +33,236 (non-rs shipped, minus exclusions) |
+| Full (all Code nodes) | **953,601** | 1,359,882 | −406k total — **under 1M** (ops/presentation tooling-classified) |
+| Lite (skeletons/verbatim) | 158,316 | 172,243 | −8% vs first measurement |
 | Compact | ~1.04M | 1,099,370 | — |
 | Map (component cards) | ~24.5k | 26,949 | — |
 | Production files | 342 in tiers (376 total incl. tooling) | 380 | bench/vlm → Auxiliary |
 | Source lines (repo) | ~205k | ~211k | −6,027 (waves 1-4) |
 
-Lite density: 16.2% of full (83.8% reduction). Map density: ~1.8%.
+Lite density: 16.6% of full. Map density: ~1.7% (16.3k). Full product logic fits a 1M window with ~46k headroom; the 0.70 auto-fit still picks Lite at 1M (Full at 0.95+ fit_ratio).
 
 ## Per-module tokens (top 15 by full size)
 
