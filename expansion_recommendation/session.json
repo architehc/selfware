@@ -2,29 +2,22 @@
   "component": "session",
   "tier": "full",
   "loop_stage": "learn",
-  "summary": "The session component is the loop's state and persistence substrate. ToolCache and LlmCache avoid redundant act and reason work; EditHistory records file edits as branchable EditCheckpoints for undo/redo/timeline; the CheckpointManager snapshots the whole TaskCheckpoint (step, iteration, messages, tool logs, budget) via delta writes for resume; EncryptionManager protects data at rest with AES-256-GCM; LocalFirstCoordinator caches responses offline; ChatStore persists encrypted conversations.",
-  "loop_objects": ["ToolCache", "LlmCache", "EditHistory", "EditCheckpoint", "FileSnapshot", "TaskCheckpoint", "CheckpointDelta", "EncryptionManager", "SavedChat", "CacheStats"],
-  "context_basis": "recommendations were formed with src/session/ read in the context of the full engine (~600k budget framing), grounded in cache.rs ToolCache/LlmCache/CacheManager, edit_history.rs EditCheckpoint/EditHistory, checkpoint.rs TaskCheckpoint/CheckpointDelta/CheckpointManager, encryption.rs EncryptionManager, local_first.rs, and chat_store.rs.",
+  "summary": "The session component is the loop's state and persistence substrate: the 'learn' stage's memory and the control stage's resume anchor. ToolCache and LlmCache (cache.rs) avoid redundant act and reason work by keying results on tool+args and on embedding/context_hash similarity; EditHistory (edit_history.rs) records every mutation as a branchable EditCheckpoint of FileSnapshots for undo/redo/timeline; CheckpointManager (checkpoint.rs) snapshots the whole TaskCheckpoint — step, iteration, messages, tool logs, errors, budget — via CheckpointDelta writes for crash-safe resume; EncryptionManager (encryption.rs) protects data at rest with AES-256-GCM and zeroizes its key on drop; LocalFirstCoordinator (local_first.rs) caches responses for offline use; ChatStore (chat_store.rs) persists encrypted named conversations.",
+  "loop_objects": ["ToolCache", "LlmCache", "CacheStats", "CacheManager", "EditHistory", "EditCheckpoint", "FileSnapshot", "TimelineEntry", "TaskCheckpoint", "CheckpointDelta", "CheckpointManager", "EncryptionManager", "SavedChat", "ChatSummary", "LocalFirstCoordinator", "LocalCache"],
+  "context_basis": "Recommendations formed with src/session/ read in the context of the full engine (~600k budget framing), grounded in cache.rs ToolCache/LlmCache/CacheManager, edit_history.rs EditCheckpoint/EditHistory/TimelineEntry, checkpoint.rs TaskCheckpoint/CheckpointDelta/CheckpointManager, encryption.rs EncryptionManager, local_first.rs LocalFirstCoordinator, and chat_store.rs ChatStore.",
   "examples": [
     {
       "id": "session-01",
       "title": "Cache a read-only tool result",
       "loop_stage": "act",
       "pattern": "keyed-result-cache",
-      "intent": "Skip re-executing a tool whose inputs have not changed.",
-      "how_it_shapes_the_loop": "ToolCache keys on tool_name+args_json and returns a hit within TTL, so the act stage returns instantly and the loop spends its budget elsewhere.",
+      "intent": "Skip re-executing a read-only tool whose inputs have not changed.",
+      "how_it_shapes_the_loop": "ToolCache::get keys on cache_key(tool_name, args_json) and returns a hit inside its TTL, so the act stage short-circuits and the loop spends its budget on new work instead of repeat reads.",
       "loop_objects_touched": ["ToolCache", "CacheStats"],
-      "wiring": {
-        "inputs_from": ["tool name + args"],
-        "outputs_to": ["cached ToolResult", "act stage"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping a read node reveals its cache card; a hit lights the shortcut edge to the stored value.",
-        "visual": "A cache hit shows a lightning badge; the node skips its execution spinner."
-      },
-      "mini_scenario": "A repeated grep_search returns from ToolCache in microseconds instead of scanning the tree again.",
-      "pitfall": "Caching without mtime-based staleness checks serves outdated file contents to the loop."
+      "wiring": {"inputs_from": ["agent (read-only ToolCall: file_read, grep_search)", "ToolCache::is_cacheable gate"], "outputs_to": ["cached ToolResult into the act stage", "CacheStats hit counter"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping a read node opens its cache card; a hit lights a shortcut edge straight to the stored value.", "visual": "Cache-hit nodes show a lightning badge and skip their execution spinner; misses show a hollow badge."},
+      "mini_scenario": "The agent repeats grep_search with identical args; ToolCache::get returns the stored result in microseconds and the act stage moves on without touching the filesystem.",
+      "pitfall": "Only cache tools that pass is_cacheable — caching a mutating tool's result serves stale state to the loop."
     },
     {
       "id": "session-02",
@@ -32,219 +25,142 @@
       "loop_stage": "act",
       "pattern": "path-scoped-invalidation",
       "intent": "Drop only the cache entries a mutation could have affected.",
-      "how_it_shapes_the_loop": "invalidate_path removes every ToolCache entry containing the touched path, so post-write reads re-run against fresh state without nuking unrelated cached results.",
-      "loop_objects_touched": ["ToolCache"],
-      "wiring": {
-        "inputs_from": ["mutating tool result", "path"],
-        "outputs_to": ["cache invalidation"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "User flicks a write node's edge across the cache to clear entries for that path only.",
-        "visual": "Only path-matching cache cards fade out; unrelated cards stay intact."
-      },
-      "mini_scenario": "After editing config.rs, only config.rs cache entries are dropped so its next read is fresh.",
-      "pitfall": "Over-broad invalidation clears the whole cache and forfeits the savings on unrelated reads."
+      "how_it_shapes_the_loop": "After a mutating act, CacheManager::invalidate_path removes every ToolCache entry whose key contains the touched path, so post-write reads re-run against fresh state while unrelated cached results survive.",
+      "loop_objects_touched": ["ToolCache", "CacheManager"],
+      "wiring": {"inputs_from": ["agent (mutating ToolCall: file_edit, file_write)", "ToolCache::invalidates_cache gate"], "outputs_to": ["targeted cache eviction", "fresh re-read on next act"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking a write node's output edge across the cache node clears only the cards matching that path.", "visual": "Path-matching cache cards fade out; unrelated cards stay lit, and the hit-rate dial barely dips."},
+      "mini_scenario": "file_edit lands on config.rs; invalidate_path drops the two config.rs entries so the next file_read re-scans, while the cached Cargo.toml read stays hot.",
+      "pitfall": "Over-broad invalidation (clear() on every write) forfeits the entire cache saving on unrelated reads."
     },
     {
       "id": "session-03",
       "title": "Evict expired and LRU entries on overflow",
       "loop_stage": "control",
       "pattern": "bounded-cache",
-      "intent": "Keep the cache from growing without bound.",
-      "how_it_shapes_the_loop": "evict_expired purges expired entries and, at max_entries, removes an LRU slice, so the cache stays inside its budget without stalling the loop.",
+      "intent": "Keep the cache inside a fixed memory budget without stalling the loop.",
+      "how_it_shapes_the_loop": "ToolCache::set calls evict_expired at max_entries (1000 by default) and then removes the oldest 10% LRU slice, so the cache stays bounded and set never blocks the act stage.",
       "loop_objects_touched": ["ToolCache", "CacheStats"],
-      "wiring": {
-        "inputs_from": ["cache size", "TTL"],
-        "outputs_to": ["evicted entries"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "Pinching the cache node compacts it, visibly dropping the oldest and expired cards.",
-        "visual": "Expired cards grey and fall away; the entry-count gauge settles back under the max."
-      },
-      "mini_scenario": "The cache reaches max_entries; eviction removes 10% oldest so new results still fit.",
-      "pitfall": "Setting max_entries too low thrashes the cache and negates its benefit under a busy loop."
+      "wiring": {"inputs_from": ["ToolCache::set insert path", "entry TTL and max_entries"], "outputs_to": ["evicted entries", "CacheStats entry_count settling under the cap"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the cache node compacts it, visibly dropping greyed expired cards and the oldest entries.", "visual": "An entry-count gauge sits under the max line; expired cards grey and fall away during the pinch."},
+      "mini_scenario": "The cache hits 1000 entries mid-task; the next set evicts 100 oldest and the loop continues without a hiccup.",
+      "pitfall": "Setting max_entries too low thrashes the cache — entries are evicted before their TTL and hit_rate collapses."
     },
     {
       "id": "session-04",
       "title": "Match a semantic LLM cache hit",
       "loop_stage": "reason",
       "pattern": "embedding-similarity-cache",
-      "intent": "Reuse a prior LLM response for a near-identical prompt.",
-      "how_it_shapes_the_loop": "LlmCache::lookup matches on cosine similarity of embeddings plus a context_hash and model match, so a repeated reason turn can be served from cache and skip a billable call.",
+      "intent": "Reuse a prior LLM response for a near-identical prompt instead of paying for a new call.",
+      "how_it_shapes_the_loop": "LlmCache::lookup matches on cosine similarity of the prompt embedding plus a context_hash and model check, so a repeated reason turn can be served from cache and skip a billable, latency-heavy model call.",
       "loop_objects_touched": ["LlmCache"],
-      "wiring": {
-        "inputs_from": ["prompt embedding", "context_hash", "model"],
-        "outputs_to": ["cached LLM response", "reason turn"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the Reason node shows nearby cached prompts by similarity distance.",
-        "visual": "Candidate cache cards orbit by closeness; a match snaps in with a similarity score badge."
-      },
-      "mini_scenario": "A re-asked question with the same context hash and model returns the cached answer, saving a turn.",
-      "pitfall": "Ignoring context_hash serves an answer computed under a different context and misleads the loop."
+      "wiring": {"inputs_from": ["agent (reason-turn prompt embedding, context_hash, model id)"], "outputs_to": ["cached LLM response into the reason stage", "api (only on miss)"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the reason node fans out nearby cached prompts as orbit cards ordered by similarity distance.", "visual": "A matching card snaps onto the node with a similarity-score badge; near misses hover dimmer at their distance."},
+      "mini_scenario": "The agent re-asks the same diagnostic question with an unchanged context_hash; lookup returns the cached answer and the loop skips a full model round-trip.",
+      "pitfall": "Ignoring context_hash serves an answer computed under different context and silently misleads the reason stage."
     },
     {
       "id": "session-05",
       "title": "Snapshot a file before it changes",
       "loop_stage": "learn",
       "pattern": "pre-edit-snapshot",
-      "intent": "Capture the exact prior state so any edit can be undone.",
-      "how_it_shapes_the_loop": "EditHistory::create_checkpoint records a FileSnapshot (path, content, size, hash) tagged with an EditAction, giving the loop a durable rollback point per mutation.",
+      "intent": "Capture the exact prior file state so any edit can be undone.",
+      "how_it_shapes_the_loop": "EditHistory::create_checkpoint records FileSnapshots (path, content, size, hash) tagged with an EditAction before the mutation lands, giving the loop a durable rollback point per act.",
       "loop_objects_touched": ["EditHistory", "EditCheckpoint", "FileSnapshot"],
-      "wiring": {
-        "inputs_from": ["file_edit / file_write"],
-        "outputs_to": ["EditCheckpoint", "undo timeline"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a write node drops a snapshot pin capturing the file's pre-edit state.",
-        "visual": "A camera-pin badge appears on the timeline with the file hash."
-      },
-      "mini_scenario": "Before applying a patch, the loop snapshots the file so /undo can restore it exactly.",
-      "pitfall": "Snapshotting after the edit instead of before loses the original content and breaks undo."
+      "wiring": {"inputs_from": ["agent (file_edit / file_write ToolCall)", "current file bytes"], "outputs_to": ["EditCheckpoint on the undo timeline", "session edit_history"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing a write node drops a snapshot pin capturing the file's pre-edit state before the act fires.", "visual": "A camera-pin badge appears on the timeline edge with the file hash; the write node pauses until the pin sets."},
+      "mini_scenario": "Before file_edit applies a patch, create_checkpoint snapshots the original content so a later /undo restores it byte-for-byte.",
+      "pitfall": "Snapshotting after the edit instead of before loses the original content and makes undo restore the wrong state."
     },
     {
       "id": "session-06",
       "title": "Undo the last edit checkpoint",
       "loop_stage": "control",
       "pattern": "reversible-act",
-      "intent": "Roll the workspace back to the state before a bad edit.",
-      "how_it_shapes_the_loop": "EditHistory::undo steps the current pointer back and restores the FileSnapshot, letting the loop recover from a wrong turn without redoing the whole task.",
-      "loop_objects_touched": ["EditHistory", "EditCheckpoint"],
-      "wiring": {
-        "inputs_from": ["/undo command", "current checkpoint pointer"],
-        "outputs_to": ["restored files"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "User flicks the timeline left to step the pointer back and restore the prior snapshot.",
-        "visual": "The current-checkpoint marker slides back and the restored file card flashes."
-      },
-      "mini_scenario": "An edit breaks the build; /undo restores the pre-edit snapshot and the loop retries a different fix.",
-      "pitfall": "Undoing past a git commit checkpoint without accounting for it desyncs the working tree from history."
+      "intent": "Roll the workspace back to the state before a bad edit so the loop can retry.",
+      "how_it_shapes_the_loop": "EditHistory::undo steps the position pointer back (can_undo gate) and restores the checkpoint's FileSnapshots, letting the loop recover from a wrong turn without restarting the task or its budget.",
+      "loop_objects_touched": ["EditHistory", "EditCheckpoint", "FileSnapshot"],
+      "wiring": {"inputs_from": ["input (/undo command)", "EditHistory position pointer"], "outputs_to": ["restored files on disk", "agent retry with a different fix"]},
+      "touch_interaction": {"gesture": "drag", "canvas_action": "Dragging the current-checkpoint marker left along the timeline scrubs back one step and restores that snapshot.", "visual": "The marker slides to the previous pin; the restored file card flashes green and the undone pin dims."},
+      "mini_scenario": "An edit breaks the build; /undo restores the pre-edit snapshot and the agent's next reason turn proposes a different fix.",
+      "pitfall": "Undoing past a git-anchored checkpoint without accounting for it desyncs the working tree from committed history."
     },
     {
       "id": "session-07",
-      "title": "Branch the edit timeline on a new edit",
+      "title": "Branch the edit timeline after an undo",
       "loop_stage": "learn",
       "pattern": "what-if-branching",
-      "intent": "Preserve alternate edit paths after an undo.",
-      "how_it_shapes_the_loop": "create_checkpoint truncates future history on the current branch when a new edit follows an undo, so the timeline models a tree of what-if edit paths the loop explored.",
+      "intent": "Preserve alternate edit paths instead of silently discarding them.",
+      "how_it_shapes_the_loop": "After an undo, a new create_checkpoint truncates the redo future on the current branch, while create_branch / switch_to_main model the timeline as a tree of what-if edit paths the loop explored.",
       "loop_objects_touched": ["EditHistory", "EditCheckpoint"],
-      "wiring": {
-        "inputs_from": ["edit after undo"],
-        "outputs_to": ["new branch checkpoint"]
-      },
-      "touch_interaction": {
-        "gesture": "draw-connection",
-        "canvas_action": "User draws a branch edge from an earlier checkpoint to spawn an alternate edit path.",
-        "visual": "The timeline forks into a labeled branch line with its own checkpoint pins."
-      },
-      "mini_scenario": "After undoing, a different edit forks a new branch so the abandoned path is not lost.",
-      "pitfall": "Assuming a linear timeline after undo silently discards the branch the loop meant to keep."
+      "wiring": {"inputs_from": ["agent (edit following an undo)", "EditHistory::create_branch"], "outputs_to": ["new branch of EditCheckpoints", "branch-labeled timeline"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Drawing a branch edge from an earlier checkpoint pin spawns a labeled alternate edit path.", "visual": "The timeline forks into a colored branch line with its own pins; the abandoned redo path greys but stays visible."},
+      "mini_scenario": "The user undoes two edits, then the agent tries a different approach; the timeline forks so the abandoned path remains inspectable.",
+      "pitfall": "Assuming a linear timeline after undo silently discards the redo branch the loop may have meant to keep."
     },
     {
       "id": "session-08",
-      "title": "Render the edit timeline",
+      "title": "Render the edit timeline for restore-point picking",
       "loop_stage": "perceive",
       "pattern": "timeline-visualization",
-      "intent": "Show the loop's edit history so a user can pick a restore point.",
-      "how_it_shapes_the_loop": "EditHistory::timeline emits TimelineEntry rows (id, is_current, action, timestamp, branch), giving /timeline the data to render the loop's mutation history.",
-      "loop_objects_touched": ["EditHistory", "EditCheckpoint"],
-      "wiring": {
-        "inputs_from": ["EditHistory checkpoints"],
-        "outputs_to": ["/timeline UI"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the timeline node expands the full list of edit checkpoints with actions and branches.",
-        "visual": "Each entry is a labeled pin; the current one is highlighted and branches are colored distinctly."
-      },
-      "mini_scenario": "The user opens /timeline, sees every edit checkpoint, and jumps to one with goto.",
-      "pitfall": "Rendering timestamps without branch labels makes divergent edit paths indistinguishable."
+      "intent": "Project the loop's mutation history so the user can pick a restore point.",
+      "how_it_shapes_the_loop": "EditHistory::timeline emits TimelineEntry rows (id, is_current, action, timestamp, branch) — read-only data that feeds /timeline without touching loop control.",
+      "loop_objects_touched": ["EditHistory", "EditCheckpoint", "TimelineEntry"],
+      "wiring": {"inputs_from": ["EditHistory checkpoints and position"], "outputs_to": ["ui (/timeline view)", "EditHistory::goto on user pick"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Two-finger-rotate on the timeline pivots the view between the main line and branch lines.", "visual": "Each entry is a labeled pin with its action icon; the current pin glows and each branch gets a distinct hue."},
+      "mini_scenario": "The user opens /timeline, rotates to inspect a side branch, and taps a pin to goto that checkpoint.",
+      "pitfall": "Rendering entries without branch labels makes divergent edit paths indistinguishable and invites restoring the wrong line."
     },
     {
       "id": "session-09",
       "title": "Save the loop's TaskCheckpoint",
       "loop_stage": "learn",
       "pattern": "durable-loop-snapshot",
-      "intent": "Persist enough state to resume the loop after interruption.",
-      "how_it_shapes_the_loop": "CheckpointManager::save writes a TaskCheckpoint holding current_step, current_iteration, messages, tool_calls, errors, and cumulative budget, so continue_execution can rehydrate the loop.",
-      "loop_objects_touched": ["TaskCheckpoint", "CheckpointDelta"],
-      "wiring": {
-        "inputs_from": ["AgentState", "messages", "budget counters"],
-        "outputs_to": ["checkpoints dir", "resume"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the control hub drops a task-checkpoint pin capturing the whole loop state.",
-        "visual": "A save pin shows step/iteration and a token-total badge, pulsing once on write."
-      },
-      "mini_scenario": "Mid-task the manager saves a checkpoint; after a crash, load restores the loop's step and messages.",
-      "pitfall": "Persisting messages but not cumulative budget lets a resumed loop exceed its original ceiling."
+      "intent": "Persist enough state to resume the loop after an interruption.",
+      "how_it_shapes_the_loop": "CheckpointManager::save writes a TaskCheckpoint holding current_step, current_iteration, messages, tool_calls, errors, and estimated cumulative tokens, so continue_execution can rehydrate the loop exactly where it stopped.",
+      "loop_objects_touched": ["TaskCheckpoint", "CheckpointManager", "CheckpointDelta"],
+      "wiring": {"inputs_from": ["agent (AgentState, Message history, budget counters)"], "outputs_to": ["checkpoints dir on disk", "resume path in the control stage"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the control hub drops a task-checkpoint pin capturing the entire loop state.", "visual": "The save pin shows step/iteration and a token-total badge, pulsing once on write completion."},
+      "mini_scenario": "Mid-task the manager saves; after a crash, load restores step, iteration, and messages and the loop continues.",
+      "pitfall": "Persisting messages but not the cumulative token count lets a resumed loop blow past its original budget ceiling."
     },
     {
       "id": "session-10",
       "title": "Write incremental checkpoint deltas",
       "loop_stage": "learn",
       "pattern": "delta-persistence",
-      "intent": "Persist progress cheaply on every turn without rewriting the whole checkpoint.",
-      "how_it_shapes_the_loop": "save prefers CheckpointDelta writes (new messages, tool calls, errors since a base version) and compacts every 24 deltas or over 512KB, keeping per-turn persistence lightweight.",
-      "loop_objects_touched": ["CheckpointDelta", "TaskCheckpoint"],
-      "wiring": {
-        "inputs_from": ["turn diffs vs base version"],
-        "outputs_to": ["delta files", "compacted base"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the checkpoint node shows a stack of delta layers over the base snapshot.",
-        "visual": "Delta layers stack thin; at the compaction threshold they fold into a fresh base card."
-      },
-      "mini_scenario": "Each turn appends a small delta; after 24 the manager compacts them into a new base for fast loads.",
-      "pitfall": "Never compacting deltas makes load slow and fragile as the delta chain grows unbounded."
+      "intent": "Persist progress cheaply every turn without rewriting the whole checkpoint.",
+      "how_it_shapes_the_loop": "save prefers compute_delta CheckpointDelta writes (new messages, tool calls, errors since a base version) and compacts into a fresh base after the delta chain grows, keeping per-turn persistence lightweight.",
+      "loop_objects_touched": ["CheckpointDelta", "TaskCheckpoint", "CheckpointManager"],
+      "wiring": {"inputs_from": ["per-turn state diffs vs base version (compute_delta)"], "outputs_to": ["delta files on disk", "periodic compacted base checkpoint"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the checkpoint node expands a layer stack of thin delta cards over the base snapshot card.", "visual": "Delta layers stack thin and translucent; at the compaction threshold they fold down into a fresh solid base card."},
+      "mini_scenario": "Each loop turn appends a small delta; after the chain threshold the manager compacts them into a new base so loads stay fast.",
+      "pitfall": "Never compacting deltas makes load replay an unbounded chain — resume gets slower and more fragile every turn."
     },
     {
       "id": "session-11",
-      "title": "Load a checkpoint and apply deltas",
+      "title": "Load a checkpoint and replay its deltas",
       "loop_stage": "control",
       "pattern": "rehydrate-on-resume",
       "intent": "Rebuild the exact loop state a resumed task needs.",
-      "how_it_shapes_the_loop": "CheckpointManager::load reads the base and replays all CheckpointDeltas to reconstruct the TaskCheckpoint, so continue_execution restarts the loop at the right step and iteration.",
-      "loop_objects_touched": ["TaskCheckpoint", "CheckpointDelta"],
-      "wiring": {
-        "inputs_from": ["base + delta chain"],
-        "outputs_to": ["restored TaskCheckpoint", "AgentLoop restore_progress"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "User flicks a saved checkpoint pin onto the canvas to rehydrate the loop from it.",
-        "visual": "The base card and its delta layers merge into a single restored state, then the loop resumes."
-      },
-      "mini_scenario": "On resume, load replays the deltas to reconstruct the messages and progress, and the loop continues.",
-      "pitfall": "Applying deltas out of version order reconstructs a corrupt or stale loop state."
+      "how_it_shapes_the_loop": "CheckpointManager::load reads the base TaskCheckpoint and applies each CheckpointDelta via apply_delta in version order, so continue_execution restarts the loop at the right step, iteration, and message history.",
+      "loop_objects_touched": ["TaskCheckpoint", "CheckpointDelta", "CheckpointManager"],
+      "wiring": {"inputs_from": ["base checkpoint file + delta chain"], "outputs_to": ["restored TaskCheckpoint", "agent loop resume (restore progress)"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking a saved checkpoint pin onto the canvas rehydrates the loop from it in place.", "visual": "The base card and its delta layers merge into one restored state card; the loop ring lights back up at the saved step."},
+      "mini_scenario": "On resume, load replays twelve deltas onto the base; the loop comes back at step 4 with full message context.",
+      "pitfall": "Applying deltas out of version order reconstructs a corrupt or stale loop state — always replay sequentially."
     },
     {
       "id": "session-12",
-      "title": "Recover a corrupted checkpoint",
+      "title": "Recover from a corrupted checkpoint",
       "loop_stage": "control",
       "pattern": "corruption-recovery",
-      "intent": "Keep the loop resumable even if a checkpoint file is damaged.",
-      "how_it_shapes_the_loop": "recover_from_corruption tries the .json.bak backup and otherwise creates a fresh checkpoint, so a torn write does not permanently strand the task.",
+      "intent": "Keep the loop resumable even when a checkpoint file is damaged by a torn write.",
+      "how_it_shapes_the_loop": "CheckpointManager::recover_from_corruption tries the .json.bak backup and otherwise creates a fresh checkpoint, so a crash-truncated file does not permanently strand the task.",
       "loop_objects_touched": ["TaskCheckpoint", "CheckpointManager"],
-      "wiring": {
-        "inputs_from": ["corrupt checkpoint file"],
-        "outputs_to": ["restored or fresh TaskCheckpoint"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a corrupted checkpoint pin offers restore-from-backup or start-fresh options.",
-        "visual": "A damaged pin shows a red crack; recovery heals it green or spawns a new blank pin."
-      },
-      "mini_scenario": "A checkpoint is truncated by a crash; recovery loads the .json.bak and the loop resumes.",
-      "pitfall": "Silently starting fresh without surfacing the loss can drop hours of loop progress unnoticed."
+      "wiring": {"inputs_from": ["corrupt checkpoint file on load"], "outputs_to": ["restored TaskCheckpoint from backup, or a fresh one", "control-stage resume decision"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping a cracked checkpoint pin opens the recovery sheet: restore-from-backup or start-fresh.", "visual": "A damaged pin shows a red crack badge; recovery heals it green, or spawns a new blank pin with a warning stripe."},
+      "mini_scenario": "A checkpoint is truncated by a power loss; recovery loads the .json.bak and the loop resumes from the last good state.",
+      "pitfall": "Silently starting fresh without surfacing the loss can drop hours of loop progress unnoticed — always show the crack."
     },
     {
       "id": "session-13",
@@ -252,38 +168,24 @@
       "loop_stage": "foundation",
       "pattern": "encrypt-substrate",
       "intent": "Protect persisted conversations and checkpoints from disk snooping.",
-      "how_it_shapes_the_loop": "EncryptionManager::encrypt wraps bytes with AES-256-GCM and a random nonce; the ChatStore and checkpoints write ciphertext, so the loop's persistent substrate is confidential.",
+      "how_it_shapes_the_loop": "EncryptionManager::encrypt wraps bytes with AES-256-GCM and a fresh random nonce; ChatStore and checkpoint writes persist ciphertext, so the loop's entire persistent substrate is confidential without changing loop control.",
       "loop_objects_touched": ["EncryptionManager", "SavedChat"],
-      "wiring": {
-        "inputs_from": ["plaintext session data"],
-        "outputs_to": ["encrypted files on disk"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the persistence node toggles its encryption shield on the stored data cards.",
-        "visual": "Encrypted cards render with a lock glyph; unencrypted ones show an open lock warning."
-      },
-      "mini_scenario": "A saved chat is AES-256-GCM encrypted before hitting disk and decrypted only in-process on load.",
-      "pitfall": "Reusing a nonce across encryptions under the same key breaks GCM's security guarantee."
+      "wiring": {"inputs_from": ["plaintext session bytes (chat, checkpoint)"], "outputs_to": ["encrypted files on disk", "decrypt-on-load path"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the persistence node toggles a shield overlay showing which stored cards are encrypted.", "visual": "Encrypted cards render with a closed lock glyph; any unencrypted card shows an open-lock amber warning."},
+      "mini_scenario": "A SavedChat is AES-256-GCM encrypted before hitting disk and decrypted in-process only when the chat is loaded.",
+      "pitfall": "Reusing a nonce across encryptions under the same key breaks GCM's security guarantee — always generate a fresh nonce."
     },
     {
       "id": "session-14",
-      "title": "Derive the key from the OS keychain",
+      "title": "Derive the encryption key from the OS keychain",
       "loop_stage": "foundation",
       "pattern": "keychain-key-init",
       "intent": "Bootstrap encryption without a hard-coded key.",
-      "how_it_shapes_the_loop": "EncryptionManager::load_from_keychain reads the passphrase from the OS keychain and derive_key runs PBKDF2 with a per-install salt, so the loop's crypto substrate self-initializes securely.",
+      "how_it_shapes_the_loop": "EncryptionManager::load_from_keychain reads the passphrase from the OS keychain and derive_key runs PBKDF2 with a per-install salt, so the loop's crypto substrate self-initializes securely at session start.",
       "loop_objects_touched": ["EncryptionManager"],
-      "wiring": {
-        "inputs_from": ["OS keychain", "per-install salt"],
-        "outputs_to": ["session key"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the persistence node shows the key source (keychain) feeding the encryption shield.",
-        "visual": "A key-ring badge lights when the keychain provides the passphrase; a fallback shows an ephemeral badge."
-      },
-      "mini_scenario": "On startup the manager pulls the passphrase from the keychain and derives the session key via PBKDF2.",
+      "wiring": {"inputs_from": ["OS keychain passphrase", "per-install salt"], "outputs_to": ["derived 32-byte session key", "encrypt/decrypt path"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the persistence node reveals the key source edge feeding the encryption shield.", "visual": "A key-ring badge lights green when the keychain supplies the passphrase; a fallback key shows an ephemeral amber badge."},
+      "mini_scenario": "On startup the manager pulls the passphrase from the keychain, runs derive_key, and decrypts the saved chat list.",
       "pitfall": "Falling back to an ephemeral key without warning means data written this session cannot be decrypted later."
     },
     {
@@ -291,120 +193,78 @@
       "title": "Persist the conversation to the ChatStore",
       "loop_stage": "learn",
       "pattern": "conversation-persistence",
-      "intent": "Save the loop's message history so a named session can be resumed.",
-      "how_it_shapes_the_loop": "ChatStore::save writes a SavedChat (name, saved_at, model, messages) atomically and encrypted, so resume_named_session can restore the loop's conversation.",
+      "intent": "Save the loop's message history so a named session can be resumed later.",
+      "how_it_shapes_the_loop": "ChatStore::save writes a SavedChat (name, saved_at, model, messages) atomically and encrypted, so resume_named_session can restore the loop's full conversation context.",
       "loop_objects_touched": ["SavedChat", "EncryptionManager"],
-      "wiring": {
-        "inputs_from": ["Message history", "model"],
-        "outputs_to": ["encrypted chat file"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the history strip saves it as a named, encrypted session card.",
-        "visual": "A named session card slots into the store shelf with a lock glyph and timestamp."
-      },
-      "mini_scenario": "The user saves the current chat by name; later resume_named_session decrypts and reloads the messages.",
-      "pitfall": "A non-atomic write interrupted mid-save can leave a truncated, undecryptable chat file."
+      "wiring": {"inputs_from": ["agent (Message history, model id)"], "outputs_to": ["encrypted chat file", "resume_named_session in the control stage"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the message-history strip saves it as a named session card on the store shelf.", "visual": "A named session card slots onto the shelf with a lock glyph and timestamp; it pulses once on atomic write."},
+      "mini_scenario": "The user names and saves the chat; days later resume_named_session decrypts and reloads every message.",
+      "pitfall": "A non-atomic write interrupted mid-save can leave a truncated, undecryptable chat file — write-then-rename."
     },
     {
       "id": "session-16",
-      "title": "List sessions, skipping tampered files",
+      "title": "List sessions while skipping tampered files",
       "loop_stage": "perceive",
       "pattern": "fail-closed-listing",
-      "intent": "Show resumable sessions without crashing on a bad file.",
-      "how_it_shapes_the_loop": "ChatStore::list returns ChatSummary rows and skips corrupted or tamper-failed files, so the loop can present valid resume points and ignore the rest.",
-      "loop_objects_touched": ["SavedChat"],
-      "wiring": {
-        "inputs_from": ["chats directory"],
-        "outputs_to": ["ChatSummary list", "resume UI"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the store shelf fans out the saved session cards; corrupt ones are omitted.",
-        "visual": "Valid session cards render clean; tampered files simply do not appear."
-      },
-      "mini_scenario": "One chat file fails its auth tag; list silently skips it and shows the remaining valid sessions.",
-      "pitfall": "Listing a file that fails decryption as if valid then errors on load, confusing the resume flow."
+      "intent": "Show resumable sessions without crashing on a corrupted or tampered file.",
+      "how_it_shapes_the_loop": "ChatStore::list returns ChatSummary rows and silently skips files that fail decryption or their GCM auth tag, so the loop presents only valid resume points.",
+      "loop_objects_touched": ["SavedChat", "ChatSummary"],
+      "wiring": {"inputs_from": ["chats directory on disk"], "outputs_to": ["ChatSummary list", "ui resume picker"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the store shelf fans out the saved session cards; tampered files simply never appear.", "visual": "Valid cards render clean with name and saved_at; the shelf shows a small shield badge confirming fail-closed filtering."},
+      "mini_scenario": "One chat file fails its auth tag; list skips it and the picker shows the remaining valid sessions without an error.",
+      "pitfall": "Listing a file that fails decryption as if it were valid defers the error to load time and breaks the resume flow."
     },
     {
       "id": "session-17",
       "title": "Cache responses for local-first offline use",
       "loop_stage": "reason",
       "pattern": "offline-response-cache",
-      "intent": "Serve prior responses and track bandwidth saved when offline.",
-      "how_it_shapes_the_loop": "LocalFirstCoordinator::cache_response stores responses with size tracking and stats reports bandwidth_saved_bytes, so the loop can prefer cached data and quantify savings.",
-      "loop_objects_touched": ["ToolCache", "CacheStats"],
-      "wiring": {
-        "inputs_from": ["reason/act responses"],
-        "outputs_to": ["LocalFirstStats", "/stats"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "Pinching the persistence node surfaces a bandwidth-saved gauge from the local-first cache.",
-        "visual": "A savings gauge grows as cached responses are reused instead of refetched."
-      },
-      "mini_scenario": "A repeated response is served from the local cache and /stats reports the bytes saved.",
+      "intent": "Serve prior responses and track bandwidth saved when the endpoint is unreachable.",
+      "how_it_shapes_the_loop": "LocalFirstCoordinator::cache_response stores responses in the LocalCache with size tracking, and stats reports bandwidth_saved_bytes, so the loop can prefer cached data offline and quantify the savings.",
+      "loop_objects_touched": ["LocalFirstCoordinator", "LocalCache", "CacheStats"],
+      "wiring": {"inputs_from": ["reason/act responses while online"], "outputs_to": ["LocalFirstStats bandwidth_saved_bytes", "output (/stats display)"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the persistence node surfaces a bandwidth-saved gauge fed by the local-first cache.", "visual": "The savings gauge grows as cached responses are reused; the node rims blue when OfflineStatus is offline."},
+      "mini_scenario": "Offline, a repeated request is served from LocalCache and /stats shows the bytes that were not refetched.",
       "pitfall": "Unbounded FIFO growth of the local cache eventually evicts the very entries the loop reuses most."
     },
     {
       "id": "session-18",
-      "title": "Report cache hit rate in stats",
+      "title": "Report cache hit rate in /stats",
       "loop_stage": "learn",
       "pattern": "cache-observability",
       "intent": "Make the cache's contribution to loop efficiency measurable.",
-      "how_it_shapes_the_loop": "CacheStats (entry_count, total_size_bytes, hit_rate) surfaces in /stats, letting the loop and operator see whether caching is actually saving turns and budget.",
+      "how_it_shapes_the_loop": "CacheStats (entry_count, total_size_bytes, hit_rate) surfaces via ToolCache::stats in /stats, letting the loop and operator see whether caching is actually saving act turns and budget.",
       "loop_objects_touched": ["CacheStats", "ToolCache"],
-      "wiring": {
-        "inputs_from": ["cache hit/miss counters"],
-        "outputs_to": ["/stats display"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping the cache node opens its stats card with hit rate and size.",
-        "visual": "A dial shows hit rate; green when high, amber when the cache is barely helping."
-      },
-      "mini_scenario": "The /stats view shows a 60% tool-cache hit rate, confirming the cache is trimming redundant acts.",
+      "wiring": {"inputs_from": ["ToolCache hit/miss counters"], "outputs_to": ["output (/stats display)", "operator budget decisions"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the cache node opens its stats card with hit rate, entry count, and size.", "visual": "A dial shows hit_rate — green when high, amber when the cache is barely helping — with size in a side chip."},
+      "mini_scenario": "The /stats view shows a 60% tool-cache hit rate, confirming the cache is trimming redundant act steps.",
       "pitfall": "Reporting entry_count as a health metric without hit_rate hides a cache that stores much but hits little."
     },
     {
       "id": "session-19",
-      "title": "Checkpoint on a git commit action",
+      "title": "Anchor the timeline on a git commit",
       "loop_stage": "learn",
       "pattern": "git-aligned-checkpoint",
-      "intent": "Anchor the edit timeline to the repository's own history.",
-      "how_it_shapes_the_loop": "An EditCheckpoint with EditAction::GitCommit records the git_hash and dirty/staged/modified file state, aligning the loop's undo timeline with the real VCS boundary.",
+      "intent": "Align the loop's undo timeline with the repository's own history.",
+      "how_it_shapes_the_loop": "An EditCheckpoint built with_git_hash records the commit hash and capture_git_state tracks dirty/staged/modified files, giving the timeline a hard VCS boundary the loop must respect when undoing.",
       "loop_objects_touched": ["EditCheckpoint", "EditHistory"],
-      "wiring": {
-        "inputs_from": ["git commit result"],
-        "outputs_to": ["timeline anchor", "GitCheckpointInfo"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing after a commit drops a git-anchor pin that marks a hard timeline boundary.",
-        "visual": "The git pin renders with a commit-hash badge and a heavier boundary line."
-      },
-      "mini_scenario": "After a commit, the timeline gets a git-anchored checkpoint so undo knows where the committed baseline is.",
-      "pitfall": "Treating a git-anchored checkpoint like an ordinary undo point can rewind past a commit and confuse the tree."
+      "wiring": {"inputs_from": ["git commit result (commit hash)", "CheckpointManager::capture_git_state"], "outputs_to": ["git-anchored EditCheckpoint", "GitCheckpointInfo on the timeline"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the timeline after a commit drops a git-anchor pin marking a hard boundary.", "visual": "The git pin renders with a short commit-hash badge and a heavier boundary line that undo markers cannot cross silently."},
+      "mini_scenario": "After the agent commits, the timeline gets a git-anchored checkpoint so a later /undo knows where the committed baseline sits.",
+      "pitfall": "Treating a git-anchored checkpoint like an ordinary undo point can rewind past a commit and desync the working tree."
     },
     {
       "id": "session-20",
-      "title": "Zeroize the key on drop",
+      "title": "Zeroize the encryption key on drop",
       "loop_stage": "foundation",
       "pattern": "secret-hygiene",
-      "intent": "Ensure the encryption key never lingers in memory after use.",
-      "how_it_shapes_the_loop": "EncryptionManager's Drop impl zeroizes the key when the manager is dropped, so the loop's crypto substrate leaves no key residue for a memory scrape.",
+      "intent": "Ensure the session key never lingers in memory after use.",
+      "how_it_shapes_the_loop": "EncryptionManager's Drop impl calls zeroize on the key bytes when the manager is dropped at session teardown, so the loop's crypto substrate leaves no key residue for a memory scrape.",
       "loop_objects_touched": ["EncryptionManager"],
-      "wiring": {
-        "inputs_from": ["session teardown"],
-        "outputs_to": ["zeroized key memory"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "Flicking the persistence node away at session end wipes its key glyph in a visible scrub.",
-        "visual": "The key badge dissolves to zeros as the node is torn down."
-      },
-      "mini_scenario": "At session end the manager drops and its key bytes are zeroized before the allocation is freed.",
-      "pitfall": "Copying the key into a struct without matching zeroization leaves a plaintext key copy behind."
+      "wiring": {"inputs_from": ["session teardown (manager drop)"], "outputs_to": ["zeroized key memory"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the persistence node off the canvas at session end visibly scrubs its key glyph.", "visual": "The key badge dissolves into zeros as the node tears down; the shield overlay fades with it."},
+      "mini_scenario": "At session end the manager drops and its 32-byte key is zeroized before the allocation is freed.",
+      "pitfall": "Copying the key into another struct without matching zeroization leaves a plaintext key copy behind in memory."
     }
   ]
 }

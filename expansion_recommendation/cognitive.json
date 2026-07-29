@@ -2,9 +2,9 @@
   "component": "cognitive",
   "tier": "full",
   "loop_stage": "learn",
-  "summary": "The cognitive component is the engine's memory and reflection substrate for the learn stage. It runs a 4-tier HierarchicalMemory (Working, ShortTerm, LongTerm, Archive), records Episodes with outcomes, indexes the codebase as a knowledge graph of Entities and RelationTypes, maintains a SelfModel with introspection and modification tracking, ranks improvement strategies via a MetaLearner, retrieves code context through RAG, and dynamically splits the token budget by TaskType. On the loop it closes the cycle: it captures what happened, promotes what mattered, introspects the agent's own state, and feeds a grounded LlmContext back into the next perceive/reason pass.",
-  "loop_objects": ["Episode", "MemoryEntry", "HierarchicalMemory", "SelfModel", "ReferenceState", "IntrospectionTarget", "ProposedModification", "CodeModification", "Entity", "RelationType", "Symbol", "TokenBudget", "LlmContext", "CodeContext", "MetaLearner", "StrategyScore", "Lesson", "CognitiveState", "CyclePhase"],
-  "context_basis": "Recommendations were formed with src/cognitive/ read in the context of the full engine under a ~600k budget framing; token-budget task-type splits and memory-tier capacities assume a large context that must be actively partitioned across working/episodic/semantic recall.",
+  "summary": "The cognitive component is the engine's memory and reflection substrate for the learn stage. It runs a 4-tier HierarchicalMemory (Working, ShortTerm, LongTerm, Archive) over MemoryEntry items, records Episodes with EpisodeOutcome and related_episodes links, indexes the codebase as a knowledge graph of Entities and RelationTypes plus a SymbolIndex, maintains a SelfModel with an IntrospectionEngine and ModificationEngine, ranks improvement strategies via a MetaLearner of StrategyScores, retrieves code context through the RagEngine, and splits the token window by TaskType with the TokenBudgetAllocator. On the loop it closes the cycle: CognitiveSystem.record_episode captures what happened, memory tiers promote what mattered, introspection grounds the agent's own state, and CognitiveSystem.build_context feeds an LlmContext back into the next perceive/reason pass.",
+  "loop_objects": ["Episode", "MemoryEntry", "HierarchicalMemory", "SelfModel", "ReferenceState", "IntrospectionTarget", "ProposedModification", "CodeModification", "Entity", "RelationType", "SymbolIndex", "TokenBudget", "LlmContext", "CodeContext", "MetaLearner", "StrategyScore", "Lesson", "CognitiveState", "CyclePhase", "WorkingContext"],
+  "context_basis": "Recommendations formed with src/cognitive/ read in the context of the full engine under a ~600k budget framing; TokenBudgetAllocator ratios (e.g. SelfImprovement 10/10/70 with a 10% reserve) and memory-tier capacities assume a large context that must be actively partitioned across working/episodic/semantic recall.",
   "examples": [
     {
       "id": "cognitive-01",
@@ -12,59 +12,59 @@
       "loop_stage": "perceive",
       "pattern": "relevance-recall",
       "intent": "Bring past experiences that match the query into working context before reasoning.",
-      "how_it_shapes_the_loop": "EpisodicMemory.retrieve_relevant ranks Episodes by relevance and Importance, injecting top-k into the LlmContext so the perceive stage arrives pre-loaded with prior outcomes.",
+      "how_it_shapes_the_loop": "EpisodicMemory.retrieve_relevant ranks Episodes by relevance_score and Importance, injecting top-k into the LlmContext so the perceive stage arrives pre-loaded with prior outcomes.",
       "loop_objects_touched": ["Episode", "LlmContext"],
       "wiring": {
-        "inputs_from": ["query", "EpisodicMemory store"],
-        "outputs_to": ["LlmContext", "reason stage"]
+        "inputs_from": ["query text", "EpisodicMemory store"],
+        "outputs_to": ["CognitiveSystem.build_context", "LlmContext"]
       },
       "touch_interaction": {
         "gesture": "spread",
-        "canvas_action": "Spreading over the memory node fans out matching episode cards ranked by importance closest to the center.",
-        "visual": "Episode cards bloom outward; high-importance ones glow gold and pull inward, low ones fade to the edges."
+        "canvas_action": "Spreading over the episodic node fans out matching Episode cards ranked by importance, closest matches pulling toward the center.",
+        "visual": "Episode cards bloom outward; high-Importance ones glow gold and pull inward, low ones fade to the canvas edge."
       },
-      "mini_scenario": "The user spreads the episodic node on a debugging query and the three highest-importance error episodes bloom in, seeding the context.",
-      "pitfall": "Retrieval must respect the importance threshold; flooding context with low-importance episodes crowds out the semantic code the reasoning actually needs."
+      "mini_scenario": "The user spreads the episodic node on a debugging query and the three highest-importance error Episodes bloom in, seeding the LlmContext before the reason pass.",
+      "pitfall": "Retrieval must respect the importance threshold; flooding context with low-Importance Episodes crowds out the semantic code the reasoning actually needs."
     },
     {
       "id": "cognitive-02",
       "title": "Record an Episode with its outcome after acting",
       "loop_stage": "learn",
       "pattern": "experience-capture",
-      "intent": "Persist what just happened, its outcome, and any lessons for future recall.",
-      "how_it_shapes_the_loop": "After the act stage, an Episode (type, content, outcome, insights) is written and linked to related_episodes, giving the learn stage a durable trace to promote and mine.",
+      "intent": "Persist what just happened, its EpisodeOutcome, and any lessons for future recall.",
+      "how_it_shapes_the_loop": "After the act stage, CognitiveSystem.record_episode writes an Episode (EpisodeType, content, EpisodeOutcome, related_episodes), giving the learn stage a durable trace to promote and mine.",
       "loop_objects_touched": ["Episode", "Lesson"],
       "wiring": {
-        "inputs_from": ["act stage result", "outcome (success/failure)"],
+        "inputs_from": ["act stage result", "verify outcome (Success/Error)"],
         "outputs_to": ["EpisodicMemory", "MetaLearner"]
       },
       "touch_interaction": {
         "gesture": "tap",
-        "canvas_action": "Tapping the learn node stamps a new episode tile onto the memory timeline at the current cycle.",
-        "visual": "A fresh tile drops in with a green check (Success) or red cross (Error) badge and a pulsing 'new' glow that fades."
+        "canvas_action": "Tapping the learn node stamps a new Episode tile onto the memory timeline at the current cycle position.",
+        "visual": "A fresh tile drops in with a green check (Success) or red cross (Error) badge and a pulsing 'new' glow that slowly fades."
       },
-      "mini_scenario": "A tool run fixes a failing test; a Success episode is stamped with the lesson 'checked lock ordering', linked to the prior Error episode.",
-      "pitfall": "Record the true outcome, not the intended one; logging a Success on an unverified action poisons future relevance recall with false confidence."
+      "mini_scenario": "A tool run fixes a failing test; a Success Episode is stamped with the lesson 'checked lock ordering', linked via related_episodes to the prior Error Episode.",
+      "pitfall": "Record the true EpisodeOutcome, not the intended one; logging Success on an unverified action poisons future relevance recall with false confidence."
     },
     {
       "id": "cognitive-03",
-      "title": "Promote a ShortTerm memory to LongTerm on repeated access",
+      "title": "Promote a ShortTerm MemoryEntry to LongTerm",
       "loop_stage": "learn",
       "pattern": "tier-promotion",
       "intent": "Move memories that keep proving useful into durable storage.",
-      "how_it_shapes_the_loop": "HierarchicalMemory promotes a MemoryEntry from ShortTerm to LongTerm when access_count and importance cross thresholds, reshaping what survives across sessions.",
+      "how_it_shapes_the_loop": "HierarchicalMemory.promote moves a MemoryEntry from ShortTermMemory to LongTermMemory when check_promotion sees access count and Importance cross their thresholds, reshaping what survives across sessions.",
       "loop_objects_touched": ["MemoryEntry", "HierarchicalMemory"],
       "wiring": {
-        "inputs_from": ["access_count", "importance"],
-        "outputs_to": ["LongTerm tier"]
+        "inputs_from": ["ShortTermMemory.check_promotion", "MemoryEntry access count"],
+        "outputs_to": ["LongTermMemory.store"]
       },
       "touch_interaction": {
         "gesture": "drag",
-        "canvas_action": "Dragging a memory tile upward across the tier boundary promotes it; the boundary flexes and accepts it if thresholds are met.",
+        "canvas_action": "Dragging a MemoryEntry tile upward across the tier boundary promotes it; the boundary flexes and accepts it only if thresholds are met.",
         "visual": "The tile brightens as it crosses; the LongTerm band ripples and locks it in with a subtle anchor icon."
       },
       "mini_scenario": "A pattern recalled five times this session drags up past the promotion threshold into LongTerm, so it persists into tomorrow's run.",
-      "pitfall": "Promotion must be gated by both access and importance; promoting on access alone lets high-frequency noise clog LongTerm."
+      "pitfall": "Promotion is gated by both access and Importance; promoting on access alone lets high-frequency noise clog LongTerm."
     },
     {
       "id": "cognitive-04",
@@ -72,39 +72,39 @@
       "loop_stage": "control",
       "pattern": "budget-by-task-type",
       "intent": "Allocate the context window to working/episodic/semantic recall according to what the task needs.",
-      "how_it_shapes_the_loop": "TokenBudgetAllocator maps the detected TaskType to a TokenBudget split (e.g. SelfImprovement 10/10/70), so the control layer partitions the window before context assembly.",
+      "how_it_shapes_the_loop": "TokenBudgetAllocator.allocation_ratios maps the detected TaskType to an AllocationRatios split (SelfImprovement = working 10 / episodic 10 / semantic 70 / reserve 10), so the control layer partitions the window before context assembly.",
       "loop_objects_touched": ["TokenBudget", "LlmContext"],
       "wiring": {
-        "inputs_from": ["suggest_task_type(query)"],
-        "outputs_to": ["context assembly", "LlmContext"]
+        "inputs_from": ["TokenBudgetAllocator.suggest_task_type(query)"],
+        "outputs_to": ["CognitiveSystem.build_context", "context assembly"]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
-        "canvas_action": "Rotating the budget wheel redistributes its three colored arcs (working/episodic/semantic) to the task-type preset.",
-        "visual": "The pie wheel spins to the preset split; the semantic arc swells green for a self-improvement task, the arcs snapping into place."
+        "canvas_action": "Rotating the budget wheel redistributes its three colored arcs (working/episodic/semantic) to the TaskType preset ratios.",
+        "visual": "The pie wheel spins to the preset split; the semantic arc swells green for a SelfImprovement task while a thin reserve ring stays locked at the rim."
       },
-      "mini_scenario": "The allocator detects a self-improvement query and rotates the budget to 70% semantic, giving the agent room to read its own code.",
-      "pitfall": "Always keep the response_reserve; a split that consumes 100% of the window on recall leaves no room to generate an answer."
+      "mini_scenario": "The allocator detects a self-improvement query and rotates the budget to 70% semantic, giving the agent room to read its own code via read_own_code.",
+      "pitfall": "Always keep the reserve arc; a split that spends 100% of the window on recall leaves no room to generate an answer."
     },
     {
       "id": "cognitive-05",
       "title": "Assemble a single LlmContext from all memory sources",
       "loop_stage": "foundation",
       "pattern": "context-merge",
-      "intent": "Fuse working, episodic, semantic, and self-context into one prompt within budget.",
-      "how_it_shapes_the_loop": "CognitiveSystem.build_context merges WorkingContext, retrieved Episodes, CodeContext, and self-improvement context into an LlmContext with an estimated token count the loop can gate on.",
-      "loop_objects_touched": ["LlmContext", "CodeContext", "Episode"],
+      "intent": "Fuse working, episodic, semantic, and self context into one prompt within budget.",
+      "how_it_shapes_the_loop": "CognitiveSystem.build_context merges the WorkingContext, retrieved Episodes, RAG CodeContext, and SelfImprovementContext into one LlmContext with estimate_tokens, and is_within_budget lets the loop gate on it before the model call.",
+      "loop_objects_touched": ["LlmContext", "CodeContext", "WorkingContext", "Episode"],
       "wiring": {
         "inputs_from": ["WorkingContext", "EpisodicMemory", "SemanticMemory", "SelfModel"],
         "outputs_to": ["reason stage (model call)"]
       },
       "touch_interaction": {
         "gesture": "pinch",
-        "canvas_action": "Pinching the four source nodes together fuses them into one context tile stamped with its estimated tokens.",
+        "canvas_action": "Pinching the four source nodes together fuses them into one LlmContext tile stamped with its estimated token count.",
         "visual": "Four streams braid into a single glowing tile; a token meter fills along its edge, green under budget, amber near the limit."
       },
-      "mini_scenario": "The user pinches working, episodic, semantic, and self nodes into one LlmContext reading 340k estimated tokens, ready to send.",
-      "pitfall": "The estimate must reflect the actual assembled content; a stale estimate lets an over-budget context reach the model and truncate silently."
+      "mini_scenario": "The user pinches working, episodic, semantic, and self nodes into one LlmContext reading 340k estimated tokens, and is_within_budget returns true.",
+      "pitfall": "The estimate must reflect the assembled content; a stale estimate lets an over-budget context reach the model and truncate silently."
     },
     {
       "id": "cognitive-06",
@@ -112,27 +112,27 @@
       "loop_stage": "reason",
       "pattern": "self-query",
       "intent": "Answer 'what is my state / what can I do' from the self-reference system rather than guessing.",
-      "how_it_shapes_the_loop": "IntrospectionEngine resolves an IntrospectionTarget (CurrentState, Capabilities, Memory, Performance, Decisions) against ReferenceState, feeding the reason stage grounded facts about itself.",
+      "how_it_shapes_the_loop": "IntrospectionEngine.introspect resolves an IntrospectionTarget (CurrentState, Capabilities, Memory, Performance, Decisions) against the ReferenceState, feeding the reason stage grounded facts about itself instead of confabulation.",
       "loop_objects_touched": ["IntrospectionTarget", "ReferenceState", "SelfModel"],
       "wiring": {
-        "inputs_from": ["introspection query"],
+        "inputs_from": ["introspection query", "SelfReferenceSystem"],
         "outputs_to": ["reason stage", "ProposedModification generation"]
       },
       "touch_interaction": {
         "gesture": "double-tap",
-        "canvas_action": "Double-tapping the self node opens a mirror panel listing the chosen introspection target's answer.",
+        "canvas_action": "Double-tapping the self node opens a mirror panel listing the chosen IntrospectionTarget's answer.",
         "visual": "A reflective mirror-surface node flips open; the target's facts scroll up in a cool blue introspection panel."
       },
-      "mini_scenario": "Before proposing a change, the agent double-taps to introspect Capabilities and confirms it has the tool-dispatch ability the plan needs.",
-      "pitfall": "Introspection answers reflect the recorded SelfModel; if recent CodeModifications were not applied to the model, the agent introspects a stale self."
+      "mini_scenario": "Before proposing a change, the agent introspects Capabilities and confirms it has the tool-dispatch ability the plan needs.",
+      "pitfall": "Introspection reflects the recorded SelfModel; if recent CodeModifications were not tracked, the agent introspects a stale self."
     },
     {
       "id": "cognitive-07",
-      "title": "Climb reference levels from Direct to Reflective",
+      "title": "Climb ReferenceLevels from Direct to Reflective",
       "loop_stage": "reason",
       "pattern": "meta-reasoning-ascent",
       "intent": "Reason about the agent's own reasoning at increasing depth.",
-      "how_it_shapes_the_loop": "ReferenceState tracks current_level (Direct, Meta, MetaMeta, Reflective); ascending a level reframes the reason stage from 'what' to 'why I decided that way'.",
+      "how_it_shapes_the_loop": "ReferenceState.set_level moves the current ReferenceLevel (Direct, Meta, MetaMeta, Reflective); ascending a level reframes the reason stage from 'what' to 'why I decided that way'.",
       "loop_objects_touched": ["ReferenceState", "SelfModel"],
       "wiring": {
         "inputs_from": ["current reasoning trace"],
@@ -140,10 +140,10 @@
       },
       "touch_interaction": {
         "gesture": "spread",
-        "canvas_action": "Spreading vertically on the self node steps it up a reference level, nesting a new reflective frame around the current one.",
-        "visual": "Concentric rings nest outward, each labeled Direct, Meta, MetaMeta, Reflective, the active ring pulsing."
+        "canvas_action": "Spreading vertically on the self node steps it up a ReferenceLevel, nesting a new reflective frame around the current one.",
+        "visual": "Concentric rings nest outward labeled Direct, Meta, MetaMeta, Reflective, the active ring pulsing."
       },
-      "mini_scenario": "After a failed plan the agent spreads to Meta level to ask why it preferred the failing strategy, then adjusts its priors.",
+      "mini_scenario": "After a failed plan the agent ascends to Meta level to ask why it preferred the failing strategy, then adjusts its priors.",
       "pitfall": "Deeper is not always better; ascending to Reflective on every trivial query burns budget on navel-gazing instead of acting."
     },
     {
@@ -152,7 +152,7 @@
       "loop_stage": "learn",
       "pattern": "strategy-ranking",
       "intent": "Choose which kind of self-improvement to attempt next based on what has worked.",
-      "how_it_shapes_the_loop": "MetaLearner tracks a StrategyScore per category (PromptTemplate, ToolPipeline, ErrorHandling...) via EMA of effectiveness, biasing the reason stage toward historically successful categories.",
+      "how_it_shapes_the_loop": "MetaLearner.analyze_strategies maintains a StrategyScore per ImprovementCategory via an EMA of success_rate and in_cooldown flags, biasing the reason stage toward historically successful categories.",
       "loop_objects_touched": ["MetaLearner", "StrategyScore"],
       "wiring": {
         "inputs_from": ["improvement outcome records"],
@@ -160,11 +160,11 @@
       },
       "touch_interaction": {
         "gesture": "flick",
-        "canvas_action": "Flicking the strategy panel reorders category bars by their current effectiveness score.",
-        "visual": "Horizontal bars re-sort with a smooth slide; the top category glows green, a cooling-down one greys with a clock icon."
+        "canvas_action": "Flicking the strategy panel reorders category bars by their current StrategyScore effectiveness.",
+        "visual": "Horizontal bars re-sort with a smooth slide; the top category glows green, a cooling-down one greys out with a clock icon."
       },
-      "mini_scenario": "ErrorHandling has the highest EMA this week, so the MetaLearner ranks it first and the agent picks an error-recovery improvement.",
-      "pitfall": "Respect the cooldown; re-picking a category that just failed before its cooldown expires ignores the very signal the MetaLearner recorded."
+      "mini_scenario": "ErrorHandling holds the highest EMA this week, so the MetaLearner ranks it first and the agent picks an error-recovery improvement.",
+      "pitfall": "Respect in_cooldown; re-picking a category that just failed before its cooldown expires ignores the very signal the MetaLearner recorded."
     },
     {
       "id": "cognitive-09",
@@ -172,18 +172,18 @@
       "loop_stage": "perceive",
       "pattern": "structural-indexing",
       "intent": "Add a code symbol to the queryable graph so cross-file references resolve.",
-      "how_it_shapes_the_loop": "A new Entity (Function, Struct, Trait...) is inserted with its RelationTypes (Calls, Uses, Implements), extending the graph the perceive stage queries to ground reasoning in real code.",
-      "loop_objects_touched": ["Entity", "RelationType"],
+      "how_it_shapes_the_loop": "A new Entity (Function, Struct, Trait...) is inserted with its RelationTypes (Calls, Uses, Implements), extending the knowledge graph the perceive stage queries to ground reasoning in real code.",
+      "loop_objects_touched": ["Entity", "RelationType", "SymbolIndex"],
       "wiring": {
         "inputs_from": ["source scan", "SymbolIndex"],
         "outputs_to": ["knowledge graph", "RAG grounding"]
       },
       "touch_interaction": {
         "gesture": "drag",
-        "canvas_action": "Dragging a new symbol onto the graph canvas snaps it into place and auto-draws its relation edges.",
-        "visual": "The entity node lands and edges fan out to callers and callees, each edge labeled by its RelationType."
+        "canvas_action": "Dragging a new symbol onto the graph canvas snaps it into place and auto-draws its RelationType edges.",
+        "visual": "The Entity node lands and edges fan out to callers and callees, each edge labeled by its RelationType."
       },
-      "mini_scenario": "A newly written function is dragged into the graph; Calls edges auto-connect it to its callees so future queries traverse it.",
+      "mini_scenario": "A newly written function is dragged into the graph; Calls edges auto-connect it to its callees so future queries can traverse it.",
       "pitfall": "Relations must reflect actual code, not naming similarity; inferring an Implements edge from a matching name creates false graph paths."
     },
     {
@@ -191,7 +191,7 @@
       "title": "Traverse RelationTypes to answer a cross-file question",
       "loop_stage": "reason",
       "pattern": "graph-traversal",
-      "intent": "Follow Calls/Uses/DependsOn edges to gather the entities a question spans.",
+      "intent": "Follow Calls/Uses/DependsOn edges to gather the Entities a question spans.",
       "how_it_shapes_the_loop": "The reason stage walks RelationType edges from a seed Entity to collect a connected subgraph, grounding multi-hop reasoning in real dependencies rather than guesses.",
       "loop_objects_touched": ["Entity", "RelationType"],
       "wiring": {
@@ -200,51 +200,51 @@
       },
       "touch_interaction": {
         "gesture": "draw-connection",
-        "canvas_action": "Drawing along an edge from a node walks the graph, lighting each entity reached hop by hop.",
+        "canvas_action": "Drawing along an edge from a node walks the graph, lighting each Entity reached hop by hop.",
         "visual": "A traveling spark runs the edges; visited nodes light up in sequence and dim behind the spark's trail."
       },
       "mini_scenario": "Asked what breaks if a struct changes, the agent draws out from it along DependsOn edges and lights every dependent module.",
-      "pitfall": "Bound the traversal depth; an unbounded walk over a densely connected utility entity pulls half the graph into context."
+      "pitfall": "Bound the traversal depth; an unbounded walk over a densely connected utility Entity pulls half the graph into context."
     },
     {
       "id": "cognitive-11",
-      "title": "Run RAG search to fetch relevant code chunks",
+      "title": "Run RagEngine retrieval to fetch relevant code chunks",
       "loop_stage": "perceive",
       "pattern": "retrieval-augmentation",
-      "intent": "Surface the code most relevant to the query within a token budget.",
-      "how_it_shapes_the_loop": "RAG semantic-searches the indexed codebase, filters by relevance and dedup, and returns a CodeContext the perceive stage folds into the LlmContext.",
+      "intent": "Surface the code most relevant to the query within the token budget.",
+      "how_it_shapes_the_loop": "RagEngine.retrieve searches the built index, applies RagConfig (top_k, min relevance), and returns a RetrievedContext the perceive stage folds into the LlmContext as a CodeContext.",
       "loop_objects_touched": ["CodeContext", "LlmContext"],
       "wiring": {
-        "inputs_from": ["query embedding", "RagConfig (top_k, min_score)"],
+        "inputs_from": ["query", "RagConfig (top_k, thresholds)"],
         "outputs_to": ["SemanticMemory", "LlmContext"]
       },
       "touch_interaction": {
         "gesture": "long-press",
         "canvas_action": "Long-pressing the RAG node runs a retrieval sweep; matching chunks surface as tiles ranked by score.",
-        "visual": "Chunk tiles rise from the node ranked top-down by score; below-threshold chunks stay submerged and greyed."
+        "visual": "Chunk tiles rise from the node ranked top-down by score; below-threshold chunks stay submerged and greyed out."
       },
-      "mini_scenario": "On a query about caching, RAG surfaces the three highest-scoring cache chunks and drops a near-duplicate before assembly.",
+      "mini_scenario": "On a query about caching, RagEngine.retrieve surfaces the three highest-scoring cache chunks and drops a near-duplicate before assembly.",
       "pitfall": "Dedup before the budget cut; returning two near-identical chunks wastes budget that a distinct relevant chunk needed."
     },
     {
       "id": "cognitive-12",
-      "title": "Propose a self-modification with a risk level",
+      "title": "Propose a self-modification with a RiskLevel",
       "loop_stage": "reason",
       "pattern": "risk-tagged-proposal",
       "intent": "Suggest a concrete change to the agent's own code, tagged by risk before review.",
-      "how_it_shapes_the_loop": "ModificationEngine emits a ProposedModification (modification_type, target, risk_level), so the reason stage hands the act stage a change carrying its own risk gate.",
+      "how_it_shapes_the_loop": "ModificationEngine.propose emits a ProposedModification (ModificationType, target, risk_level: RiskLevel), so the reason stage hands the act stage a change carrying its own risk gate.",
       "loop_objects_touched": ["ProposedModification", "SelfModel"],
       "wiring": {
-        "inputs_from": ["introspection", "MetaLearner ranking"],
-        "outputs_to": ["review / act stage"]
+        "inputs_from": ["IntrospectionEngine result", "MetaLearner ranking"],
+        "outputs_to": ["validate / execute review path", "act stage"]
       },
       "touch_interaction": {
         "gesture": "long-press",
-        "canvas_action": "Long-pressing a target module conjures a proposal card with a risk dial the user can read before approving.",
-        "visual": "The proposal card floats up with a risk dial (Low green, Critical red); a high-risk dial pulses to demand attention."
+        "canvas_action": "Long-pressing a target module conjures a ProposedModification card with a risk dial the user can read before approving.",
+        "visual": "The proposal card floats up with a risk dial (Low green, Critical red); a high-RiskLevel dial pulses to demand attention."
       },
-      "mini_scenario": "The agent proposes refactoring its context assembler, tagged Medium risk, and the change routes through review before any edit.",
-      "pitfall": "Risk level must gate execution; treating a Critical proposal like a Low one lets a dangerous self-edit skip the review it warrants."
+      "mini_scenario": "The agent proposes refactoring its context assembler, tagged Medium risk, and the change routes through validate before any edit executes.",
+      "pitfall": "RiskLevel must gate execution; treating a Critical proposal like a Low one lets a dangerous self-edit skip the review it warrants."
     },
     {
       "id": "cognitive-13",
@@ -252,7 +252,7 @@
       "loop_stage": "learn",
       "pattern": "self-model-update",
       "intent": "Keep the agent's self-representation current after it changes its own code.",
-      "how_it_shapes_the_loop": "An applied CodeModification (file_path, change_type, success) is recorded into the SelfModel's recent_changes, so subsequent introspection reflects the agent's true, evolved self.",
+      "how_it_shapes_the_loop": "SelfReferenceSystem.track_modification records an applied CodeModification (file_path, change_type, success) into the SelfModel's recent_changes, so subsequent introspection reflects the agent's true, evolved self.",
       "loop_objects_touched": ["CodeModification", "SelfModel"],
       "wiring": {
         "inputs_from": ["applied change", "act stage"],
@@ -261,18 +261,18 @@
       "touch_interaction": {
         "gesture": "tap",
         "canvas_action": "Tapping the applied-change badge writes it into the self node's change log, incrementing the version.",
-        "visual": "The self node's version chip ticks up; a change entry slides into its log with a Refactor/Addition icon."
+        "visual": "The self node's version chip ticks up; a change entry slides into its log with an Add/Refactor icon."
       },
-      "mini_scenario": "After splitting a module, the CodeModification is tapped into the SelfModel so the next introspection knows the new structure.",
-      "pitfall": "Record failures too; logging only successful modifications makes the self-model believe every attempt worked."
+      "mini_scenario": "After splitting a module, track_modification logs the CodeModification so the next introspection knows the new structure.",
+      "pitfall": "Record failures too; logging only successful modifications makes the SelfModel believe every attempt worked."
     },
     {
       "id": "cognitive-14",
-      "title": "Advance the PDVR cycle phase",
+      "title": "Advance the PDVR CyclePhase",
       "loop_stage": "control",
       "pattern": "cycle-phase-advance",
       "intent": "Drive the cognitive state machine through Plan, Do, Verify, Reflect.",
-      "how_it_shapes_the_loop": "CognitiveState.cycle_phase advances through CyclePhase (Plan, Do, Verify, Reflect), giving the control layer an explicit phase that dictates what the loop does next.",
+      "how_it_shapes_the_loop": "CognitiveState.advance_phase steps cycle_phase through CyclePhase (Plan -> Do -> Verify -> Reflect), giving the control layer an explicit phase that dictates what the loop does next.",
       "loop_objects_touched": ["CognitiveState", "CyclePhase"],
       "wiring": {
         "inputs_from": ["phase completion signal"],
@@ -291,19 +291,19 @@
       "title": "Adapt the budget allocation from observed usage",
       "loop_stage": "learn",
       "pattern": "usage-driven-adaptation",
-      "intent": "Correct the token split when real usage drifts from the task-type preset.",
-      "how_it_shapes_the_loop": "TokenBudgetAllocator.adapt compares usage_history to the budgeted split and shifts future TokenBudget ratios, so the learn stage tunes control-layer allocation over time.",
+      "intent": "Correct the token split when real usage drifts from the TaskType preset.",
+      "how_it_shapes_the_loop": "TokenBudgetAllocator.record_usage accumulates UsageSnapshots and adapt() shifts future AllocationRatios toward the observed distribution, so the learn stage tunes control-layer allocation over time.",
       "loop_objects_touched": ["TokenBudget"],
       "wiring": {
-        "inputs_from": ["usage_history"],
-        "outputs_to": ["next TokenBudget split"]
+        "inputs_from": ["UsageSnapshot history"],
+        "outputs_to": ["next AllocationRatios split"]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
         "canvas_action": "Rotating the budget wheel while a drift overlay is showing nudges the preset toward the observed distribution.",
         "visual": "A ghost overlay shows actual usage; the wheel eases toward it, the arcs settling on a corrected split."
       },
-      "mini_scenario": "Debugging tasks kept overspending episodic; adapt nudges the debugging preset to give episodic more of the window next time.",
+      "mini_scenario": "Debugging tasks kept overspending episodic recall; adapt nudges the Debugging preset to give episodic more of the window next time.",
       "pitfall": "Adapt on a stable sample, not one outlier run; a single anomalous session should not rewrite the standing allocation."
     },
     {
@@ -311,8 +311,8 @@
       "title": "Link related Episodes to surface a pattern",
       "loop_stage": "learn",
       "pattern": "episode-linking",
-      "intent": "Connect episodes that share a cause so recurring patterns become visible.",
-      "how_it_shapes_the_loop": "Setting an Episode's related_episodes stitches experiences into chains the learn stage can mine, turning isolated events into a detectable pattern.",
+      "intent": "Connect Episodes that share a cause so recurring patterns become visible.",
+      "how_it_shapes_the_loop": "Setting an Episode's related_episodes (or with_related) stitches experiences into chains the learn stage can mine, turning isolated events into a detectable pattern.",
       "loop_objects_touched": ["Episode", "Lesson"],
       "wiring": {
         "inputs_from": ["new Episode", "prior Episodes"],
@@ -320,10 +320,10 @@
       },
       "touch_interaction": {
         "gesture": "draw-connection",
-        "canvas_action": "Drawing a line between two episode tiles links them; a shared-cause label appears on the connecting edge.",
+        "canvas_action": "Drawing a line between two Episode tiles links them; a shared-cause label appears on the connecting edge.",
         "visual": "A thread ties the tiles; when a third joins the chain, the whole chain flashes to signal a detected pattern."
       },
-      "mini_scenario": "Three timeout episodes get linked; the chain flashes and the MetaLearner flags a recurring latency pattern to address.",
+      "mini_scenario": "Three timeout Episodes get linked; the chain flashes and the MetaLearner flags a recurring latency pattern to address.",
       "pitfall": "Link by genuine causal relation, not mere co-occurrence; false links invent patterns that mislead the next planning pass."
     },
     {
@@ -332,11 +332,11 @@
       "loop_stage": "control",
       "pattern": "capacity-eviction",
       "intent": "Free tier capacity by demoting or dropping the least valuable memory.",
-      "how_it_shapes_the_loop": "When a tier hits its MemoryConfig capacity, HierarchicalMemory demotes or evicts the lowest importance/access MemoryEntry, keeping the perceive stage's recall lean.",
+      "how_it_shapes_the_loop": "When a tier hits its MemoryConfig capacity, HierarchicalMemory demotes the lowest Importance/access MemoryEntry to ArchiveMemory or drops it, keeping the perceive stage's recall lean.",
       "loop_objects_touched": ["MemoryEntry", "HierarchicalMemory"],
       "wiring": {
-        "inputs_from": ["tier capacity limit"],
-        "outputs_to": ["Archive tier / drop"]
+        "inputs_from": ["tier capacity limit (MemoryConfig)"],
+        "outputs_to": ["ArchiveMemory / drop"]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -352,7 +352,7 @@
       "loop_stage": "perceive",
       "pattern": "task-type-detection",
       "intent": "Classify the query so budget and recall strategy fit its shape.",
-      "how_it_shapes_the_loop": "suggest_task_type inspects the query and returns a TaskType (Conversation, CodeAnalysis, SelfImprovement, Debugging...), steering the control layer's budget split and the perceive stage's recall mix.",
+      "how_it_shapes_the_loop": "TokenBudgetAllocator.suggest_task_type inspects the query and returns a TaskType (Conversation, CodeAnalysis, SelfImprovement, Debugging...), steering the control layer's budget split and the perceive stage's recall mix.",
       "loop_objects_touched": ["TokenBudget", "LlmContext"],
       "wiring": {
         "inputs_from": ["raw query"],
@@ -364,7 +364,7 @@
         "visual": "A type badge (e.g. 'Debugging') snaps onto the query; the budget wheel downstream recolors to match the preset."
       },
       "mini_scenario": "The query 'why does this panic' is tapped and classified Debugging, so episodic recall of past errors is boosted.",
-      "pitfall": "Misclassification cascades; tagging a self-improvement query as Conversation starves the semantic recall it depended on."
+      "pitfall": "Misclassification cascades; tagging a SelfImprovement query as Conversation starves the semantic recall it depended on."
     },
     {
       "id": "cognitive-19",
@@ -372,19 +372,19 @@
       "loop_stage": "learn",
       "pattern": "lesson-distillation",
       "intent": "Distill a reusable insight from what just succeeded or failed.",
-      "how_it_shapes_the_loop": "During Reflect, a Lesson is distilled from the Episode outcome and stored, so the learn stage turns a single event into guidance the next reason pass can apply.",
-      "loop_objects_touched": ["Lesson", "Episode", "CognitiveState"],
+      "how_it_shapes_the_loop": "During the Reflect CyclePhase, a Lesson is distilled from the verified Episode outcome and stored, so the learn stage turns a single event into guidance the next reason pass can apply.",
+      "loop_objects_touched": ["Lesson", "Episode", "CognitiveState", "CyclePhase"],
       "wiring": {
         "inputs_from": ["verified Episode outcome"],
-        "outputs_to": ["LongTerm memory", "future reasoning"]
+        "outputs_to": ["LongTermMemory", "future reasoning"]
       },
       "touch_interaction": {
         "gesture": "long-press",
-        "canvas_action": "Long-pressing a completed episode squeezes out a distilled lesson token that docks to the LongTerm shelf.",
-        "visual": "A droplet of insight condenses from the episode tile and slides onto a lesson shelf, glowing when later reused."
+        "canvas_action": "Long-pressing a completed Episode squeezes out a distilled Lesson token that docks to the LongTerm shelf.",
+        "visual": "A droplet of insight condenses from the Episode tile and slides onto a lesson shelf, glowing when later reused."
       },
-      "mini_scenario": "A verified fix yields the lesson 'validate path before write', which docks to LongTerm and surfaces on the next file task.",
-      "pitfall": "Distill only from verified outcomes; a lesson drawn from an unverified success encodes a false rule the agent will repeat."
+      "mini_scenario": "A verified fix yields the Lesson 'validate path before write', which docks to LongTerm and surfaces on the next file task.",
+      "pitfall": "Distill only from verified outcomes; a Lesson drawn from an unverified success encodes a false rule the agent will repeat."
     },
     {
       "id": "cognitive-20",
@@ -392,11 +392,11 @@
       "loop_stage": "foundation",
       "pattern": "working-set-refresh",
       "intent": "Reset the immediate context to the current conversation, task, and active code.",
-      "how_it_shapes_the_loop": "WorkingContext (messages, current_task, active_code) is refreshed each turn so the foundation layer always assembles the LlmContext around the true present state.",
-      "loop_objects_touched": ["LlmContext", "CognitiveState"],
+      "how_it_shapes_the_loop": "The WorkingContext (messages, current task, ActiveCodeContext) is refreshed each turn via add_message and active-code updates, so the foundation layer always assembles the LlmContext around the true present state.",
+      "loop_objects_touched": ["WorkingContext", "LlmContext", "CognitiveState"],
       "wiring": {
-        "inputs_from": ["latest messages", "current task"],
-        "outputs_to": ["context assembly"]
+        "inputs_from": ["latest messages (add_message)", "current task"],
+        "outputs_to": ["CognitiveSystem.build_context"]
       },
       "touch_interaction": {
         "gesture": "double-tap",
@@ -404,7 +404,7 @@
         "visual": "The working node blinks, old slots dim out, and fresh message/task/code slots fill in with a clean-slate shimmer."
       },
       "mini_scenario": "At a new turn the user double-taps working; last turn's active_code clears and the file now under edit populates it.",
-      "pitfall": "Stale active_code in WorkingContext misleads reasoning; failing to refresh it makes the agent reason about a file it already moved past."
+      "pitfall": "Stale active code in WorkingContext misleads reasoning; failing to refresh makes the agent reason about a file it already moved past."
     }
   ]
 }

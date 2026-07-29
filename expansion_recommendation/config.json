@@ -2,9 +2,9 @@
   "component": "config",
   "tier": "full",
   "loop_stage": "foundation",
-  "summary": "The config component is the loop's foundation substrate. The loader merges Config from defaults -> TOML -> env -> model-defaults profile, then derives the context/token budget, attaches provenance, enforces workspace trust, and validates. api_key resolves credentials through a strict hierarchy behind transport guards that refuse to leak the key to unsafe or spoofed endpoints. Every loop-shaping knob (context_length, token_budget, max_iterations, model, safety) originates here.",
-  "loop_objects": ["Config", "AgentConfig", "SafetyConfig", "ModelProfile", "ConfigSource", "ConfigSources", "RedactedString", "Budget", "TrustDecision"],
-  "context_basis": "recommendations were formed with src/config/ read in the context of the full engine (~600k budget framing), grounded in loader.rs precedence, mod.rs Config/derive_context_budget, api_key.rs credential guards, provenance.rs ConfigSources, trust.rs, validation.rs, and model_profiles.rs.",
+  "summary": "The config component is the loop's foundation substrate. crate::config::loader::load merges Config from defaults -> TOML -> env -> model-defaults profile, then derive_context_budget computes the usable context/token budget, provenance attaches a ConfigSource per field, trust gates checkout-local configs, and validation rejects unrunnable settings at startup. The api_key module resolves credentials through a strict hierarchy (env -> keyring -> TOML) behind transport guards that refuse to leak the key to insecure or spoofed endpoints. Every loop-shaping knob the driver reads — context_length, agent.token_budget, max_iterations, step_timeout_secs, model, safety, concurrency — originates here before the state machine starts.",
+  "loop_objects": ["Config", "AgentConfig", "SafetyConfig", "ModelProfile", "ModelDefaultsProfile", "ConcurrencyConfig", "ConfigSource", "ConfigSources", "ApiKeySource", "RedactedString", "Budget"],
+  "context_basis": "Recommendations formed with config read in the context of the full engine (~600k budget framing), grounded in loader.rs precedence and trust gating, mod.rs Config/derive_context_budget, api_key.rs credential guards, provenance.rs ConfigSources, trust.rs, validation.rs, types.rs ConcurrencyConfig, and model_profiles.rs.",
   "examples": [
     {
       "id": "config-01",
@@ -12,10 +12,10 @@
       "loop_stage": "foundation",
       "pattern": "layered-precedence",
       "intent": "Resolve every setting from the highest-priority source that defines it.",
-      "how_it_shapes_the_loop": "The loader merges defaults -> TOML -> env -> model-defaults profile, so each layer overrides the last; the final Config is what the entire loop reads for budget, model, and safety.",
+      "how_it_shapes_the_loop": "loader::load merges defaults -> TOML -> env -> model-defaults profile, so each layer overrides the last; the final Config is the single object the entire loop reads for budget, model, and safety before the state machine starts.",
       "loop_objects_touched": ["Config", "ConfigSources"],
       "wiring": {
-        "inputs_from": ["defaults", "TOML file", "env vars", "profile"],
+        "inputs_from": ["defaults", "selfware.toml", "env vars", "model profile"],
         "outputs_to": ["merged Config", "Agent::new"]
       },
       "touch_interaction": {
@@ -23,7 +23,7 @@
         "canvas_action": "Spreading the foundation node fans out the four precedence layers as stacked translucent sheets.",
         "visual": "Higher-priority layers sit on top and glow; overridden values below them are dimmed."
       },
-      "mini_scenario": "SELFWARE_MODEL in the env overrides the TOML model, and the loop runs against the env-chosen model.",
+      "mini_scenario": "SELFWARE_MODEL in the env overrides the TOML model, and the loop runs against the env-chosen model on its very first reason turn.",
       "pitfall": "Assuming the TOML file always wins hides that env vars silently override it for the running loop."
     },
     {
@@ -32,10 +32,10 @@
       "loop_stage": "foundation",
       "pattern": "profile-fill-unset",
       "intent": "Apply sensible model defaults without clobbering explicit user choices.",
-      "how_it_shapes_the_loop": "match_profile finds the first glob-matching ModelDefaultsProfile and apply_profile fills only user-unset fields (native FC, streaming, temperature, max_tokens, extra_body), tuning the reason stage per model.",
-      "loop_objects_touched": ["Config", "ModelProfile"],
+      "how_it_shapes_the_loop": "model_profiles::match_profile finds the first glob-matching ModelDefaultsProfile and apply_profile fills only user-unset fields (native FC, streaming, temperature, max_tokens, extra_body), tuning the reason stage per model.",
+      "loop_objects_touched": ["Config", "ModelDefaultsProfile"],
       "wiring": {
-        "inputs_from": ["config.model", "builtin profiles"],
+        "inputs_from": ["config.model", "builtin_profiles"],
         "outputs_to": ["filled Config fields"]
       },
       "touch_interaction": {
@@ -43,7 +43,7 @@
         "canvas_action": "Tapping the model node applies its matching profile, filling empty slots and leaving set ones untouched.",
         "visual": "Auto-filled fields glow amber (profile-sourced); user-set fields stay solid blue."
       },
-      "mini_scenario": "A glm-5.2 model matches its profile, enabling native FC and thinking without the user setting them.",
+      "mini_scenario": "A glm-5.2 model matches its builtin profile, enabling native function calling and thinking without the user setting either.",
       "pitfall": "A profile that overwrites explicitly-set fields silently changes the loop's behavior against the user's intent."
     },
     {
@@ -52,18 +52,18 @@
       "loop_stage": "foundation",
       "pattern": "budget-derivation",
       "intent": "Compute the usable conversation budget the whole loop lives within.",
-      "how_it_shapes_the_loop": "derive_context_budget reserves a 20% safety margin, clamps max_tokens to what fits, and enforces a conversation floor, returning the max_context_tokens and output reservation every reason turn respects.",
+      "how_it_shapes_the_loop": "Config::derive_context_budget reserves a 20% safety margin, clamps max_tokens to what fits, and enforces a conversation floor, returning the max_context_tokens and output reservation every reason turn and the compressor respect.",
       "loop_objects_touched": ["Config", "Budget", "AgentConfig"],
       "wiring": {
         "inputs_from": ["context_length", "max_tokens", "token_safety_margin"],
-        "outputs_to": ["compressor", "reason turns"]
+        "outputs_to": ["history compressor", "reason turns"]
       },
       "touch_interaction": {
         "gesture": "pinch",
         "canvas_action": "Pinching the foundation node reveals the budget breakdown into margin, output reservation, and conversation budget.",
         "visual": "Three segments render: hatched margin, reserved output, and green usable conversation budget."
       },
-      "mini_scenario": "At startup the loop derives max_context_tokens from context_length so history compaction targets the right size.",
+      "mini_scenario": "At startup the loop derives max_context_tokens from context_length so history compaction targets the right size before turn one.",
       "pitfall": "Deriving from max_tokens (the output cap) instead of context_length undersizes the conversation budget."
     },
     {
@@ -72,18 +72,18 @@
       "loop_stage": "foundation",
       "pattern": "safe-default-fallback",
       "intent": "Avoid overflowing an unrecognized model's real window.",
-      "how_it_shapes_the_loop": "When the model is unknown and the user did not set context_length, the loader defaults to a conservative 32k, keeping the loop's requests inside a window it can rely on.",
+      "how_it_shapes_the_loop": "When the model matches no profile and the user did not set context_length, the loader applies UNKNOWN_MODEL_CONTEXT_LENGTH (32_768), keeping the loop's requests inside a window it can rely on.",
       "loop_objects_touched": ["Config", "Budget"],
       "wiring": {
-        "inputs_from": ["unrecognized model"],
-        "outputs_to": ["context_length = 32k", "budget derivation"]
+        "inputs_from": ["unrecognized model name"],
+        "outputs_to": ["context_length = 32768", "budget derivation"]
       },
       "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping an unknown model node snaps its context slot to the conservative fallback value.",
+        "gesture": "flick",
+        "canvas_action": "Flicking an unknown-model node's context slot snaps it down to the conservative fallback value.",
         "visual": "The context bar renders half-width with a 'fallback' badge to signal the safe default."
       },
-      "mini_scenario": "A brand-new model with no profile gets a 32k context so the loop does not overrun an unknown window.",
+      "mini_scenario": "A brand-new model with no profile gets a 32k context so the loop does not overrun an unknown window on its first request.",
       "pitfall": "Assuming a large default for an unknown model can silently exceed its real window and 400 every turn."
     },
     {
@@ -92,7 +92,7 @@
       "loop_stage": "foundation",
       "pattern": "conversation-budget-share",
       "intent": "Give the loop a conversation token budget proportional to the context.",
-      "how_it_shapes_the_loop": "If agent.token_budget is unset the loader derives it as 60% of context_length, and validation ensures token_safety_margin < token_budget, bounding how much history the loop can carry.",
+      "how_it_shapes_the_loop": "If agent.token_budget is unset the loader derives it as 60% of context_length, and validation ensures token_safety_margin < token_budget, bounding how much history the loop can carry before compaction triggers.",
       "loop_objects_touched": ["AgentConfig", "Budget", "Config"],
       "wiring": {
         "inputs_from": ["context_length"],
@@ -103,7 +103,7 @@
         "canvas_action": "Rotating the budget dial sets the conversation share; the default sits at 60% of context.",
         "visual": "A ring shows the token_budget as a fraction of the full context window."
       },
-      "mini_scenario": "With context_length 128k and no explicit budget, the loop gets a ~76k conversation budget.",
+      "mini_scenario": "With context_length 32768 and no explicit budget, the loop gets a 19660-token conversation budget (32768 * 3 / 5).",
       "pitfall": "Setting token_safety_margin above token_budget fails validation and the loop cannot start."
     },
     {
@@ -112,10 +112,10 @@
       "loop_stage": "foundation",
       "pattern": "credential-hierarchy",
       "intent": "Pick the credential from the most trustworthy available source.",
-      "how_it_shapes_the_loop": "api_key resolution tries SELFWARE_API_KEY, then OPENROUTER_API_KEY (only for the openrouter host), then the OS keyring, then plaintext TOML, so the reason stage authenticates without hard-coded secrets.",
-      "loop_objects_touched": ["RedactedString", "Config"],
+      "how_it_shapes_the_loop": "api_key resolution tries SELFWARE_API_KEY, then OPENROUTER_API_KEY (only when is_openrouter_endpoint matches), then load_api_key_from_keyring, then plaintext TOML — recording the winning ApiKeySource so the reason stage authenticates without hard-coded secrets.",
+      "loop_objects_touched": ["RedactedString", "ApiKeySource", "Config"],
       "wiring": {
-        "inputs_from": ["env", "keyring", "TOML"],
+        "inputs_from": ["env", "OS keyring", "selfware.toml"],
         "outputs_to": ["authorized ApiClient"]
       },
       "touch_interaction": {
@@ -123,7 +123,7 @@
         "canvas_action": "Long-pressing the credential node shows the resolution chain with the winning source highlighted.",
         "visual": "Each source is a rung; the first that resolves lights green, the rest grey out."
       },
-      "mini_scenario": "No env var is set, so the loop pulls the key from the OS keyring scoped to the endpoint.",
+      "mini_scenario": "No env var is set, so the loop pulls the key from the OS keyring scoped to the endpoint before the first reason turn.",
       "pitfall": "Falling through to a plaintext TOML key without warning normalizes storing secrets in the repo."
     },
     {
@@ -132,11 +132,11 @@
       "loop_stage": "foundation",
       "pattern": "credential-transport-guard",
       "intent": "Never transmit the key over plaintext HTTP to a remote host.",
-      "how_it_shapes_the_loop": "is_insecure_remote_endpoint and assert_credential_endpoint_safe block authorization when the endpoint is plaintext HTTP to a non-local host, so the loop cannot leak the key on the wire.",
+      "how_it_shapes_the_loop": "is_insecure_remote_endpoint and assert_credential_endpoint_safe block authorization when the endpoint is plaintext HTTP to a non-local host, so authorize_request cannot leak the key on the wire during any reason turn.",
       "loop_objects_touched": ["Config", "RedactedString"],
       "wiring": {
-        "inputs_from": ["endpoint URL", "api_key"],
-        "outputs_to": ["authorized request or refusal"]
+        "inputs_from": ["endpoint URL", "resolved api_key"],
+        "outputs_to": ["authorized request or hard refusal"]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -152,7 +152,7 @@
       "loop_stage": "foundation",
       "pattern": "host-spoof-guard",
       "intent": "Prevent a URL like localhost@attacker from tricking the local-endpoint check.",
-      "how_it_shapes_the_loop": "endpoint_has_userinfo rejects URLs carrying userinfo so an attacker cannot disguise a remote host as local and coax the loop into sending the key.",
+      "how_it_shapes_the_loop": "endpoint_has_userinfo rejects URLs carrying a userinfo component so an attacker cannot disguise a remote host as local and coax the loop into sending the key without TLS.",
       "loop_objects_touched": ["Config"],
       "wiring": {
         "inputs_from": ["endpoint URL"],
@@ -163,7 +163,7 @@
         "canvas_action": "Long-pressing the endpoint node parses the URL and flags any userinfo component as spoof.",
         "visual": "A spoofed URL highlights the userinfo segment in red and blocks the node."
       },
-      "mini_scenario": "An endpoint http://localhost@attacker.com is rejected before the local-endpoint check can be fooled.",
+      "mini_scenario": "An endpoint http://localhost@attacker.com is rejected before the is_local_endpoint check can be fooled.",
       "pitfall": "A naive 'contains localhost' host check without userinfo rejection is trivially bypassed."
     },
     {
@@ -183,7 +183,7 @@
         "canvas_action": "Tapping the endpoint node shows whether it exactly matches the OpenRouter host.",
         "visual": "An exact match shows the OpenRouter badge; a lookalike shows a warning and no badge."
       },
-      "mini_scenario": "A lookalike host openrouter.ai.evil.com does not match, so the OpenRouter key is not sent to it.",
+      "mini_scenario": "A lookalike host openrouter.ai.evil.com does not match, so the OpenRouter key is never sent to it.",
       "pitfall": "A substring host match sends the OpenRouter key to any domain containing the string."
     },
     {
@@ -192,7 +192,7 @@
       "loop_stage": "foundation",
       "pattern": "redaction-by-default",
       "intent": "Keep credentials out of logs, traces, and error output.",
-      "how_it_shapes_the_loop": "RedactedString renders as [REDACTED] and redact_config_secrets walks JSON to scrub the api_key and env values, so the loop's observability never leaks credentials.",
+      "how_it_shapes_the_loop": "RedactedString renders as [REDACTED] in Debug/Display and redact_config_secrets walks serialized JSON to scrub the api_key and env values, so the loop's observability channel never leaks credentials.",
       "loop_objects_touched": ["RedactedString", "Config"],
       "wiring": {
         "inputs_from": ["Config with secrets"],
@@ -204,7 +204,7 @@
         "visual": "Secret fields render as dotted [REDACTED] chips that never reveal the value."
       },
       "mini_scenario": "A debug dump of the request body shows the api_key as [REDACTED] instead of the real token.",
-      "pitfall": "Logging the raw Config or request_body before redaction leaks the key into persistent traces."
+      "pitfall": "Logging the raw Config or request body before redaction leaks the key into persistent traces."
     },
     {
       "id": "config-11",
@@ -212,10 +212,10 @@
       "loop_stage": "learn",
       "pattern": "value-provenance",
       "intent": "Know where every effective setting came from.",
-      "how_it_shapes_the_loop": "ConfigSources maps each dotted field to a ConfigSource (Default/ConfigFile/EnvVar/Profile/CliArg/AutoConfig), so source_of makes the loop's foundation transparent and debuggable.",
+      "how_it_shapes_the_loop": "ConfigSources maps each dotted field to a ConfigSource (Default/ConfigFile/EnvVar/Profile/CliArg/AutoConfig) as each layer merges, so source_of makes the loop's foundation transparent and debuggable after the fact.",
       "loop_objects_touched": ["ConfigSources", "ConfigSource", "Config"],
       "wiring": {
-        "inputs_from": ["each merge layer"],
+        "inputs_from": ["each merge layer in loader::load"],
         "outputs_to": ["source_of lookups", "diagnostics"]
       },
       "touch_interaction": {
@@ -232,10 +232,10 @@
       "loop_stage": "control",
       "pattern": "workspace-trust-gate",
       "intent": "Stop an untrusted repo's selfware.toml from weakening the loop's guardrails.",
-      "how_it_shapes_the_loop": "For an untrusted checkout-local selfware.toml the loader resets hooks, MCP, yolo, and permission grants and refuses remote endpoint overrides, so a cloned repo cannot silently escalate the loop's privileges.",
-      "loop_objects_touched": ["Config", "SafetyConfig", "TrustDecision"],
+      "how_it_shapes_the_loop": "When loader::load sees a checkout-local selfware.toml and trust::is_config_trusted returns false, it resets hooks, MCP, yolo, and permission grants and refuses remote endpoint overrides — so a cloned repo cannot silently escalate the loop's privileges.",
+      "loop_objects_touched": ["Config", "SafetyConfig"],
       "wiring": {
-        "inputs_from": ["checkout-local TOML", "trusted_repos file"],
+        "inputs_from": ["checkout-local TOML", "~/.selfware/trusted_repos"],
         "outputs_to": ["restricted Config"]
       },
       "touch_interaction": {
@@ -243,7 +243,7 @@
         "canvas_action": "Long-pressing the foundation node shows the trust verdict; untrusted repos display their reset privileged fields.",
         "visual": "Untrusted config renders behind a caution border; reset fields flash back to their safe defaults."
       },
-      "mini_scenario": "A cloned repo's selfware.toml tries to set hooks; being untrusted, the loader strips them before the loop runs.",
+      "mini_scenario": "A cloned repo's selfware.toml tries to register hooks; being untrusted, the loader strips them before the loop runs.",
       "pitfall": "Trusting a checkout-local config by default lets a malicious repo add hooks that run arbitrary commands."
     },
     {
@@ -252,10 +252,10 @@
       "loop_stage": "control",
       "pattern": "explicit-trust-grant",
       "intent": "Let the user opt a specific checkout into full config privileges.",
-      "how_it_shapes_the_loop": "add_trusted_config appends the canonical path to ~/.selfware/trusted_repos so is_config_trusted later returns true, allowing that repo's config to configure hooks and endpoints for the loop.",
-      "loop_objects_touched": ["TrustDecision", "Config"],
+      "how_it_shapes_the_loop": "trust::add_trusted_config appends the config's canonical path to trusted_repos_file (~/.selfware/trusted_repos) so is_config_trusted returns true on later loads, allowing that repo's config to set hooks and endpoints for the loop.",
+      "loop_objects_touched": ["Config", "SafetyConfig"],
       "wiring": {
-        "inputs_from": ["user trust command", "config path"],
+        "inputs_from": ["user trust command", "canonical config path"],
         "outputs_to": ["trusted_repos file"]
       },
       "touch_interaction": {
@@ -272,7 +272,7 @@
       "loop_stage": "verify",
       "pattern": "startup-validation-gate",
       "intent": "Fail fast on a config that would break the loop.",
-      "how_it_shapes_the_loop": "Config::validate hard-errors on bad URLs, empty model, zero/oversized token budgets, negative temperature, and invalid globs, so an unrunnable loop is rejected at startup rather than mid-turn.",
+      "how_it_shapes_the_loop": "validation::validate hard-errors on bad URLs, empty model, zero/oversized token budgets, negative temperature, and invalid globs, so an unrunnable loop is rejected at startup rather than mid-turn.",
       "loop_objects_touched": ["Config", "AgentConfig", "SafetyConfig"],
       "wiring": {
         "inputs_from": ["merged Config"],
@@ -292,7 +292,7 @@
       "loop_stage": "verify",
       "pattern": "no-silent-clamp",
       "intent": "Ensure wizard/auto-config output actually fits the window.",
-      "how_it_shapes_the_loop": "check_generated_context_fit requires max_tokens to fit without runtime clamping for generated configs, so an auto-config cannot rely on a silent clamp that later surprises the loop.",
+      "how_it_shapes_the_loop": "check_generated_context_fit requires max_tokens to fit without runtime clamping for generated configs, so an auto-config cannot rely on a silent clamp that later surprises the loop's budget derivation.",
       "loop_objects_touched": ["Config", "Budget"],
       "wiring": {
         "inputs_from": ["auto-generated Config"],
@@ -312,10 +312,10 @@
       "loop_stage": "control",
       "pattern": "concurrency-bounds",
       "intent": "Cap the loop's parallel fanout from a single source of truth.",
-      "how_it_shapes_the_loop": "ConcurrencyConfig (max_streams, max_tools, max_global, each in 1..256) feeds the tool dispatch governor, so the act stage's parallelism is bounded by validated config.",
-      "loop_objects_touched": ["Config", "AgentConfig"],
+      "how_it_shapes_the_loop": "ConcurrencyConfig (max_streams, max_tools, max_global, each validated to 1..=256) feeds the tool dispatch governor, so the act stage's parallelism is bounded by validated config.",
+      "loop_objects_touched": ["ConcurrencyConfig", "Config"],
       "wiring": {
-        "inputs_from": ["concurrency config"],
+        "inputs_from": ["concurrency config section"],
         "outputs_to": ["tool dispatch governor"]
       },
       "touch_interaction": {
@@ -323,8 +323,8 @@
         "canvas_action": "Rotating the concurrency dial sets max concurrent tools; the value is clamped to the valid range.",
         "visual": "The dial refuses to move past 256 or below 1, snapping into the allowed band."
       },
-      "mini_scenario": "max_tools is set to 4, so the parallel read batch never runs more than four tools at once.",
-      "pitfall": "A concurrency value outside 1..256 fails validation and the loop refuses to start."
+      "mini_scenario": "max_tools is set to 4, so a parallel read batch never runs more than four tools at once in the act stage.",
+      "pitfall": "A concurrency value outside 1..=256 fails validation and the loop refuses to start."
     },
     {
       "id": "config-17",
@@ -332,7 +332,7 @@
       "loop_stage": "reason",
       "pattern": "profile-scoped-model",
       "intent": "Route certain turns to a specialized model (coder, vision).",
-      "how_it_shapes_the_loop": "Config.models holds named ModelProfiles with their own endpoint, context_length, and modalities; supports_vision lets the loop pick a vision-capable profile for a multimodal verify turn.",
+      "how_it_shapes_the_loop": "Config.models holds named ModelProfiles with their own endpoint, context_length, and modalities; supports_vision lets the loop pick a vision-capable profile for a multimodal verify turn instead of the default model.",
       "loop_objects_touched": ["ModelProfile", "Config"],
       "wiring": {
         "inputs_from": ["named profile", "turn modality"],
@@ -352,18 +352,18 @@
       "loop_stage": "control",
       "pattern": "loop-bounds-from-config",
       "intent": "Give the loop's state machine its iteration and per-step limits.",
-      "how_it_shapes_the_loop": "AgentConfig.max_iterations and step_timeout_secs (both validated > 0) seed AgentLoop's iteration ceiling and per-turn timeout, directly bounding how long the control loop can run.",
+      "how_it_shapes_the_loop": "AgentConfig.max_iterations and step_timeout_secs (both validated > 0) seed the agent loop's iteration ceiling and per-turn timeout, directly bounding how long the control loop can run before it must fail or recover.",
       "loop_objects_touched": ["AgentConfig", "Config", "Budget"],
       "wiring": {
-        "inputs_from": ["agent config"],
-        "outputs_to": ["AgentLoop::new", "step timeout"]
+        "inputs_from": ["agent config section"],
+        "outputs_to": ["AgentLoop::new", "per-step timeout"]
       },
       "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the control hub exposes sliders for max iterations and per-step timeout.",
+        "gesture": "drag",
+        "canvas_action": "Dragging the two control sliders sets max iterations and per-step timeout; values below 1 snap back.",
         "visual": "Two gauges show the iteration ceiling and step timeout that bound the loop."
       },
-      "mini_scenario": "max_iterations 40 seeds the AgentLoop so the state machine fails after 40 execution turns.",
+      "mini_scenario": "max_iterations 40 seeds the agent loop so the state machine fails cleanly after 40 execution turns.",
       "pitfall": "A zero max_iterations fails validation; a huge one lets a runaway loop burn the entire budget."
     },
     {
@@ -372,8 +372,8 @@
       "loop_stage": "reason",
       "pattern": "backend-extension-merge",
       "intent": "Pass backend-specific request knobs without losing user overrides.",
-      "how_it_shapes_the_loop": "extra_body from the profile merges key-by-key with the user's, with the user winning, so backend extensions (enable_thinking, top_p) reach the reason turn while respecting explicit settings.",
-      "loop_objects_touched": ["Config", "ModelProfile"],
+      "how_it_shapes_the_loop": "extra_body from the matching ModelDefaultsProfile merges key-by-key with the user's, with the user winning, so backend extensions (enable_thinking, top_p) reach the reason turn while respecting explicit settings.",
+      "loop_objects_touched": ["Config", "ModelDefaultsProfile"],
       "wiring": {
         "inputs_from": ["profile extra_body", "user extra_body"],
         "outputs_to": ["request body extensions"]
@@ -392,15 +392,15 @@
       "loop_stage": "verify",
       "pattern": "soft-warning-signal",
       "intent": "Flag risky-but-legal settings without blocking the loop.",
-      "how_it_shapes_the_loop": "validate emits warnings (http to a remote host, temperature > 10, very long step timeout, empty api_key) so the loop starts but the operator sees the foundation risks it is running on.",
+      "how_it_shapes_the_loop": "validation emits warnings (http to a remote host, extreme temperature, very long step timeout, empty api_key) so the loop starts but the operator sees the foundation risks it is running on.",
       "loop_objects_touched": ["Config", "SafetyConfig"],
       "wiring": {
         "inputs_from": ["merged Config"],
         "outputs_to": ["warning log", "startup"]
       },
       "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the validate gate shows amber warning chips for risky values that still pass.",
+        "gesture": "flick",
+        "canvas_action": "Flicking sideways on the validate gate cycles through amber warning chips for risky values that still pass.",
         "visual": "Warnings render amber (non-blocking) versus red errors (blocking) so the two are distinct."
       },
       "mini_scenario": "An empty api_key produces a warning; the loop still starts for a local endpoint but the risk is visible.",

@@ -2,9 +2,9 @@
   "component": "evolution",
   "tier": "full",
   "loop_stage": "learn",
-  "summary": "The evolution component is the second-order self-modification daemon: an outer evolutionary loop that mutates the engine itself. Each generation captures a TelemetrySnapshot, asks an LLM swarm for Hypotheses (search/replace or diff patches), filters them against PROTECTED_PATHS, applies survivors in an isolated shadow worktree or Docker Sandbox, runs compile/test/clippy gates, scores winners with an immutable FitnessWeights composite over a SabResult, rates the generation Bloom/Grow/Wilt/Frost, and commits the exact tested diff as a GenerationWinner. On the loop it is the meta-controller that treats the compiler and the SAB benchmark as the immutable laws of physics no mutation may weaken.",
-  "loop_objects": ["Hypothesis", "FitnessWeights", "FitnessMetrics", "GenerationRating", "GenerationWinner", "Sandbox", "SandboxResult", "SabConfig", "SabResult", "ScenarioScore", "TelemetrySnapshot", "CpuHotspot", "AllocationHotspot", "BenchmarkDelta", "TournamentConfig", "HypothesisResult", "AstMutationResult", "EvolutionConfig", "SafetyConfig"],
-  "context_basis": "Recommendations were formed with src/evolution/ read in the context of the full engine under a ~600k budget framing; the daemon must keep the fitness oracle (SAB) and safety module externally immutable while mutating everything else, and it treats context as source material for hypothesis generation.",
+  "summary": "The evolution component is the second-order self-modification daemon: an outer evolutionary loop that mutates the engine itself. telemetry::capture builds a TelemetrySnapshot (CPU hotspots, allocation sinks, benchmark deltas, test summary) as the generation's sensory input; the daemon's prompt builders turn telemetry plus hall-of-fame history into LLM prompts whose parse_hypotheses_response yields a population of Hypotheses; is_protected and the SafetyConfig gate out any mutation touching the immutable core; ast_tools' create_shadow_worktree and the Docker Sandbox apply and evaluate survivors in isolation; run_tournament screens the population in parallel under a Semaphore; fitness::run_sab measures the winner with the external SAB oracle and FitnessWeights::composite reduces metrics to one scalar; the daemon rates the generation via GenerationRating and records a GenerationWinner. On the loop it is the meta-controller that treats the compiler and the SAB benchmark as the immutable laws of physics no mutation may weaken.",
+  "loop_objects": ["TelemetrySnapshot", "CpuHotspot", "AllocationHotspot", "BenchmarkDelta", "TestSummary", "TrackingAllocator", "Hypothesis", "HypothesisResult", "TournamentConfig", "GenerationWinner", "EvolutionResult", "SabConfig", "SabResult", "ScenarioScore", "Difficulty", "FitnessWeights", "FitnessMetrics", "MutationTargets", "SafetyConfig", "GenerationRating", "AstMutationResult", "WorktreeError", "Sandbox", "SandboxConfig", "SandboxResult", "ExecResult", "EvolutionConfig", "LlmConfig"],
+  "context_basis": "Recommendations formed with src/evolution/ read in the context of the full engine (~600k budget framing); the daemon must keep the fitness oracle (SAB) and safety checks externally immutable while mutating everything else, and it treats telemetry and history as source material for hypothesis generation.",
   "examples": [
     {
       "id": "evolution-01",
@@ -12,399 +12,259 @@
       "loop_stage": "perceive",
       "pattern": "profile-then-mutate",
       "intent": "Give the mutating LLM a real performance profile to target instead of guessing.",
-      "how_it_shapes_the_loop": "telemetry::capture reads flamegraph, DHAT, criterion, and test data into a TelemetrySnapshot, so each generation's perceive stage hands the hypothesis generator concrete hotspots to attack.",
-      "loop_objects_touched": ["TelemetrySnapshot", "CpuHotspot", "AllocationHotspot", "BenchmarkDelta"],
-      "wiring": {
-        "inputs_from": ["flamegraph", "DHAT / TrackingAllocator", "criterion", "cargo test"],
-        "outputs_to": ["hypothesis generation prompt"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the telemetry node fans out hotspot, allocation, and benchmark panels for the current generation.",
-        "visual": "Panels bloom: CPU hotspots as a ranked heat list, allocations as byte bars, benchmark deltas colored red slower / green faster."
-      },
-      "mini_scenario": "The snapshot shows a function at 40% CPU; that hotspot is injected into the prompt so the LLM aims its mutation there.",
+      "how_it_shapes_the_loop": "telemetry::capture reads profiling, allocation, benchmark, and test data into a TelemetrySnapshot, so each generation's perceive stage hands the hypothesis prompt concrete CpuHotspots and BenchmarkDeltas to attack.",
+      "loop_objects_touched": ["TelemetrySnapshot", "CpuHotspot", "AllocationHotspot", "BenchmarkDelta", "TestSummary"],
+      "wiring": {"inputs_from": ["profiler output", "TrackingAllocator", "benchmark runs", "cargo test"], "outputs_to": ["daemon::build_user_prompt"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the telemetry node fans out hotspot, allocation, benchmark, and test-summary panels for the current generation.", "visual": "Panels bloom: CPU hotspots as a ranked heat list, allocations as byte bars, benchmark deltas colored red slower / green faster."},
+      "mini_scenario": "capture returns a snapshot whose top CpuHotspot sits at 40% of samples; that hotspot flows into the user prompt so the LLM aims its mutation there.",
       "pitfall": "Telemetry must reflect the current build; feeding a stale snapshot makes the generation optimize a hotspot the last winner already fixed."
     },
     {
       "id": "evolution-02",
-      "title": "Generate a population of Hypotheses from an LLM swarm",
-      "loop_stage": "reason",
-      "pattern": "population-proposal",
-      "intent": "Propose several candidate mutations per generation so the tournament has choices.",
-      "how_it_shapes_the_loop": "generate_hypotheses prompts the LLM with telemetry, history, and source context to return population_size Hypotheses (id, description, patch), so the reason stage produces a slate of mutations to evaluate.",
-      "loop_objects_touched": ["Hypothesis", "TelemetrySnapshot"],
-      "wiring": {
-        "inputs_from": ["TelemetrySnapshot", "evolution history", "source context"],
-        "outputs_to": ["safety filter", "tournament"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "Flicking the generator spawns a row of hypothesis cards, each showing its description and patch shape.",
-        "visual": "Cards deal out labeled hyp-0..hyp-n; each shows a diff preview badge (search/replace or unified) and a target-files chip."
-      },
-      "mini_scenario": "The swarm returns five hypotheses; hyp-2 proposes caching a repeated computation the telemetry flagged as hot.",
-      "pitfall": "The patch, not the target_files metadata, is authoritative; a hypothesis can claim safe files while its patch edits something else."
+      "title": "Track live allocations with the TrackingAllocator",
+      "loop_stage": "perceive",
+      "pattern": "allocation-sensing",
+      "intent": "Measure memory pressure so hypotheses can chase allocation sinks, not just CPU.",
+      "how_it_shapes_the_loop": "telemetry's TrackingAllocator wraps the global allocator, exposing total_allocs, total_bytes_allocated, current_live_bytes, and peak_live_bytes; the perceive stage folds these into AllocationHotspots on the snapshot.",
+      "loop_objects_touched": ["TrackingAllocator", "AllocationHotspot", "TelemetrySnapshot"],
+      "wiring": {"inputs_from": ["global allocator"], "outputs_to": ["telemetry::capture", "hypothesis prompt"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the memory gauge zooms from a single live-bytes dial into per-site allocation bars.", "visual": "A live-bytes dial fills with a peak-watermark ring; zooming in splits it into ranked byte bars per allocation site."},
+      "mini_scenario": "peak_live_bytes spikes during a benchmark; the snapshot lists the responsible AllocationHotspot, and the next hypothesis proposes reusing a buffer.",
+      "pitfall": "Allocator stats are process-global; capturing them mid-benchmark mixes unrelated allocations into the hotspot ranking."
     },
     {
       "id": "evolution-03",
-      "title": "Block a Hypothesis that touches a PROTECTED_PATH",
-      "loop_stage": "verify",
-      "pattern": "immutable-core-gate",
-      "intent": "Stop the daemon from modifying its own safety, fitness oracle, or test suite.",
-      "how_it_shapes_the_loop": "hypothesis_touches_protected dual-gates on both target_files and patch_edited_paths against PROTECTED_PATHS (evolution/, safety/, tests/, benches/sab_), so the verify stage rejects any self-weakening mutation before evaluation.",
-      "loop_objects_touched": ["Hypothesis", "SafetyConfig"],
-      "wiring": {
-        "inputs_from": ["Hypothesis patch + metadata"],
-        "outputs_to": ["rejected (blocked) or tournament (allowed)"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a hypothesis scans its edited paths; any protected path slams a red lock over the card.",
-        "visual": "Edited paths list out; a protected one flashes red with a padlock and the whole card stamps 'BLOCKED: protected'."
-      },
-      "mini_scenario": "A hypothesis tries to edit benches/sab_full to inflate its score; the gate detects the protected path and blocks it outright.",
-      "pitfall": "Gate the patch payload, not just declared files; canonicalize paths first or a symlink or .. escape sneaks past the lexical check."
+      "title": "Build the generation prompt from telemetry and history",
+      "loop_stage": "reason",
+      "pattern": "context-conditioned-prompt",
+      "intent": "Condition the mutating model on both current telemetry and past winners.",
+      "how_it_shapes_the_loop": "daemon::build_system_prompt and build_user_prompt assemble read_mutation_targets plus telemetry::to_agent_prompt and format_evolution_history into the messages that generate this generation's hypothesis slate.",
+      "loop_objects_touched": ["TelemetrySnapshot", "MutationTargets", "GenerationWinner", "LlmConfig"],
+      "wiring": {"inputs_from": ["TelemetrySnapshot", "hall of fame", "mutation target files"], "outputs_to": ["LLM request", "parse_hypotheses_response"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the prompt node renders the assembled system+user prompt card the generator will read.", "visual": "Three trays — targets, telemetry markdown, history — slide into one prompt card; the card glows when the LlmConfig endpoint accepts it."},
+      "mini_scenario": "build_user_prompt interleaves the snapshot markdown with the last ten GenerationWinners, steering the model toward mutation kinds that previously won.",
+      "pitfall": "to_agent_prompt must faithfully reflect the numbers; rounding or truncating hotspots too aggressively hides the very signal the mutation should chase."
     },
     {
       "id": "evolution-04",
-      "title": "Apply a mutation in an isolated shadow worktree",
-      "loop_stage": "act",
-      "pattern": "isolated-mutation",
-      "intent": "Test a mutation without touching the live repo.",
-      "how_it_shapes_the_loop": "create_shadow_worktree makes a detached git worktree under .worktrees/, where the patch is applied and evaluated, so the act stage mutates a disposable copy the RAII guard cleans up.",
-      "loop_objects_touched": ["AstMutationResult", "Hypothesis"],
-      "wiring": {
-        "inputs_from": ["Hypothesis patch", "repo HEAD"],
-        "outputs_to": ["compile gate", "AstMutationResult"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a hypothesis spawns a ghost worktree beside the repo where the patch lands.",
-        "visual": "A translucent repo clone forks off; the patch applies with a diff shimmer, and it dissolves after evaluation."
-      },
-      "mini_scenario": "hyp-2's patch applies cleanly in a shadow worktree, producing an AstMutationResult ready for the compile gate.",
-      "pitfall": "The worktree guard must clean up on panic; a leaked worktree accumulates under .worktrees/ and clutters every future generation."
+      "title": "Parse the LLM reply into a population of Hypotheses",
+      "loop_stage": "reason",
+      "pattern": "population-proposal",
+      "intent": "Turn one model response into several candidate mutations so the tournament has choices.",
+      "how_it_shapes_the_loop": "daemon::parse_hypotheses_response extracts structured Hypotheses (id, description, patch) from the model output, so the reason stage produces a slate the control layer can screen in parallel.",
+      "loop_objects_touched": ["Hypothesis", "MutationTargets", "LlmConfig"],
+      "wiring": {"inputs_from": ["LLM response text"], "outputs_to": ["safety filter (is_protected)", "tournament::run_tournament"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the parser node deals out a row of hypothesis cards, each showing its description and patch shape.", "visual": "Cards deal out labeled hyp-0..hyp-n; each carries a diff-preview badge and a target-files chip; malformed fragments crumble away."},
+      "mini_scenario": "The model returns five hypotheses; hyp-2 proposes caching a repeated computation the telemetry flagged as hot.",
+      "pitfall": "The patch, not the declared target_files metadata, is authoritative; a hypothesis can claim safe files while its patch edits something else."
     },
     {
       "id": "evolution-05",
+      "title": "Gate every Hypothesis through is_protected",
+      "loop_stage": "verify",
+      "pattern": "immutable-core-gate",
+      "intent": "Stop the daemon from modifying its own safety logic, fitness oracle, or test suite.",
+      "how_it_shapes_the_loop": "is_protected (backed by SafetyConfig) rejects any Hypothesis whose patch touches protected paths, so the verify stage filters self-weakening mutations before any evaluation budget is spent.",
+      "loop_objects_touched": ["Hypothesis", "SafetyConfig", "MutationTargets"],
+      "wiring": {"inputs_from": ["parse_hypotheses_response"], "outputs_to": ["rejected set", "run_tournament (survivors)"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing a hypothesis scans its edited paths; any protected path slams a red lock over the card.", "visual": "Edited paths list out; a protected one flashes red with a padlock and the card stamps 'BLOCKED'; survivors keep a green clearance badge."},
+      "mini_scenario": "A hypothesis tries to edit the SAB bench harness to inflate its score; is_protected matches the path and the card is discarded before the tournament.",
+      "pitfall": "Gate the patch payload, not just declared files; canonicalize paths first or a symlink or '..' escape sneaks past a lexical check."
+    },
+    {
+      "id": "evolution-06",
+      "title": "Apply a mutation in a shadow worktree",
+      "loop_stage": "act",
+      "pattern": "isolated-mutation",
+      "intent": "Test a mutation without touching the live repo.",
+      "how_it_shapes_the_loop": "ast_tools::create_shadow_worktree makes a detached worktree where daemon::apply_edits applies the patch and evaluates it, so the act stage mutates a disposable copy; cleanup_worktree removes it afterward.",
+      "loop_objects_touched": ["AstMutationResult", "WorktreeError", "Hypothesis"],
+      "wiring": {"inputs_from": ["Hypothesis patch", "repo HEAD"], "outputs_to": ["compile gate", "AstMutationResult"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing a hypothesis spawns a ghost worktree beside the repo node where its patch lands.", "visual": "A translucent repo clone forks off; the patch applies with a diff shimmer, and the ghost dissolves when cleanup_worktree runs."},
+      "mini_scenario": "hyp-2's patch applies cleanly in a shadow worktree, producing an AstMutationResult ready for the compile gate.",
+      "pitfall": "Worktrees must be cleaned up even on failure; a leaked worktree under the worktree dir clutters every future generation."
+    },
+    {
+      "id": "evolution-07",
       "title": "Reject a mutation at the compile gate",
       "loop_stage": "verify",
       "pattern": "compiler-as-physics",
       "intent": "Prune mutations that do not compile before spending any benchmark budget.",
-      "how_it_shapes_the_loop": "cargo check runs in the worktree; a mutation with compiler_errors is rejected as Frost, so the verify stage lets the compiler act as the immutable law that filters invalid code first.",
+      "how_it_shapes_the_loop": "ast_tools::compile_failed flags a mutation whose build breaks, and the daemon rates it Frost via GenerationRating, so the verify stage lets the compiler act as the immutable first law.",
       "loop_objects_touched": ["AstMutationResult", "GenerationRating"],
-      "wiring": {
-        "inputs_from": ["applied mutation"],
-        "outputs_to": ["Frost rating or test gate"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the compile gate runs cargo check; a failing mutation ices over with a frost badge.",
-        "visual": "The gate icon spins, then the card either passes green or freezes with a blue Frost crystal and the compiler error listed."
-      },
-      "mini_scenario": "A hypothesis introduces a type error; cargo check fails, it is rated Frost, and the daemon moves to the next candidate.",
+      "wiring": {"inputs_from": ["applied mutation in worktree"], "outputs_to": ["Frost rating or test gate"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the compile gate runs the check; a failing mutation ices over with a frost badge.", "visual": "The gate icon spins, then the card either passes green or freezes with a blue Frost crystal and the compiler error listed."},
+      "mini_scenario": "A hypothesis introduces a type error; compile_failed returns true, the daemon marks it Frost, and it never reaches the tournament's expensive lanes.",
       "pitfall": "Run the compile gate before tests and SAB; skipping it wastes expensive benchmark runs on code that never built."
     },
     {
-      "id": "evolution-06",
-      "title": "Enforce the hard test-count gate on a winner",
-      "loop_stage": "verify",
-      "pattern": "anti-gaming-gate",
-      "intent": "Stop a mutation from improving its score by deleting tests.",
-      "how_it_shapes_the_loop": "winner_test_count_gate rejects any candidate whose tests_total regressed below baseline, so the verify stage prevents a mutation from gaming fitness by weakening the very tests that measure it.",
-      "loop_objects_touched": ["FitnessMetrics", "GenerationRating"],
-      "wiring": {
-        "inputs_from": ["candidate FitnessMetrics", "baseline test count"],
-        "outputs_to": ["rejected or commit"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a winner compares its test count to baseline; a regression trips a red tripwire.",
-        "visual": "A test-count meter shows candidate vs baseline; if candidate dips below, a red tripwire snaps across and rejects it."
-      },
-      "mini_scenario": "A candidate scores higher but dropped 40 tests; the count gate catches the regression and refuses to crown it.",
-      "pitfall": "The gate compares against baseline, not the previous candidate; anchoring to the wrong baseline lets test erosion drift generation by generation."
-    },
-    {
-      "id": "evolution-07",
-      "title": "Score a winner with the immutable FitnessWeights composite",
-      "loop_stage": "reason",
-      "pattern": "composite-objective",
-      "intent": "Reduce many metrics to one comparable scalar the loop can maximize.",
-      "how_it_shapes_the_loop": "FitnessWeights.composite blends sab_score (0.50), token_efficiency (0.25), latency (0.15), test_coverage (0.05), and binary_size (0.05) from FitnessMetrics, so the reason stage compares candidates on a single fixed objective.",
-      "loop_objects_touched": ["FitnessWeights", "FitnessMetrics"],
-      "wiring": {
-        "inputs_from": ["FitnessMetrics"],
-        "outputs_to": ["winner selection", "GenerationRating"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "Pinching the five metric gauges together fuses them into one composite score dial.",
-        "visual": "Five weighted arcs collapse into a single dial; the SAB arc dominates at half the ring, the score reading centered."
-      },
-      "mini_scenario": "A candidate trades a little latency for a big SAB gain; the 0.50-weighted composite rewards it as a net improvement.",
-      "pitfall": "The weights are the objective and must stay immutable; letting a mutation alter FitnessWeights lets the daemon redefine winning itself."
-    },
-    {
       "id": "evolution-08",
-      "title": "Run the SAB benchmark to measure real capability",
-      "loop_stage": "verify",
-      "pattern": "benchmark-oracle",
-      "intent": "Measure a winner's actual agentic performance, not a proxy.",
-      "how_it_shapes_the_loop": "fitness::run_sab spawns the SAB runner over its scenarios and returns a SabResult (aggregate_score, ScenarioScores, tokens), so the verify stage grounds fitness in an external oracle the daemon cannot fake.",
-      "loop_objects_touched": ["SabConfig", "SabResult", "ScenarioScore"],
-      "wiring": {
-        "inputs_from": ["release binary", "SabConfig"],
-        "outputs_to": ["FitnessMetrics", "GenerationRating"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the SAB node lays out its scenario tiles, each scoring live as the benchmark runs.",
-        "visual": "Scenario tiles by difficulty (Easy..Expert) fill their score bars; the aggregate score assembles at the center as they complete."
-      },
-      "mini_scenario": "A winner runs the 12 SAB scenarios; expert_refactor jumps 8 points and lifts the aggregate the composite rewards.",
-      "pitfall": "SAB is expensive; running it on every hypothesis instead of only compile-passing winners burns the budget the daemon needs to iterate."
+      "title": "Screen the population in a parallel tournament",
+      "loop_stage": "control",
+      "pattern": "budget-scoped-fanout",
+      "intent": "Evaluate many candidates concurrently to find a passing one faster.",
+      "how_it_shapes_the_loop": "tournament::run_tournament evaluates hypotheses as HypothesisResults under a Semaphore sized by TournamentConfig (acquire/release bound concurrency), so the control layer fans out the population without oversubscribing the machine.",
+      "loop_objects_touched": ["TournamentConfig", "Hypothesis", "HypothesisResult"],
+      "wiring": {"inputs_from": ["safety-filtered Hypotheses"], "outputs_to": ["ranked HypothesisResults", "winner selection"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the tournament node forks parallel evaluation lanes up to the semaphore cap.", "visual": "Candidate lanes run side by side, one slot lighting per acquire; each posts a provisional score and the lanes re-sort when done."},
+      "mini_scenario": "Five candidates evaluate across three semaphore lanes; results sort so the daemon picks the first passing winner quickly.",
+      "pitfall": "The semaphore is the budget guard; bypassing acquire/release oversubscribes CPU and makes every candidate's timing signal noisy."
     },
     {
       "id": "evolution-09",
+      "title": "Evaluate untrusted code in a Docker Sandbox",
+      "loop_stage": "act",
+      "pattern": "contained-evaluation",
+      "intent": "Run mutated code with bounded resources and no network access.",
+      "how_it_shapes_the_loop": "Sandbox::create builds a container from SandboxConfig; apply_patch lands the mutation, exec runs the build/test commands, and evaluate returns a SandboxResult, so the act stage measures a mutation without risking the host.",
+      "loop_objects_touched": ["Sandbox", "SandboxConfig", "SandboxResult", "ExecResult"],
+      "wiring": {"inputs_from": ["mutated source", "SandboxConfig limits"], "outputs_to": ["SandboxResult", "fitness::build_fitness_metrics"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing a candidate drops it into a sealed container node with visible CPU and memory ceilings.", "visual": "A sealed box encloses the candidate; CPU and memory dials cap at their SandboxConfig limits and the network icon shows crossed-out."},
+      "mini_scenario": "A candidate builds and tests inside a container; evaluate returns a SandboxResult with per-command ExecResults the fitness stage reads.",
+      "pitfall": "Call destroy when done and check is_expired for stale sandboxes; leaked containers accumulate across generations."
+    },
+    {
+      "id": "evolution-10",
+      "title": "Run the SAB oracle to measure real capability",
+      "loop_stage": "verify",
+      "pattern": "benchmark-oracle",
+      "intent": "Measure a winner's actual agentic performance, not a proxy.",
+      "how_it_shapes_the_loop": "fitness::run_sab spawns the SAB runner over SabConfig scenarios and returns a SabResult (aggregate score plus per-scenario ScenarioScores by Difficulty), so the verify stage grounds fitness in an external oracle the daemon cannot fake.",
+      "loop_objects_touched": ["SabConfig", "SabResult", "ScenarioScore", "Difficulty"],
+      "wiring": {"inputs_from": ["candidate binary", "SabConfig"], "outputs_to": ["FitnessMetrics", "fitness_delta"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the SAB node lays out its scenario tiles, each filling its score bar live as the benchmark runs.", "visual": "Scenario tiles grouped by Difficulty (Easy..Expert) fill their bars; the aggregate score assembles at the center as tiles complete."},
+      "mini_scenario": "A winner runs the SAB scenarios; the expert-refactor ScenarioScore jumps and lifts the aggregate the composite rewards.",
+      "pitfall": "SAB is expensive; running it on every hypothesis instead of only compile-passing winners burns the budget the daemon needs to iterate."
+    },
+    {
+      "id": "evolution-11",
+      "title": "Score candidates with the FitnessWeights composite",
+      "loop_stage": "reason",
+      "pattern": "composite-objective",
+      "intent": "Reduce many metrics to one comparable scalar the loop can maximize.",
+      "how_it_shapes_the_loop": "fitness::build_fitness_metrics derives FitnessMetrics from the SabResult, and FitnessWeights::composite blends them into a single score, so the reason stage compares candidates on a fixed objective.",
+      "loop_objects_touched": ["FitnessWeights", "FitnessMetrics", "SabResult"],
+      "wiring": {"inputs_from": ["SabResult", "build_fitness_metrics"], "outputs_to": ["winner selection", "GenerationRating"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the metric gauges together fuses them into one composite score dial.", "visual": "Weighted arcs collapse into a single dial; the dominant SAB arc takes the largest sector with the score reading centered."},
+      "mini_scenario": "A candidate trades a little latency for a big SAB gain; the composite weights reward it as a net improvement over baseline.",
+      "pitfall": "The weights are the objective and must stay immutable; letting a mutation alter FitnessWeights lets the daemon redefine winning itself."
+    },
+    {
+      "id": "evolution-12",
+      "title": "Compute fitness_delta against the baseline",
+      "loop_stage": "verify",
+      "pattern": "delta-against-anchor",
+      "intent": "Judge a candidate by improvement over the anchored baseline, not absolute score.",
+      "how_it_shapes_the_loop": "fitness::fitness_delta compares a candidate's FitnessMetrics to the stored baseline, so the verify stage only crowns genuine improvements and can anchor anti-gaming checks like test-count regression to the same baseline.",
+      "loop_objects_touched": ["FitnessMetrics", "SabResult", "GenerationRating"],
+      "wiring": {"inputs_from": ["candidate FitnessMetrics", "baseline FitnessMetrics"], "outputs_to": ["winner decision", "GenerationRating"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating the score dial sweeps the candidate arc against the fixed baseline needle to reveal the signed delta.", "visual": "A dashed baseline needle stays fixed; the candidate arc sweeps past it green when positive, snaps red when negative."},
+      "mini_scenario": "A candidate scores higher on SAB but its parse_test_summary shows fewer tests passing than baseline; the delta check flags the regression and refuses to crown it.",
+      "pitfall": "Compare against the re-measured baseline, not the previous candidate; anchoring wrong lets silent erosion drift generation by generation."
+    },
+    {
+      "id": "evolution-13",
       "title": "Rate the generation Bloom, Grow, Wilt, or Frost",
       "loop_stage": "learn",
       "pattern": "generation-rating",
       "intent": "Summarize each generation's outcome in one legible signal.",
-      "how_it_shapes_the_loop": "The daemon assigns a GenerationRating (Bloom above threshold, Grow marginal, Wilt no-regression, Frost failure), so the learn stage records progress and history the next generation reads.",
-      "loop_objects_touched": ["GenerationRating", "GenerationWinner"],
-      "wiring": {
-        "inputs_from": ["composite score vs baseline"],
-        "outputs_to": ["evolution log", "history prompt"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping the generation node stamps its garden rating with a seasonal icon.",
-        "visual": "The node blooms a flower for Bloom, a leaf for Grow, a wilted stem for Wilt, or ices over for Frost."
-      },
-      "mini_scenario": "A generation clears baseline plus threshold and earns Bloom, its winner logged as a milestone in the hall of fame.",
+      "how_it_shapes_the_loop": "The daemon assigns a GenerationRating from the composite delta (Bloom above threshold, Grow marginal, Wilt no-regression, Frost failure), so the learn stage records a progress signal the next generation's history prompt reads.",
+      "loop_objects_touched": ["GenerationRating", "GenerationWinner", "EvolutionResult"],
+      "wiring": {"inputs_from": ["fitness_delta result"], "outputs_to": ["evolution log", "format_evolution_history"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the generation node stamps its garden rating with a seasonal icon.", "visual": "The node blooms a flower for Bloom, a leaf for Grow, a wilted stem for Wilt, or ices over for Frost."},
+      "mini_scenario": "A generation clears the baseline plus threshold and earns Bloom; its winner is logged and later fed back by format_evolution_history.",
       "pitfall": "Wilt is not a win; treating a no-regression generation as progress lets the baseline stagnate while the log looks busy."
     },
     {
-      "id": "evolution-10",
-      "title": "Commit the exact tested diff, not the raw patch",
+      "id": "evolution-14",
+      "title": "Commit the winner as a GenerationWinner record",
       "loop_stage": "act",
       "pattern": "commit-tested-bytes",
-      "intent": "Ensure the committed code is byte-identical to what passed the gates.",
-      "how_it_shapes_the_loop": "capture_tested_diff records the worktree state after fmt auto-fixes, and commit_winner_to_repo commits that diff (not the LLM's raw patch), so the act stage guarantees the merged bytes equal the tested bytes.",
-      "loop_objects_touched": ["GenerationWinner", "AstMutationResult"],
-      "wiring": {
-        "inputs_from": ["tested worktree diff"],
-        "outputs_to": ["repo commit", "GenerationWinner record"]
-      },
-      "touch_interaction": {
-        "gesture": "draw-connection",
-        "canvas_action": "Drawing from the tested worktree to the repo commits the captured diff; the raw patch card is discarded.",
-        "visual": "A solid diff bundle flows into the repo node and seals as a commit; the original raw-patch card fades away unused."
-      },
-      "mini_scenario": "The winner's diff includes a cargo fmt fixup; the daemon commits the fmt-corrected diff so the repo matches exactly what was tested.",
-      "pitfall": "Committing the raw LLM patch instead of the tested diff can ship unformatted or subtly different bytes than the gates approved."
-    },
-    {
-      "id": "evolution-11",
-      "title": "Checkpoint-tag the repo every N generations",
-      "loop_stage": "control",
-      "pattern": "checkpoint-tagging",
-      "intent": "Create bisectable milestones across a long evolution run.",
-      "how_it_shapes_the_loop": "At each checkpoint_interval the daemon tags the commit evolve-gen-{n}, so the control layer leaves recoverable anchors the run can be bisected or rolled back to.",
-      "loop_objects_touched": ["GenerationWinner", "EvolutionConfig"],
-      "wiring": {
-        "inputs_from": ["generation number", "checkpoint_interval"],
-        "outputs_to": ["git tag"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the timeline at a checkpoint interval pins a tag flag onto that generation's commit.",
-        "visual": "A tag flag plants on the generation node reading evolve-gen-1000; the timeline shows tagged anchors as bright pins."
-      },
-      "mini_scenario": "At generation 1000 the daemon tags evolve-gen-1000 so a later regression can be bisected back to a known-good anchor.",
-      "pitfall": "Tag winners actually committed; tagging a rejected or Frost generation plants an anchor at a state the run never adopted."
-    },
-    {
-      "id": "evolution-12",
-      "title": "Evaluate hypotheses in a resource-limited Sandbox",
-      "loop_stage": "act",
-      "pattern": "contained-evaluation",
-      "intent": "Run untrusted mutated code with bounded CPU, memory, and no network.",
-      "how_it_shapes_the_loop": "Sandbox::create runs the candidate in a Docker container (--cpus, --memory, --network=none) and evaluate() reports a SandboxResult, so the act stage measures a mutation without risking the host.",
-      "loop_objects_touched": ["Sandbox", "SandboxResult"],
-      "wiring": {
-        "inputs_from": ["mutated worktree", "SandboxConfig"],
-        "outputs_to": ["SandboxResult", "provisional fitness"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a candidate drops it into a sealed container node with visible CPU and memory ceilings.",
-        "visual": "A sealed box node encloses the candidate; CPU and memory dials cap out at their limits, a network-off icon crossed out."
-      },
-      "mini_scenario": "A candidate builds and tests inside a 2-CPU 4GB no-network container, returning a SandboxResult with peak memory measured.",
-      "pitfall": "Network must stay disabled; a sandbox with outbound access lets a mutated build exfiltrate or fetch code outside the daemon's control."
-    },
-    {
-      "id": "evolution-13",
-      "title": "Screen the population in a parallel Tournament",
-      "loop_stage": "control",
-      "pattern": "parallel-screening",
-      "intent": "Evaluate many candidates concurrently to find the passing one faster.",
-      "how_it_shapes_the_loop": "run_tournament evaluates HypothesisResults under a semaphore (TournamentConfig.max_parallel) and sorts by composite_score, so the control layer screens the population without serial waiting.",
-      "loop_objects_touched": ["TournamentConfig", "HypothesisResult"],
-      "wiring": {
-        "inputs_from": ["filtered Hypotheses"],
-        "outputs_to": ["ranked HypothesisResults", "winner selection"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the tournament node forks parallel evaluation lanes up to the concurrency cap.",
-        "visual": "Candidate lanes run side by side; each posts a provisional score, then the lanes re-sort by composite when done."
-      },
-      "mini_scenario": "Five candidates evaluate across three lanes; results sort by composite so the daemon picks the first passing winner quickly.",
-      "pitfall": "Provisional tournament fitness comes from test ratios, not full SAB; treating that screening score as final skips the real oracle."
-    },
-    {
-      "id": "evolution-14",
-      "title": "Fall back to synthetic metrics when SAB is unavailable",
-      "loop_stage": "foundation",
-      "pattern": "graceful-degradation",
-      "intent": "Keep evolving even without the full benchmark harness available.",
-      "how_it_shapes_the_loop": "When SAB is off, build_candidate_metrics derives FitnessMetrics from compile and test results against a synthetic baseline, so the foundation layer lets the loop run in a lighter mode.",
-      "loop_objects_touched": ["FitnessMetrics", "SandboxResult"],
-      "wiring": {
-        "inputs_from": ["test results", "synthetic baseline"],
-        "outputs_to": ["composite scoring"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping the fitness node toggles between SAB mode and synthetic mode; the source of the score swaps.",
-        "visual": "A mode switch flips from a benchmark icon to a proxy icon; the score panel notes 'synthetic baseline' in muted text."
-      },
-      "mini_scenario": "On a machine without the SAB runner, the daemon scores candidates from test pass ratios against a 50-point synthetic baseline.",
-      "pitfall": "Synthetic metrics are weaker signal; a winner crowned in synthetic mode should be re-validated under real SAB before trusting the gain."
+      "intent": "Ensure the repo gets exactly the mutation that passed the gates, recorded for history.",
+      "how_it_shapes_the_loop": "After apply_edits lands the winning patch and all gates pass, the daemon records a GenerationWinner (hypothesis, rating, metrics) inside the EvolutionResult, so the act stage's outcome is auditable and replayable.",
+      "loop_objects_touched": ["GenerationWinner", "EvolutionResult", "Hypothesis"],
+      "wiring": {"inputs_from": ["winning HypothesisResult", "tested worktree"], "outputs_to": ["repo state", "hall of fame"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Drawing from the tested worktree node to the repo node commits the winner and drops a record card onto the hall-of-fame shelf.", "visual": "A solid diff bundle flows into the repo node and seals; a trophy card slides onto the shelf carrying the rating icon."},
+      "mini_scenario": "hyp-2 passes compile, tests, clippy, and SAB; the daemon commits it and the GenerationWinner joins the shelf the next prompt will read.",
+      "pitfall": "Commit the tested worktree state, not the raw LLM patch; any auto-fix applied in the worktree must be part of what lands."
     },
     {
       "id": "evolution-15",
-      "title": "Adapt to a micro model with reduced context and edits",
-      "loop_stage": "foundation",
-      "pattern": "small-model-mode",
-      "intent": "Let a 0.8B-3B model participate by shrinking the task to its capacity.",
-      "how_it_shapes_the_loop": "is_micro_model triggers micro mode: MICRO_MAX_CONTEXT_CHARS, MICRO_MAX_FILES, and MICRO_MAX_EDITS cap the prompt and hypothesis size, so the foundation layer keeps small models producing valid focused mutations.",
-      "loop_objects_touched": ["Hypothesis", "EvolutionConfig"],
-      "wiring": {
-        "inputs_from": ["model name", "smallest source files"],
-        "outputs_to": ["truncated hypothesis prompt"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "Pinching the generator into micro mode shrinks its context window and clamps the edit count.",
-        "visual": "The prompt panel contracts to a compact 12k window; file and edit counters clamp to 3 and 2 with a 'micro' tag."
-      },
-      "mini_scenario": "A 1.5B model is detected, so the daemon feeds it the three smallest files under 12k chars and caps it to two edits.",
-      "pitfall": "Word-boundary detection matters; a naive substring match flags '32b' as micro '2b' and needlessly starves a capable model."
-    },
-    {
-      "id": "evolution-16",
-      "title": "Feed the hall-of-fame history into the next prompt",
+      "title": "Feed hall-of-fame history into the next generation",
       "loop_stage": "learn",
       "pattern": "history-conditioning",
       "intent": "Bias the next generation toward mutation kinds that previously won.",
-      "how_it_shapes_the_loop": "format_evolution_history injects the most recent GenerationWinners into the next user prompt, so the learn stage conditions the LLM on what worked and steers it away from repeating dead ends.",
-      "loop_objects_touched": ["GenerationWinner", "TelemetrySnapshot"],
-      "wiring": {
-        "inputs_from": ["hall of fame"],
-        "outputs_to": ["next hypothesis prompt"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "Flicking the history shelf feeds the top recent winners into the generator's context tray.",
-        "visual": "Winner cards slide from a trophy shelf into the prompt tray; the generator glows as it absorbs the recent wins."
-      },
+      "how_it_shapes_the_loop": "daemon::format_evolution_history renders recent GenerationWinners into the next user prompt, so the learn stage conditions the model on what worked and steers it away from repeating dead ends.",
+      "loop_objects_touched": ["GenerationWinner", "EvolutionResult", "Hypothesis"],
+      "wiring": {"inputs_from": ["hall of fame"], "outputs_to": ["build_user_prompt", "next generation"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the trophy shelf feeds the top recent winners into the generator's context tray.", "visual": "Winner cards slide from the shelf into the prompt tray; the generator glows as it absorbs the recent wins."},
       "mini_scenario": "The last ten winners favored caching mutations, so the next prompt carries them and the LLM leans toward similar gains.",
       "pitfall": "Over-conditioning narrows exploration; injecting only winners can trap the daemon in a local optimum it never mutates out of."
     },
     {
+      "id": "evolution-16",
+      "title": "Drive the whole run through the daemon's evolve loop",
+      "loop_stage": "control",
+      "pattern": "outer-loop-driver",
+      "intent": "Orchestrate perceive→reason→act→verify→learn across many generations.",
+      "how_it_shapes_the_loop": "daemon::evolve iterates generations under EvolutionConfig: capture telemetry, prompt and parse hypotheses, filter, evaluate, score, rate, and commit — the control state machine of the outer loop, distinct from the inner agent loop it mutates.",
+      "loop_objects_touched": ["EvolutionConfig", "EvolutionResult", "GenerationRating", "GenerationWinner"],
+      "wiring": {"inputs_from": ["EvolutionConfig", "repo HEAD"], "outputs_to": ["evolved repo", "EvolutionResult"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating the daemon ring advances or rewinds the generation timeline, scrubbing through ratings per generation.", "visual": "A ring of generation nodes circles the daemon; rotating highlights each node with its seasonal rating icon and score chip."},
+      "mini_scenario": "evolve runs 50 generations; the ring shows mostly Frost early, then a run of Grow and two Bloom commits near the end.",
+      "pitfall": "The outer loop must never mutate its own control path while running; EvolutionConfig and the daemon source belong to the protected set."
+    },
+    {
       "id": "evolution-17",
-      "title": "Log every generation event to the JSONL stream",
+      "title": "Shrink the task for a micro model",
       "loop_stage": "foundation",
-      "pattern": "event-journaling",
-      "intent": "Keep an auditable record of what each generation did and decided.",
-      "how_it_shapes_the_loop": "log_event appends start, generation_start, hypotheses_generated, generation_end, and end records to .evolution-log.jsonl, so the foundation layer preserves a replayable trace of the outer loop.",
-      "loop_objects_touched": ["GenerationRating", "GenerationWinner"],
-      "wiring": {
-        "inputs_from": ["generation lifecycle events"],
-        "outputs_to": [".evolution-log.jsonl", "post-hoc analysis"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the log node opens the JSONL event stream scrolling the current run's records.",
-        "visual": "A ledger panel scrolls one JSON line per event; generation_end lines carry the rating icon and score inline."
-      },
-      "mini_scenario": "The user taps the log and reads the generation_end record showing hyp-2 won with a Bloom rating and its SAB delta.",
-      "pitfall": "The log is append-only truth; deriving progress from console output instead of the JSONL misses events the terminal scrolled past."
+      "pattern": "small-model-mode",
+      "intent": "Let a 0.8B-3B model participate by shrinking the task to its capacity.",
+      "how_it_shapes_the_loop": "micro_mode::is_micro_model detects small models; build_micro_system_prompt, select_micro_targets, and build_micro_context shrink the prompt to the smallest files, and validate_micro_hypothesis clamps the result, so the foundation layer keeps small models producing valid focused mutations.",
+      "loop_objects_touched": ["Hypothesis", "MutationTargets", "LlmConfig", "EvolutionConfig"],
+      "wiring": {"inputs_from": ["model name", "smallest source files"], "outputs_to": ["truncated hypothesis prompt", "validated Hypothesis"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the generator into micro mode shrinks its context window and clamps the edit count.", "visual": "The prompt panel contracts to a compact window; file and edit counters clamp low with a 'micro' tag on the generator node."},
+      "mini_scenario": "A 1.5B model is detected by is_micro_model; select_micro_targets picks the three smallest files and validate_micro_hypothesis rejects an oversized reply.",
+      "pitfall": "Model-size detection must be precise; a naive substring match flags '32b' as micro '2b' and needlessly starves a capable model."
     },
     {
       "id": "evolution-18",
-      "title": "Measure the compile/test baseline before the first generation",
+      "title": "Parse test output into a TestSummary signal",
       "loop_stage": "perceive",
-      "pattern": "baseline-anchoring",
-      "intent": "Establish the fitness bar every candidate must beat.",
-      "how_it_shapes_the_loop": "measure_compile_test_baseline runs real compile, test, fmt, clippy, and optionally full SAB to set current_baseline_metrics, so the perceive stage anchors the whole run to a real starting point.",
-      "loop_objects_touched": ["FitnessMetrics", "SabResult"],
-      "wiring": {
-        "inputs_from": ["current repo HEAD"],
-        "outputs_to": ["baseline for composite comparison"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the baseline node runs the full measurement suite and plants a reference line on the score axis.",
-        "visual": "A measurement sequence ticks through build/test/clippy/SAB; a dashed baseline line settles on the fitness chart."
-      },
-      "mini_scenario": "Before evolving, the daemon measures the HEAD baseline at composite 0.62, the line every generation must exceed.",
-      "pitfall": "Re-baseline after each committed winner; comparing new candidates to a stale baseline understates or overstates their true delta."
+      "pattern": "test-signal-extraction",
+      "intent": "Turn raw cargo test output into structured pass/fail counts the loop can compare.",
+      "how_it_shapes_the_loop": "daemon::parse_test_summary extracts totals and failures from test output into telemetry's TestSummary, so the perceive stage carries a machine-readable health signal into both the prompt and the baseline comparison.",
+      "loop_objects_touched": ["TestSummary", "TelemetrySnapshot", "FitnessMetrics"],
+      "wiring": {"inputs_from": ["cargo test output"], "outputs_to": ["TelemetrySnapshot", "fitness baseline"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the test node flips raw scrollback into a parsed chip showing passed/failed counts.", "visual": "Log lines fold into a chip: green passed count, red failed count; failing test names list beneath on expand."},
+      "mini_scenario": "After a candidate runs tests, parse_test_summary reads 'test result: ok. 512 passed' into a TestSummary the fitness stage diffs against baseline.",
+      "pitfall": "Parsing must handle the failing-tests section, not just the summary line; missing names weaken the failure signal handed to the prompt."
     },
     {
       "id": "evolution-19",
-      "title": "Gate a mutation through clippy with denied warnings",
-      "loop_stage": "verify",
-      "pattern": "lint-gate",
-      "intent": "Keep evolved code idiomatic and warning-free.",
-      "how_it_shapes_the_loop": "cargo clippy -- -D warnings runs after tests pass; any lint rejects the candidate, so the verify stage prevents the daemon from accreting warnings as it self-modifies.",
-      "loop_objects_touched": ["AstMutationResult", "GenerationRating"],
-      "wiring": {
-        "inputs_from": ["test-passing candidate"],
-        "outputs_to": ["Frost rating or SAB scoring"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping the lint gate runs clippy; a warning ices the candidate as Frost before it can reach SAB.",
-        "visual": "The lint gate pulses, then either passes green or freezes the card with the clippy warning quoted on a frost badge."
-      },
-      "mini_scenario": "A candidate compiles and tests clean but trips a needless-clone lint; the clippy gate rejects it as Frost.",
-      "pitfall": "Order clippy after tests but before SAB; running the expensive benchmark on a candidate a lint would reject wastes the budget."
-    },
-    {
-      "id": "evolution-20",
-      "title": "Format the TelemetrySnapshot into an agent-readable prompt",
+      "title": "Render the snapshot as an agent-readable prompt",
       "loop_stage": "reason",
       "pattern": "telemetry-to-prompt",
       "intent": "Turn raw profiling data into prose the mutating model can act on.",
-      "how_it_shapes_the_loop": "to_agent_prompt renders the TelemetrySnapshot as markdown (top CPU hotspots, allocation sinks, benchmark deltas with slower/faster icons), so the reason stage hands the LLM legible gradients to follow.",
-      "loop_objects_touched": ["TelemetrySnapshot", "CpuHotspot", "BenchmarkDelta"],
-      "wiring": {
-        "inputs_from": ["TelemetrySnapshot"],
-        "outputs_to": ["hypothesis generation prompt"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping the telemetry node renders it into a formatted prompt card the generator will read.",
-        "visual": "Numeric panels transcribe into a markdown card: ranked hotspots, byte sinks, and delta lines with red/green/stable icons."
-      },
+      "how_it_shapes_the_loop": "telemetry::to_agent_prompt renders the TelemetrySnapshot as markdown (top CPU hotspots, allocation sinks, benchmark deltas, test summary), so the reason stage hands the LLM legible gradients to follow.",
+      "loop_objects_touched": ["TelemetrySnapshot", "CpuHotspot", "BenchmarkDelta", "TestSummary"],
+      "wiring": {"inputs_from": ["TelemetrySnapshot"], "outputs_to": ["build_user_prompt"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the telemetry node transcribes its panels into a formatted markdown prompt card.", "visual": "Numeric panels rewrite into a markdown card: ranked hotspots, byte sinks, and delta lines with red/green/stable icons."},
       "mini_scenario": "The snapshot renders a prompt listing the top ten hotspots and a benchmark that got 12% slower, guiding the mutation toward it.",
-      "pitfall": "The prompt must faithfully reflect the numbers; rounding or truncating hotspots too aggressively hides the very signal the mutation should chase."
+      "pitfall": "Keep the markdown faithful to the numbers; a pretty prompt that softens a regression teaches the model to ignore the real gradient."
+    },
+    {
+      "id": "evolution-20",
+      "title": "Anchor the run on a measured baseline",
+      "loop_stage": "perceive",
+      "pattern": "baseline-anchoring",
+      "intent": "Establish the fitness bar every candidate must beat before any mutation.",
+      "how_it_shapes_the_loop": "Before the first generation, the daemon runs fitness::run_sab and build_fitness_metrics on the unmodified repo and, after each committed winner, re-measures so fitness_delta always compares against the current HEAD.",
+      "loop_objects_touched": ["FitnessMetrics", "SabResult", "SabConfig", "EvolutionConfig"],
+      "wiring": {"inputs_from": ["repo HEAD", "SabConfig"], "outputs_to": ["baseline for fitness_delta"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the baseline node runs the full measurement suite and plants a reference line on the score axis.", "visual": "A measurement sequence ticks through build/test/SAB; a dashed baseline line settles on the fitness chart and re-plants after each winner."},
+      "mini_scenario": "Before evolving, the daemon measures HEAD at composite 0.62 — the line every generation's fitness_delta must exceed.",
+      "pitfall": "Re-baseline after each committed winner; comparing new candidates to a stale baseline understates or overstates their true delta."
     }
   ]
 }

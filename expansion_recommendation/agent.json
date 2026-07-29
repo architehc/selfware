@@ -2,9 +2,9 @@
   "component": "agent",
   "tier": "full",
   "loop_stage": "control",
-  "summary": "The agent component is the loop driver: a budget-guarded state machine (Planning -> Executing -> ErrorRecovery -> Completed/Failed) implemented by AgentLoop over AgentState. run_task resets loop state, seeds a TaskCheckpoint and Plan, then iterates turns that call the LLM, collect ToolCalls, execute them, and advance state until the task completes or the iteration/token/wall budget is exhausted. It owns iteration counting, valid state transitions, recovery hints, plan-mode gating, and cumulative budget accounting.",
-  "loop_objects": ["AgentState", "AgentLoop", "Plan", "PlanStep", "TaskCheckpoint", "Budget", "Message", "FailureMode", "RecoveryStrategy", "GuardCounters"],
-  "context_basis": "recommendations were formed with src/agent/ read in the context of the full engine (~600k budget framing), grounded in loop_control.rs AgentState/AgentLoop, task_runner.rs run_task, plan_mode.rs Plan/PlanStep, recovery.rs, and mod.rs budget derivation.",
+  "summary": "The agent component is the loop driver and everything the driver needs to stay honest: loop_control.rs holds the AgentLoop state machine over AgentState (Planning -> Executing -> ErrorRecovery -> Completed/Failed) with guarded transitions and budget-scoped iteration; task_runner.rs run_task seeds the checkpoint and plan and iterates LLM turns that collect and dispatch ToolCalls; plan_mode.rs owns Plan/PlanStep and the read-only approval gate; context_map.rs and compression.rs perceive and shrink context against a measured Budget; failure_mode.rs, recovery via tool_dispatch::helpers, checkpointing.rs, session_log.rs and last_tool.rs give the loop labeled endings, hints, and durable resume. On the loop it is the 'control' hub that every other stage hangs off.",
+  "loop_objects": ["AgentState", "AgentLoop", "InvalidStateTransition", "Plan", "PlanStep", "StepStatus", "PlanModeState", "PlanModeManager", "TaskCheckpoint", "Budget", "Message", "ToolCall", "ToolErrorKind", "FailureMode", "FailureKind", "RunOutcome", "ContextMap", "ContextModality", "ContextCompressor", "CompressionOrchestrator", "AutoCompactManager", "SystemPromptBuilder", "ProgressEvent", "EvolutionEvent", "ThroughputSnapshot", "SessionLogEvent", "LastToolOutput", "TurnArtifact", "GuardCounters"],
+  "context_basis": "Recommendations formed with agent read in the context of the full engine (~600k budget framing), grounded in the crate::agent cards: loop_control (AgentState/AgentLoop), task_runner (run_task), plan_mode (Plan/PlanModeManager), context_map, compression, context (ContextCompressor), prompt_builder, failure_mode, tool_dispatch::helpers (ToolErrorKind), checkpointing, progress, evolution_events, session_log, last_tool, tool_validator, and turn_artifacts.",
   "examples": [
     {
       "id": "agent-01",
@@ -12,39 +12,25 @@
       "loop_stage": "control",
       "pattern": "single-entry-state-init",
       "intent": "Guarantee every task starts in a known Planning state with a zeroed iteration counter.",
-      "how_it_shapes_the_loop": "AgentLoop::new sets state=Planning and iteration=0; run_task calls reset_for_task so a queued follow-up cannot inherit the previous task's counter and trip max-iterations immediately.",
+      "how_it_shapes_the_loop": "AgentLoop::new sets state=Planning and iteration=0; task_runner::run_task calls reset_for_task so a queued follow-up cannot inherit the previous task's counter and trip max-iterations on turn one.",
       "loop_objects_touched": ["AgentState", "AgentLoop"],
-      "wiring": {
-        "inputs_from": ["task string", "config.agent.max_iterations"],
-        "outputs_to": ["AgentState::Planning", "first reason turn"]
-      },
-      "touch_interaction": {
-        "gesture": "drag",
-        "canvas_action": "User drags the Planning node from the palette onto the canvas as the loop's single entry point; it snaps to the start anchor.",
-        "visual": "Planning node renders cyan with a slow breathing pulse to signal it is armed but not yet consuming budget."
-      },
-      "mini_scenario": "A new task arrives; run_task calls reset_for_task, the loop lands in Planning, and the counter reads 0 before the first LLM turn.",
-      "pitfall": "Reusing an Agent for a follow-up without reset_for_task carries stale iteration counts and can fail the new task on turn one."
+      "wiring": {"inputs_from": ["task string", "config.agent.max_iterations"], "outputs_to": ["AgentState::Planning", "first reason turn"]},
+      "touch_interaction": {"gesture": "drag", "canvas_action": "User drags the Planning node from the palette onto the canvas as the loop's single entry point; it snaps to the start anchor.", "visual": "Planning node renders cyan with a slow breathing pulse to signal it is armed but not yet consuming budget."},
+      "mini_scenario": "A new task arrives; run_task calls reset_for_task, the AgentLoop lands in Planning, and current_iteration reads 0 before the first LLM turn.",
+      "pitfall": "Reusing an Agent for a follow-up without reset_for_task carries stale iteration counts and can fail the new task immediately."
     },
     {
       "id": "agent-02",
       "title": "Advance only through valid transitions",
       "loop_stage": "control",
       "pattern": "guarded-transition",
-      "intent": "Prevent illegal jumps between loop states (e.g. Completed back to Executing).",
-      "how_it_shapes_the_loop": "transition_to consults is_valid_transition; an InvalidStateTransition error is returned rather than corrupting the state, so the state graph stays a legal DAG of Planning->Executing->(ErrorRecovery)->Completed/Failed.",
-      "loop_objects_touched": ["AgentState", "AgentLoop"],
-      "wiring": {
-        "inputs_from": ["current AgentState"],
-        "outputs_to": ["next AgentState", "InvalidStateTransition on violation"]
-      },
-      "touch_interaction": {
-        "gesture": "draw-connection",
-        "canvas_action": "User draws a finger edge from one state node to another; the canvas rejects and snaps back any edge that is not in the allowed transition set.",
-        "visual": "A legal edge draws solid green; an illegal edge flashes red and dissolves with a shake."
-      },
-      "mini_scenario": "After Completed, a stray attempt to re-enter Executing is refused by is_valid_transition and the loop stays terminal.",
-      "pitfall": "Bypassing transition_to via set_state's expect() will panic on an invalid edge instead of surfacing a recoverable error."
+      "intent": "Prevent illegal jumps between loop states, such as Completed back to Executing.",
+      "how_it_shapes_the_loop": "AgentLoop::transition_to consults the valid-transition table and returns an InvalidStateTransition error instead of corrupting state, keeping the graph a legal DAG of Planning->Executing->(ErrorRecovery)->Completed/Failed.",
+      "loop_objects_touched": ["AgentState", "AgentLoop", "InvalidStateTransition"],
+      "wiring": {"inputs_from": ["current AgentState"], "outputs_to": ["next AgentState", "InvalidStateTransition error"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "User draws a finger edge from one state node to another; the canvas rejects and snaps back any edge not in the allowed transition set.", "visual": "A legal edge draws solid green; an illegal edge flashes red and dissolves with a shake."},
+      "mini_scenario": "After Completed, a stray attempt to re-enter Executing is refused by transition_to and the loop stays terminal.",
+      "pitfall": "Bypassing transition_to via set_state panics on an invalid edge instead of surfacing a recoverable InvalidStateTransition."
     },
     {
       "id": "agent-03",
@@ -52,18 +38,11 @@
       "loop_stage": "control",
       "pattern": "budget-scoped-iteration",
       "intent": "Give the model max_iterations execution turns plus one free Planning turn.",
-      "how_it_shapes_the_loop": "next_state increments iteration only when the state is not Planning; once iteration exceeds max_iterations it forces AgentState::Failed with 'Max iterations exceeded'.",
+      "how_it_shapes_the_loop": "AgentLoop::next_state increments iteration only when the state is not Planning; once iteration exceeds max_iterations it forces AgentState::Failed with 'Max iterations exceeded', bounding the loop.",
       "loop_objects_touched": ["AgentLoop", "AgentState", "Budget"],
-      "wiring": {
-        "inputs_from": ["AgentState", "max_iterations"],
-        "outputs_to": ["AgentState::Executing", "AgentState::Failed"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "User pinches the Executing node to reveal a ring gauge showing iterations consumed against the max_iterations budget.",
-        "visual": "The gauge fills amber as iterations climb and turns red on the turn that forces Failed."
-      },
-      "mini_scenario": "On the turn where iteration crosses max_iterations, next_state returns Failed and the loop halts cleanly instead of spinning forever.",
+      "wiring": {"inputs_from": ["AgentState", "max_iterations"], "outputs_to": ["AgentState::Executing", "AgentState::Failed"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "User pinches the Executing node to reveal a ring gauge showing current_iteration against the max_iterations budget.", "visual": "The gauge fills amber as iterations climb and turns red on the turn that forces Failed."},
+      "mini_scenario": "On the turn where current_iteration crosses max_iterations, next_state returns Failed and the loop halts cleanly instead of spinning forever.",
       "pitfall": "Incrementing the counter during Planning would silently rob the model of one execution turn."
     },
     {
@@ -74,37 +53,23 @@
       "intent": "Let the model wrap up before it is force-failed for running out of turns.",
       "how_it_shapes_the_loop": "approaching_limit_warning and approaching_limit_band inject a system Message when the loop nears max_iterations, nudging the model toward a final answer while it still has budget.",
       "loop_objects_touched": ["AgentLoop", "Message", "Budget"],
-      "wiring": {
-        "inputs_from": ["iteration count", "max_iterations"],
-        "outputs_to": ["injected system Message", "next reason turn"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the Executing node opens a threshold slider that sets when the wrap-up warning fires.",
-        "visual": "The node grows an amber warning badge that pulses faster as the loop approaches the band."
-      },
+      "wiring": {"inputs_from": ["iteration count", "max_iterations"], "outputs_to": ["injected system Message", "next reason turn"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the Executing node opens a threshold slider that sets the band where the wrap-up warning fires.", "visual": "The node grows an amber warning badge that pulses faster as the loop approaches the band."},
       "mini_scenario": "At band 2 the loop injects 'you are nearly out of turns; finalize now' and the model produces its answer on the next turn.",
-      "pitfall": "Warning too late (only at the last turn) leaves no room for the model to actually finish."
+      "pitfall": "Warning only on the last turn leaves the model no room to actually finish."
     },
     {
       "id": "agent-05",
-      "title": "Perceive the task and build the L1 tree",
+      "title": "Perceive the repo through the ContextMap",
       "loop_stage": "perceive",
       "pattern": "perceive-before-plan",
-      "intent": "Ground the loop in the repository before any planning happens.",
-      "how_it_shapes_the_loop": "run_task sets modality from the task, builds the L1 project tree, and for Review modality auto-loads L2 skeletons so the model perceives structure without reading 100+ files one by one.",
-      "loop_objects_touched": ["Plan", "Message", "TaskCheckpoint"],
-      "wiring": {
-        "inputs_from": ["task string", "context_map"],
-        "outputs_to": ["system Message preamble", "Planning turn"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "User spreads two fingers over the Perceive node to expand it into the layered L1/L2 context map view.",
-        "visual": "The node blooms into a nested tree; loaded skeletons glow, unloaded ones stay dim."
-      },
-      "mini_scenario": "A 'review the config module' task classifies as Review modality, auto-loads skeletons, and the model plans against real structure.",
-      "pitfall": "Skipping the L1 build makes the model blind-read files, burning budget on discovery it could have perceived up front."
+      "intent": "Ground the loop in real repository structure before any planning happens.",
+      "how_it_shapes_the_loop": "ContextMap::set_modality_from_task picks a ContextModality from the task text, loading_plan decides which files load as tree entries, skeletons, or full content, and render_tree/render_boundary feed the model a token-accounted map instead of blind file reads.",
+      "loop_objects_touched": ["ContextMap", "ContextModality", "Budget", "Message"],
+      "wiring": {"inputs_from": ["task string", "codebase tree"], "outputs_to": ["rendered context map", "Planning turn system Message"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "User spreads two fingers over the Perceive node to expand it into the layered tree/skeleton/full view of the ContextMap.", "visual": "The node blooms into a nested tree; loaded skeletons glow cyan, full-loaded files glow brighter, unloaded entries stay dim."},
+      "mini_scenario": "A 'review the config module' task sets Review modality, loading_plan marks skeletons loadable within budget, and the model plans against render_tree output.",
+      "pitfall": "Skipping the ContextMap makes the model blind-read files, burning Budget on discovery it could have perceived up front."
     },
     {
       "id": "agent-06",
@@ -112,19 +77,12 @@
       "loop_stage": "reason",
       "pattern": "explicit-plan-graph",
       "intent": "Turn the task into an ordered, trackable list of steps.",
-      "how_it_shapes_the_loop": "Plan::add_step appends PlanSteps; next_pending_step drives which step the loop tackles, and completed_count/is_complete tell the control layer when the plan is exhausted.",
-      "loop_objects_touched": ["Plan", "PlanStep"],
-      "wiring": {
-        "inputs_from": ["reasoned task decomposition"],
-        "outputs_to": ["Executing turns", "verification gate"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping the Reason node opens an editable step list the user can reorder by dragging rows.",
-        "visual": "Each PlanStep is a chip: grey pending, blue in-progress, green done, red failed."
-      },
-      "mini_scenario": "The planner emits steps 'find files', 'implement', 'cargo_check', 'cargo_test'; the loop pulls next_pending_step each turn.",
-      "pitfall": "A plan with no completion check lets the loop mark done before is_complete is actually true."
+      "how_it_shapes_the_loop": "Planner::create_plan with analyze_prompt/review_prompt produces the step list; Plan::add_step appends PlanSteps, next_pending_step drives which step the loop tackles, and completed_count/is_complete tell control when the plan is exhausted.",
+      "loop_objects_touched": ["Plan", "PlanStep", "StepStatus"],
+      "wiring": {"inputs_from": ["reasoned task decomposition"], "outputs_to": ["Executing turns", "completion gate"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the Reason node opens an editable step list the user can reorder by dragging rows.", "visual": "Each PlanStep is a chip: grey pending, blue in-progress, green done, red failed."},
+      "mini_scenario": "The planner emits 'find files', 'implement', 'cargo_check', 'cargo_test'; each turn pulls next_pending_step until is_complete is true.",
+      "pitfall": "A plan with no is_complete check lets the loop declare done before every PlanStep is actually finished."
     },
     {
       "id": "agent-07",
@@ -132,19 +90,12 @@
       "loop_stage": "control",
       "pattern": "gate-before-act",
       "intent": "Hold the loop in a read-only planning phase until the user approves.",
-      "how_it_shapes_the_loop": "toggle_plan_mode / is_in_plan_mode keep the loop from mutating; approve_plan flips is_plan_approved so Executing can begin, converting plan mode into an explicit control checkpoint.",
-      "loop_objects_touched": ["Plan", "AgentState", "PlanModeState"],
-      "wiring": {
-        "inputs_from": ["stored Plan", "user approval signal"],
-        "outputs_to": ["AgentState::Executing"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "A padlock badge sits on the edge into Executing; tapping it once toggles approval and unlocks the edge.",
-        "visual": "Locked edge is dashed grey; on approval it turns solid green and the padlock springs open."
-      },
-      "mini_scenario": "In plan mode the model drafts a Plan, the user taps approve, is_plan_approved becomes true, and only then does the loop start editing.",
-      "pitfall": "Letting mutating tools run while is_in_plan_mode is still true defeats the entire dry-run guarantee."
+      "how_it_shapes_the_loop": "PlanModeManager::enter_plan_mode keeps the loop non-mutating — is_tool_allowed only passes is_readonly_tool entries — and approve_plan flips is_approved so the transition into Executing becomes an explicit user checkpoint.",
+      "loop_objects_touched": ["Plan", "PlanModeState", "PlanModeManager", "AgentState"],
+      "wiring": {"inputs_from": ["stored Plan", "user approval signal"], "outputs_to": ["AgentState::Executing"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "A padlock badge sits on the edge into Executing; tapping it once calls approve_plan and unlocks the edge.", "visual": "Locked edge is dashed grey; on approval it turns solid green and the padlock springs open."},
+      "mini_scenario": "In plan mode the model drafts a Plan with read-only tools, the user taps approve, is_approved becomes true, and only then does the loop start editing.",
+      "pitfall": "Letting a mutating tool slip past is_tool_allowed while in plan mode defeats the entire dry-run guarantee."
     },
     {
       "id": "agent-08",
@@ -152,259 +103,168 @@
       "loop_stage": "control",
       "pattern": "state-annotated-progress",
       "intent": "Keep an honest record of which steps are in-flight, done, or failed.",
-      "how_it_shapes_the_loop": "PlanStep::mark_in_progress/mark_done/mark_failed update StepStatus so progress reporting and the completion gate reason over real per-step state rather than turn counts.",
-      "loop_objects_touched": ["PlanStep", "Plan"],
-      "wiring": {
-        "inputs_from": ["tool execution outcome"],
-        "outputs_to": ["progress display", "completion gate"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "User flicks a step chip right to mark done or left to mark failed, mirroring what the loop records automatically.",
-        "visual": "A right flick fills the chip green with a checkmark; a left flick fills red with a reason tooltip."
-      },
-      "mini_scenario": "After cargo_test passes, the loop calls mark_done on that PlanStep and completed_count ticks up.",
+      "how_it_shapes_the_loop": "PlanStep::mark_in_progress/mark_done/mark_failed update StepStatus so progress reporting and the completion gate reason over real per-step state rather than raw turn counts.",
+      "loop_objects_touched": ["PlanStep", "StepStatus", "Plan"],
+      "wiring": {"inputs_from": ["tool execution outcome"], "outputs_to": ["progress display", "completion gate"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "User flicks a step chip right to mark done or left to mark failed, mirroring what the loop records automatically.", "visual": "A right flick fills the chip green with a checkmark; a left flick fills red with a reason tooltip."},
+      "mini_scenario": "After cargo_test passes, the loop calls mark_done on that PlanStep and Plan::completed_count ticks up.",
       "pitfall": "Marking a step done before its verifying tool succeeds inflates completed_count and can trigger premature completion."
     },
     {
       "id": "agent-09",
-      "title": "Divert into ErrorRecovery on failure",
-      "loop_stage": "control",
-      "pattern": "error-diversion",
-      "intent": "Route recoverable failures through a dedicated recovery state instead of failing the whole task.",
-      "how_it_shapes_the_loop": "A failing tool transitions Executing -> ErrorRecovery { error }; is_valid_transition permits ErrorRecovery -> Executing so the loop can retry, or ErrorRecovery -> Failed if unrecoverable.",
-      "loop_objects_touched": ["AgentState", "RecoveryStrategy"],
-      "wiring": {
-        "inputs_from": ["failed ToolResult"],
-        "outputs_to": ["AgentState::Executing (retry)", "AgentState::Failed"]
-      },
-      "touch_interaction": {
-        "gesture": "draw-connection",
-        "canvas_action": "User draws a recovery loop edge from Executing to the ErrorRecovery node and back, forming a visible retry cycle.",
-        "visual": "The ErrorRecovery node glows orange and the retry edge animates a return arrow when a retry is chosen."
-      },
-      "mini_scenario": "A flaky network tool fails, the loop enters ErrorRecovery, emits a hint, then transitions back to Executing to retry.",
-      "pitfall": "Allowing unlimited ErrorRecovery->Executing cycles without a counter turns recovery into an infinite retry loop."
+      "title": "Classify the tool error and route recovery",
+      "loop_stage": "verify",
+      "pattern": "classify-then-recover",
+      "intent": "Turn a raw tool failure into a typed error with a concrete next move.",
+      "how_it_shapes_the_loop": "ToolErrorKind::classify buckets the error string, recovery_hint returns the matching guidance, and task_requires_mutation decides whether the loop may keep attempting edits — together they route Executing into ErrorRecovery with a plan instead of a bare failure.",
+      "loop_objects_touched": ["ToolErrorKind", "ToolCall", "AgentState", "Message"],
+      "wiring": {"inputs_from": ["failed ToolCall result"], "outputs_to": ["recovery hint Message", "ErrorRecovery or Failed"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "User draws a recovery edge from the failed tool node into the ErrorRecovery node; the edge labels itself with the classified ToolErrorKind.", "visual": "The edge color codes the class — amber for transient, red for deterministic — and the hint appears as a badge on the edge."},
+      "mini_scenario": "A shell_exec timeout classifies as transient; recovery_hint says retry once, and the loop re-enters Executing with that hint injected.",
+      "pitfall": "Retrying a deterministic ToolErrorKind (bad path, parse error) wastes a turn re-attempting the same doomed call."
     },
     {
       "id": "agent-10",
-      "title": "Build an error-recovery hint for the model",
-      "loop_stage": "learn",
-      "pattern": "hint-on-failure",
-      "intent": "Feed the model a concrete next-step suggestion instead of a bare error.",
-      "how_it_shapes_the_loop": "build_error_recovery_hint turns a tool name and error into guidance (e.g. connection may self-heal next attempt) injected as a Message so the next reason turn adapts rather than repeats.",
-      "loop_objects_touched": ["Message", "RecoveryStrategy", "FailureMode"],
-      "wiring": {
-        "inputs_from": ["tool name", "error string"],
-        "outputs_to": ["injected Message", "next reason turn"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the ErrorRecovery node reveals the generated hint text bubble that will be injected.",
-        "visual": "A speech-bubble badge fades in over the node carrying the hint preview."
-      },
-      "mini_scenario": "After a failed http_request the loop injects 'the connection may recover automatically; retry once' and the model retries deliberately.",
-      "pitfall": "Injecting a generic hint for a deterministic error (bad path) wastes a turn re-attempting the same doomed call."
-    },
-    {
-      "id": "agent-11",
-      "title": "Detect and break a stuck loop",
-      "loop_stage": "control",
-      "pattern": "thrash-guard",
-      "intent": "Stop the loop from repeating the same fruitless action forever.",
-      "how_it_shapes_the_loop": "consecutive_no_tool_call_turns and GuardCounters (no-action prompts, mutation-gate rejections, prefill 400 breaker) escalate pressure and can force Failed, converting silent spinning into a bounded, observable stop.",
-      "loop_objects_touched": ["GuardCounters", "AgentState", "FailureMode"],
-      "wiring": {
-        "inputs_from": ["turn outcomes", "tool-call counts"],
-        "outputs_to": ["escalating Message", "AgentState::Failed"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "Pinching the control hub surfaces the guard-counter dials for no-action, mutation-gate, and prefill breakers.",
-        "visual": "Each dial reddens as its counter climbs; crossing the threshold flashes a stop icon."
-      },
-      "mini_scenario": "Three consecutive no-tool-call turns raise the guard, inject a firmer directive, and if ignored transition the loop to Failed.",
-      "pitfall": "Setting the guard threshold too low kills legitimately slow reasoning turns that just happen not to call a tool."
-    },
-    {
-      "id": "agent-12",
-      "title": "Latch the wall-clock budget",
-      "loop_stage": "foundation",
-      "pattern": "absolute-deadline-latch",
-      "intent": "Give the whole loop a hard wall-clock ceiling that resume cannot reset.",
-      "how_it_shapes_the_loop": "budget_elapsed_secs sums prior_elapsed_secs with the current run, so max_wall_secs is measured against total lifetime; the loop stops when the deadline passes regardless of state.",
-      "loop_objects_touched": ["Budget", "TaskCheckpoint"],
-      "wiring": {
-        "inputs_from": ["task_start_time", "prior_elapsed_secs", "config.agent.max_wall_secs"],
-        "outputs_to": ["AgentState::Failed (budget stop)"]
-      },
-      "touch_interaction": {
-        "gesture": "two-finger-rotate",
-        "canvas_action": "User rotates a two-finger dial on the foundation node to set the wall-clock ceiling for the entire loop.",
-        "visual": "A clock ring drains as wall time is consumed and turns red when the deadline is latched shut."
-      },
-      "mini_scenario": "A task resumed from checkpoint keeps its original deadline because budget_elapsed_secs carries prior_elapsed_secs forward.",
-      "pitfall": "Resetting elapsed time on resume would hand the loop an unlimited effective budget and break the ceiling."
-    },
-    {
-      "id": "agent-13",
-      "title": "Derive the context/token budget at startup",
-      "loop_stage": "foundation",
-      "pattern": "budget-from-context",
-      "intent": "Fit the conversation inside the model's real context window before the first turn.",
-      "how_it_shapes_the_loop": "Agent::new calls config.derive_context_budget to compute max_context_tokens and reserved output, sizing the compressor to the usable conversation budget rather than the raw output cap.",
-      "loop_objects_touched": ["Budget", "Config", "Message"],
-      "wiring": {
-        "inputs_from": ["Config.context_length", "Config.max_tokens", "token_safety_margin"],
-        "outputs_to": ["compressor", "every reason turn"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading the foundation node fans out three bars: total context, safety margin, and usable conversation budget.",
-        "visual": "The usable-budget bar glows green; the safety margin is shown hatched and reserved."
-      },
-      "mini_scenario": "At startup the loop reserves 20% margin and derives max_context_tokens, so the compressor keeps turns inside the window.",
-      "pitfall": "Sizing the compressor to token_budget (the output cap) instead of max_context_tokens overflows the real window."
-    },
-    {
-      "id": "agent-14",
-      "title": "Compress history to reclaim budget",
-      "loop_stage": "control",
-      "pattern": "reclaim-by-compaction",
-      "intent": "Free conversation budget mid-loop without losing task continuity.",
-      "how_it_shapes_the_loop": "compact_micro/compact_auto/compact_full shrink the Message history via the CompressionOrchestrator, letting the loop keep iterating instead of dying on context overflow.",
-      "loop_objects_touched": ["Message", "Budget", "TaskCheckpoint"],
-      "wiring": {
-        "inputs_from": ["growing Message history", "budget pressure"],
-        "outputs_to": ["compacted Message history", "next reason turn"]
-      },
-      "touch_interaction": {
-        "gesture": "pinch",
-        "canvas_action": "Pinching the history strip collapses old turns into a single summary card while keeping recent turns expanded.",
-        "visual": "Collapsed turns fold into a stacked card with a token-saved badge; recent turns stay crisp."
-      },
-      "mini_scenario": "As budget nears the ceiling the loop runs compact_auto, folds early turns to a summary, and continues executing.",
-      "pitfall": "Compacting away the task statement or key evidence strands the model with no anchor for the remaining work."
-    },
-    {
-      "id": "agent-15",
-      "title": "Snapshot progress into a TaskCheckpoint",
+      "title": "Snapshot and resume through a TaskCheckpoint",
       "loop_stage": "learn",
       "pattern": "durable-progress-snapshot",
       "intent": "Persist enough loop state that the task can resume after interruption.",
-      "how_it_shapes_the_loop": "run_task creates a TaskCheckpoint holding current_step, current_iteration, messages, tool_calls, and cumulative budget; the loop updates it so continue_execution can pick up mid-flight.",
-      "loop_objects_touched": ["TaskCheckpoint", "Budget", "Message"],
-      "wiring": {
-        "inputs_from": ["AgentState", "Message history", "budget counters"],
-        "outputs_to": ["CheckpointManager", "continue_execution"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing the control hub drops a checkpoint pin onto the timeline capturing the current loop state.",
-        "visual": "A pin badge with the step/iteration numbers materializes and pulses once to confirm the save."
-      },
-      "mini_scenario": "Mid-task the loop writes a checkpoint; after a crash, continue_execution restores step and iteration and resumes.",
-      "pitfall": "Overwriting the checkpoint's task_description on a reused Agent points the completion gate at the wrong task."
+      "how_it_shapes_the_loop": "checkpointing::to_checkpoint captures the AgentState, current step and iteration, messages, tool calls, and GuardCounters into a TaskCheckpoint; checkpointing::resume restores it so task_runner::continue_execution picks up mid-flight instead of restarting.",
+      "loop_objects_touched": ["TaskCheckpoint", "AgentState", "GuardCounters", "Message"],
+      "wiring": {"inputs_from": ["AgentState", "Message history", "budget counters"], "outputs_to": ["persisted TaskCheckpoint", "continue_execution"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the control hub drops a checkpoint pin onto the timeline capturing the current loop state.", "visual": "A pin badge with the step/iteration numbers materializes and pulses once to confirm the save; resuming replays the pin."},
+      "mini_scenario": "Mid-task the loop writes a checkpoint via to_checkpoint; after a crash, resume restores step, iteration, and GuardCounters and the loop continues.",
+      "pitfall": "Overwriting the checkpoint's task description on a reused Agent points the completion gate at the wrong task."
+    },
+    {
+      "id": "agent-11",
+      "title": "Break thrash with guard counters",
+      "loop_stage": "control",
+      "pattern": "thrash-guard",
+      "intent": "Stop the loop from repeating the same fruitless action forever.",
+      "how_it_shapes_the_loop": "consecutive_no_tool_call_turns, progress_guard_fire_count, prefill_400_count and prefill_breaker_open track stall patterns on the Agent; when a counter crosses its threshold the loop escalates with a firmer Message or forces AgentState::Failed, converting silent spinning into a bounded stop.",
+      "loop_objects_touched": ["GuardCounters", "AgentState", "Message"],
+      "wiring": {"inputs_from": ["turn outcomes", "tool-call counts"], "outputs_to": ["escalating Message", "AgentState::Failed"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the control hub surfaces the guard dials: no-tool-call turns, progress-guard fires, and the prefill 400 breaker.", "visual": "Each dial reddens as its counter climbs; crossing the threshold flashes a stop icon over the hub."},
+      "mini_scenario": "Three consecutive no-tool-call turns fire the progress guard, inject a directive, and if ignored the loop transitions to Failed.",
+      "pitfall": "Setting guard thresholds too low kills legitimately slow reasoning turns that simply happen not to call a tool."
+    },
+    {
+      "id": "agent-12",
+      "title": "Dial compression depth with the orchestrator",
+      "loop_stage": "control",
+      "pattern": "reclaim-by-compaction",
+      "intent": "Reclaim conversation budget mid-loop without losing task continuity.",
+      "how_it_shapes_the_loop": "CompressionOrchestrator::check_and_compress watches budget pressure and picks run_micro, run_auto, or run_full; AutoCompactManager::should_compress plus a circuit breaker (record_success/record_failure, is_circuit_open) keep compression from thrashing, so the loop keeps iterating instead of dying on context overflow.",
+      "loop_objects_touched": ["CompressionOrchestrator", "AutoCompactManager", "Message", "Budget"],
+      "wiring": {"inputs_from": ["growing Message history", "budget pressure"], "outputs_to": ["compacted Message history", "next reason turn"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating the history strip with two fingers dials compression depth from micro through auto to full.", "visual": "The strip folds tighter as the dial turns; a token-saved badge (total_tokens_saved) counts up, and the circuit-breaker icon glows if open."},
+      "mini_scenario": "As the window fills, check_and_compress runs auto compaction, folds early turns into a summary, and the loop continues executing.",
+      "pitfall": "Compacting away the task statement or key evidence strands the model with no anchor for the remaining work."
+    },
+    {
+      "id": "agent-13",
+      "title": "Size the compressor to the real window",
+      "loop_stage": "foundation",
+      "pattern": "budget-from-context",
+      "intent": "Fit the conversation inside the model's true context window before the first turn.",
+      "how_it_shapes_the_loop": "ContextCompressor::new takes the derived context budget and with_content_ratio sets the trigger point; should_compress uses estimate_message_tokens so compression fires from measured token counts, and hard_compress is the last-resort clamp when a turn would overflow.",
+      "loop_objects_touched": ["ContextCompressor", "Budget", "Message"],
+      "wiring": {"inputs_from": ["config context_length", "token estimates"], "outputs_to": ["compression threshold", "compressor for every reason turn"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating a dial on the foundation node sets the content ratio where should_compress starts firing.", "visual": "A ring shows estimated tokens against the threshold; the region past the ratio is hatched red."},
+      "mini_scenario": "At startup the loop builds the ContextCompressor with the derived budget; at 80% fill should_compress flips true and the next turn compacts first.",
+      "pitfall": "Sizing the compressor to the output token cap instead of the derived context budget overflows the real window."
+    },
+    {
+      "id": "agent-14",
+      "title": "Split the system prompt at the cache boundary",
+      "loop_stage": "foundation",
+      "pattern": "static-dynamic-boundary",
+      "intent": "Keep the stable prefix of the system prompt byte-identical so provider caching hits.",
+      "how_it_shapes_the_loop": "SystemPromptBuilder::add_static/add_dynamic partition sections; split_at_boundary marks the cut, build_cached serves the static half under static_cache_key, and only the dynamic half is rebuilt per turn — so every reason turn reuses the cached prefix instead of re-sending it.",
+      "loop_objects_touched": ["SystemPromptBuilder", "Message", "Budget"],
+      "wiring": {"inputs_from": ["static instructions", "dynamic loop state"], "outputs_to": ["cached static prefix", "per-turn dynamic suffix"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the prompt node fans it into a static slab and a dynamic slab with the boundary line between them.", "visual": "The static slab renders cool blue with a cache-hit shimmer; the dynamic slab renders warm amber and re-renders each turn."},
+      "mini_scenario": "The loop builds the system prompt once via build_cached; on turn five only the dynamic section changes and the static prefix hits the provider cache.",
+      "pitfall": "Leaking per-turn state into a static section busts the cache key and silently multiplies prompt-token spend."
+    },
+    {
+      "id": "agent-15",
+      "title": "Validate every ToolCall against its schema",
+      "loop_stage": "act",
+      "pattern": "validate-before-act",
+      "intent": "Reject malformed tool arguments before they reach execution.",
+      "how_it_shapes_the_loop": "validate_tool_call checks a single call and validate_tool_calls sweeps a whole model-emitted batch against the tool JSON schemas, so a bad call fails at the act boundary with a typed error instead of crashing mid-dispatch.",
+      "loop_objects_touched": ["ToolCall", "ToolErrorKind", "AgentState"],
+      "wiring": {"inputs_from": ["model-emitted ToolCall batch"], "outputs_to": ["validated calls to dispatch", "validation error to ErrorRecovery"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping a tool-call chip flips it over to show the schema check result for each argument.", "visual": "Valid chips carry a green schema badge; an invalid chip shows a red badge with the failing field highlighted."},
+      "mini_scenario": "The model emits three calls; validate_tool_calls flags a file_edit missing its path argument, and the loop routes the error to recovery before anything executes.",
+      "pitfall": "Validating only the first call of a batch lets a malformed later call reach dispatch and fail the whole turn."
     },
     {
       "id": "agent-16",
-      "title": "Enforce explicit required tools before answering",
-      "loop_stage": "control",
-      "pattern": "required-tool-gate",
-      "intent": "Refuse to finish until tools the task explicitly named have actually run.",
-      "how_it_shapes_the_loop": "run_task extracts explicit_task_tools, activates them, and appends a directive so the completion path blocks a final answer until each required tool has succeeded.",
-      "loop_objects_touched": ["Plan", "Message", "TaskCheckpoint"],
-      "wiring": {
-        "inputs_from": ["task string", "tool registry list"],
-        "outputs_to": ["activated tools", "completion gate"]
-      },
-      "touch_interaction": {
-        "gesture": "draw-connection",
-        "canvas_action": "User draws mandatory edges from named tool nodes into a 'required' collar around the completion node.",
-        "visual": "Each required tool edge is amber and thick until its tool succeeds, then it turns green and thins."
-      },
-      "mini_scenario": "A task says 'use cargo_test'; the loop activates it and will not emit a final answer until cargo_test has passed.",
-      "pitfall": "Marking a required tool satisfied on a failed call lets the loop answer without the evidence it was told to gather."
+      "title": "Stash the last tool output for progressive disclosure",
+      "loop_stage": "perceive",
+      "pattern": "detail-on-demand",
+      "intent": "Keep bulky tool output retrievable without keeping it in the prompt.",
+      "how_it_shapes_the_loop": "store_last_tool_output saves the full result into a LastToolOutput record while the loop keeps only a truncated preview in the Message history; retrieve_last_tool_output (the /last command) pulls the full text back on demand.",
+      "loop_objects_touched": ["LastToolOutput", "ToolCall", "Message"],
+      "wiring": {"inputs_from": ["tool execution result"], "outputs_to": ["LastToolOutput store", "/last retrieval"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping a collapsed tool chip expands it into the full stored output card fetched via retrieve_last_tool_output.", "visual": "The chip unfolds to a scrollable card; a small badge shows the stored byte size versus the in-prompt preview."},
+      "mini_scenario": "A 300-line test log is stored and previewed as 5 lines in history; the operator double-taps and reads the full log without a re-run.",
+      "pitfall": "Keeping full outputs inline instead of stashing them inflates every subsequent reason turn's token count."
     },
     {
       "id": "agent-17",
-      "title": "Escalate to careful/rigor mode",
-      "loop_stage": "reason",
-      "pattern": "adaptive-rigor",
-      "intent": "Slow the loop down and add verification when outcomes look risky.",
-      "how_it_shapes_the_loop": "should_enter_rigor inspects a ResolutionOutcome and, when it warrants, injects careful_mode_directive so subsequent reason turns are more methodical and completion requires verification.",
-      "loop_objects_touched": ["Message", "FailureMode", "AgentState"],
-      "wiring": {
-        "inputs_from": ["ResolutionOutcome", "failure counters"],
-        "outputs_to": ["careful-mode Message", "verification gate"]
-      },
-      "touch_interaction": {
-        "gesture": "two-finger-rotate",
-        "canvas_action": "Rotating the Reason node with two fingers dials rigor from fast to careful, adding verify sub-steps.",
-        "visual": "At higher rigor the node deepens to indigo and grows an extra verification sub-node."
-      },
-      "mini_scenario": "After a shaky resolution the loop enters rigor, injects the careful directive, and demands verification before completing.",
-      "pitfall": "Entering rigor on every minor hiccup makes routine tasks crawl and burns the wall-clock budget."
+      "title": "Label the terminal outcome with a FailureMode",
+      "loop_stage": "learn",
+      "pattern": "labeled-termination",
+      "intent": "Record why the loop ended so the outcome is diagnosable, not just 'failed'.",
+      "how_it_shapes_the_loop": "failure_mode::classify maps the terminal state and guard counters to a FailureKind wrapped in a FailureMode; write_artifact persists it, cli_banner renders it, and RunOutcome::is_success/is_nonfailure let downstream tooling distinguish a clean stop from a real failure.",
+      "loop_objects_touched": ["FailureMode", "FailureKind", "RunOutcome", "AgentState"],
+      "wiring": {"inputs_from": ["terminal AgentState", "guard counters"], "outputs_to": ["failure artifact", "CLI banner", "learning session"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping a terminal node reveals its classified FailureKind label and the artifact it wrote.", "visual": "Failed nodes carry a red tag with the FailureKind; Completed nodes carry a green success tag; budget stops get an amber tag."},
+      "mini_scenario": "The loop hits max iterations; classify produces the max-iterations FailureKind, write_artifact saves it, and the banner prints the one-line reason.",
+      "pitfall": "Treating budget stops as failures (misusing is_nonfailure) poisons success-rate metrics with non-failures."
     },
     {
       "id": "agent-18",
-      "title": "Verify before declaring Completed",
-      "loop_stage": "verify",
-      "pattern": "completion-gate",
-      "intent": "Block the Completed transition until the work is actually verified.",
-      "how_it_shapes_the_loop": "completion_requires_verification and the baseline-dirty capture make the Executing -> Completed transition conditional on evidence, so the loop cannot self-declare success on unverified edits.",
-      "loop_objects_touched": ["AgentState", "TaskCheckpoint", "PlanStep"],
-      "wiring": {
-        "inputs_from": ["verification results", "baseline dirty paths"],
-        "outputs_to": ["AgentState::Completed", "back to Executing"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "A checkmark gate sits on the edge into Completed; it stays greyed until verification evidence lands, then becomes tappable.",
-        "visual": "The gate icon is a hollow check while unverified and fills solid green once evidence passes."
-      },
-      "mini_scenario": "The model claims done, but the completion gate holds the loop in Executing until cargo_test evidence appears.",
-      "pitfall": "Counting pre-existing uncommitted changes as new work lets the gate pass on edits the loop never made."
+      "title": "Emit structured progress events off the driver",
+      "loop_stage": "perceive",
+      "pattern": "observer-side-channel",
+      "intent": "Stream live loop telemetry without letting observers touch control flow.",
+      "how_it_shapes_the_loop": "The driver emits ProgressEvent values through the ProgressEmitter trait; MultiProgressEmitter fans one event to many sinks (StderrProgressEmitter, RecordingProgressEmitter) while NoopProgressEmitter keeps headless runs silent — render_event_kv formats each event for display.",
+      "loop_objects_touched": ["ProgressEvent", "AgentState", "ToolCall"],
+      "wiring": {"inputs_from": ["agent loop events"], "outputs_to": ["stderr sink", "recording sink", "TUI"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the progress node toggles which emitter sinks are attached, shown as small satellite nodes around the hub.", "visual": "Each attached sink glows as events flow; the Noop sink renders as a muted grey dot."},
+      "mini_scenario": "The driver emits a ProgressEvent per tool call; the MultiProgressEmitter mirrors it to stderr and a recorder the test later asserts on.",
+      "pitfall": "Emitting progress in JSON/plain output mode corrupts machine-parsed output — keep the Noop emitter for headless runs."
     },
     {
       "id": "agent-19",
-      "title": "Classify the terminal failure mode",
-      "loop_stage": "learn",
-      "pattern": "labeled-termination",
-      "intent": "Record why a loop ended so the outcome is diagnosable, not just 'failed'.",
-      "how_it_shapes_the_loop": "last_run_failure_mode captures a FailureMode (budget stop, max iterations, unrecoverable error) on the terminal transition, and terminal_event_emitted guards against double-emitting the end event.",
-      "loop_objects_touched": ["FailureMode", "AgentState"],
-      "wiring": {
-        "inputs_from": ["terminal AgentState", "guard counters"],
-        "outputs_to": ["terminal AgentEvent", "learning session"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping a terminal node reveals its labeled failure/success reason and the single terminal event it emitted.",
-        "visual": "Failed nodes carry a red tag with the mode label; Completed nodes carry a green success tag."
-      },
-      "mini_scenario": "The loop hits the wall-clock ceiling; last_run_failure_mode is set to a budget stop and exactly one terminal event fires.",
-      "pitfall": "Emitting the terminal event twice (missing the terminal_event_emitted latch) confuses downstream listeners."
+      "title": "Feed the evolution bus with loop telemetry",
+      "loop_stage": "perceive",
+      "pattern": "telemetry-fanout",
+      "intent": "Give visualizations a real-time stream of what the loop is doing.",
+      "how_it_shapes_the_loop": "The EvolutionBus emits EvolutionEvent values as the loop runs — record_tokens_in/record_tokens_out feed a ThroughputTracker whose snapshot/throughput calls produce a ThroughputSnapshot — and subscribers receive events without the driver ever blocking on them.",
+      "loop_objects_touched": ["EvolutionEvent", "ThroughputSnapshot", "Budget", "AgentState"],
+      "wiring": {"inputs_from": ["agent events", "token counters"], "outputs_to": ["DAG visualization", "throughput dashboard"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching out on the telemetry node zooms from a single agent's event stream to a fleet-wide ThroughputSnapshot.", "visual": "Events ripple outward along subscriber edges; the throughput chip pulses brighter as tokens-per-second climbs."},
+      "mini_scenario": "While the loop executes, the bus emits per-request events; a subscriber renders the agent's activity state changing in the DAG view live.",
+      "pitfall": "Letting a slow subscriber block emit back-pressures the driver — the bus must drop or buffer, never stall the loop."
     },
     {
       "id": "agent-20",
-      "title": "Reset cleanly for the next queued task",
-      "loop_stage": "control",
-      "pattern": "clean-slate-reset",
-      "intent": "Ensure a reused Agent starts the next task with no residue from the last.",
-      "how_it_shapes_the_loop": "run_task clears failed-tool attempts, no-action prompt state, failure-mode counters, required tools, cumulative token/cost usage, and dirty-path baseline before the new loop begins.",
-      "loop_objects_touched": ["Budget", "GuardCounters", "TaskCheckpoint", "FailureMode"],
-      "wiring": {
-        "inputs_from": ["previous task terminal state"],
-        "outputs_to": ["fresh AgentState::Planning", "new TaskCheckpoint"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "User flicks the whole canvas downward to sweep the previous run's counters and badges off before the next task drops in.",
-        "visual": "Old badges fade and slide away; the state graph resets to the single breathing Planning node."
-      },
-      "mini_scenario": "A queued follow-up task starts; run_task wipes cumulative usage and counters so its budget and guards start from zero.",
-      "pitfall": "Forgetting to reset cumulative_token_usage bleeds the previous task's spend into the next task's budget accounting."
+      "title": "Append every loop event to the session log",
+      "loop_stage": "learn",
+      "pattern": "append-only-audit-trail",
+      "intent": "Leave a durable, replayable record of what the loop did.",
+      "how_it_shapes_the_loop": "SessionLogger::log appends typed SessionLogEvent entries (keyed by SessionEventType) under the session's path; recent_events/read_recent let later runs and the operator inspect the tail, giving the learn stage real history to reason over.",
+      "loop_objects_touched": ["SessionLogEvent", "Message", "ToolCall", "FailureMode"],
+      "wiring": {"inputs_from": ["loop events", "terminal FailureMode"], "outputs_to": ["session log file", "post-run review"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking vertically scrubs the session-log timeline; each flick steps to the previous SessionLogEvent.", "visual": "Events render as a vertical bead chain colored by SessionEventType; the current bead enlarges with its payload summary."},
+      "mini_scenario": "After a run, the operator flicks through the log: plan stored, five tool calls, a recovery hint, and the terminal FailureMode bead at the end.",
+      "pitfall": "Logging unbounded payloads into every event grows the log without bound — keep entries summarized like the driver does."
     }
   ]
 }

@@ -2,9 +2,9 @@
   "component": "analysis",
   "tier": "full",
   "loop_stage": "perceive",
-  "summary": "The analysis component is the engine's retrieval and search substrate for the perceive stage. It runs three tiers over code: a BM25Index for lexical keyword search, a VectorStore of embedded CodeChunks (via Mock/TfIdf/Http EmbeddingBackends) searched through an HNSW VectorIndex for semantic recall, and a CodeGraph / WorkspaceGraph of GraphNodes and GraphEdges for structural traversal. An ErrorAnalyzer classifies compiler errors into fixes, and a DebtPrioritizer quantifies tech debt. On the loop it is how the agent finds the right code: chunk, index, search, filter, rank, then feed grounded results into reasoning.",
-  "loop_objects": ["CodeChunk", "ChunkMetadata", "ChunkType", "BM25Index", "BM25Result", "VectorStore", "VectorIndex", "VectorCollection", "SearchResult", "SearchFilter", "EmbeddingBackend", "GraphNode", "GraphEdge", "NodeType", "EdgeType", "CodeGraph", "WorkspaceGraphSummary", "AnalyzedError", "FixSuggestion", "DebtItem"],
-  "context_basis": "Recommendations were formed with src/analysis/ read in the context of the full engine under a ~600k budget framing; hybrid lexical/semantic/structural retrieval assumes a large codebase whose relevant slices must be surfaced without loading everything.",
+  "summary": "The analysis component is the engine's retrieval and search substrate for the perceive stage. It runs three tiers over code: a BM25Index for lexical keyword search, a VectorStore of embedded CodeChunks searched through an HNSW VectorIndex for semantic recall, and a CodeGraph / WorkspaceGraph of GraphNodes and GraphEdges for structural traversal. An ErrorAnalyzer classifies RawErrors into AnalyzedErrors with FixSuggestions, and the tech_debt module scores and prioritizes DebtItems. On the loop it is how the agent finds the right code: chunk, index, search, filter, rank, then feed grounded results into reasoning.",
+  "loop_objects": ["CodeChunk", "ChunkMetadata", "ChunkType", "BM25Index", "BM25Result", "VectorStore", "VectorIndex", "SearchFilter", "EmbeddingBackend", "GraphNode", "GraphEdge", "NodeType", "EdgeType", "CodeGraph", "WorkspaceGraphOptions", "WorkspaceGraphSummary", "RawError", "AnalyzedError", "ErrorCategory", "FixSuggestion", "ErrorAnalyzer", "DebtItem"],
+  "context_basis": "Recommendations formed with src/analysis/ read in the context of the full engine under a ~600k budget framing; hybrid lexical/semantic/structural retrieval assumes a large codebase whose relevant slices must be surfaced without loading everything.",
   "examples": [
     {
       "id": "analysis-01",
@@ -12,18 +12,18 @@
       "loop_stage": "perceive",
       "pattern": "chunk-first",
       "intent": "Break code into retrievable units with metadata so every index has something coherent to hold.",
-      "how_it_shapes_the_loop": "The chunker splits files into CodeChunks (functions, structs, modules) with ChunkMetadata (path, line range, ChunkType), giving the perceive stage the atomic units all three search tiers index.",
+      "how_it_shapes_the_loop": "chunk_rust splits a file into symbol-aware CodeChunks (falling back to chunk_fixed_size), each stamped with ChunkMetadata, giving the perceive stage the atomic units all three search tiers index.",
       "loop_objects_touched": ["CodeChunk", "ChunkMetadata", "ChunkType"],
       "wiring": {
-        "inputs_from": ["source files"],
-        "outputs_to": ["BM25Index", "VectorStore", "CodeGraph"]
+        "inputs_from": ["source files", "vector_store::chunk_rust"],
+        "outputs_to": ["BM25Index", "VectorStore::add_chunk", "CodeGraph"]
       },
       "touch_interaction": {
         "gesture": "drag",
         "canvas_action": "Dragging a file node onto the chunker splits it into a fan of labeled chunk tiles by symbol.",
         "visual": "The file bursts into chunk tiles, each color-tagged by ChunkType (Function blue, Struct green, Test amber)."
       },
-      "mini_scenario": "The user drags analyzer.rs onto the chunker and it fans into function and impl chunks, each stamped with its line range.",
+      "mini_scenario": "The user drags analyzer.rs onto the chunker and chunk_rust fans it into function and impl chunks, each stamped with its line range.",
       "pitfall": "Chunk boundaries must preserve line ranges accurately; a chunk whose metadata lines drift makes every later search result cite the wrong location."
     },
     {
@@ -32,48 +32,88 @@
       "loop_stage": "foundation",
       "pattern": "lexical-index-build",
       "intent": "Enable fast exact-term retrieval over symbol names and documented words.",
-      "how_it_shapes_the_loop": "BM25Index tokenizes chunks (splitting camelCase and snake_case), builds term frequencies and IDF, and gives the perceive stage O(fast) keyword lookup with k1/b tuned scoring.",
+      "how_it_shapes_the_loop": "BM25Index::add_batch ingests chunks (with_params tunes k1/b), tokenizing camelCase and snake_case into term frequencies and IDF, arming the perceive stage with O(fast) keyword lookup.",
       "loop_objects_touched": ["BM25Index", "CodeChunk"],
       "wiring": {
         "inputs_from": ["CodeChunks"],
-        "outputs_to": ["BM25 search", "hybrid ranking"]
+        "outputs_to": ["BM25Index::search", "hybrid ranking"]
       },
       "touch_interaction": {
         "gesture": "long-press",
-        "canvas_action": "Long-pressing the lexical node triggers an index rebuild; term buckets fill and the IDF table settles.",
-        "visual": "A word-cloud of terms condenses into an index grid; the k1/b tuning knobs sit on the node's rim."
+        "canvas_action": "Long-pressing the lexical node triggers add_batch over the chunk pool; term buckets fill and the IDF table settles.",
+        "visual": "A word-cloud of terms condenses into an index grid; the k1/b tuning knobs from with_params sit on the node's rim."
       },
-      "mini_scenario": "The user long-presses to rebuild BM25 after new files land, and 'getUserName' tokenizes to get/user/name for retrieval.",
-      "pitfall": "The IDF and avgdl must be recomputed on rebuild; searching a stale index after documents changed scores terms against outdated frequencies."
+      "mini_scenario": "The user long-presses to index new chunks, and 'getUserName' tokenizes to get/user/name so BM25Index::terms can retrieve it.",
+      "pitfall": "The IDF and avgdl must be recomputed when documents change; searching a stale index scores terms against outdated frequencies."
     },
     {
       "id": "analysis-03",
+      "title": "Query the BM25Index for exact-term hits",
+      "loop_stage": "perceive",
+      "pattern": "lexical-lookup",
+      "intent": "Retrieve chunks that contain the query's exact terms, ranked by BM25 score.",
+      "how_it_shapes_the_loop": "BM25Index::search returns BM25Results (document id plus score) that the perceive stage folds into context; contains and terms let the loop probe index coverage before searching.",
+      "loop_objects_touched": ["BM25Index", "BM25Result"],
+      "wiring": {
+        "inputs_from": ["user query", "BM25Index"],
+        "outputs_to": ["hybrid ranking", "LlmContext"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the query chip fires it at the lexical index; matching chunk tiles light up in score order.",
+        "visual": "Hits glow brighter with their BM25 score; a small badge shows the result count from the search."
+      },
+      "mini_scenario": "A query for 'find_cycles' hits the exact symbol via BM25Index::search even when the semantic index ranks unrelated graph code higher.",
+      "pitfall": "BM25 only matches terms it has seen; a query word absent from the index vocabulary returns nothing regardless of relevance."
+    },
+    {
+      "id": "analysis-04",
+      "title": "Rebuild the lexical index after files change",
+      "loop_stage": "control",
+      "pattern": "stale-index-refresh",
+      "intent": "Keep keyword search honest as the codebase mutates under the loop.",
+      "how_it_shapes_the_loop": "BM25Index::remove drops a stale document and rebuild recomputes the whole statistics table, letting the control layer schedule re-indexing between loop turns instead of mid-search.",
+      "loop_objects_touched": ["BM25Index", "CodeChunk"],
+      "wiring": {
+        "inputs_from": ["file-change events", "BM25Index::remove"],
+        "outputs_to": ["fresh BM25Index::search results"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking a stale chunk tile off the index removes its document; a rebuild badge appears when drift accumulates.",
+        "visual": "The tile greys out and slides off the grid; the index node shows a pulsing 'rebuild' badge until statistics settle."
+      },
+      "mini_scenario": "After the agent rewrites config.rs, the control step removes its old chunks and rebuild runs before the next perceive turn.",
+      "pitfall": "Removing documents without rebuilding leaves IDF stale; interleaving remove and search across loop turns yields inconsistent scores."
+    },
+    {
+      "id": "analysis-05",
       "title": "Embed chunks into the VectorStore with a backend",
       "loop_stage": "foundation",
       "pattern": "semantic-embedding",
       "intent": "Turn code chunks into vectors so meaning-based recall becomes possible.",
-      "how_it_shapes_the_loop": "VectorStore generates embeddings via the chosen EmbeddingBackend (Mock, TfIdf, or Http) and L2-normalizes them into the VectorIndex, arming the perceive stage for semantic search.",
+      "how_it_shapes_the_loop": "VectorStore::add_chunk embeds each CodeChunk through the configured EmbeddingBackend (with_api_key arms the Http backend) and inserts the normalized vector into the HNSW VectorIndex.",
       "loop_objects_touched": ["VectorStore", "EmbeddingBackend", "CodeChunk", "VectorIndex"],
       "wiring": {
         "inputs_from": ["CodeChunks", "EmbeddingBackend"],
-        "outputs_to": ["VectorIndex (HNSW)", "semantic search"]
+        "outputs_to": ["VectorIndex (HNSW)", "VectorStore::search"]
       },
       "touch_interaction": {
         "gesture": "tap",
-        "canvas_action": "Tapping a chunk sends it through the embedding pipeline; a vector trail flows into the HNSW node.",
+        "canvas_action": "Tapping a chunk sends it through add_chunk; a vector trail flows into the HNSW node.",
         "visual": "The chunk emits a shimmering vector arrow that threads into the index sphere, which pulses as it inserts."
       },
-      "mini_scenario": "With the Http backend configured, the user taps a batch of chunks and their embeddings stream into the HNSW index.",
+      "mini_scenario": "With the Http backend configured via with_api_key, the user taps a batch of chunks and their embeddings stream into the HNSW index.",
       "pitfall": "Embedding dimension must match the index; feeding vectors from a different backend dimension into an existing VectorIndex corrupts search."
     },
     {
-      "id": "analysis-04",
+      "id": "analysis-06",
       "title": "Search the VectorIndex for the k nearest chunks",
       "loop_stage": "perceive",
       "pattern": "semantic-knn",
       "intent": "Retrieve the chunks whose meaning is closest to the query, not just its words.",
-      "how_it_shapes_the_loop": "VectorStore.search embeds the query and runs HNSW k-NN with ef_search, returning SearchResults (chunk, score, distance) that the perceive stage folds into context.",
-      "loop_objects_touched": ["VectorStore", "SearchResult", "VectorIndex"],
+      "how_it_shapes_the_loop": "VectorStore::search embeds the query and runs HNSW k-NN ranked by cosine_similarity, returning scored chunks the perceive stage folds into context.",
+      "loop_objects_touched": ["VectorStore", "VectorIndex", "CodeChunk"],
       "wiring": {
         "inputs_from": ["query", "VectorIndex"],
         "outputs_to": ["hybrid ranking", "LlmContext"]
@@ -81,61 +121,61 @@
       "touch_interaction": {
         "gesture": "spread",
         "canvas_action": "Spreading from the query node radiates a similarity field; the nearest chunk tiles pull toward it.",
-        "visual": "Chunks arrange by distance in concentric rings; the closest glow bright, distant ones fade with rising distance labels."
+        "visual": "Chunks arrange by cosine_similarity in concentric rings; the closest glow bright, distant ones fade."
       },
       "mini_scenario": "A query about retry logic returns the three nearest chunks by cosine similarity even though none contain the word 'retry'.",
-      "pitfall": "Score is 1 minus HNSW distance; treating raw distance as relevance inverts the ranking and surfaces the least similar chunks."
+      "pitfall": "Score derives from distance, not raw distance; treating HNSW distance as relevance inverts the ranking and surfaces the least similar chunks."
     },
     {
-      "id": "analysis-05",
+      "id": "analysis-07",
       "title": "Apply a SearchFilter to scope results",
       "loop_stage": "perceive",
       "pattern": "scoped-retrieval",
       "intent": "Restrict search to relevant files, chunk types, languages, or a min score.",
-      "how_it_shapes_the_loop": "A SearchFilter (file patterns, ChunkType, language, tags, min_score) narrows the result set before ranking, so the perceive stage only ingests chunks that pass the scope.",
-      "loop_objects_touched": ["SearchFilter", "SearchResult", "ChunkType"],
+      "how_it_shapes_the_loop": "A SearchFilter built with with_file_pattern, with_chunk_type, with_language and with_min_score narrows candidates via matches before ranking, so the perceive stage only ingests chunks that pass the scope.",
+      "loop_objects_touched": ["SearchFilter", "ChunkType", "CodeChunk"],
       "wiring": {
-        "inputs_from": ["raw SearchResults"],
+        "inputs_from": ["raw search results"],
         "outputs_to": ["ranked results", "LlmContext"]
       },
       "touch_interaction": {
         "gesture": "long-press",
-        "canvas_action": "Long-pressing the results panel opens filter chips; toggling one dims out chunks that fail the scope.",
+        "canvas_action": "Long-pressing the results panel opens filter chips; toggling one dims out chunks that fail matches.",
         "visual": "Filter chips (Function, *.rs, score>0.5) light when active; failing chunks grey out and drop from the stack."
       },
-      "mini_scenario": "The user filters to Function chunks in src/ with score above 0.6, cutting a noisy result set to five precise hits.",
+      "mini_scenario": "The user filters to Function chunks in src/ with min_score above 0.6, cutting a noisy result set to five precise hits.",
       "pitfall": "A min_score set too high can empty the result set; over-filtering starves reasoning of context it needed to answer."
     },
     {
-      "id": "analysis-06",
-      "title": "Weight results by ChunkType before final rank",
+      "id": "analysis-08",
+      "title": "Weight chunks by type and tags before final rank",
       "loop_stage": "reason",
       "pattern": "type-weighted-ranking",
       "intent": "Prefer higher-signal chunk kinds when two results score similarly.",
-      "how_it_shapes_the_loop": "ChunkType.weight (Function 1.0, Import 0.3...) multiplies raw similarity, so the reason stage ranks a matching function above a matching import at equal cosine.",
-      "loop_objects_touched": ["ChunkType", "SearchResult"],
+      "how_it_shapes_the_loop": "ChunkType::weight (Function outranks Import) multiplies raw similarity, and metadata set via with_symbol/with_tag sharpens matchability, so the reason stage ranks a matching function above a matching import at equal cosine.",
+      "loop_objects_touched": ["ChunkType", "ChunkMetadata", "CodeChunk"],
       "wiring": {
-        "inputs_from": ["semantic SearchResults"],
+        "inputs_from": ["semantic search results"],
         "outputs_to": ["final ranked list"]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
-        "canvas_action": "Rotating the ranking dial re-weights by type; function tiles climb the list while imports sink.",
+        "canvas_action": "Rotating the ranking dial re-weights by ChunkType; function tiles climb the list while imports sink.",
         "visual": "Tiles reshuffle as their weight badges apply; the list reorders with a smooth vertical slide."
       },
       "mini_scenario": "Two chunks tie on similarity; the type weight lifts the Function above the Comment so it ranks first in context.",
       "pitfall": "Type weight should nudge, not dominate; over-weighting can bury a highly relevant comment that actually answers the query."
     },
     {
-      "id": "analysis-07",
-      "title": "Combine BM25 and vector scores into a hybrid rank",
+      "id": "analysis-09",
+      "title": "Fuse BM25 and vector scores into a hybrid rank",
       "loop_stage": "reason",
       "pattern": "hybrid-fusion",
       "intent": "Get the precision of keyword match plus the recall of semantic similarity.",
-      "how_it_shapes_the_loop": "The reason stage fuses BM25Results with vector SearchResults, so a chunk strong on either exact terms or meaning surfaces, widening what the loop can find.",
-      "loop_objects_touched": ["BM25Result", "SearchResult"],
+      "how_it_shapes_the_loop": "The reason stage merges BM25Results from BM25Index::search with scored chunks from VectorStore::search, so a chunk strong on either exact terms or meaning surfaces, widening what the loop can find.",
+      "loop_objects_touched": ["BM25Result", "BM25Index", "VectorStore"],
       "wiring": {
-        "inputs_from": ["BM25Index results", "VectorStore results"],
+        "inputs_from": ["BM25Index::search results", "VectorStore::search results"],
         "outputs_to": ["fused ranked list", "LlmContext"]
       },
       "touch_interaction": {
@@ -143,76 +183,56 @@
         "canvas_action": "Pinching the lexical and semantic result columns together merges them into one fused ranking.",
         "visual": "Two colored streams (blue lexical, green semantic) braid into a single ranked column with blended tile borders."
       },
-      "mini_scenario": "A query for 'BM25' hits exactly via lexical and its neighbors via semantic; fusion returns both the definition and its callers.",
+      "mini_scenario": "A query for 'BM25Index' hits exactly via lexical and its callers via semantic; fusion returns both the definition and its usages.",
       "pitfall": "Normalize the two score scales before fusing; adding raw BM25 to cosine lets one metric silently swamp the other."
     },
     {
-      "id": "analysis-08",
-      "title": "Soft-delete a chunk and defer compaction",
+      "id": "analysis-10",
+      "title": "Soft-delete a chunk and compact when the index degrades",
       "loop_stage": "control",
       "pattern": "soft-delete",
-      "intent": "Remove a stale chunk from results without an expensive index rebuild.",
-      "how_it_shapes_the_loop": "VectorIndex marks the entry deleted and filters it from results, letting the control layer defer compaction until the deletion ratio crosses its threshold.",
-      "loop_objects_touched": ["VectorIndex", "CodeChunk"],
+      "intent": "Remove stale chunks from results without an expensive index rebuild, then sweep when health drops.",
+      "how_it_shapes_the_loop": "VectorStore::remove_chunk and remove_file mark entries deleted and rebuild_id_index keeps lookups coherent; the control layer calls compact only when check_health or verify_index_integrity reports the index has degraded.",
+      "loop_objects_touched": ["VectorStore", "VectorIndex", "CodeChunk"],
       "wiring": {
-        "inputs_from": ["stale chunk id"],
-        "outputs_to": ["filtered search results"]
+        "inputs_from": ["stale chunk ids", "check_health report"],
+        "outputs_to": ["filtered search results", "compacted VectorIndex"]
       },
       "touch_interaction": {
         "gesture": "flick",
-        "canvas_action": "Flicking a chunk tile off the canvas marks it deleted; it greys but stays in place until compaction sweeps.",
-        "visual": "The tile fades to a ghost outline; a deletion-ratio meter on the index ticks up toward the compaction line."
+        "canvas_action": "Flicking a chunk tile off the canvas marks it deleted; a health gauge on the index node ticks toward the compaction line.",
+        "visual": "The tile fades to a ghost outline; the index node's health ring shifts green to amber as deletions accumulate."
       },
-      "mini_scenario": "A refactored function's old chunk is flicked out; it vanishes from results while the index waits to compact past 30%.",
-      "pitfall": "Compact when the deletion ratio crosses its threshold; letting soft-deleted entries accumulate unbounded bloats the index and slows search."
-    },
-    {
-      "id": "analysis-09",
-      "title": "Scope collections by Project, Session, or Global",
-      "loop_stage": "foundation",
-      "pattern": "collection-scoping",
-      "intent": "Keep chunk sets separated so search targets the right lifetime of code.",
-      "how_it_shapes_the_loop": "VectorCollection groups CodeChunks by scope (Project, Session, Global) and persists across restarts, letting the foundation layer route search to the correct persistence tier.",
-      "loop_objects_touched": ["VectorCollection", "CodeChunk", "VectorStore"],
-      "wiring": {
-        "inputs_from": ["chunk scope"],
-        "outputs_to": ["scoped VectorStore search"]
-      },
-      "touch_interaction": {
-        "gesture": "double-tap",
-        "canvas_action": "Double-tapping the store cycles the active collection scope; the chunk pool visibly swaps.",
-        "visual": "A scope tab (Project/Session/Global) highlights; the tile pool underneath fades out and swaps to the scoped set."
-      },
-      "mini_scenario": "The user double-taps to the Session collection so search returns only chunks from this working session, not the whole project.",
-      "pitfall": "Searching the wrong scope misleads; querying Global when the answer lives in the Session collection returns stale project-wide code."
-    },
-    {
-      "id": "analysis-10",
-      "title": "Classify a compiler error into an AnalyzedError",
-      "loop_stage": "perceive",
-      "pattern": "error-classification",
-      "intent": "Turn raw compiler output into a categorized, prioritized error the loop can act on.",
-      "how_it_shapes_the_loop": "ErrorAnalyzer pattern-matches output into an AnalyzedError with an ErrorCategory (TypeError, BorrowError...) and priority, giving the perceive stage structured signal instead of a wall of text.",
-      "loop_objects_touched": ["AnalyzedError", "FixSuggestion"],
-      "wiring": {
-        "inputs_from": ["compiler stderr"],
-        "outputs_to": ["fix suggestion", "error recovery"]
-      },
-      "touch_interaction": {
-        "gesture": "tap",
-        "canvas_action": "Tapping a raw error line classifies it into a category chip and slots it by priority.",
-        "visual": "The error line snaps a category badge (BorrowError red, StyleWarning grey) and drops into a priority-ordered lane."
-      },
-      "mini_scenario": "A cargo build fails; the analyzer tags an E0502 as BorrowError at high priority so recovery addresses it before a style warning.",
-      "pitfall": "Category drives priority; misclassifying a blocking TypeError as a StyleWarning lets the loop skip past a fatal error."
+      "mini_scenario": "A refactored file's chunks are removed via remove_file; they vanish from results while compact waits for check_health to signal real degradation.",
+      "pitfall": "Compact when integrity checks say so, not on a whim; compacting after every delete stalls the loop on rebuilds it did not need."
     },
     {
       "id": "analysis-11",
-      "title": "Emit a FixSuggestion with a confidence and auto-fix flag",
+      "title": "Triage compiler output into prioritized AnalyzedErrors",
+      "loop_stage": "perceive",
+      "pattern": "error-classification",
+      "intent": "Turn raw compiler output into categorized, ordered errors the loop can act on.",
+      "how_it_shapes_the_loop": "ErrorAnalyzer::analyze maps each RawError to an AnalyzedError with an ErrorCategory and priority; analyze_batch, group_by_category and first_to_fix give the perceive stage an ordered queue instead of a wall of text.",
+      "loop_objects_touched": ["ErrorAnalyzer", "RawError", "AnalyzedError", "ErrorCategory"],
+      "wiring": {
+        "inputs_from": ["compiler stderr (RawError)"],
+        "outputs_to": ["first_to_fix queue", "error recovery"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a raw error line classifies it into a category chip and slots it into the priority lane.",
+        "visual": "The error line snaps a category badge (BorrowError red, StyleWarning grey) and drops into the lane first_to_fix would pop."
+      },
+      "mini_scenario": "A cargo build fails; analyze tags an E0502 as a borrow error at high priority so first_to_fix surfaces it before a style warning.",
+      "pitfall": "Category drives priority; misclassifying a blocking type error as a style warning lets the loop skip past a fatal error."
+    },
+    {
+      "id": "analysis-12",
+      "title": "Emit a FixSuggestion the loop can gate on",
       "loop_stage": "reason",
       "pattern": "fix-proposal",
       "intent": "Propose a concrete fix and mark whether it is safe to apply automatically.",
-      "how_it_shapes_the_loop": "A FixSuggestion (description, fix_code, confidence, auto_fixable) lets the reason stage decide between auto-applying a high-confidence fix and routing a risky one to review.",
+      "how_it_shapes_the_loop": "Each AnalyzedError carries a FixSuggestion whose confidence and auto-fix flag let the reason stage decide between applying a safe fix directly and routing a risky one to review before the act stage.",
       "loop_objects_touched": ["FixSuggestion", "AnalyzedError"],
       "wiring": {
         "inputs_from": ["AnalyzedError"],
@@ -221,38 +241,58 @@
       "touch_interaction": {
         "gesture": "long-press",
         "canvas_action": "Long-pressing an error reveals its fix card with a confidence meter and an auto-fix toggle.",
-        "visual": "The fix card unfolds; a green auto-fix badge shows when auto_fixable, the confidence bar filling proportionally."
+        "visual": "The fix card unfolds; a green auto-fix badge shows when the suggestion is auto-fixable, the confidence bar filling proportionally."
       },
-      "mini_scenario": "An unused import gets a high-confidence auto_fixable suggestion, applied silently, while a lifetime fix routes to review.",
-      "pitfall": "Only auto-apply when auto_fixable and confidence are high; auto-applying a low-confidence structural fix can compile away real intent."
+      "mini_scenario": "An unused import gets a high-confidence auto-fixable suggestion applied silently, while a lifetime fix routes to operator review.",
+      "pitfall": "Only auto-apply high-confidence suggestions; auto-applying a low-confidence structural fix can compile away real intent."
     },
     {
-      "id": "analysis-12",
-      "title": "Build the CodeGraph of entities and edges",
+      "id": "analysis-13",
+      "title": "Build the CodeGraph of nodes and typed edges",
       "loop_stage": "foundation",
       "pattern": "structural-graph-build",
-      "intent": "Represent the codebase as a DAG so structural queries become possible.",
-      "how_it_shapes_the_loop": "CodeGraph assembles GraphNodes (File, Function, Struct...) linked by GraphEdges (Calls, Imports, Implements...), giving the foundation layer a traversable structure beside the text indices.",
+      "intent": "Represent the codebase as a traversable structure so structural queries become possible.",
+      "how_it_shapes_the_loop": "add_node and add_edge (or connect) assemble GraphNodes via add_file/add_module/add_function/add_struct/add_trait, linked by typed GraphEdges, giving the foundation layer a structure beside the text indices.",
       "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge", "NodeType", "EdgeType"],
       "wiring": {
-        "inputs_from": ["ProjectIntelligence symbols"],
-        "outputs_to": ["path finding", "cycle detection", "WorkspaceGraph"]
+        "inputs_from": ["parsed symbols"],
+        "outputs_to": ["find_path", "find_cycles", "build_workspace_graph"]
       },
       "touch_interaction": {
         "gesture": "spread",
         "canvas_action": "Spreading over the codebase node expands it into a live node-and-edge graph laid out by dependency.",
-        "visual": "Nodes settle into a force-directed layout; Calls edges thin blue, Imports dashed, Implements bold arrows."
+        "visual": "Nodes settle into a force-directed layout; call edges thin blue, import edges dashed, implement edges bold arrows."
       },
-      "mini_scenario": "The user spreads the graph and sees the call structure of the analyzer module render as connected function nodes.",
-      "pitfall": "Edge weights and types must reflect real relations; a fabricated Calls edge corrupts every path query built on the graph."
+      "mini_scenario": "The user spreads the graph and sees the call structure of the vector_store module render as connected function nodes.",
+      "pitfall": "Edge types must reflect real relations; a fabricated call edge corrupts every path query built on the graph."
     },
     {
-      "id": "analysis-13",
+      "id": "analysis-14",
+      "title": "Walk dependencies and dependents from one node",
+      "loop_stage": "perceive",
+      "pattern": "neighborhood-traversal",
+      "intent": "See what a symbol uses and what uses it before touching it.",
+      "how_it_shapes_the_loop": "From a node found by get_node_by_id, outgoing_edges/incoming_edges and the dependencies/dependents helpers give the perceive stage the immediate structural neighborhood around a change target.",
+      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge"],
+      "wiring": {
+        "inputs_from": ["focus symbol", "CodeGraph"],
+        "outputs_to": ["impact preview", "reason stage"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping a node fans out its dependencies on one side and its dependents on the other.",
+        "visual": "Outbound edges slide left in blue, inbound edges right in amber; the focus node holds center with a bright ring."
+      },
+      "mini_scenario": "The user double-taps VectorStore::search and sees its callees on the left and every module that calls it on the right.",
+      "pitfall": "Dependents change as the graph rebuilds; caching a dependents list across an edit turn acts on stale impact data."
+    },
+    {
+      "id": "analysis-15",
       "title": "Find a path between two GraphNodes",
       "loop_stage": "reason",
       "pattern": "path-finding",
       "intent": "Discover how one code entity reaches another through the dependency structure.",
-      "how_it_shapes_the_loop": "CodeGraph.find_path runs BFS over GraphEdges between two GraphNodes, giving the reason stage the concrete chain linking a caller to a callee.",
+      "how_it_shapes_the_loop": "CodeGraph::find_path runs BFS over GraphEdges between two GraphNodes, giving the reason stage the concrete chain linking a caller to a callee.",
       "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge"],
       "wiring": {
         "inputs_from": ["source and target GraphNode"],
@@ -263,37 +303,57 @@
         "canvas_action": "Drawing from one node to another traces the shortest edge path; the route highlights hop by hop.",
         "visual": "A glowing path lights the intermediate nodes and edges; off-path nodes dim to focus the route."
       },
-      "mini_scenario": "The user draws from a public API node to a private helper and the graph highlights the three-hop call chain between them.",
+      "mini_scenario": "The user draws from a public API node to a private helper and find_path highlights the three-hop call chain between them.",
       "pitfall": "BFS finds a shortest path, not the only one; presenting it as the sole route hides other dependency chains that also matter."
     },
     {
-      "id": "analysis-14",
+      "id": "analysis-16",
       "title": "Detect cycles in the CodeGraph",
       "loop_stage": "verify",
       "pattern": "cycle-detection",
       "intent": "Flag circular dependencies that signal fragile architecture.",
-      "how_it_shapes_the_loop": "CodeGraph.find_cycles surfaces circular GraphEdge chains, letting the verify stage reject or warn on structures that would tangle the dependency order.",
+      "how_it_shapes_the_loop": "CodeGraph::find_cycles surfaces circular GraphEdge chains, letting the verify stage reject or warn on structures that would tangle the dependency order.",
       "loop_objects_touched": ["CodeGraph", "GraphEdge"],
       "wiring": {
         "inputs_from": ["CodeGraph edges"],
-        "outputs_to": ["verify gate", "tech-debt flagging"]
+        "outputs_to": ["verify gate", "DebtItem flagging"]
       },
       "touch_interaction": {
         "gesture": "long-press",
         "canvas_action": "Long-pressing the graph runs a cycle sweep; any loop of edges lights red and its nodes pulse together.",
         "visual": "A detected cycle rings its nodes in red and animates the loop direction with a rotating dashed edge."
       },
-      "mini_scenario": "The verify stage runs cycle detection before a merge and flags a new A-to-B-to-A import loop for the human to break.",
+      "mini_scenario": "The verify stage runs find_cycles before a merge and flags a new A-to-B-to-A import loop for the human to break.",
       "pitfall": "A cycle in test-only edges may be acceptable; treating every cycle as fatal blocks harmless mutual references."
     },
     {
-      "id": "analysis-15",
-      "title": "Summarize the WorkspaceGraph for a focus symbol",
+      "id": "analysis-17",
+      "title": "Rank hub nodes by graph metrics",
+      "loop_stage": "reason",
+      "pattern": "hub-identification",
+      "intent": "Find the most-connected entities that a change would ripple through.",
+      "how_it_shapes_the_loop": "CodeGraph::node_metrics computes per-node degree and find_hubs ranks the top GraphNodes, so the reason stage knows which entities are high-impact before proposing a change near them; subgraph can isolate a hub's region.",
+      "loop_objects_touched": ["CodeGraph", "GraphNode"],
+      "wiring": {
+        "inputs_from": ["node_metrics"],
+        "outputs_to": ["impact assessment", "reason stage"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching on the graph rescales each node by its degree; hubs swell large while leaves shrink to dots.",
+        "visual": "Node sizes rescale to degree; the biggest hubs glow warm and cast the most edges."
+      },
+      "mini_scenario": "The user pinches and sees the VectorStore node swell as the largest hub, warning that touching it ripples widely.",
+      "pitfall": "Degree measures coupling, not importance; a high-degree utility may be safe to change while a low-degree core type is not."
+    },
+    {
+      "id": "analysis-18",
+      "title": "Summarize a WorkspaceGraph around a focus symbol",
       "loop_stage": "perceive",
       "pattern": "focus-neighborhood",
       "intent": "Retrieve a bounded structural neighborhood around one symbol of interest.",
-      "how_it_shapes_the_loop": "WorkspaceGraphOptions (focus, neighborhood_depth, max_nodes) build a WorkspaceGraphSummary, giving the perceive stage a size-capped subgraph centered on the focus.",
-      "loop_objects_touched": ["WorkspaceGraphSummary", "GraphNode", "GraphEdge"],
+      "how_it_shapes_the_loop": "build_workspace_graph assembles the workspace-wide graph and summarize_graph applies WorkspaceGraphOptions (focus, depth, node cap) to produce a WorkspaceGraphSummary, giving the perceive stage a size-capped subgraph.",
+      "loop_objects_touched": ["WorkspaceGraphOptions", "WorkspaceGraphSummary", "GraphNode", "GraphEdge"],
       "wiring": {
         "inputs_from": ["focus symbol", "WorkspaceGraphOptions"],
         "outputs_to": ["LlmContext", "reason stage"]
@@ -303,104 +363,44 @@
         "canvas_action": "Pinching around a focus node crops the graph to its neighborhood at the chosen depth.",
         "visual": "The graph fades to grey except the focus and its depth-N neighbors, which stay sharp within a lens circle."
       },
-      "mini_scenario": "The user pinches around VectorStore at depth 2 and gets its callers, callees, and their types capped at max_nodes.",
-      "pitfall": "Respect max_nodes; an unbounded neighborhood around a hub symbol expands to the whole workspace and blows the budget."
+      "mini_scenario": "The user pinches around VectorStore at depth 2 and summarize_graph returns its callers, callees, and their types capped at the node limit.",
+      "pitfall": "Respect the node cap in WorkspaceGraphOptions; an unbounded neighborhood around a hub expands to the whole workspace and blows the budget."
     },
     {
-      "id": "analysis-16",
-      "title": "Identify hub nodes in the CodeGraph",
-      "loop_stage": "reason",
-      "pattern": "hub-identification",
-      "intent": "Find the most-connected entities that a change would ripple through.",
-      "how_it_shapes_the_loop": "CodeGraph ranks GraphNodes by edge degree, so the reason stage knows which entities are high-impact before proposing a change near them.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode"],
-      "wiring": {
-        "inputs_from": ["CodeGraph degree metrics"],
-        "outputs_to": ["impact assessment", "reason stage"]
-      },
-      "touch_interaction": {
-        "gesture": "spread",
-        "canvas_action": "Spreading on the graph scales each node by its degree; hubs swell large while leaves shrink.",
-        "visual": "Node sizes rescale to degree; the biggest hubs glow warm and cast the most edges, leaves shrink to dots."
-      },
-      "mini_scenario": "The user spreads and sees ProjectIntelligence swell as the largest hub, warning that touching it ripples widely.",
-      "pitfall": "Degree measures coupling, not importance; a high-degree utility may be safe to change while a low-degree core type is not."
-    },
-    {
-      "id": "analysis-17",
-      "title": "Prioritize a DebtItem with the DebtPrioritizer",
+      "id": "analysis-19",
+      "title": "Prioritize tech debt into a roadmap",
       "loop_stage": "reason",
       "pattern": "debt-prioritization",
       "intent": "Rank technical debt so the loop fixes the highest-value items first.",
-      "how_it_shapes_the_loop": "DebtPrioritizer scores each DebtItem by a strategy (RiskImpactEffort, QuickWins, SecurityFirst...), giving the reason stage an ordered debt roadmap.",
+      "how_it_shapes_the_loop": "The tech_debt module scores each DebtItem — total_cost compounds fix_cost with monthly_interest, severity_weight scales impact, and hotspot_score folds in churn_rate — then prioritize and generate_roadmap order the work for the reason stage.",
       "loop_objects_touched": ["DebtItem"],
       "wiring": {
-        "inputs_from": ["detected DebtItems"],
+        "inputs_from": ["detected DebtItems", "hotspot_score metrics"],
         "outputs_to": ["improvement roadmap", "reason stage"]
       },
       "touch_interaction": {
         "gesture": "flick",
-        "canvas_action": "Flicking the strategy selector re-sorts the debt list under the chosen prioritization rule.",
-        "visual": "Debt cards re-order; under SecurityFirst the security items jump to the top with a red shield accent."
+        "canvas_action": "Flicking the debt list re-sorts it by priority_score; the costliest items rise to the top.",
+        "visual": "Debt cards re-order by score; high-interest items carry a rising cost curve, security items a red shield accent."
       },
-      "mini_scenario": "The user flicks to QuickWins and the low-effort high-impact debt items rise to the top of the roadmap.",
-      "pitfall": "The strategy changes the order, not the debt; switching to CostFirst can bury a critical security item that RiskImpactEffort surfaced."
-    },
-    {
-      "id": "analysis-18",
-      "title": "Compute compounding cost on a DebtItem",
-      "loop_stage": "verify",
-      "pattern": "debt-cost-accrual",
-      "intent": "Quantify how a debt item grows in cost the longer it is left.",
-      "how_it_shapes_the_loop": "A DebtItem's interest_rate and age_days compound its total cost, giving the verify stage a hard number that justifies acting now versus deferring.",
-      "loop_objects_touched": ["DebtItem"],
-      "wiring": {
-        "inputs_from": ["DebtItem age and interest_rate"],
-        "outputs_to": ["cost report", "prioritization"]
-      },
-      "touch_interaction": {
-        "gesture": "long-press",
-        "canvas_action": "Long-pressing a debt card unfurls its cost curve rising with age at its interest rate.",
-        "visual": "A cost curve arcs upward on the card; the current age marker glows and the projected cost ticks higher as it ages."
-      },
-      "mini_scenario": "A duplication debt item is long-pressed and its compounding curve shows the cost doubling if deferred another quarter.",
-      "pitfall": "Interest rate defaults by DebtType; applying a flat rate to every item understates the true cost of high-interest categories like Security."
-    },
-    {
-      "id": "analysis-19",
-      "title": "Evict vocabulary when the TfIdf backend overflows",
-      "loop_stage": "control",
-      "pattern": "vocabulary-eviction",
-      "intent": "Keep the lightweight embedding backend bounded as the codebase grows.",
-      "how_it_shapes_the_loop": "The TfIdfEmbeddingProvider evicts terms when its vocabulary exceeds MAX_VOCABULARY_SIZE, so the control layer keeps embedding memory bounded without swapping backends.",
-      "loop_objects_touched": ["EmbeddingBackend", "VectorStore"],
-      "wiring": {
-        "inputs_from": ["growing term vocabulary"],
-        "outputs_to": ["bounded embedding memory"]
-      },
-      "touch_interaction": {
-        "gesture": "flick",
-        "canvas_action": "Flicking the overflowing vocabulary panel ejects the least-informative terms off its bottom edge.",
-        "visual": "A vocabulary bar hits its ceiling and flashes; rare low-weight terms slough off the bottom as it settles back under the cap."
-      },
-      "mini_scenario": "As indexing crosses 50k terms, the TfIdf backend evicts the rarest terms so embedding memory stays flat.",
-      "pitfall": "Eviction drops terms from future embeddings; evicting a term still present in indexed chunks skews their vectors on re-embed."
+      "mini_scenario": "The user flicks the debt list and a high-churn file with mounting monthly_interest jumps to the top of the generated roadmap.",
+      "pitfall": "The strategy changes the order, not the debt; sorting by effort alone can bury a critical security item that severity_weight would surface."
     },
     {
       "id": "analysis-20",
-      "title": "Render the CodeGraph to a shareable diagram",
+      "title": "Render the graph to a shareable diagram",
       "loop_stage": "act",
       "pattern": "graph-rendering",
       "intent": "Export the structural graph as a diagram a human can read and reason over.",
-      "how_it_shapes_the_loop": "CodeGraph renders to DOT, Mermaid, ASCII, or PlantUML, letting the act stage produce a human-facing artifact from the same structure the loop reasons on.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge"],
+      "how_it_shapes_the_loop": "CodeGraph::render and render_to emit DOT, Mermaid, ASCII, or PlantUML (cluster and with_direction shape layout), and render_workspace_graph does the same at workspace scale, letting the act stage produce a human-facing artifact from the structure the loop reasons on.",
+      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge", "WorkspaceGraphSummary"],
       "wiring": {
-        "inputs_from": ["CodeGraph"],
+        "inputs_from": ["CodeGraph", "WorkspaceGraphSummary"],
         "outputs_to": ["diagram artifact", "human review"]
       },
       "touch_interaction": {
         "gesture": "double-tap",
-        "canvas_action": "Double-tapping the graph exports it to the selected format; a rendered diagram card slides out.",
+        "canvas_action": "Double-tapping the graph exports it via render_to in the selected format; a rendered diagram card slides out.",
         "visual": "A format chip (Mermaid/DOT) highlights and a clean rendered diagram peels off the live graph as a shareable card."
       },
       "mini_scenario": "The user double-taps to export the module graph as Mermaid for a design doc, matching the graph the agent searched.",
