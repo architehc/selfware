@@ -1,291 +1,270 @@
 {
-  "node_id": "consolidation",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (CONSOLIDATION)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via consolidation context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize consolidation token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding consolidation dynamically does not invalidate active turn execution."
-  ],
+  "component": "consolidation",
+  "tier": "tooling",
+  "loop_stage": "learn",
+  "summary": "The consolidation component is the loop's memory-consolidation ('sleep') system. On an interval the ConsolidationEngine collects recent episodes via ShortTermCollector, compacts them with MemoryCompactor (LLM summarization), deduplicates near-identical memories, establishes causal links, and writes durable TemporalRecords with decay scores into a LongTermStore, emitting a ConsolidationReport. It runs off the hot path: it transforms transient EpisodeData into consolidated long-term memory that later perceive stages retrieve, reshaping the loop's memory budget over time rather than per-iteration.",
+  "loop_objects": ["EpisodeData", "CollectedItem", "CollectedBatch", "CompactedContent", "TemporalRecord", "RecordImportance", "ConsolidationReport", "LongTermStore", "StoreResult", "ConsolidationConfig", "ConsolidationEngine"],
+  "context_basis": "Recommendations were formed reading src/consolidation/ (mod ConsolidationEngine, collector, compactor, store, temporal, config) in the context of the full engine at a ~600k budget framing, where consolidation runs periodically to convert episodes into long-term memory.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Consolidation - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling consolidation under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "consolidation-01",
+      "title": "Collect recent episodes for consolidation",
+      "loop_stage": "perceive",
+      "pattern": "harvest-short-term",
+      "intent": "Gather episodes eligible for consolidation by age and importance.",
+      "how_it_shapes_the_loop": "ShortTermCollector.collect_episodes filters EpisodeData into CollectedItems, defining the working set the sleep cycle will process.",
+      "loop_objects_touched": ["EpisodeData", "CollectedItem"],
+      "wiring": {"inputs_from": ["recent episodes", "max_age + min_importance"], "outputs_to": ["ShortTermCollector working set"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick recent episode chips into the consolidation node to queue them.", "visual": "Episodes stream in as small cards; those below the importance floor gray out and drop."},
+      "mini_scenario": "The sleep cycle wakes and collect_episodes pulls episodes newer than max_age and above min_importance into a batch.",
+      "pitfall": "Filter by both age and importance; consolidating trivial episodes wastes LLM tokens on noise."
     },
     {
-      "example_id": 2,
-      "title": "Consolidation - High Token Load (600k Context)",
-      "loop_scenario": "Modeling consolidation under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "consolidation-02",
+      "title": "Assemble a batch to summarize",
+      "loop_stage": "reason",
+      "pattern": "batch-for-compaction",
+      "intent": "Group collected items into a CollectedBatch sized for one compaction pass.",
+      "how_it_shapes_the_loop": "assemble_batch bundles CollectedItems by batch_size so compaction operates on coherent chunks within the concurrency budget.",
+      "loop_objects_touched": ["CollectedItem", "CollectedBatch"],
+      "wiring": {"inputs_from": ["CollectedItems", "batch_size"], "outputs_to": ["MemoryCompactor"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch collected item cards together to form a batch bundle.", "visual": "Items snap into a stacked batch card showing its item count and estimated tokens."},
+      "mini_scenario": "assemble_batch groups twenty CollectedItems into a CollectedBatch that the compactor summarizes in one LLM call.",
+      "pitfall": "Size batches to the summary token budget; oversized batches truncate or overflow the summarization prompt."
     },
     {
-      "example_id": 3,
-      "title": "Consolidation - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling consolidation under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "consolidation-03",
+      "title": "Compact episodes into a summary",
+      "loop_stage": "learn",
+      "pattern": "llm-summarization",
+      "intent": "Distill a batch of episodes into CompactedContent.",
+      "how_it_shapes_the_loop": "MemoryCompactor summarizes a CollectedBatch into CompactedContent, shrinking many episodes into one dense memory to save long-term budget.",
+      "loop_objects_touched": ["CollectedBatch", "CompactedContent"],
+      "wiring": {"inputs_from": ["CollectedBatch", "summary_max_tokens"], "outputs_to": ["TemporalRecord content"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the compactor node to preview the summary it produced.", "visual": "The batch card collapses into a single glowing summary card with an estimated-tokens badge."},
+      "mini_scenario": "A batch of debugging episodes is compacted into a single CompactedContent capturing the root cause and fix.",
+      "pitfall": "Preserve the salient facts, not just length reduction; a summary that drops the key insight defeats consolidation."
     },
     {
-      "example_id": 4,
-      "title": "Consolidation - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling consolidation under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "consolidation-04",
+      "title": "Deduplicate near-identical memories",
+      "loop_stage": "learn",
+      "pattern": "similarity-dedup",
+      "intent": "Avoid storing multiple copies of the same knowledge.",
+      "how_it_shapes_the_loop": "Consolidation drops records above the dedup_similarity threshold, keeping the LongTermStore compact so retrieval stays sharp.",
+      "loop_objects_touched": ["CompactedContent", "TemporalRecord", "ConsolidationReport"],
+      "wiring": {"inputs_from": ["candidate records", "dedup_similarity"], "outputs_to": ["deduplicated store", "duplicates_removed count"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread the store node to see clusters of similar records with duplicates flagged.", "visual": "Near-duplicate records cluster; the kept one glows while duplicates fade with a merge arrow."},
+      "mini_scenario": "Two consolidations of the same recurring task produce near-identical records; the second is dropped as a duplicate.",
+      "pitfall": "Set dedup_similarity carefully; too high keeps redundant memories, too low merges genuinely distinct ones."
     },
     {
-      "example_id": 5,
-      "title": "Consolidation - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling consolidation under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "consolidation-05",
+      "title": "Assign importance to records",
+      "loop_stage": "reason",
+      "pattern": "importance-tiering",
+      "intent": "Rank consolidated memories so key ones survive pruning.",
+      "how_it_shapes_the_loop": "RecordImportance tiers TemporalRecords, letting the store prioritize what to keep as memory budget tightens.",
+      "loop_objects_touched": ["TemporalRecord", "RecordImportance"],
+      "wiring": {"inputs_from": ["CompactedContent", "source importance"], "outputs_to": ["store retention policy"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press a record to adjust its importance tier.", "visual": "Records render at heights by tier; high-importance ones sit tall with a star badge."},
+      "mini_scenario": "A record capturing a critical architectural decision is tagged high importance so it resists decay and pruning.",
+      "pitfall": "Do not over-promote; if everything is high importance, importance can no longer guide pruning."
     },
     {
-      "example_id": 6,
-      "title": "Consolidation - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling consolidation under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "consolidation-06",
+      "title": "Apply time decay to relevance",
+      "loop_stage": "learn",
+      "pattern": "half-life-decay",
+      "intent": "Let old, unused memories fade in retrieval ranking.",
+      "how_it_shapes_the_loop": "decay_score_at applies decay_half_life_hours so a TemporalRecord's relevance drops over time unless refreshed by access.",
+      "loop_objects_touched": ["TemporalRecord", "RecordImportance"],
+      "wiring": {"inputs_from": ["record age", "half_life_hours"], "outputs_to": ["retrieval ranking"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the timeline to watch decay scores age across records.", "visual": "Records dim and shrink as their decay score falls; recently accessed ones re-brighten."},
+      "mini_scenario": "An old record's decay_score_at drops below the useful threshold, so it ranks low in the next retrieval.",
+      "pitfall": "Weight decay against importance; a critical old memory should decay slower than a trivial recent one."
     },
     {
-      "example_id": 7,
-      "title": "Consolidation - Stream Chunk Processing",
-      "loop_scenario": "Modeling consolidation under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "consolidation-07",
+      "title": "Refresh a record on access",
+      "loop_stage": "perceive",
+      "pattern": "access-reinforcement",
+      "intent": "Keep frequently-used memories fresh.",
+      "how_it_shapes_the_loop": "record_access updates a TemporalRecord's access metadata, boosting its decay score so useful memories persist across sleep cycles.",
+      "loop_objects_touched": ["TemporalRecord"],
+      "wiring": {"inputs_from": ["retrieval hit"], "outputs_to": ["updated decay score"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a retrieved record to reinforce it; its access count ticks up.", "visual": "The tapped record pulses brighter and its freshness ring refills."},
+      "mini_scenario": "A record retrieved during a task calls record_access, so it survives the next decay pass instead of fading.",
+      "pitfall": "Reinforce on genuine use, not incidental scans; over-reinforcing pins stale records artificially."
     },
     {
-      "example_id": 8,
-      "title": "Consolidation - Interactive User Interruption",
-      "loop_scenario": "Modeling consolidation under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "consolidation-08",
+      "title": "Establish causal links between memories",
+      "loop_stage": "learn",
+      "pattern": "causal-linking",
+      "intent": "Connect a cause memory to its effect memory.",
+      "how_it_shapes_the_loop": "Consolidation records causal_links so the perceive stage can traverse from a symptom memory to its known cause.",
+      "loop_objects_touched": ["TemporalRecord", "ConsolidationReport"],
+      "wiring": {"inputs_from": ["related records"], "outputs_to": ["causal_links_created count", "linked store"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge between two record cards to assert a causal link.", "visual": "A directed cause->effect arrow forms; linked records share a highlight when either is selected."},
+      "mini_scenario": "Consolidation links a 'config change' record to a 'test failure' record so future retrieval surfaces the cause.",
+      "pitfall": "Only link real causation; spurious links pollute retrieval with misleading associations."
     },
     {
-      "example_id": 9,
-      "title": "Consolidation - Subagent Delegation",
-      "loop_scenario": "Modeling consolidation under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "consolidation-09",
+      "title": "Preserve multimodal references",
+      "loop_stage": "learn",
+      "pattern": "multimodal-anchoring",
+      "intent": "Keep pointers to images or artifacts alongside text summaries.",
+      "how_it_shapes_the_loop": "Consolidation retains multimodal_refs so a compacted memory can still surface its screenshot or artifact on retrieval.",
+      "loop_objects_touched": ["CompactedContent", "TemporalRecord", "ConsolidationReport"],
+      "wiring": {"inputs_from": ["episode multimodal attachments"], "outputs_to": ["multimodal_refs_count", "store"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap a record to expand its attached multimodal thumbnails.", "visual": "Small thumbnail chips fan out beneath the record's text summary."},
+      "mini_scenario": "A UI-debugging episode is compacted but its screenshot reference is preserved so the memory stays visually grounded.",
+      "pitfall": "Store references, not copies, of large artifacts; embedding raw media bloats the store."
     },
     {
-      "example_id": 10,
-      "title": "Consolidation - Safety Policy Interception",
-      "loop_scenario": "Modeling consolidation under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "consolidation-10",
+      "title": "Write records to the long-term store",
+      "loop_stage": "act",
+      "pattern": "durable-persist",
+      "intent": "Persist consolidated memories for future retrieval.",
+      "how_it_shapes_the_loop": "LongTermStore writes TemporalRecords (optionally embedded) and returns a StoreResult, moving knowledge from volatile episodes to durable memory.",
+      "loop_objects_touched": ["TemporalRecord", "LongTermStore", "StoreResult"],
+      "wiring": {"inputs_from": ["CompactedContent + metadata"], "outputs_to": ["persisted store", "StoreResult"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick a finished summary card into the store to persist it.", "visual": "The card slides into the store node and leaves a persisted-checkmark marker."},
+      "mini_scenario": "After compaction, the engine writes the TemporalRecord to LongTermStore and the StoreResult confirms persistence.",
+      "pitfall": "Persist atomically; a partial write during the sleep cycle can leave the store inconsistent."
     },
     {
-      "example_id": 11,
-      "title": "Consolidation - Context Pruning & Compaction",
-      "loop_scenario": "Modeling consolidation under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "consolidation-11",
+      "title": "Query stored memory by tag",
+      "loop_stage": "perceive",
+      "pattern": "tag-scoped-retrieval",
+      "intent": "Retrieve consolidated memories relevant to the current task.",
+      "how_it_shapes_the_loop": "query_by_tag pulls matching TemporalRecords into the perceive stage, injecting durable knowledge back into the loop.",
+      "loop_objects_touched": ["TemporalRecord", "LongTermStore"],
+      "wiring": {"inputs_from": ["task tags"], "outputs_to": ["perceive context injection"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a tag chip on the store to pull matching records into the context tray.", "visual": "Matching records light up and slide into a context tray at the canvas edge."},
+      "mini_scenario": "Starting a database task, query_by_tag('db') returns past consolidated db-migration memories into context.",
+      "pitfall": "Rank retrieved records by decay+importance; dumping all tag matches floods the context budget."
     },
     {
-      "example_id": 12,
-      "title": "Consolidation - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling consolidation under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "consolidation-12",
+      "title": "Run consolidation on a schedule",
+      "loop_stage": "control",
+      "pattern": "periodic-sleep-cycle",
+      "intent": "Consolidate memory off the hot path at intervals.",
+      "how_it_shapes_the_loop": "start_periodic spawns a background task that runs consolidation every interval_secs, so memory upkeep never blocks the main loop.",
+      "loop_objects_touched": ["ConsolidationEngine", "ConsolidationReport"],
+      "wiring": {"inputs_from": ["interval_secs"], "outputs_to": ["background consolidation task"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotate the interval dial on the consolidation node to set the sleep cadence.", "visual": "A clock ring on the node ticks toward the next cycle; it pulses moon-blue while consolidating."},
+      "mini_scenario": "start_periodic runs every hour; between cycles the main loop is unaffected while memory quietly consolidates.",
+      "pitfall": "Keep consolidation off the hot path; running it synchronously stalls the loop during summarization."
     },
     {
-      "example_id": 13,
-      "title": "Consolidation - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling consolidation under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "consolidation-13",
+      "title": "Cap concurrent LLM summarization",
+      "loop_stage": "control",
+      "pattern": "bounded-fanout",
+      "intent": "Limit parallel summarization to protect the endpoint and budget.",
+      "how_it_shapes_the_loop": "max_concurrent_llm bounds how many batches summarize at once, keeping the sleep cycle within its token and rate budget.",
+      "loop_objects_touched": ["CollectedBatch", "ConsolidationConfig"],
+      "wiring": {"inputs_from": ["max_concurrent_llm"], "outputs_to": ["throttled compaction fanout"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the fanout edges to set how many batches summarize in parallel.", "visual": "Active summarization lanes glow; queued batches wait dimmed behind the concurrency cap."},
+      "mini_scenario": "With max_concurrent_llm=3, only three batches summarize at once while the rest queue, respecting the rate limit.",
+      "pitfall": "Do not unbound the fanout; too many concurrent LLM calls trip rate limits and blow the token budget."
     },
     {
-      "example_id": 14,
-      "title": "Consolidation - Isolated Branch Staging",
-      "loop_scenario": "Modeling consolidation under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "consolidation-14",
+      "title": "Emit a consolidation report",
+      "loop_stage": "verify",
+      "pattern": "cycle-accounting",
+      "intent": "Summarize what one sleep cycle accomplished.",
+      "how_it_shapes_the_loop": "ConsolidationReport records episodes_processed, records_produced, duplicates_removed, and tokens_used so the loop can verify the cycle's cost and yield.",
+      "loop_objects_touched": ["ConsolidationReport"],
+      "wiring": {"inputs_from": ["completed cycle"], "outputs_to": ["observability", "budget accounting"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the consolidation node after a cycle to read its report card.", "visual": "A report card lists processed/produced/deduped counts and a tokens-used meter."},
+      "mini_scenario": "A cycle processes 40 episodes into 12 records, removes 8 duplicates, and the report shows the token cost.",
+      "pitfall": "Watch tokens_used per record; a cycle that spends huge tokens for few records signals oversized batches."
     },
     {
-      "example_id": 15,
-      "title": "Consolidation - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling consolidation under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "consolidation-15",
+      "title": "Prune episodes after consolidation",
+      "loop_stage": "learn",
+      "pattern": "reclaim-after-compact",
+      "intent": "Free short-term storage once episodes are safely consolidated.",
+      "how_it_shapes_the_loop": "prune_after_consolidation removes source episodes once their knowledge is in the LongTermStore, bounding short-term memory growth.",
+      "loop_objects_touched": ["EpisodeData", "TemporalRecord", "ConsolidationConfig"],
+      "wiring": {"inputs_from": ["consolidated episodes", "prune_after_consolidation"], "outputs_to": ["freed short-term store"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick consolidated episode chips into a trash bin to prune them.", "visual": "Consolidated episodes gray out with a checkmark, then fade as they are pruned."},
+      "mini_scenario": "After records are persisted, prune_after_consolidation deletes the source episodes so short-term memory does not grow unbounded.",
+      "pitfall": "Prune only after successful persistence; deleting episodes before the store write risks losing them on failure."
     },
     {
-      "example_id": 16,
-      "title": "Consolidation - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling consolidation under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "consolidation-16",
+      "title": "Age out episodes past a horizon",
+      "loop_stage": "learn",
+      "pattern": "age-horizon-filter",
+      "intent": "Ignore episodes too old to be worth consolidating.",
+      "how_it_shapes_the_loop": "max_episode_age_hours bounds which episodes the collector considers, keeping each cycle focused on relevant recent activity.",
+      "loop_objects_touched": ["EpisodeData", "CollectedItem", "ConsolidationConfig"],
+      "wiring": {"inputs_from": ["max_episode_age_hours"], "outputs_to": ["collector eligibility"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the age-horizon slider to set how far back episodes qualify.", "visual": "Episodes beyond the horizon slide past a fade line and drop from the queue."},
+      "mini_scenario": "Episodes older than the age horizon are skipped, so a long-idle backlog does not flood one cycle.",
+      "pitfall": "Set the horizon relative to your interval; too short skips episodes between cycles and loses them."
     },
     {
-      "example_id": 17,
-      "title": "Consolidation - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling consolidation under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "consolidation-17",
+      "title": "Estimate token cost before compaction",
+      "loop_stage": "reason",
+      "pattern": "cost-preview",
+      "intent": "Predict the summarization cost of a batch.",
+      "how_it_shapes_the_loop": "CompactedContent.estimated_tokens lets the engine size batches and forecast budget before spending LLM tokens.",
+      "loop_objects_touched": ["CompactedContent", "CollectedBatch"],
+      "wiring": {"inputs_from": ["batch content"], "outputs_to": ["batch sizing decision"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread a batch card to reveal its estimated token cost bar.", "visual": "A token bar fills; batches near the summary limit tint amber as a warning."},
+      "mini_scenario": "A batch's estimated_tokens nears the summary limit, so the engine splits it before compaction.",
+      "pitfall": "Estimate before, not after, calling the LLM; discovering overflow post-call wastes the whole request."
     },
     {
-      "example_id": 18,
-      "title": "Consolidation - Gesture-based Node Filter",
-      "loop_scenario": "Modeling consolidation under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "consolidation-18",
+      "title": "Track temporal span of a record",
+      "loop_stage": "learn",
+      "pattern": "temporal-provenance",
+      "intent": "Record the time range the memory covers.",
+      "how_it_shapes_the_loop": "time_span gives a TemporalRecord a start/end window, letting the loop reason about when consolidated knowledge applies.",
+      "loop_objects_touched": ["TemporalRecord"],
+      "wiring": {"inputs_from": ["episode timestamps"], "outputs_to": ["temporal retrieval filters"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press a record to see its covered time span on a mini timeline.", "visual": "A span bracket highlights the start-to-end window on the record's timeline strip."},
+      "mini_scenario": "A record consolidating a week of episodes carries a time_span so retrieval can scope to that period.",
+      "pitfall": "Derive the span from the source episodes, not the write time; the record covers when things happened, not when it was stored."
     },
     {
-      "example_id": 19,
-      "title": "Consolidation - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling consolidation under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "consolidation-19",
+      "title": "Surface consolidation errors",
+      "loop_stage": "verify",
+      "pattern": "partial-failure-visibility",
+      "intent": "Know which parts of a cycle failed without aborting the rest.",
+      "how_it_shapes_the_loop": "ConsolidationReport.errors collects per-item failures so the cycle degrades gracefully and the loop sees what did not consolidate.",
+      "loop_objects_touched": ["ConsolidationReport"],
+      "wiring": {"inputs_from": ["failed compactions/writes"], "outputs_to": ["retry queue", "observability"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the report to expand the error list for the cycle.", "visual": "Failed items list under a red error section while successful ones stay in the green summary."},
+      "mini_scenario": "One batch's LLM call times out; its error is recorded in the report while the other batches consolidate successfully.",
+      "pitfall": "Isolate per-item failures; one bad batch must not abort the whole consolidation cycle."
     },
     {
-      "example_id": 20,
-      "title": "Consolidation - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling consolidation under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "ConsolidationPayload"
-      ],
-      "component_loop_effect": "Determines how consolidation intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'consolidation' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "consolidation-20",
+      "title": "Compose the sleep cycle end to end",
+      "loop_stage": "learn",
+      "pattern": "consolidation-pipeline",
+      "intent": "Wire collect, compact, dedup, link, store, and report into one background cycle.",
+      "how_it_shapes_the_loop": "Chains ShortTermCollector -> MemoryCompactor -> dedup/causal-link -> LongTermStore -> ConsolidationReport, running periodically to move episodes into durable memory.",
+      "loop_objects_touched": ["EpisodeData", "CollectedBatch", "CompactedContent", "TemporalRecord", "ConsolidationReport"],
+      "wiring": {"inputs_from": ["recent episodes", "interval trigger"], "outputs_to": ["LongTermStore", "perceive-stage retrieval", "ConsolidationReport"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch to collapse the consolidation sub-nodes into one sleep-cycle node with a moon badge.", "visual": "Collapsed it shows a moon with the last cycle's yield; spread reveals collector, compactor, dedup, store, and report."},
+      "mini_scenario": "On its interval the engine collects episodes, compacts and dedups them, links and stores records, then emits a report before the loop's next perceive stage retrieves the fresh memory.",
+      "pitfall": "Keep the pipeline ordered and off the hot path: collect and compact before store, prune only after persist, and never block the main loop on a cycle."
     }
   ]
 }

@@ -1,291 +1,410 @@
 {
-  "node_id": "bin",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (BIN)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via bin context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize bin token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding bin dynamically does not invalidate active turn execution."
-  ],
+  "component": "bin",
+  "tier": "tooling",
+  "loop_stage": "foundation",
+  "summary": "The bin component holds selfware's auxiliary binaries — offline tools that ground and evaluate the loop rather than run inside it. codegraph builds a JSON dependency graph (CodeGraph of nodes and edges: functions, structs, enums, traits, modules; 'uses'/'implements'/'contains' edges, plus fusion_groups for cyclic clusters) that gives the planner structural grounding. vlm_gen_fixtures generates PNG benchmark fixtures across six escalating difficulty levels (TUI state, diagnostics, architecture, profiling, layout, evolution), and vlm_bench_run (VlmBenchRunner over VlmBenchConfig) drives a vision-language model against them and emits JSON/Markdown reports. On the loop these are 'foundation' (codegraph as structural substrate) and 'eval' (the VLM harness measuring the loop's multimodal perception offline).",
+  "loop_objects": ["CodeGraph", "NodeData", "Edge", "Symbol", "VlmBenchRunner", "VlmBenchConfig", "Difficulty", "Fixture", "Report", "Evidence", "Plan"],
+  "context_basis": "Recommendations were formed by reading src/bin/ (codegraph.rs, vlm_bench_run.rs, vlm_gen_fixtures.rs) in the context of the full engine's ~600k-token budget framing, so each move treats these binaries as offline substrate and eval harnesses that inform the loop without competing for its live turn budget.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Bin - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling bin under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "bin-01",
+      "title": "Build a code graph to ground planning",
+      "loop_stage": "foundation",
+      "pattern": "structure-first",
+      "intent": "Produce a whole-repo structural map the planner can navigate before touching code.",
+      "how_it_shapes_the_loop": "codegraph regex-scans the crate and emits codegraph.json with nodes (id,label,kind,path,lines,tokens_estimate,complexity) and edges; the loop plans against this map instead of blind file walks, saving perceive budget.",
+      "loop_objects_touched": ["CodeGraph", "NodeData", "Edge"],
+      "wiring": {
+        "inputs_from": ["repository source tree"],
+        "outputs_to": ["codegraph.json", "planner navigation map"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread over the repo root node to unfold the full CodeGraph as a spatial constellation of module and type nodes.",
+        "visual": "Nodes bloom by kind color (fn/struct/enum/trait/module) with edges drawn as 'uses'/'implements'/'contains' strands."
+      },
+      "mini_scenario": "Before a refactor, cargo run --bin codegraph writes codegraph.json and the planner loads it to see which modules touch the target type.",
+      "pitfall": "codegraph is deprecated (2026-07-26) and emits duplicate node ids and dangling edges — prefer selfware self-evolve's graph; use this only as a reference fallback."
     },
     {
-      "example_id": 2,
-      "title": "Bin - High Token Load (600k Context)",
-      "loop_scenario": "Modeling bin under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "bin-02",
+      "title": "Estimate per-node token cost for budgeting",
+      "loop_stage": "foundation",
+      "pattern": "budget-envelope",
+      "intent": "Attach a token estimate to each code node so the loop can size reads before it makes them.",
+      "how_it_shapes_the_loop": "Each CodeGraph node carries tokens_estimate and a low/medium/high complexity tag; the planner uses these to pick which nodes fit the remaining budget, shaping how much of the codebase a single iteration ingests.",
+      "loop_objects_touched": ["CodeGraph", "NodeData"],
+      "wiring": {
+        "inputs_from": ["node line counts"],
+        "outputs_to": ["planner budget accounting"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch a node to reveal its token-estimate meter and complexity tier.",
+        "visual": "A cost pill shows the token estimate; complexity renders as a three-step green/amber/red gauge."
+      },
+      "mini_scenario": "The loop has 40k budget left; it picks three low-complexity nodes under 12k tokens total rather than one high-complexity module.",
+      "pitfall": "tokens_estimate is a heuristic from line counts, not a real tokenizer count — treat it as a rough envelope, not a hard budget guarantee."
     },
     {
-      "example_id": 3,
-      "title": "Bin - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling bin under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "bin-03",
+      "title": "Surface context actions per node",
+      "loop_stage": "foundation",
+      "pattern": "action-affordance",
+      "intent": "Offer the loop a menu of what it can do with each code node and the cost of each.",
+      "how_it_shapes_the_loop": "Each node lists context_actions (inspect, read_full, read_skeleton, alter, build_new) with token/time estimates; the loop selects an affordance sized to its budget instead of always reading full.",
+      "loop_objects_touched": ["CodeGraph", "NodeData"],
+      "wiring": {
+        "inputs_from": ["CodeGraph node metadata"],
+        "outputs_to": ["planner action selection"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a node to open its context-actions wheel of inspect/read_full/read_skeleton/alter/build_new.",
+        "visual": "A radial menu fans out, each spoke labeled with its token and time estimate."
+      },
+      "mini_scenario": "Rather than read_full a 900-line module, the loop picks read_skeleton to get its shape for a fraction of the tokens.",
+      "pitfall": "Don't default to read_full for every node — the skeleton affordance exists precisely to keep the perceive step within budget."
     },
     {
-      "example_id": 4,
-      "title": "Bin - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling bin under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "bin-04",
+      "title": "Detect cyclic clusters with fusion groups",
+      "loop_stage": "reason",
+      "pattern": "cycle-aware-planning",
+      "intent": "Warn the planner about circular dependencies before it edits into a knot.",
+      "how_it_shapes_the_loop": "codegraph computes fusion_groups (binary mutual deps, trinary cycles, quaternary diamonds); the loop reasons that these clusters must change together, so it plans them as a unit rather than one file at a time.",
+      "loop_objects_touched": ["CodeGraph", "Edge"],
+      "wiring": {
+        "inputs_from": ["edge dependency analysis"],
+        "outputs_to": ["planner cluster grouping"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotate a fusion group to view the cycle from different angles and see which edges close the loop.",
+        "visual": "Cyclic edges glow in a closed ring; binary/trinary/quaternary groups are tinted by their fusion pattern."
+      },
+      "mini_scenario": "codegraph flags a binary fusion between config and loader; the loop plans a joint edit instead of breaking one and stranding the other.",
+      "pitfall": "Ignoring fusion_groups leads to half-applied edits that leave a cycle inconsistent — treat a group as an atomic unit of change."
     },
     {
-      "example_id": 5,
-      "title": "Bin - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling bin under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "bin-05",
+      "title": "Run the code graph as an offline foundation step",
+      "loop_stage": "foundation",
+      "pattern": "offline-substrate",
+      "intent": "Keep graph construction out of the live turn budget.",
+      "how_it_shapes_the_loop": "codegraph runs as a standalone binary (cargo run --bin codegraph) from the project root and writes a file; the loop consumes the artifact later, so heavy scanning never competes with in-turn reasoning.",
+      "loop_objects_touched": ["CodeGraph"],
+      "wiring": {
+        "inputs_from": ["CLI invocation"],
+        "outputs_to": ["codegraph.json artifact"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick the codegraph node into the offline tray to schedule a background regeneration.",
+        "visual": "The node moves to a separate offline lane and shows a build spinner detached from the live loop."
+      },
+      "mini_scenario": "Overnight, codegraph regenerates the artifact; the next morning's loop loads a fresh map with zero in-turn cost.",
+      "pitfall": "A stale codegraph.json misleads the planner — regenerate after large refactors, since the file is a snapshot not a live view."
     },
     {
-      "example_id": 6,
-      "title": "Bin - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling bin under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "bin-06",
+      "title": "Generate benchmark fixtures for VLM eval",
+      "loop_stage": "foundation",
+      "pattern": "fixture-provisioning",
+      "intent": "Produce the visual stimuli the eval harness will grade the loop's perception against.",
+      "how_it_shapes_the_loop": "vlm_gen_fixtures renders 18 PNGs across six levels via text_to_png into level subdirs (ensure_fixture_dir); these become the fixed ground truth that lets eval measure multimodal perception reproducibly.",
+      "loop_objects_touched": ["Fixture", "Difficulty"],
+      "wiring": {
+        "inputs_from": ["CLI invocation (--features vlm-bench)"],
+        "outputs_to": ["vlm_fixtures/ PNG set"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread over the fixtures node to lay out all six level folders and their rendered PNGs.",
+        "visual": "Thumbnails tile by level (l1..mega), each folder chip badged with its PNG count."
+      },
+      "mini_scenario": "cargo run --features vlm-bench --bin vlm_gen_fixtures writes l1_tui_state through mega_evolution so the harness has stable inputs.",
+      "pitfall": "Regenerating fixtures mid-benchmark invalidates comparability — freeze the fixture set before a scoring run."
     },
     {
-      "example_id": 7,
-      "title": "Bin - Stream Chunk Processing",
-      "loop_scenario": "Modeling bin under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "bin-07",
+      "title": "Ladder difficulty from TUI state to evolution",
+      "loop_stage": "foundation",
+      "pattern": "difficulty-ladder",
+      "intent": "Structure eval so perception is tested across escalating visual complexity.",
+      "how_it_shapes_the_loop": "The Difficulty enum (Easy..Mega) maps to level folders (l1 TUI state, l2 diagnostics, l3 architecture, l4 profiling, l5 layout, mega evolution); eval walks the ladder to find where the loop's vision breaks down.",
+      "loop_objects_touched": ["Difficulty", "Fixture"],
+      "wiring": {
+        "inputs_from": ["fixture level structure"],
+        "outputs_to": ["VlmBenchRunner difficulty ordering"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag along the difficulty rail to preview each level's fixtures in ascending complexity.",
+        "visual": "A rail of six stops lights up sequentially; harder stops carry a denser, warmer tint."
+      },
+      "mini_scenario": "Eval runs Easy through Hard cleanly but drops accuracy at l4 profiling flamegraphs, pinpointing the loop's perception limit.",
+      "pitfall": "Skipping intermediate levels hides where degradation begins — run the ladder in order, not just the extremes."
     },
     {
-      "example_id": 8,
-      "title": "Bin - Interactive User Interruption",
-      "loop_scenario": "Modeling bin under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "bin-08",
+      "title": "Configure the benchmark runner",
+      "loop_stage": "foundation",
+      "pattern": "eval-config",
+      "intent": "Pin the endpoint, model, and sampling so eval results are reproducible.",
+      "how_it_shapes_the_loop": "VlmBenchConfig captures endpoint, model, concurrency, max_tokens, temperature, timeout, and dirs; fixing these makes a benchmark run a controlled measurement of the loop's perception rather than a moving target.",
+      "loop_objects_touched": ["VlmBenchConfig"],
+      "wiring": {
+        "inputs_from": ["CLI flags"],
+        "outputs_to": ["VlmBenchRunner"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the runner node to open its config wheel of endpoint/model/temperature/concurrency.",
+        "visual": "Each parameter renders as an adjustable dial; changed-from-default dials glow to flag non-standard runs."
+      },
+      "mini_scenario": "The operator sets --model qwen/qwen3.5-9b --temperature 0.2 so two runs on the same fixtures are directly comparable.",
+      "pitfall": "Changing temperature or model between runs invalidates comparison — record the VlmBenchConfig alongside every report."
     },
     {
-      "example_id": 9,
-      "title": "Bin - Subagent Delegation",
-      "loop_scenario": "Modeling bin under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "bin-09",
+      "title": "Drive the VLM against fixtures",
+      "loop_stage": "verify",
+      "pattern": "eval-run",
+      "intent": "Actually score the model's visual reasoning on the frozen fixture set.",
+      "how_it_shapes_the_loop": "VlmBenchRunner sends each fixture to the OpenAI-compatible /v1 endpoint and collects per-level results; this is the eval act that verifies whether the loop's perception layer meets bar before it's trusted in production.",
+      "loop_objects_touched": ["VlmBenchRunner", "Fixture", "Report"],
+      "wiring": {
+        "inputs_from": ["VlmBenchConfig", "vlm_fixtures/"],
+        "outputs_to": ["per-level results"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the run node to launch the benchmark; a progress edge sweeps through each fixture.",
+        "visual": "A fill bar advances per level; passing fixtures mark green, failures red as they resolve."
+      },
+      "mini_scenario": "The runner sends dashboard_error.png and grades whether the VLM correctly reports the connection-error state.",
+      "pitfall": "A flaky endpoint inflates failures — respect the timeout and concurrency settings so contention doesn't masquerade as poor perception."
     },
     {
-      "example_id": 10,
-      "title": "Bin - Safety Policy Interception",
-      "loop_scenario": "Modeling bin under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "bin-10",
+      "title": "Emit dual JSON and Markdown reports",
+      "loop_stage": "learn",
+      "pattern": "dual-report",
+      "intent": "Produce both a machine-readable and a human-readable record of eval outcomes.",
+      "how_it_shapes_the_loop": "The runner writes vlm_benchmark_report.json and .md into vlm_results/; the JSON feeds automated tracking while the Markdown lets a human diagnose, closing the learn loop over perception quality.",
+      "loop_objects_touched": ["Report", "VlmBenchRunner"],
+      "wiring": {
+        "inputs_from": ["per-level results"],
+        "outputs_to": ["vlm_results/ report files"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the report node to flip between its JSON and Markdown faces.",
+        "visual": "The card flips like a coin: one side structured JSON, the other rendered Markdown with a summary table."
+      },
+      "mini_scenario": "After a run, the Markdown report shows l5 layout at 60% while the JSON feeds a dashboard tracking the trend over releases.",
+      "pitfall": "Consuming only the JSON loses the human narrative; reading only the Markdown loses machine tracking — keep both in the loop's memory."
     },
     {
-      "example_id": 11,
-      "title": "Bin - Context Pruning & Compaction",
-      "loop_scenario": "Modeling bin under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "bin-11",
+      "title": "Test diagnostic-reading with l2 fixtures",
+      "loop_stage": "verify",
+      "pattern": "targeted-probe",
+      "intent": "Check specifically whether the loop can read compiler errors from a screenshot.",
+      "how_it_shapes_the_loop": "l2_diagnostics fixtures (lifetime_error, type_mismatch, trait_bound) probe the exact perception the loop needs when a build screenshot is its only evidence; eval here validates a load-bearing capability.",
+      "loop_objects_touched": ["Fixture", "Difficulty", "Report"],
+      "wiring": {
+        "inputs_from": ["l2_diagnostics/ PNGs"],
+        "outputs_to": ["diagnostic-reading score"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the l2 level chip to run only the diagnostics fixtures.",
+        "visual": "Three fixture thumbnails light up; each shows the parsed-vs-expected error side by side."
+      },
+      "mini_scenario": "The harness feeds trait_bound.png and checks the VLM identifies the missing Send bound the loop would need to fix.",
+      "pitfall": "Diagnostic fixtures are text-heavy — a low render resolution can fail the model for legibility, not reasoning; keep text_to_png crisp."
     },
     {
-      "example_id": 12,
-      "title": "Bin - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling bin under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "bin-12",
+      "title": "Test architecture comprehension with l3 fixtures",
+      "loop_stage": "verify",
+      "pattern": "targeted-probe",
+      "intent": "Validate the loop can read system diagrams into a mental model.",
+      "how_it_shapes_the_loop": "l3_architecture fixtures (evolution_diagram, agent_pipeline, safety_layers) test whether the VLM extracts component flow; eval confirms the loop can perceive its own architecture diagrams as structured knowledge.",
+      "loop_objects_touched": ["Fixture", "Report"],
+      "wiring": {
+        "inputs_from": ["l3_architecture/ PNGs"],
+        "outputs_to": ["diagram-comprehension score"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread on the agent_pipeline fixture to compare the diagram against the model's extracted stage list.",
+        "visual": "Detected stages (Parser, Context, Planner, Executor) highlight on the diagram as the model names them."
+      },
+      "mini_scenario": "Eval shows the VLM correctly reads the four-stage agent pipeline, so the loop can trust it to interpret diagrams.",
+      "pitfall": "Diagram fixtures encode a specific layout — don't over-fit eval to these exact PNGs, or the score won't generalize to novel diagrams."
     },
     {
-      "example_id": 13,
-      "title": "Bin - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling bin under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "bin-13",
+      "title": "Test profiling readouts with l4 fixtures",
+      "loop_stage": "verify",
+      "pattern": "targeted-probe",
+      "intent": "Check the loop can read flamegraphs and memory profiles from images.",
+      "how_it_shapes_the_loop": "l4_profiling fixtures (simple_flamegraph, multithread_profile, memory_profile) test perception of performance visuals; eval validates whether the loop can act on profiling evidence delivered as a screenshot.",
+      "loop_objects_touched": ["Fixture", "Report"],
+      "wiring": {
+        "inputs_from": ["l4_profiling/ PNGs"],
+        "outputs_to": ["profiling-comprehension score"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the flamegraph fixture to see which frame the model named as hottest.",
+        "visual": "The identified hot frame (e.g. hnsw::search_layer) highlights in the flamegraph with a heat overlay."
+      },
+      "mini_scenario": "Eval feeds simple_flamegraph.png and checks the VLM names search_layer as the hotspot the loop would target.",
+      "pitfall": "Flamegraph reading is a hard level — a failure here bounds where the loop can rely on visual profiling, so record it, don't discard it."
     },
     {
-      "example_id": 14,
-      "title": "Bin - Isolated Branch Staging",
-      "loop_scenario": "Modeling bin under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "bin-14",
+      "title": "Test layout reasoning with l5 fixtures",
+      "loop_stage": "verify",
+      "pattern": "targeted-probe",
+      "intent": "Validate the loop can parse nested TUI layouts from an image.",
+      "how_it_shapes_the_loop": "l5_layout fixtures (simple_split, dashboard_grid, complex_nested) test spatial decomposition; eval measures whether the loop can perceive a UI's structure well enough to act on the right panel.",
+      "loop_objects_touched": ["Fixture", "Report"],
+      "wiring": {
+        "inputs_from": ["l5_layout/ PNGs"],
+        "outputs_to": ["layout-reasoning score"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the complex_nested fixture to drill into how deep the model resolved the layout tree.",
+        "visual": "Nested regions outline progressively as the model reports each nesting level, up to depth four."
+      },
+      "mini_scenario": "Eval checks the VLM identifies the 3x2 dashboard_grid regions so a downstream loop could target the status pane.",
+      "pitfall": "Deeply nested layouts stress the model; a miss at depth four bounds the loop's reliable UI-parsing depth."
     },
     {
-      "example_id": 15,
-      "title": "Bin - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling bin under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "bin-15",
+      "title": "Track UI evolution with mega fixtures",
+      "loop_stage": "learn",
+      "pattern": "progression-eval",
+      "intent": "Measure whether the loop can perceive change across successive UI iterations.",
+      "how_it_shapes_the_loop": "mega_evolution fixtures (iteration_01, progression_pair, iteration_03) test before/after comprehension; eval validates the loop's ability to perceive its own evolution, feeding the learn stage of self-improvement.",
+      "loop_objects_touched": ["Fixture", "Difficulty", "Report"],
+      "wiring": {
+        "inputs_from": ["mega_evolution/ PNGs"],
+        "outputs_to": ["progression-comprehension score"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw a connection between iteration_01 and iteration_03 to have the model narrate what changed.",
+        "visual": "A diff edge links the two thumbnails; added panels highlight green, removed ones red."
+      },
+      "mini_scenario": "Eval feeds progression_pair and checks the VLM describes the v0.1 to v0.3 jump the loop's evolution engine produced.",
+      "pitfall": "Progression fixtures encode one specific evolution story — don't treat mastery here as general change-detection across arbitrary UIs."
     },
     {
-      "example_id": 16,
-      "title": "Bin - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling bin under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "bin-16",
+      "title": "Gate the harness behind a feature flag",
+      "loop_stage": "control",
+      "pattern": "feature-gated-eval",
+      "intent": "Keep the VLM eval tooling out of default builds.",
+      "how_it_shapes_the_loop": "Both VLM binaries require --features vlm-bench; this keeps heavy eval dependencies off the loop's default build path so production stays lean, and eval is opt-in.",
+      "loop_objects_touched": ["VlmBenchRunner", "Fixture"],
+      "wiring": {
+        "inputs_from": ["cargo feature flags"],
+        "outputs_to": ["conditionally compiled eval binaries"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the vlm-bench feature toggle to enable or disable the eval binaries on the canvas.",
+        "visual": "The VLM nodes render greyed and non-interactive until the vlm-bench flag is toggled on."
+      },
+      "mini_scenario": "A production build omits vlm-bench so the eval harness never ships; a CI eval job enables the flag to run it.",
+      "pitfall": "Don't wire eval into the default build — the fixtures and VLM client are eval-only and would bloat the loop's runtime footprint."
     },
     {
-      "example_id": 17,
-      "title": "Bin - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling bin under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "bin-17",
+      "title": "Tune concurrency against endpoint capacity",
+      "loop_stage": "control",
+      "pattern": "throughput-tuning",
+      "intent": "Match benchmark parallelism to what the model endpoint can serve.",
+      "how_it_shapes_the_loop": "VlmBenchConfig.concurrency controls how many fixtures run in parallel; setting it to the endpoint's real capacity keeps eval fast without contention corrupting the measurement.",
+      "loop_objects_touched": ["VlmBenchConfig", "VlmBenchRunner"],
+      "wiring": {
+        "inputs_from": ["--concurrency flag", "endpoint capacity"],
+        "outputs_to": ["parallel fixture dispatch"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag the concurrency slider on the runner node to set parallel request count.",
+        "visual": "Parallel request lanes appear beneath the node, one per unit of concurrency, throttling when overloaded."
+      },
+      "mini_scenario": "A local LM Studio serves one request at a time; concurrency stays at 1 so latency reflects the model, not queueing.",
+      "pitfall": "Over-high concurrency against a single-slot endpoint inflates timeouts and skews the eval — size it to real capacity."
     },
     {
-      "example_id": 18,
-      "title": "Bin - Gesture-based Node Filter",
-      "loop_scenario": "Modeling bin under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "bin-18",
+      "title": "Render text to PNG deterministically",
+      "loop_stage": "foundation",
+      "pattern": "deterministic-render",
+      "intent": "Produce identical fixtures every generation so eval is repeatable.",
+      "how_it_shapes_the_loop": "text_to_png renders each character at a fixed 8x16 cell, so re-running vlm_gen_fixtures yields byte-stable PNGs; eval can trust that a score change reflects the model, not fixture drift.",
+      "loop_objects_touched": ["Fixture"],
+      "wiring": {
+        "inputs_from": ["fixture text definitions"],
+        "outputs_to": ["deterministic PNG files"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a fixture thumbnail to inspect its fixed 8x16 character grid.",
+        "visual": "A pixel grid overlays the rendered text, confirming each glyph occupies an exact cell."
+      },
+      "mini_scenario": "Regenerating help_panel.png yields an identical file, so a diff against a prior run detects only real changes.",
+      "pitfall": "Any nondeterminism in rendering (fonts, timestamps) breaks reproducibility — keep the renderer pinned and free of variable content."
     },
     {
-      "example_id": 19,
-      "title": "Bin - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling bin under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "bin-19",
+      "title": "Feed the code graph into evolution planning",
+      "loop_stage": "reason",
+      "pattern": "graph-informed-plan",
+      "intent": "Let structural knowledge shape which modules the loop chooses to evolve.",
+      "how_it_shapes_the_loop": "The CodeGraph's complexity tags and fusion_groups inform which nodes are safe to alter vs build_new; the loop's reasoning prioritizes low-complexity, low-coupling targets first.",
+      "loop_objects_touched": ["CodeGraph", "NodeData", "Plan"],
+      "wiring": {
+        "inputs_from": ["codegraph.json"],
+        "outputs_to": ["evolution plan ordering"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw from the graph node to the plan node to seed evolution targets ranked by complexity.",
+        "visual": "The plan node fills with target rows sorted low-to-high complexity, coupled nodes grouped by fusion tint."
+      },
+      "mini_scenario": "The loop picks an isolated low-complexity module to evolve first, deferring a high-complexity fusion cluster.",
+      "pitfall": "codegraph's known schema mismatch with consumers can misrank nodes — validate against the live evolve graph before committing a plan order."
     },
     {
-      "example_id": 20,
-      "title": "Bin - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling bin under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "BinPayload"
-      ],
-      "component_loop_effect": "Determines how bin intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'bin' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "bin-20",
+      "title": "Separate eval artifacts from source",
+      "loop_stage": "control",
+      "pattern": "artifact-isolation",
+      "intent": "Keep generated fixtures and reports out of the source tree.",
+      "how_it_shapes_the_loop": "vlm_gen_fixtures writes to vlm_fixtures/ and the runner to vlm_results/; isolating eval artifacts keeps the loop's codebase clean and the CodeGraph free of non-source noise.",
+      "loop_objects_touched": ["Fixture", "Report"],
+      "wiring": {
+        "inputs_from": ["--fixtures_dir / --output_dir flags"],
+        "outputs_to": ["dedicated artifact directories"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick generated artifacts into the isolated artifact tray, away from the source constellation.",
+        "visual": "Fixture and report nodes drift into a bordered off-canvas tray tinted distinctly from source nodes."
+      },
+      "mini_scenario": "The operator points --output_dir at vlm_results/ so reports never land in src/ where codegraph would scan them.",
+      "pitfall": "Letting eval artifacts leak into the source tree pollutes the CodeGraph with non-code nodes and inflates its token estimates."
     }
   ]
 }

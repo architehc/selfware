@@ -1,168 +1,410 @@
 {
-  "module": "session",
-  "generated": "2026-07-29",
-  "full_tokens": 22568,
-  "loop_role": "Session is the agent loop's durability and continuity layer: it persists task state (TaskCheckpoint), conversation threads (ChatStore), edit time-travel (EditHistory), caches tool/LLM results, and encrypts everything sensitive at rest so a loop can pause, resume, and be audited without losing budget, evidence, or trust.",
+  "component": "session",
+  "tier": "full",
+  "loop_stage": "learn",
+  "summary": "The session component is the loop's state and persistence substrate. ToolCache and LlmCache avoid redundant act and reason work; EditHistory records file edits as branchable EditCheckpoints for undo/redo/timeline; the CheckpointManager snapshots the whole TaskCheckpoint (step, iteration, messages, tool logs, budget) via delta writes for resume; EncryptionManager protects data at rest with AES-256-GCM; LocalFirstCoordinator caches responses offline; ChatStore persists encrypted conversations.",
+  "loop_objects": ["ToolCache", "LlmCache", "EditHistory", "EditCheckpoint", "FileSnapshot", "TaskCheckpoint", "CheckpointDelta", "EncryptionManager", "SavedChat", "CacheStats"],
+  "context_basis": "recommendations were formed with src/session/ read in the context of the full engine (~600k budget framing), grounded in cache.rs ToolCache/LlmCache/CacheManager, edit_history.rs EditCheckpoint/EditHistory, checkpoint.rs TaskCheckpoint/CheckpointDelta/CheckpointManager, encryption.rs EncryptionManager, local_first.rs, and chat_store.rs.",
   "examples": [
     {
       "id": "session-01",
-      "title": "Serialize the entire loop state into TaskCheckpoint",
-      "loop_role": "Wire TaskCheckpoint as the remember stage's canonical snapshot: after each act→verify cycle, the agent calls set_step, set_iteration, set_messages, and set_status so Agent::resume() can rebuild the loop mid-flight (restore_progress resets the iteration budget so a resumed task isn't killed instantly by 'max iterations').",
-      "affects": "TaskCheckpoint holds messages, memory_entries, estimated_tokens (context window state), tool_calls and errors (evidence), git_checkpoint, and status — it is the single object that lets the loop survive process death. current_step vs messages.is_empty() is the corruption invariant checked on load.",
-      "touch_ux": "A large rounded 'task capsule' node pinned at the bottom of the canvas; the act and verify nodes emit edges into it on every save. Tap expands to show step/iteration/status; long-press scrubs version history; the live badge shows current_step and TaskStatus color-coded (amber InProgress, green Completed, red Failed).",
-      "pointer": "src/session/checkpoint.rs::TaskCheckpoint"
+      "title": "Cache a read-only tool result",
+      "loop_stage": "act",
+      "pattern": "keyed-result-cache",
+      "intent": "Skip re-executing a tool whose inputs have not changed.",
+      "how_it_shapes_the_loop": "ToolCache keys on tool_name+args_json and returns a hit within TTL, so the act stage returns instantly and the loop spends its budget elsewhere.",
+      "loop_objects_touched": ["ToolCache", "CacheStats"],
+      "wiring": {
+        "inputs_from": ["tool name + args"],
+        "outputs_to": ["cached ToolResult", "act stage"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping a read node reveals its cache card; a hit lights the shortcut edge to the stored value.",
+        "visual": "A cache hit shows a lightning badge; the node skips its execution spinner."
+      },
+      "mini_scenario": "A repeated grep_search returns from ToolCache in microseconds instead of scanning the tree again.",
+      "pitfall": "Caching without mtime-based staleness checks serves outdated file contents to the loop."
     },
     {
       "id": "session-02",
-      "title": "Never lose a save: save_with_retry with retry backoff",
-      "loop_role": "Model CheckpointManager::save_with_retry as the remember stage's commit barrier: the loop should treat checkpoint persistence as a fallible, retried operation — a failed save must surface as a typed error, not silently drop state before the next act step.",
-      "affects": "Protects the checkpoint object itself; checkpoints_dir is created with 0o700 permissions because checkpoints contain conversation data and tool output. Retention is bounded by MAX_CHECKPOINT_FILES (500) so the remember stage doesn't grow the disk budget unboundedly.",
-      "touch_ux": "A shield-shaped node attached to the task capsule; its badge counts save retries and pulses red on the final failure. Tap shows the last error string; two-finger drag draws a 'depends on' edge from the act node so users see saves gate progression.",
-      "pointer": "src/session/checkpoint.rs::CheckpointManager::save_with_retry"
+      "title": "Invalidate cache entries by path",
+      "loop_stage": "act",
+      "pattern": "path-scoped-invalidation",
+      "intent": "Drop only the cache entries a mutation could have affected.",
+      "how_it_shapes_the_loop": "invalidate_path removes every ToolCache entry containing the touched path, so post-write reads re-run against fresh state without nuking unrelated cached results.",
+      "loop_objects_touched": ["ToolCache"],
+      "wiring": {
+        "inputs_from": ["mutating tool result", "path"],
+        "outputs_to": ["cache invalidation"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "User flicks a write node's edge across the cache to clear entries for that path only.",
+        "visual": "Only path-matching cache cards fade out; unrelated cards stay intact."
+      },
+      "mini_scenario": "After editing config.rs, only config.rs cache entries are dropped so its next read is fresh.",
+      "pitfall": "Over-broad invalidation clears the whole cache and forfeits the savings on unrelated reads."
     },
     {
       "id": "session-03",
-      "title": "Refuse tampered checkpoints via HMAC envelope",
-      "loop_role": "Put CheckpointEnvelope::verify on the resume path as a trust gate: before the loop rebuilds any state, the envelope recomputes HMAC-SHA-256 over the payload with a per-installation key (0o600) and bails with a typed 'integrity check failed' error on mismatch.",
-      "affects": "Directly shapes trust state: a checkpoint is only admissible evidence if its HMAC matches. Honest-status rule in code form — resume fails loudly with the expected vs actual digest instead of running on tampered messages, tool_calls, or budget counters.",
-      "touch_ux": "A hexagonal seal node between checkpoint storage and the resume entry point; edges from disk to the loop must pass through it. Badge shows a lock glyph and key-source (persisted vs ephemeral, matching the tracing::warn! path). Long-press reveals the digest comparison.",
-      "pointer": "src/session/checkpoint.rs::CheckpointEnvelope::verify"
+      "title": "Evict expired and LRU entries on overflow",
+      "loop_stage": "control",
+      "pattern": "bounded-cache",
+      "intent": "Keep the cache from growing without bound.",
+      "how_it_shapes_the_loop": "evict_expired purges expired entries and, at max_entries, removes an LRU slice, so the cache stays inside its budget without stalling the loop.",
+      "loop_objects_touched": ["ToolCache", "CacheStats"],
+      "wiring": {
+        "inputs_from": ["cache size", "TTL"],
+        "outputs_to": ["evicted entries"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the cache node compacts it, visibly dropping the oldest and expired cards.",
+        "visual": "Expired cards grey and fall away; the entry-count gauge settles back under the max."
+      },
+      "mini_scenario": "The cache reaches max_entries; eviction removes 10% oldest so new results still fit.",
+      "pitfall": "Setting max_entries too low thrashes the cache and negates its benefit under a busy loop."
     },
     {
       "id": "session-04",
-      "title": "Recover from corruption instead of dying",
-      "loop_role": "Model recover_from_corruption as the remember stage's fallback edge: when load() fails integrity or parse checks, the loop routes to delta-log replay and partial reconstruction so a crashed task resumes from the newest valid state rather than restarting from zero.",
-      "affects": "Keeps evidence (tool_calls, errors) and budget objects (cumulative_tokens) maximally intact under failure; the alternative — amnesiac restart — would both lose evidence and reset spend, violating the honest-status rule. Pair with the step-without-messages invariant check in Agent::resume.",
-      "touch_ux": "A lifebuoy-shaped node that only appears when a corruption event fires; its edge into the task capsule is dashed (conditional path). Badge shows 'recovered from vN'. Tap shows which fields were reconstructed vs lost — losses are listed explicitly, never hidden.",
-      "pointer": "src/session/checkpoint.rs::CheckpointManager::recover_from_corruption"
+      "title": "Match a semantic LLM cache hit",
+      "loop_stage": "reason",
+      "pattern": "embedding-similarity-cache",
+      "intent": "Reuse a prior LLM response for a near-identical prompt.",
+      "how_it_shapes_the_loop": "LlmCache::lookup matches on cosine similarity of embeddings plus a context_hash and model match, so a repeated reason turn can be served from cache and skip a billable call.",
+      "loop_objects_touched": ["LlmCache"],
+      "wiring": {
+        "inputs_from": ["prompt embedding", "context_hash", "model"],
+        "outputs_to": ["cached LLM response", "reason turn"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the Reason node shows nearby cached prompts by similarity distance.",
+        "visual": "Candidate cache cards orbit by closeness; a match snaps in with a similarity score badge."
+      },
+      "mini_scenario": "A re-asked question with the same context hash and model returns the cached answer, saving a turn.",
+      "pitfall": "Ignoring context_hash serves an answer computed under a different context and misleads the loop."
     },
     {
       "id": "session-05",
-      "title": "Save incrementally with CheckpointDelta",
-      "loop_role": "Wire compute_delta/apply_delta into the remember stage's hot path: every loop iteration appends only new_messages, new_tool_calls, new_errors, and new_visual_assertions to a .delta.jsonl log, compacting to a full write after MAX_DELTA_ENTRIES_BEFORE_COMPACT (24) entries or 512 KiB.",
-      "affects": "Trades disk-IO budget per iteration (deltas are tiny) for a bounded replay cost on resume; the delta carries cumulative_tokens, elapsed_wall_secs, cumulative_cost_usd, and guard_counters so incremental saves don't silently drop budget or guard state — the specific bug the fields were added to fix.",
-      "touch_ux": "Render as a streaming tape node feeding the task capsule; pinch-to-zoom toggles between delta-log view (individual appends) and compacted-snapshot view. Badge shows delta count until next compaction (N/24) and delta file size.",
-      "pointer": "src/session/checkpoint.rs::TaskCheckpoint::compute_delta"
+      "title": "Snapshot a file before it changes",
+      "loop_stage": "learn",
+      "pattern": "pre-edit-snapshot",
+      "intent": "Capture the exact prior state so any edit can be undone.",
+      "how_it_shapes_the_loop": "EditHistory::create_checkpoint records a FileSnapshot (path, content, size, hash) tagged with an EditAction, giving the loop a durable rollback point per mutation.",
+      "loop_objects_touched": ["EditHistory", "EditCheckpoint", "FileSnapshot"],
+      "wiring": {
+        "inputs_from": ["file_edit / file_write"],
+        "outputs_to": ["EditCheckpoint", "undo timeline"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing a write node drops a snapshot pin capturing the file's pre-edit state.",
+        "visual": "A camera-pin badge appears on the timeline with the file hash."
+      },
+      "mini_scenario": "Before applying a patch, the loop snapshots the file so /undo can restore it exactly.",
+      "pitfall": "Snapshotting after the edit instead of before loses the original content and breaks undo."
     },
     {
       "id": "session-06",
-      "title": "Carry budget caps across resume",
-      "loop_role": "Model cumulative_tokens / cumulative_cost_usd / elapsed_wall_secs plus max_budget_tokens / max_wall_secs / max_cost_usd as the loop's budget contract: restore_budget_caps_from_checkpoint reinstates them on Agent::resume (CLI flags override), closing the 'uncapped resume = unbounded spend' gap.",
-      "affects": "Directly the budget objects on the loop: without persistence, N resumes = N× the configured budget and AgentConfig's #[serde(skip)] caps would default to None. measured-not-estimated applies — cumulative consumption is real accounted spend, not a heuristic.",
-      "touch_ux": "A fuel-gauge widget node docked to the task capsule with three bars (tokens / wall secs / USD) filling against restored caps. Tap toggles cumulative vs per-segment view; the badge shows percent of cap consumed and turns red at 90%.",
-      "pointer": "src/session/checkpoint.rs::TaskCheckpoint"
+      "title": "Undo the last edit checkpoint",
+      "loop_stage": "control",
+      "pattern": "reversible-act",
+      "intent": "Roll the workspace back to the state before a bad edit.",
+      "how_it_shapes_the_loop": "EditHistory::undo steps the current pointer back and restores the FileSnapshot, letting the loop recover from a wrong turn without redoing the whole task.",
+      "loop_objects_touched": ["EditHistory", "EditCheckpoint"],
+      "wiring": {
+        "inputs_from": ["/undo command", "current checkpoint pointer"],
+        "outputs_to": ["restored files"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "User flicks the timeline left to step the pointer back and restore the prior snapshot.",
+        "visual": "The current-checkpoint marker slides back and the restored file card flashes."
+      },
+      "mini_scenario": "An edit breaks the build; /undo restores the pre-edit snapshot and the loop retries a different fix.",
+      "pitfall": "Undoing past a git commit checkpoint without accounting for it desyncs the working tree from history."
     },
     {
       "id": "session-07",
-      "title": "Persist GuardCounters so crash-loops can't reset",
-      "loop_role": "Wire GuardCounters into the verify stage's anti-thrash guards: consecutive_no_action_prompts, mutation_gate_rejections, and prefill_400_count persist across resume so a watchdog that auto-resumes a crash-looping task hands it accumulated evidence, not fresh rope.",
-      "affects": "Changes loop termination behavior: guards (prefill breaker, mutation-gate abort, no-action abort) fire across resumes, converting an amnesiac infinite loop into a bounded one. This is the loop's honesty about its own failure rate made durable.",
-      "touch_ux": "A tripwire node sitting on the resume edge; badge shows the three counters as small vertical bars. When any counter nears its abort threshold the node glows and its edge to the act node thickens — users can see the loop approaching self-termination and long-press to inspect which guard.",
-      "pointer": "src/session/checkpoint.rs::GuardCounters"
+      "title": "Branch the edit timeline on a new edit",
+      "loop_stage": "learn",
+      "pattern": "what-if-branching",
+      "intent": "Preserve alternate edit paths after an undo.",
+      "how_it_shapes_the_loop": "create_checkpoint truncates future history on the current branch when a new edit follows an undo, so the timeline models a tree of what-if edit paths the loop explored.",
+      "loop_objects_touched": ["EditHistory", "EditCheckpoint"],
+      "wiring": {
+        "inputs_from": ["edit after undo"],
+        "outputs_to": ["new branch checkpoint"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "User draws a branch edge from an earlier checkpoint to spawn an alternate edit path.",
+        "visual": "The timeline forks into a labeled branch line with its own checkpoint pins."
+      },
+      "mini_scenario": "After undoing, a different edit forks a new branch so the abandoned path is not lost.",
+      "pitfall": "Assuming a linear timeline after undo silently discards the branch the loop meant to keep."
     },
     {
       "id": "session-08",
-      "title": "Anchor every checkpoint to git state",
-      "loop_role": "Attach capture_git_state to the remember stage so each save records GitCheckpointInfo (branch, commit_hash, dirty, staged_files, modified_files) — the verify stage can then correlate agent edits with repository reality, and resume can detect the repo moved on while the task slept.",
-      "affects": "Enriches the evidence objects on the loop: a dirty=true flag with a modified_files list tells the verifier which files were in flux at checkpoint time. Complements EditHistory snapshots with VCS-level ground truth for reproducibility.",
-      "touch_ux": "A small branch-fork glyph node attached to each checkpoint on the timeline; badge shows short commit hash and a dirty-dot. Tap lists staged/modified files; two-finger drag from it to an EditCheckpoint node draws a 'same moment' alignment edge.",
-      "pointer": "src/session/checkpoint.rs::capture_git_state"
+      "title": "Render the edit timeline",
+      "loop_stage": "perceive",
+      "pattern": "timeline-visualization",
+      "intent": "Show the loop's edit history so a user can pick a restore point.",
+      "how_it_shapes_the_loop": "EditHistory::timeline emits TimelineEntry rows (id, is_current, action, timestamp, branch), giving /timeline the data to render the loop's mutation history.",
+      "loop_objects_touched": ["EditHistory", "EditCheckpoint"],
+      "wiring": {
+        "inputs_from": ["EditHistory checkpoints"],
+        "outputs_to": ["/timeline UI"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the timeline node expands the full list of edit checkpoints with actions and branches.",
+        "visual": "Each entry is a labeled pin; the current one is highlighted and branches are colored distinctly."
+      },
+      "mini_scenario": "The user opens /timeline, sees every edit checkpoint, and jumps to one with goto.",
+      "pitfall": "Rendering timestamps without branch labels makes divergent edit paths indistinguishable."
     },
     {
       "id": "session-09",
-      "title": "Gate progression on pending VisualAssertion",
-      "loop_role": "Model set_pending_visual_assertion / log_visual_assertion as the verify stage's blocking condition: the loop cannot advance while a VisualAssertion is unverified, and the persisted pending_visual_assertion survives restart so a resumed task re-runs its pending check instead of skipping it.",
-      "affects": "VerificationResult carries passed, confidence (VLM score), explanation, and screenshot_hash for stale-screen detection — a trust-graded evidence object, not a boolean. The CheckpointDelta records pending_visual_assertion changes as Option<Option<..>> so 'cleared' differs from 'unchanged'.",
-      "touch_ux": "An eye-shaped node interposed between act and the next plan node; its edge is a gate that opens only when verified=true. Badge shows confidence as a ring and a stale-screen warning when screenshot_hash no longer matches the live screen. Tap shows the explanation string verbatim.",
-      "pointer": "src/session/checkpoint.rs::VisualAssertion"
+      "title": "Save the loop's TaskCheckpoint",
+      "loop_stage": "learn",
+      "pattern": "durable-loop-snapshot",
+      "intent": "Persist enough state to resume the loop after interruption.",
+      "how_it_shapes_the_loop": "CheckpointManager::save writes a TaskCheckpoint holding current_step, current_iteration, messages, tool_calls, errors, and cumulative budget, so continue_execution can rehydrate the loop.",
+      "loop_objects_touched": ["TaskCheckpoint", "CheckpointDelta"],
+      "wiring": {
+        "inputs_from": ["AgentState", "messages", "budget counters"],
+        "outputs_to": ["checkpoints dir", "resume"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the control hub drops a task-checkpoint pin capturing the whole loop state.",
+        "visual": "A save pin shows step/iteration and a token-total badge, pulsing once on write."
+      },
+      "mini_scenario": "Mid-task the manager saves a checkpoint; after a crash, load restores the loop's step and messages.",
+      "pitfall": "Persisting messages but not cumulative budget lets a resumed loop exceed its original ceiling."
     },
     {
       "id": "session-10",
-      "title": "Log every tool call as auditable evidence",
-      "loop_role": "Wire log_tool_call and log_error into the act stage's exit path: every tool execution appends a ToolCallLog (tool_name, arguments, result, success, duration_ms) and every failure an ErrorLog (step, error, recovered), giving the verify and evolve stages a replayable execution trace.",
-      "affects": "These are the primary evidence objects on the loop: duration_ms feeds latency analysis, success/recovered feed trust state, and arguments are run through crate::safety::redact before persistence so the audit trail doesn't leak secrets into checkpoint JSON.",
-      "touch_ux": "A ribbon of pill-shaped log entries flowing out of the act node into the task capsule; failed calls render red with the recovered flag as a bandage icon. Tap a pill for full arguments/result; the ribbon badge shows calls/sec and last duration_ms.",
-      "pointer": "src/session/checkpoint.rs::ToolCallLog"
+      "title": "Write incremental checkpoint deltas",
+      "loop_stage": "learn",
+      "pattern": "delta-persistence",
+      "intent": "Persist progress cheaply on every turn without rewriting the whole checkpoint.",
+      "how_it_shapes_the_loop": "save prefers CheckpointDelta writes (new messages, tool calls, errors since a base version) and compacts every 24 deltas or over 512KB, keeping per-turn persistence lightweight.",
+      "loop_objects_touched": ["CheckpointDelta", "TaskCheckpoint"],
+      "wiring": {
+        "inputs_from": ["turn diffs vs base version"],
+        "outputs_to": ["delta files", "compacted base"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the checkpoint node shows a stack of delta layers over the base snapshot.",
+        "visual": "Delta layers stack thin; at the compaction threshold they fold into a fresh base card."
+      },
+      "mini_scenario": "Each turn appends a small delta; after 24 the manager compacts them into a new base for fast loads.",
+      "pitfall": "Never compacting deltas makes load slow and fragile as the delta chain grows unbounded."
     },
     {
       "id": "session-11",
-      "title": "Cache read-only tool results with mtime honesty",
-      "loop_role": "Insert ToolCache between plan and act for read-only tools (file_read, git_status, grep_search, symbol_search, …): get() returns the cached Value only if the TTL is fresh AND the file's mtime still matches — a staleness check that keeps cached evidence honest against out-of-band edits.",
-      "affects": "Reduces redundant tool executions (act-stage cost and latency) while bounding risk: max_entries=1000 with expired-eviction plus oldest-10% trim keeps memory bounded. A stale mtime silently returning None (cache miss) is the honest-degradation pattern — never serve possibly-wrong file content.",
-      "touch_ux": "A small drum node on each read-tool edge; badge shows entries/max and TTL countdown. Cache hits render the edge as a shortcut (dashed) bypassing the act node's tool execution; long-press forces invalidate_path for the selected file.",
-      "pointer": "src/session/cache.rs::ToolCache"
+      "title": "Load a checkpoint and apply deltas",
+      "loop_stage": "control",
+      "pattern": "rehydrate-on-resume",
+      "intent": "Rebuild the exact loop state a resumed task needs.",
+      "how_it_shapes_the_loop": "CheckpointManager::load reads the base and replays all CheckpointDeltas to reconstruct the TaskCheckpoint, so continue_execution restarts the loop at the right step and iteration.",
+      "loop_objects_touched": ["TaskCheckpoint", "CheckpointDelta"],
+      "wiring": {
+        "inputs_from": ["base + delta chain"],
+        "outputs_to": ["restored TaskCheckpoint", "AgentLoop restore_progress"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "User flicks a saved checkpoint pin onto the canvas to rehydrate the loop from it.",
+        "visual": "The base card and its delta layers merge into a single restored state, then the loop resumes."
+      },
+      "mini_scenario": "On resume, load replays the deltas to reconstruct the messages and progress, and the loop continues.",
+      "pitfall": "Applying deltas out of version order reconstructs a corrupt or stale loop state."
     },
     {
       "id": "session-12",
-      "title": "Invalidate caches on mutating tools",
-      "loop_role": "Model is_cacheable / invalidates_cache as the act stage's cache-coherence contract: after any mutating tool (file_write, file_edit, git_commit, shell_exec, patch_apply, …) completes, the loop must call invalidate_path so subsequent reads see the new world, not the old one.",
-      "affects": "Keeps the context window truthful: without mutation-driven invalidation, the planner would plan against stale file content and the verifier would verify against phantom state. CacheManager::invalidate_path fans out to both tool_cache and llm_cache in one call.",
-      "touch_ux": "Render mutation tools with a red pulse that propagates along edges into all cache nodes, visually 'burning' affected entries. The badge on the cache drum flashes the invalidated path; pinch out on a mutation node previews which cache entries would be purged before the user confirms a replay.",
-      "pointer": "src/session/cache.rs::invalidates_cache"
+      "title": "Recover a corrupted checkpoint",
+      "loop_stage": "control",
+      "pattern": "corruption-recovery",
+      "intent": "Keep the loop resumable even if a checkpoint file is damaged.",
+      "how_it_shapes_the_loop": "recover_from_corruption tries the .json.bak backup and otherwise creates a fresh checkpoint, so a torn write does not permanently strand the task.",
+      "loop_objects_touched": ["TaskCheckpoint", "CheckpointManager"],
+      "wiring": {
+        "inputs_from": ["corrupt checkpoint file"],
+        "outputs_to": ["restored or fresh TaskCheckpoint"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing a corrupted checkpoint pin offers restore-from-backup or start-fresh options.",
+        "visual": "A damaged pin shows a red crack; recovery heals it green or spawns a new blank pin."
+      },
+      "mini_scenario": "A checkpoint is truncated by a crash; recovery loads the .json.bak and the loop resumes.",
+      "pitfall": "Silently starting fresh without surfacing the loss can drop hours of loop progress unnoticed."
     },
     {
       "id": "session-13",
-      "title": "Serve semantic LLM cache hits only within the same context",
-      "loop_role": "Wire LlmCache::lookup into the plan stage before the API call: embed the prompt (TfIdfEmbeddingProvider via CacheManager), cosine-match against stored embeddings above similarity_threshold (0.85), but accept a hit only when context_hash AND model match — semantic reuse is forbidden across different causal contexts.",
-      "affects": "A hit skips real token spend entirely (budget effect) while the context_hash guard protects trust: a similar prompt in a different repo state must not resurrect an answer computed from different files. This is the 'never render green for checks not performed' rule applied to caching.",
-      "touch_ux": "A crystal-ball node on the plan→LLM edge; badge shows best-match similarity as a percentage, grayed out and struck through when context_hash mismatches (visible near-miss, not hidden). Tap shows the matched LlmCacheEntry prompt diff; long-press adjusts similarity_threshold.",
-      "pointer": "src/session/cache.rs::LlmCache::lookup"
+      "title": "Encrypt session data at rest",
+      "loop_stage": "foundation",
+      "pattern": "encrypt-substrate",
+      "intent": "Protect persisted conversations and checkpoints from disk snooping.",
+      "how_it_shapes_the_loop": "EncryptionManager::encrypt wraps bytes with AES-256-GCM and a random nonce; the ChatStore and checkpoints write ciphertext, so the loop's persistent substrate is confidential.",
+      "loop_objects_touched": ["EncryptionManager", "SavedChat"],
+      "wiring": {
+        "inputs_from": ["plaintext session data"],
+        "outputs_to": ["encrypted files on disk"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the persistence node toggles its encryption shield on the stored data cards.",
+        "visual": "Encrypted cards render with a lock glyph; unencrypted ones show an open lock warning."
+      },
+      "mini_scenario": "A saved chat is AES-256-GCM encrypted before hitting disk and decrypted only in-process on load.",
+      "pitfall": "Reusing a nonce across encryptions under the same key breaks GCM's security guarantee."
     },
     {
       "id": "session-14",
-      "title": "Meter cache savings with estimated_cost",
-      "loop_role": "Use LlmCacheEntry::estimated_cost against LlmCacheConfig (cost_per_1k_input/output) to feed the evolve stage: every cache hit should be booked as avoided spend, giving the loop a measurable savings number rather than a vibes-based 'cache good' claim.",
-      "affects": "Feeds the budget object: input_tokens/output_tokens per entry times configured rates yields USD-per-hit, which can be summed into the same accounting that cumulative_cost_usd tracks — measured, not estimated (AGENTS.md rule 4), since token counts are stored per entry.",
-      "touch_ux": "A piggy-bank badge on the crystal-ball cache node accumulating '$ saved this session'. Tap breaks savings down per model and per hit_count; a green edge from the cache node into the budget fuel-gauge node visualizes avoided spend flowing back as headroom.",
-      "pointer": "src/session/cache.rs::LlmCacheEntry::estimated_cost"
+      "title": "Derive the key from the OS keychain",
+      "loop_stage": "foundation",
+      "pattern": "keychain-key-init",
+      "intent": "Bootstrap encryption without a hard-coded key.",
+      "how_it_shapes_the_loop": "EncryptionManager::load_from_keychain reads the passphrase from the OS keychain and derive_key runs PBKDF2 with a per-install salt, so the loop's crypto substrate self-initializes securely.",
+      "loop_objects_touched": ["EncryptionManager"],
+      "wiring": {
+        "inputs_from": ["OS keychain", "per-install salt"],
+        "outputs_to": ["session key"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the persistence node shows the key source (keychain) feeding the encryption shield.",
+        "visual": "A key-ring badge lights when the keychain provides the passphrase; a fallback shows an ephemeral badge."
+      },
+      "mini_scenario": "On startup the manager pulls the passphrase from the keychain and derives the session key via PBKDF2.",
+      "pitfall": "Falling back to an ephemeral key without warning means data written this session cannot be decrypted later."
     },
     {
       "id": "session-15",
-      "title": "Unify tool, LLM, and offline caching in CacheManager",
-      "loop_role": "Model CacheManager as the session's single coherence point: it owns ToolCache (exact), LlmCache (semantic), LocalFirstCoordinator (offline response cache), and the TfIdfEmbeddingProvider, so every loop stage that reads cached state goes through one object with one invalidate_path fan-out.",
-      "affects": "Simplifies the wiring graph — one invalidation edge covers both cache kinds — and LocalFirstCoordinator adds an OfflineStatus dimension: cached responses keep the loop limping along offline, with LocalFirstStats (bandwidth_saved_bytes, hit_rate) reporting what offline operation actually delivered.",
-      "touch_ux": "A hub node with three satellite drums (tool / llm / local-first); the offline satellite is gray until OfflineStatus flips. Badge aggregates CacheStats from all three; two-finger drag from a mutating act node to the hub creates the invalidation wiring interactively.",
-      "pointer": "src/session/cache.rs::CacheManager"
+      "title": "Persist the conversation to the ChatStore",
+      "loop_stage": "learn",
+      "pattern": "conversation-persistence",
+      "intent": "Save the loop's message history so a named session can be resumed.",
+      "how_it_shapes_the_loop": "ChatStore::save writes a SavedChat (name, saved_at, model, messages) atomically and encrypted, so resume_named_session can restore the loop's conversation.",
+      "loop_objects_touched": ["SavedChat", "EncryptionManager"],
+      "wiring": {
+        "inputs_from": ["Message history", "model"],
+        "outputs_to": ["encrypted chat file"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the history strip saves it as a named, encrypted session card.",
+        "visual": "A named session card slots into the store shelf with a lock glyph and timestamp."
+      },
+      "mini_scenario": "The user saves the current chat by name; later resume_named_session decrypts and reloads the messages.",
+      "pitfall": "A non-atomic write interrupted mid-save can leave a truncated, undecryptable chat file."
     },
     {
       "id": "session-16",
-      "title": "Give the act stage a time machine with EditHistory",
-      "loop_role": "Wire create_checkpoint / add_file_to_current after every file-mutating tool so undo, redo, and goto(EditCheckpointId) become first-class loop operations: a failed verify can route back through EditHistory instead of asking the model to manually reverse its edits.",
-      "affects": "Each EditCheckpoint stores full FileSnapshot objects (path, content, size, hash) with changed_from comparing hashes — reversal is content-exact, not diff-guesswork. with_max_checkpoints bounds memory; can_undo/can_redo give the planner truthful options rather than attempting impossible reversals.",
-      "touch_ux": "The star of the canvas: a horizontal timeline scrubber of EditCheckpoint beads. Swipe to move the position cursor; tapping a bead previews FileSnapshot content side-by-side with current; the badge shows position/len and branch name. Undo is a left-swipe on the act node itself.",
-      "pointer": "src/session/edit_history.rs::EditHistory"
+      "title": "List sessions, skipping tampered files",
+      "loop_stage": "perceive",
+      "pattern": "fail-closed-listing",
+      "intent": "Show resumable sessions without crashing on a bad file.",
+      "how_it_shapes_the_loop": "ChatStore::list returns ChatSummary rows and skips corrupted or tamper-failed files, so the loop can present valid resume points and ignore the rest.",
+      "loop_objects_touched": ["SavedChat"],
+      "wiring": {
+        "inputs_from": ["chats directory"],
+        "outputs_to": ["ChatSummary list", "resume UI"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the store shelf fans out the saved session cards; corrupt ones are omitted.",
+        "visual": "Valid session cards render clean; tampered files simply do not appear."
+      },
+      "mini_scenario": "One chat file fails its auth tag; list silently skips it and shows the remaining valid sessions.",
+      "pitfall": "Listing a file that fails decryption as if valid then errors on load, confusing the resume flow."
     },
     {
       "id": "session-17",
-      "title": "Render the loop's history with TimelineEntry and EditAction icons",
-      "loop_role": "Use EditHistory::timeline() to project the remember stage into the UI: each TimelineEntry combines the checkpoint, its EditAction description()/icon() (📄 ✏️ 🗑️ 🔀 📌 🚀 🏁), and formatted_time/relative_time into display_text — a ready-made visualization feed for the whole session.",
-      "affects": "Turns evidence objects into user-legible narrative: EditAction::GitCommit truncates to 7-char hash, MultiFileEdit counts paths, Manual checkpoints carry user descriptions. Honest by construction — the timeline shows exactly what was recorded, including SessionStart/SessionEnd boundaries.",
-      "touch_ux": "A filmstrip view reachable by pinch-out from the timeline scrubber; each frame shows the EditAction icon and relative_time. Tap a frame to jump (goto), long-press to attach a Manual label checkpoint, and the badge shows the display_text of the current frame.",
-      "pointer": "src/session/edit_history.rs::TimelineEntry"
+      "title": "Cache responses for local-first offline use",
+      "loop_stage": "reason",
+      "pattern": "offline-response-cache",
+      "intent": "Serve prior responses and track bandwidth saved when offline.",
+      "how_it_shapes_the_loop": "LocalFirstCoordinator::cache_response stores responses with size tracking and stats reports bandwidth_saved_bytes, so the loop can prefer cached data and quantify savings.",
+      "loop_objects_touched": ["ToolCache", "CacheStats"],
+      "wiring": {
+        "inputs_from": ["reason/act responses"],
+        "outputs_to": ["LocalFirstStats", "/stats"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the persistence node surfaces a bandwidth-saved gauge from the local-first cache.",
+        "visual": "A savings gauge grows as cached responses are reused instead of refetched."
+      },
+      "mini_scenario": "A repeated response is served from the local cache and /stats reports the bytes saved.",
+      "pitfall": "Unbounded FIFO growth of the local cache eventually evicts the very entries the loop reuses most."
     },
     {
       "id": "session-18",
-      "title": "Branch the edit timeline for speculative exploration",
-      "loop_role": "Model create_branch / switch_to_main as the plan stage's what-if mechanism: the loop (or the user) forks the EditHistory into a named branch for a speculative approach, keeping main intact; with_parent and with_git_hash link each EditCheckpoint into a DAG rather than a linear stack.",
-      "affects": "Changes exploration economics: failed approaches are abandoned branches, not undone work on the main line, so evidence of what was tried survives for the evolve stage. current_branch() keeps trust state explicit about which line the act stage is mutating.",
-      "touch_ux": "The timeline forks visually into parallel rails; the active branch is highlighted and labeled via current_branch. Drag a bead sideways to create_branch at that point; two-finger tap on a rail switches to it; abandoned branches fade but remain tappable for inspection.",
-      "pointer": "src/session/edit_history.rs::EditHistory::create_branch"
+      "title": "Report cache hit rate in stats",
+      "loop_stage": "learn",
+      "pattern": "cache-observability",
+      "intent": "Make the cache's contribution to loop efficiency measurable.",
+      "how_it_shapes_the_loop": "CacheStats (entry_count, total_size_bytes, hit_rate) surfaces in /stats, letting the loop and operator see whether caching is actually saving turns and budget.",
+      "loop_objects_touched": ["CacheStats", "ToolCache"],
+      "wiring": {
+        "inputs_from": ["cache hit/miss counters"],
+        "outputs_to": ["/stats display"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the cache node opens its stats card with hit rate and size.",
+        "visual": "A dial shows hit rate; green when high, amber when the cache is barely helping."
+      },
+      "mini_scenario": "The /stats view shows a 60% tool-cache hit rate, confirming the cache is trimming redundant acts.",
+      "pitfall": "Reporting entry_count as a health metric without hit_rate hides a cache that stores much but hits little."
     },
     {
       "id": "session-19",
-      "title": "Persist chats encrypted, degrade loudly",
-      "loop_role": "Wire ChatStore::save / load / list / delete into the remember stage for whole conversations: SavedChat JSON is encrypted through EncryptionManager::get() when available, and when it isn't, save() emits a tracing::warn! 'saving in plaintext' — and load() fails closed with a typed error if decryption fails rather than returning garbage.",
-      "affects": "Trust behavior in both directions: availability degradation (no key) is announced, never silent, and integrity failure (bad ciphertext) blocks resumption of that thread instead of poisoning the context window with corrupt messages. ChatSummary (list view) lets the user pick threads without decrypting everything.",
-      "touch_ux": "A stack-of-chats drawer node; each SavedChat card shows a lock badge (green = encrypted, amber-open = plaintext with the warning surfaced as a banner, matching the code). Tap loads the thread into the canvas; long-press deletes with a confirmation sheet; failed decryption renders the card red with the typed error.",
-      "pointer": "src/session/chat_store.rs::ChatStore::save"
+      "title": "Checkpoint on a git commit action",
+      "loop_stage": "learn",
+      "pattern": "git-aligned-checkpoint",
+      "intent": "Anchor the edit timeline to the repository's own history.",
+      "how_it_shapes_the_loop": "An EditCheckpoint with EditAction::GitCommit records the git_hash and dirty/staged/modified file state, aligning the loop's undo timeline with the real VCS boundary.",
+      "loop_objects_touched": ["EditCheckpoint", "EditHistory"],
+      "wiring": {
+        "inputs_from": ["git commit result"],
+        "outputs_to": ["timeline anchor", "GitCheckpointInfo"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing after a commit drops a git-anchor pin that marks a hard timeline boundary.",
+        "visual": "The git pin renders with a commit-hash badge and a heavier boundary line."
+      },
+      "mini_scenario": "After a commit, the timeline gets a git-anchored checkpoint so undo knows where the committed baseline is.",
+      "pitfall": "Treating a git-anchored checkpoint like an ordinary undo point can rewind past a commit and confuse the tree."
     },
     {
       "id": "session-20",
-      "title": "Root at-rest trust in EncryptionManager",
-      "loop_role": "Model EncryptionManager as session-scope infrastructure outside the loop stages but gating them: init(password) derives an AES-256-GCM key via PBKDF2-HMAC-SHA256 (100k iterations, per-installation 32-byte salt, 0o600) into a OnceLock singleton; load_from_keychain can seed it; the key is zeroized on Drop.",
-      "affects": "Determines the confidentiality posture of every persisted object on the loop — checkpoints, chats, cached responses. Failure modes are honest and ordered: salt file I/O failure falls back to a session-ephemeral salt with a warn, and new_instance exists for multi-agent sessions with distinct keys (not yet wired, so UI must not claim per-agent isolation).",
-      "touch_ux": "A vault node at the canvas root that all persistence edges pass under; its badge shows key provenance (password / keychain / ephemeral) and a PBKDF2 iteration chip. Long-press opens the unlock sheet; if the manager was never init'd, every downstream storage node shows the amber 'plaintext' state inherited from ChatStore's warning.",
-      "pointer": "src/session/encryption.rs::EncryptionManager"
+      "title": "Zeroize the key on drop",
+      "loop_stage": "foundation",
+      "pattern": "secret-hygiene",
+      "intent": "Ensure the encryption key never lingers in memory after use.",
+      "how_it_shapes_the_loop": "EncryptionManager's Drop impl zeroizes the key when the manager is dropped, so the loop's crypto substrate leaves no key residue for a memory scrape.",
+      "loop_objects_touched": ["EncryptionManager"],
+      "wiring": {
+        "inputs_from": ["session teardown"],
+        "outputs_to": ["zeroized key memory"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the persistence node away at session end wipes its key glyph in a visible scrub.",
+        "visual": "The key badge dissolves to zeros as the node is torn down."
+      },
+      "mini_scenario": "At session end the manager drops and its key bytes are zeroized before the allocation is freed.",
+      "pitfall": "Copying the key into a struct without matching zeroization leaves a plaintext key copy behind."
     }
   ]
 }

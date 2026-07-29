@@ -1,291 +1,410 @@
 {
-  "node_id": "resource",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (RESOURCE)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via resource context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize resource token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding resource dynamically does not invalidate active turn execution."
-  ],
+  "component": "resource",
+  "tier": "tooling",
+  "loop_stage": "control",
+  "summary": "Resource is the loop's physical-budget governor: ResourceManager coordinates GPU, memory, and disk, computing ResourcePressure (None..Critical) from ResourceUsage. AdaptiveQuotas shrink concurrency, context tokens, and queued tasks as pressure rises; ResourceLimitTracker hands out RAII guards (GPUAllocationGuard, RequestGuard, TaskGuard) that enforce ResourceQuotas; MemoryManager emits MemoryActions (ReduceContext, OffloadModels, EmergencyRestart) under pressure; DiskManager governs checkpoints/logs/models storage and produces StorageEstimates. It is the substrate that decides how big and how parallel each loop iteration is allowed to be.",
+  "loop_objects": ["ResourceUsage", "ResourcePressure", "AdaptiveQuotas", "ResourceQuotas", "ResourceRequest", "ResourceReservation", "MemoryAction", "DiskUsage", "StorageEstimate", "GPUAllocationGuard", "RequestGuard", "TaskGuard"],
+  "context_basis": "recommendations were formed with src/resource/ (mod.rs, quotas.rs, memory.rs, disk.rs, gpu.rs) read in the context of the full engine (~600k budget framing), where adaptive quotas throttle the loop's context and concurrency as physical pressure rises.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Resource - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling resource under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "resource-01",
+      "title": "Gate a request against current quotas",
+      "loop_stage": "control",
+      "pattern": "gate-before-act",
+      "intent": "Refuse a resource request that would exceed the loop's current limits.",
+      "how_it_shapes_the_loop": "AdaptiveQuotas.check compares a ResourceRequest against current quotas and returns QuotaExceeded, so the control stage blocks an act step before it over-allocates GPU or memory.",
+      "loop_objects_touched": ["ResourceRequest", "AdaptiveQuotas", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["act-stage ResourceRequest"],
+        "outputs_to": ["control go/no-go gate"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the quota gate node checks the pending request against current limits.",
+        "visual": "The gate glows green when the request fits, flashes red 'QuotaExceeded' when it doesn't."
+      },
+      "mini_scenario": "A request for 20GB GPU is checked against a 16GB per-model quota and rejected before the model loads.",
+      "pitfall": "check reads current (adaptive) quotas, not base; a request that passed earlier can fail after pressure shrinks the limits."
     },
     {
-      "example_id": 2,
-      "title": "Resource - High Token Load (600k Context)",
-      "loop_scenario": "Modeling resource under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "resource-02",
+      "title": "Shrink quotas as pressure rises",
+      "loop_stage": "control",
+      "pattern": "pressure-adaptive-throttle",
+      "intent": "Automatically reduce concurrency and context as the system gets loaded.",
+      "how_it_shapes_the_loop": "adjust_for_pressure maps ResourcePressure to reduced max_concurrent_requests/max_context_tokens/max_queued_tasks, so the loop iterates smaller and less parallel under load.",
+      "loop_objects_touched": ["ResourcePressure", "AdaptiveQuotas", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["ResourceManager pressure signal"],
+        "outputs_to": ["current ResourceQuotas", "loop concurrency/context"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the pressure dial previews how quotas shrink at each pressure level.",
+        "visual": "Quota bars contract as the dial climbs; at Critical they snap to emergency minimums."
+      },
+      "mini_scenario": "Pressure hits Medium, halving concurrency and context; the loop keeps running but with smaller, serial steps.",
+      "pitfall": "Pressure returning to None resets to base; a loop caching the shrunken quota misses the recovery and stays throttled."
     },
     {
-      "example_id": 3,
-      "title": "Resource - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling resource under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "resource-03",
+      "title": "Enter Critical emergency mode",
+      "loop_stage": "control",
+      "pattern": "emergency-clamp",
+      "intent": "Survive Critical pressure without crashing the loop.",
+      "how_it_shapes_the_loop": "At Critical, adjust_for_pressure clamps to 1 concurrent request, 8192 context tokens, 10 queued tasks, and halves per-model GPU memory, forcing the loop into a minimal survival footprint.",
+      "loop_objects_touched": ["ResourcePressure", "AdaptiveQuotas", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["Critical pressure signal"],
+        "outputs_to": ["emergency ResourceQuotas"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the pressure badge at Critical shows the emergency clamp values.",
+        "visual": "The node pulses deep red; quota bars collapse to their emergency floors with a warning glow."
+      },
+      "mini_scenario": "Under Critical pressure the loop drops to single-threaded 8k-context steps to avoid OOM.",
+      "pitfall": "8192 is a hard floor at Critical; a task needing more context simply cannot run until pressure eases."
     },
     {
-      "example_id": 4,
-      "title": "Resource - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling resource under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "resource-04",
+      "title": "Reserve GPU memory with an RAII guard",
+      "loop_stage": "act",
+      "pattern": "scoped-allocation",
+      "intent": "Hold GPU memory for the duration of a model call and auto-release it.",
+      "how_it_shapes_the_loop": "ResourceLimitTracker.allocate_gpu_memory returns a GPUAllocationGuard that reserves bytes and frees them on drop, so the loop's GPU budget can't leak across iterations.",
+      "loop_objects_touched": ["GPUAllocationGuard", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["act-stage model-load request"],
+        "outputs_to": ["tracked GPU budget", "act execution"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a model node onto the GPU lane reserves its memory as a scoped guard.",
+        "visual": "A GPU bar fills by the reserved amount; the fill drains when the node's scope ends."
+      },
+      "mini_scenario": "A model call allocates 12GB via a guard; when the call's scope ends the guard drops and frees it automatically.",
+      "pitfall": "The guard frees on drop; holding it in a long-lived struct beyond the call keeps GPU memory reserved and starves the loop."
     },
     {
-      "example_id": 5,
-      "title": "Resource - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling resource under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "resource-05",
+      "title": "Limit concurrent requests with a RequestGuard",
+      "loop_stage": "control",
+      "pattern": "concurrency-cap",
+      "intent": "Cap how many LLM requests run at once.",
+      "how_it_shapes_the_loop": "start_request returns a RequestGuard when under max_concurrent_requests, so the loop's fanout is bounded and excess parallel work is refused, not queued unbounded.",
+      "loop_objects_touched": ["RequestGuard", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["act-stage parallel request attempts"],
+        "outputs_to": ["bounded concurrent execution"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading a fanout node reveals how many request slots are free vs held.",
+        "visual": "Filled slots glow; attempts beyond the cap bounce back with a red flash."
+      },
+      "mini_scenario": "With a cap of 3, a fourth concurrent request fails to acquire a RequestGuard and waits its turn.",
+      "pitfall": "The guard releases on drop; forgetting to hold it for the request's whole lifetime under-counts real concurrency."
     },
     {
-      "example_id": 6,
-      "title": "Resource - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling resource under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "resource-06",
+      "title": "Bound the task queue with a TaskGuard",
+      "loop_stage": "control",
+      "pattern": "queue-depth-cap",
+      "intent": "Stop the loop from queuing unlimited pending tasks.",
+      "how_it_shapes_the_loop": "queue_task returns a TaskGuard only under max_queued_tasks, so the loop applies backpressure at the queue instead of accumulating work it can't run.",
+      "loop_objects_touched": ["TaskGuard", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["incoming task submissions"],
+        "outputs_to": ["bounded task queue"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking a task into a full queue bounces it back.",
+        "visual": "The queue depth bar fills; at capacity new tasks rebound with a soft red pulse."
+      },
+      "mini_scenario": "The queue hits its cap; the next submission can't acquire a TaskGuard and the caller must retry later.",
+      "pitfall": "Queue cap shrinks under pressure; a submitter that ignores the guard failure loses tasks silently."
     },
     {
-      "example_id": 7,
-      "title": "Resource - Stream Chunk Processing",
-      "loop_scenario": "Modeling resource under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "resource-07",
+      "title": "Compute pressure from usage",
+      "loop_stage": "observe",
+      "pattern": "usage-to-pressure",
+      "intent": "Turn raw CPU/GPU/memory/disk usage into a single pressure level.",
+      "how_it_shapes_the_loop": "ResourceManager derives ResourcePressure from ResourceUsage, giving control one None..Critical signal to drive all its throttling decisions.",
+      "loop_objects_touched": ["ResourceUsage", "ResourcePressure"],
+      "wiring": {
+        "inputs_from": ["system CPU/GPU/memory/disk metrics"],
+        "outputs_to": ["adjust_for_pressure", "control decisions"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the usage overlay collapses per-resource gauges into one pressure badge.",
+        "visual": "A composite badge shades green->amber->red as the worst resource climbs."
+      },
+      "mini_scenario": "GPU at 92% and memory at 88% resolve to High pressure, which then shrinks the loop's quotas.",
+      "pitfall": "Pressure is a rollup; a single saturated resource can dominate, so inspect ResourceUsage to know which one to relieve."
     },
     {
-      "example_id": 8,
-      "title": "Resource - Interactive User Interruption",
-      "loop_scenario": "Modeling resource under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "resource-08",
+      "title": "React to shared pressure across components",
+      "loop_stage": "control",
+      "pattern": "shared-pressure-bus",
+      "intent": "Let all subsystems see the same live pressure value.",
+      "how_it_shapes_the_loop": "shared_pressure exposes an Arc<RwLock<ResourcePressure>>, so any loop stage can read the current pressure and self-throttle without polling the manager.",
+      "loop_objects_touched": ["ResourcePressure", "ResourceUsage"],
+      "wiring": {
+        "inputs_from": ["ResourceManager pressure updates"],
+        "outputs_to": ["all subscribing loop stages"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing an edge from the pressure bus to any node subscribes it to live pressure.",
+        "visual": "A shared pressure halo tints every subscribed node the same color as the bus."
+      },
+      "mini_scenario": "Memory and act stages both read shared_pressure=High and each independently reduces its footprint.",
+      "pitfall": "It's a shared lock, not per-subscriber; holding the write lock too long stalls every reader mid-loop."
     },
     {
-      "example_id": 9,
-      "title": "Resource - Subagent Delegation",
-      "loop_scenario": "Modeling resource under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "resource-09",
+      "title": "Reduce context under memory pressure",
+      "loop_stage": "control",
+      "pattern": "shrink-the-window",
+      "intent": "Cut the context window instead of OOM-ing.",
+      "how_it_shapes_the_loop": "MemoryManager emits MemoryAction::ReduceContext{target_tokens}, so under pressure the loop's reason stage runs with a smaller prompt rather than crashing.",
+      "loop_objects_touched": ["MemoryAction", "MemoryUsage", "ResourcePressure"],
+      "wiring": {
+        "inputs_from": ["MemoryManager pressure handler"],
+        "outputs_to": ["reason-stage context size"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the context dial down issues a ReduceContext action.",
+        "visual": "The context bar contracts to the target; the reason node briefly flashes amber."
+      },
+      "mini_scenario": "Memory hits 90%; a ReduceContext{16384} action trims the next prompt to fit available RAM.",
+      "pitfall": "Reducing context can drop crucial history; pair it with summarization so the loop doesn't lose task state."
     },
     {
-      "example_id": 10,
-      "title": "Resource - Safety Policy Interception",
-      "loop_scenario": "Modeling resource under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "resource-10",
+      "title": "Offload models to CPU under pressure",
+      "loop_stage": "control",
+      "pattern": "offload-to-relieve",
+      "intent": "Free GPU memory by moving models to CPU.",
+      "how_it_shapes_the_loop": "MemoryAction::OffloadModels frees GPU pressure so the loop can keep running (slower) instead of failing to allocate.",
+      "loop_objects_touched": ["MemoryAction", "GPUAllocationGuard", "ResourcePressure"],
+      "wiring": {
+        "inputs_from": ["GPU pressure signal"],
+        "outputs_to": ["model placement", "GPU budget"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a model node from the GPU lane to the CPU lane triggers offload.",
+        "visual": "The model node slides across lanes; the GPU bar drops and a 'CPU' tag appears."
+      },
+      "mini_scenario": "Under GPU pressure a secondary model offloads to CPU, freeing 8GB so the primary model keeps serving.",
+      "pitfall": "CPU offload trades memory for latency; offloading the hot-path model can tank the loop's throughput."
     },
     {
-      "example_id": 11,
-      "title": "Resource - Context Pruning & Compaction",
-      "loop_scenario": "Modeling resource under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "resource-11",
+      "title": "Pause non-critical tasks by priority",
+      "loop_stage": "control",
+      "pattern": "priority-shed",
+      "intent": "Keep critical work running by pausing low-priority tasks.",
+      "how_it_shapes_the_loop": "MemoryAction::PauseTasks{priority_threshold} sheds work below a priority, so the loop protects its critical path when resources are scarce.",
+      "loop_objects_touched": ["MemoryAction", "TaskGuard", "ResourcePressure"],
+      "wiring": {
+        "inputs_from": ["pressure handler"],
+        "outputs_to": ["task scheduler"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the task lane sets the pause priority threshold.",
+        "visual": "Tasks below the threshold dim and pause; critical tasks stay lit."
+      },
+      "mini_scenario": "Under pressure, background indexing (priority 2) pauses while the user's task (priority 8) keeps running.",
+      "pitfall": "Set the threshold carefully; too high a threshold pauses work the user is actually waiting on."
     },
     {
-      "example_id": 12,
-      "title": "Resource - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling resource under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "resource-12",
+      "title": "Trigger an emergency component restart",
+      "loop_stage": "control",
+      "pattern": "last-resort-restart",
+      "intent": "Recover a wedged subsystem when nothing else relieves pressure.",
+      "how_it_shapes_the_loop": "MemoryAction::EmergencyRestart is the terminal escalation, resetting a component so the loop can continue rather than deadlock at Critical.",
+      "loop_objects_touched": ["MemoryAction", "ResourcePressure"],
+      "wiring": {
+        "inputs_from": ["sustained Critical pressure"],
+        "outputs_to": ["component lifecycle", "control recovery"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the emergency node downward issues a restart.",
+        "visual": "The target component node blinks red then re-initializes with a spin-up animation."
+      },
+      "mini_scenario": "A leaking component holds Critical pressure; an EmergencyRestart frees its memory and the loop resumes.",
+      "pitfall": "Restart loses in-flight state; only escalate here after cheaper MemoryActions have failed to relieve pressure."
     },
     {
-      "example_id": 13,
-      "title": "Resource - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling resource under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "resource-13",
+      "title": "Estimate memory for a token budget",
+      "loop_stage": "reason",
+      "pattern": "predict-before-allocate",
+      "intent": "Know how much RAM a planned context will need.",
+      "how_it_shapes_the_loop": "MemoryManager.estimate_for_tokens(tokens, bytes_per_token) predicts allocation, so the reason stage can size its context to fit before committing.",
+      "loop_objects_touched": ["MemoryUsage", "MemoryAction"],
+      "wiring": {
+        "inputs_from": ["planned token count"],
+        "outputs_to": ["reason-stage context sizing"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the context planner shows projected memory for the chosen token budget.",
+        "visual": "A projected-memory bar overlays the available-memory bar; overflow shades red."
+      },
+      "mini_scenario": "estimate_for_tokens(32768, 100) projects ~3.3MB per the model's per-token cost, confirming the plan fits.",
+      "pitfall": "bytes_per_token is a coarse estimate; real KV-cache growth can exceed it, so leave headroom below the limit."
     },
     {
-      "example_id": 14,
-      "title": "Resource - Isolated Branch Staging",
-      "loop_scenario": "Modeling resource under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "resource-14",
+      "title": "Track allocated memory explicitly",
+      "loop_stage": "observe",
+      "pattern": "explicit-accounting",
+      "intent": "Keep a running total of memory the loop has claimed.",
+      "how_it_shapes_the_loop": "MemoryManager.allocate/free/get_allocated maintain an atomic counter, giving the observe stage an accurate view of the loop's own memory footprint.",
+      "loop_objects_touched": ["MemoryUsage", "MemoryAction"],
+      "wiring": {
+        "inputs_from": ["allocate/free calls"],
+        "outputs_to": ["observe-stage footprint gauge"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the memory node shows current allocated bytes.",
+        "visual": "An allocated-memory gauge rises on allocate and falls on free."
+      },
+      "mini_scenario": "get_allocated reports 2.1GB claimed by the loop, distinct from OS-level usage, guiding the next allocation.",
+      "pitfall": "allocate/free must be balanced; a missed free leaks the counter and makes the loop refuse future allocations."
     },
     {
-      "example_id": 15,
-      "title": "Resource - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling resource under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "resource-15",
+      "title": "Reserve a multi-resource budget for a step",
+      "loop_stage": "act",
+      "pattern": "bundled-reservation",
+      "intent": "Claim GPU, memory, and disk together for one heavy operation.",
+      "how_it_shapes_the_loop": "A ResourceRequest (gpu/system_memory/disk bytes + duration) becomes a ResourceReservation, so the act stage holds a coherent budget for a step and releases it on completion.",
+      "loop_objects_touched": ["ResourceRequest", "ResourceReservation"],
+      "wiring": {
+        "inputs_from": ["act-stage heavy operation"],
+        "outputs_to": ["reserved multi-resource budget"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a heavy-op node onto the reservation lane claims a bundled budget.",
+        "visual": "Three sub-bars (GPU/mem/disk) fill together; releasing drains all three at once."
+      },
+      "mini_scenario": "A fine-tune step reserves 12GB GPU + 4GB RAM + 20GB disk for ~10 min, then releases on finish.",
+      "pitfall": "release() must be called (or the reservation dropped); a leaked reservation blocks the resources for the whole run."
     },
     {
-      "example_id": 16,
-      "title": "Resource - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling resource under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "resource-16",
+      "title": "Report disk usage and headroom",
+      "loop_stage": "observe",
+      "pattern": "disk-headroom-watch",
+      "intent": "Know how much storage is left before the loop writes.",
+      "how_it_shapes_the_loop": "DiskManager surfaces DiskUsage (used/total/available/percent), so the observe stage can warn control before checkpoints or model downloads exhaust disk.",
+      "loop_objects_touched": ["DiskUsage", "ResourcePressure"],
+      "wiring": {
+        "inputs_from": ["filesystem stats"],
+        "outputs_to": ["control disk gate"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the disk node zooms from a percent badge to a used/available breakdown.",
+        "visual": "A disk gauge fills; above a threshold it shades amber then red."
+      },
+      "mini_scenario": "DiskUsage shows 94% used; the loop defers a large model download until space is reclaimed.",
+      "pitfall": "percent hides absolute headroom; 6% free on a 4TB disk is fine, on a 20GB disk it isn't, so read available bytes."
     },
     {
-      "example_id": 17,
-      "title": "Resource - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling resource under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "resource-17",
+      "title": "Estimate storage needs ahead of time",
+      "loop_stage": "reason",
+      "pattern": "capacity-planning",
+      "intent": "Plan disk usage for a run before committing.",
+      "how_it_shapes_the_loop": "DiskManager.estimate_storage_needs(days) yields a StorageEstimate (checkpoints/logs/models/buffer), so the reason stage can plan retention within available disk.",
+      "loop_objects_touched": ["StorageEstimate", "DiskUsage"],
+      "wiring": {
+        "inputs_from": ["retention window in days"],
+        "outputs_to": ["reason-stage retention plan"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the storage-estimate node breaks total into checkpoints/logs/models/buffer.",
+        "visual": "A stacked bar shows each category's projected size summing to the total."
+      },
+      "mini_scenario": "estimate_storage_needs(7) projects 18GB total; the loop confirms the 40GB free disk can hold a week of runs.",
+      "pitfall": "total() sums the categories including buffer; ignoring the buffer term underestimates true headroom needs."
     },
     {
-      "example_id": 18,
-      "title": "Resource - Gesture-based Node Filter",
-      "loop_scenario": "Modeling resource under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "resource-18",
+      "title": "Create state dirs lazily on first write",
+      "loop_stage": "foundation",
+      "pattern": "lazy-dir-creation",
+      "intent": "Avoid polluting the user's cwd with empty state directories.",
+      "how_it_shapes_the_loop": "DiskManager defers checkpoints/logs/models dir creation until an actual write (ensure_dir), so read-only loop commands don't scatter empty directories.",
+      "loop_objects_touched": ["DiskUsage", "StorageEstimate"],
+      "wiring": {
+        "inputs_from": ["first write attempt"],
+        "outputs_to": ["created state directory"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a state-dir node shows whether it exists yet or is deferred.",
+        "visual": "Deferred dirs render as dashed placeholders; they solidify on first write."
+      },
+      "mini_scenario": "`selfware config show` builds a DiskManager but creates no dirs; the first checkpoint write makes checkpoints/.",
+      "pitfall": "Because creation is deferred, code that assumes the dir exists before any write will hit a missing-path error."
     },
     {
-      "example_id": 19,
-      "title": "Resource - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling resource under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "resource-19",
+      "title": "Select a quantization level to fit GPU",
+      "loop_stage": "reason",
+      "pattern": "quantize-to-fit",
+      "intent": "Trade precision for a smaller GPU footprint.",
+      "how_it_shapes_the_loop": "GpuManager's QuantizationLevel lets the reason stage pick a lower-precision model variant so it fits the available GpuDevice memory, keeping the loop runnable on constrained hardware.",
+      "loop_objects_touched": ["ResourceUsage", "GPUAllocationGuard", "ResourceQuotas"],
+      "wiring": {
+        "inputs_from": ["GpuDevice memory budget"],
+        "outputs_to": ["model load configuration"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the quantization dial cycles precision levels and shows the resulting GPU footprint.",
+        "visual": "As precision drops, the projected GPU bar shrinks; the chosen level is highlighted."
+      },
+      "mini_scenario": "The model won't fit at full precision, so the loop selects a lower QuantizationLevel that fits the 16GB GpuDevice.",
+      "pitfall": "Lower quantization degrades output quality; over-quantizing to fit can make the reason stage unreliable."
     },
     {
-      "example_id": 20,
-      "title": "Resource - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling resource under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "ResourcePayload"
-      ],
-      "component_loop_effect": "Determines how resource intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'resource' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "resource-20",
+      "title": "Escalate MemoryActions in order under rising pressure",
+      "loop_stage": "control",
+      "pattern": "graduated-escalation",
+      "intent": "Relieve pressure with the cheapest effective action first.",
+      "how_it_shapes_the_loop": "The MemoryManager's action handler applies MemoryActions in increasing severity (RunGC/FlushCaches -> ReduceContext -> PauseTasks -> OffloadModels -> EmergencyRestart), so the loop degrades gracefully instead of jumping straight to a restart.",
+      "loop_objects_touched": ["MemoryAction", "ResourcePressure", "MemoryUsage"],
+      "wiring": {
+        "inputs_from": ["escalating pressure signal"],
+        "outputs_to": ["ordered relief actions"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking up the escalation ladder steps through successively stronger actions.",
+        "visual": "A ladder of action rungs lights bottom-up; each rung glows as it fires, red at the top."
+      },
+      "mini_scenario": "Pressure rises: first FlushCaches, then ReduceContext, then PauseTasks each buy relief before any restart is needed.",
+      "pitfall": "Skipping straight to OffloadModels/EmergencyRestart wastes the cheaper actions and disrupts the loop unnecessarily."
     }
   ]
 }

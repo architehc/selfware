@@ -1,168 +1,410 @@
 {
-  "module": "evolve",
-  "generated": "2026-07-28",
-  "full_tokens": 146689,
-  "loop_role": "The self-evolve workspace: it builds the deterministic code graph, composes tier-fitted context envelopes, and drives gated apply-and-verify runs so the agent can improve its own codebase under evidence and budget constraints.",
+  "component": "evolve",
+  "tier": "full",
+  "loop_stage": "learn",
+  "summary": "The evolve component is the human-in-the-loop self-improvement layer: it scans the repository into a dependency Graph, projects it into cost/fidelity context tiers (Map, Lite, Compact, Full), compiles a ContextMap of component cards for cheap navigation, suggests architectural ComponentPairs to grow, codifies improvement directions as Presets, and stages proposed changes in a shadow worktree via ApplyRun before a grounded review protocol (GroundingEvidence, GroundedReview, trust gate) lets a human commit. On the loop it is the reflective 'learn' driver that decides what to change and how much context to spend deciding it.",
+  "loop_objects": ["Graph", "Node", "Edge", "ContextMode", "ContextMap", "ComponentCard", "ContextEnvelope", "ProjectedDocument", "ComponentPair", "Preset", "ApplyRun", "ApplyStatus", "StagedDiff", "ReadinessGate", "ReadinessReport", "GroundingEvidence", "GroundedReview", "TrustReport", "TrustGateSummary"],
+  "context_basis": "Recommendations were formed with src/evolve/ read in the context of the full engine under a ~600k budget framing; tier choices and map-vs-full tradeoffs assume the whole tree must remain describable within that envelope.",
   "examples": [
     {
       "id": "evolve-01",
-      "title": "Close the loop with EvolutionLoop re-analysis",
-      "loop_role": "Model evolve-01 as the loop-closing edge: after an apply run lands, `EvolutionLoop::run_once` re-scans `src/` via `GraphBuilder` and swaps in a fresh `Graph`, turning act back into perceive. Wire it as the transition edge from the apply/commit node to the graph node — no evolution step is complete until `LoopResult { reanalyzed, updated_nodes }` confirms the workspace model matches the new code.",
-      "affects": "Mutates the graph object everything else reads: node/edge sets, token counts per component, and therefore every downstream `ContextEnvelope.graph_revision`. Stale graph = stale evidence hashes, so the loop must treat `updated_nodes` as a revision bump that invalidates cached context envelopes and readiness reports.",
-      "touch_ux": "A circular-arrow rim around the graph node; when a re-analysis completes the whole canvas ripples once and every node badge recomputes. Tap shows `LoopResult` (`updated_nodes`, duration); long-press replays the last re-scan diff (nodes added/removed highlighted green/red). A stale-graph badge (amber dot) appears on any envelope node built from the old revision.",
-      "pointer": "src/evolve/loop.rs::EvolutionLoop::run_once"
+      "title": "Open the repository as a ContextMap before reading any file",
+      "loop_stage": "perceive",
+      "pattern": "map-then-expand",
+      "intent": "Understand the whole tree's shape at the smallest possible resident token cost before committing budget to any component.",
+      "how_it_shapes_the_loop": "Loads ContextMode::Map: one ComponentCard per module (doc line + public symbols) instead of full source, so the perceive stage pays map_tokens instead of full_tokens and defers detail pulls to on-demand expand.",
+      "loop_objects_touched": ["ContextMap", "ComponentCard", "ContextMode"],
+      "wiring": {
+        "inputs_from": ["Graph (scanned nodes + symbols)"],
+        "outputs_to": ["reason stage (which component to expand)", "ContextEnvelope"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching out on the canvas collapses every component node into its compact card, revealing the full tree as a grid of index cards.",
+        "visual": "Cards render dim slate with a token badge; the whole grid breathes with a soft settle animation as full source folds away."
+      },
+      "mini_scenario": "The user pinches to zoom out, sees 47 component cards at 3k tokens total, and taps 'evolve' to read the doc line for each without loading a single .rs body.",
+      "pitfall": "Do not treat the Map as authoritative for line-accurate claims; symbol names are indexed but bodies are absent, so any recommendation must expand the node before citing lines."
     },
     {
       "id": "evolve-02",
-      "title": "Compose context tiers with ContextComposer",
-      "loop_role": "This is the perceive stage's throttle. `ContextComposer` owns which `ContextMode` (Map, Lite, Compact, Full, FullExtended, Custom, Preset) is active over the production `Graph` nodes; plan reads `included_nodes` and `estimate_tokens` before any model call. Wire it between the graph node and the envelope builder: graph → composer → envelope.",
-      "affects": "Directly sizes the context window object: `ContextModeSize` per tier, `ContextLayerSummary` per `NodeLayer`, and `ContextSummary` for the picker. Choosing `Custom` admits hand-picked nodes at skeleton detail; `Preset(name)` narrows to one preset. `TOKENS_PER_LINE` (10) is only a fallback for nodes without measured counts — canvas must mark estimated vs measured tokens differently.",
-      "touch_ux": "A vertical tier-slider node (Map at top, FullExtended at bottom) with a token-count badge per stop that fills/drains as you drag. Tap a tier to pin it; pinch on the slider expands to the per-layer breakdown (`ContextLayerSummary`); long-press a tier shows the exact node list it would include. The active tier glows; tiers exceeding the model window show red hatch marks.",
-      "pointer": "src/evolve/context.rs::ContextComposer"
+      "title": "Expand one component card to Lite signatures on tap",
+      "loop_stage": "perceive",
+      "pattern": "detail-on-demand",
+      "intent": "Pull just the interface surface of a chosen component without paying for full bodies.",
+      "how_it_shapes_the_loop": "Projects the tapped Node at ContextMode::Lite (skeleton signatures, ~18% of full code), adding a single ProjectedDocument to the envelope instead of the whole file.",
+      "loop_objects_touched": ["ComponentCard", "ProjectedDocument", "ContextMode", "Node"],
+      "wiring": {
+        "inputs_from": ["ContextMap card selection"],
+        "outputs_to": ["ContextEnvelope", "reason stage"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a card flips it to show function and type signatures as a scrollable skeleton on the node face.",
+        "visual": "The card flips with a 3D hinge; new lines fade in as ghosted signatures, a small 'Lite' chip glowing amber in the corner."
+      },
+      "mini_scenario": "The user taps the apply.rs card and reads its ApplyRun and ApplyStatus signatures to decide whether it can stage a merge, all under 400 added tokens.",
+      "pitfall": "Lite hides bodies, so branching or control-flow reasoning that depends on implementation must escalate the same node to Compact or Full first."
     },
     {
       "id": "evolve-03",
-      "title": "Ship hash-addressed ContextEnvelope bundles",
-      "loop_role": "The envelope is the perceive→plan handoff artifact: `build_envelope` projects the composer's included set at the active tier into `ProjectedDocument`s and seals them with a `content_hash`. Model the envelope as the object that travels on the edge into the model call — preview and outbound responses both carry the hash, and equality of hashes proves both sides describe the same bytes.",
-      "affects": "Binds context window contents to evidence integrity: `ContextEnvelope { mode, graph_revision, included, documents, total_tokens, content_hash }`. Non-Rust Code nodes ship verbatim in Lite/Custom (no skeleton exists) and are counted at full tokens — so envelope cost is honest, never optimistically projected. A changed hash means a changed context; the loop can cache, diff, and audit by hash.",
-      "touch_ux": "A sealed-envelope hexagon showing `total_tokens` and a truncated `content_hash` as its badge. Tap flips it open to the `ProjectedDocument` list (path, tokens each); pinch zooms from card view into a treemap of token share per document; long-press copies the hash and highlights every other canvas object stamped with the same hash (proving shared provenance). Hash mismatch vs current graph revision renders a broken-seal icon.",
-      "pointer": "src/evolve/envelope.rs::build_envelope"
+      "title": "Let the tier fitter auto-pick a mode that fits the budget",
+      "loop_stage": "control",
+      "pattern": "budget-fit-selection",
+      "intent": "Choose the richest context tier that still fits the remaining token budget without manual guessing.",
+      "how_it_shapes_the_loop": "ContextComposer measures Lite/Compact/Map via real projections and returns a FitOutcome, letting the control layer downgrade the tier automatically when the request would overflow.",
+      "loop_objects_touched": ["ContextMode", "ContextEnvelope", "ContextMap"],
+      "wiring": {
+        "inputs_from": ["remaining Budget", "requested ContextMode::Auto"],
+        "outputs_to": ["ContextEnvelope with chosen mode"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the budget dial opens a fit slider that snaps to the highest tier whose measured tokens stay under the line.",
+        "visual": "A gauge fills toward a red overflow line; the snapped tier chip pulses green when it lands under budget, red if forced down."
+      },
+      "mini_scenario": "The user asks for Full but only 120k budget remains, so the fitter snaps to Compact and shows the measured 98k it actually costs.",
+      "pitfall": "Never trust a declared tier size over the measured one; the fitter measures real projections because comment density and dedup shift token counts per module."
     },
     {
       "id": "evolve-04",
-      "title": "Auto-fit tiers to the model window with TierMeasurer",
-      "loop_role": "Plugs into plan as the budget resolver: `RequestedMode::Auto` plus `fit_tier` walks the `TIER_LADDER` richest-first (FullExtended → Map) and picks the richest tier whose measured size fits `FitBudget::usable()`. Wire it upstream of the composer so the loop never proposes a context the model cannot hold.",
-      "affects": "Turns budget into a measured, not estimated, quantity: `FitBudget { context_length, output_reserve, fit_ratio }` with `output_reserve = max_tokens.min(context_length/4)`, and `TierMeasurer` really projects sources (strip comments / skeleton / map) to measure tier size — fixed fractions survive only as per-node fallbacks. `FitOutcome` records what fit and why; `io_reads` counts the disk cost of measuring.",
-      "touch_ux": "A gauge node shaped like a fuel dial: needle = `usable()` tokens, five tier notches on the dial. The auto-fit tier animates the needle settling on the richest fitting notch; tap shows `FitOutcome` (chosen tier, measured tokens, fallbacks used); a per-node fallback warning renders as a striped segment on the dial. Long-press pins a tier (switching `RequestedMode` from Auto to Fixed); pinch compares measured vs fallback estimates side by side.",
-      "pointer": "src/evolve/context_fit.rs::fit_tier"
+      "title": "Draw a task-scoped selection from a seed node's neighbors",
+      "loop_stage": "perceive",
+      "pattern": "seed-and-neighborhood",
+      "intent": "Assemble exactly the context a refactor task needs: the seed component plus its dependents and dependencies.",
+      "how_it_shapes_the_loop": "Walks Graph edges (DependsOn, Contains) outward from the seed Node to gather a task-scoped set, so the perceive stage loads a coherent subgraph instead of an arbitrary file list.",
+      "loop_objects_touched": ["Graph", "Node", "Edge", "ProjectedDocument"],
+      "wiring": {
+        "inputs_from": ["seed Node (the refactor target)", "Graph edges"],
+        "outputs_to": ["ContextEnvelope", "reason stage"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing a lasso ring around a node auto-selects it plus every node one edge away, highlighting the subgraph.",
+        "visual": "The seed glows white; DependsOn neighbors light blue and Contains children light violet as edges trace outward like ripples."
+      },
+      "mini_scenario": "The user lassoes context.rs and the canvas lights context_fit, context_reduce, and map as its neighborhood, forming the refactor's working set.",
+      "pitfall": "Neighborhood depth must be bounded; expanding transitively unbounded pulls the whole tree and defeats the point of task-scoping."
     },
     {
       "id": "evolve-05",
-      "title": "Navigate by ComponentCard map tier",
-      "loop_role": "The Map tier is the perceive stage for small windows: `build_map` emits one `ComponentCard` per component — doc line plus public symbol names — and `expand` pulls full detail on demand. Model it as a two-level loop: the model reads the resident map, decides what matters, then issues an expand retrieval; nothing is lost, detail is one call away.",
-      "affects": "Defines the resident-vs-retrieved split of the context window: `ContextMap.map_tokens` is the resident cost, `full_tokens` the cost it replaces. Each `ComponentCard` carries `tokens` and `lite_tokens` (what expanding full vs skeleton costs) and `more` for symbols beyond `MAX_SYMBOLS_PER_COMPONENT` — reported, not dropped, so the map never silently truncates.",
-      "touch_ux": "The map node is a grid of small cards; each card is a rounded chip with the component's doc line and a `tokens`/`lite_tokens` badge. Tap a card to expand it in place (skeleton view slides out — this is the `expand` call made visible); pinch out collapses back to the grid; long-press toggles between lite_tokens and full cost preview. Cards with `more > 0` show a '+N' corner ribbon.",
-      "pointer": "src/evolve/map.rs::ComponentCard"
+      "title": "Build a content-hashed ContextEnvelope for reproducibility",
+      "loop_stage": "foundation",
+      "pattern": "hashed-context-snapshot",
+      "intent": "Freeze the exact context handed to the model so the same inputs always reproduce the same review.",
+      "how_it_shapes_the_loop": "Assembles a ContextEnvelope (mode, graph_revision, included ids, documents) and SHA256-hashes it, giving the loop a stable content_hash that gates cache reuse and audit.",
+      "loop_objects_touched": ["ContextEnvelope", "ProjectedDocument", "ContextMode"],
+      "wiring": {
+        "inputs_from": ["projected Nodes", "graph_revision"],
+        "outputs_to": ["review protocol", "cache key"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the canvas seals the current selection into an envelope tile stamped with its hash.",
+        "visual": "A wax-seal animation presses onto a folded-envelope node; the hash prefix appears in monospace on the seal."
+      },
+      "mini_scenario": "The user seals an envelope over the map+context selection; the hash lets the next identical review hit cache instead of re-projecting.",
+      "pitfall": "The hash must fold in graph_revision, mode, ids, and content; omitting revision lets a stale envelope reuse a hash after the tree changed."
     },
     {
       "id": "evolve-06",
-      "title": "Stage and verify apply runs in shadow worktrees",
-      "loop_role": "This is the act stage with a built-in verify chute: `stage_run` spawns `selfware run --yolo` inside a shadow git worktree (never the live checkout), serialized through `APPLY_LOCK`; on exit `verify_staged_diff` checks the diff is non-empty, scoped to `src/` + `docs/`, and compiles (`cargo check`, 10-minute bound) before the run becomes `Staged`. Wire graph action → apply node → diagnostics/commit; nothing merges without the deliberate commit step.",
-      "affects": "Owns the trust state of changes: `ApplyStatus` (Running, Staged, Rejected(reason), Succeeded, Failed), typed `RejectReason`, and `StagedDiff { digest, files_changed, insertions, deletions, preview }`. `commit_staged` requires the exact digest and matching `base_revision` — a one-use token; replay yields `unknown_run` 404. Tests deliberately don't run here; compile is the authoritative minimum, deeper verification is CI's job — the canvas must show that honesty boundary.",
-      "touch_ux": "A conveyor-belt node: runs are tokens traveling left (Running, pulsing) to a staging pad (Staged, green seal) or a reject bin (Rejected, red, tap for the typed reason and capped stderr). The commit step is a physical two-finger drag of the staged token onto the live-branch node — the digest must match, shown as a key-fits-lock animation. Live badge: current run status + `files_changed`/`insertions`/`deletions` from `StagedDiff`. Long-press a rejected run opens the preserved shadow worktree for inspection.",
-      "pointer": "src/evolve/apply.rs::verify_staged_diff"
+      "title": "Surface the heaviest cross-cluster ComponentPair to evolve",
+      "loop_stage": "reason",
+      "pattern": "coupling-first-suggestion",
+      "intent": "Find the architectural seam most worth improving without reading full source.",
+      "how_it_shapes_the_loop": "connected_pairs sorts undirected ComponentPairs by cross_cluster and edge weight, feeding the reason stage the heaviest coupled pair plus both map cards to propose merge/extract/decouple moves.",
+      "loop_objects_touched": ["ComponentPair", "Graph", "Edge", "ComponentCard"],
+      "wiring": {
+        "inputs_from": ["Graph clusters + edges"],
+        "outputs_to": ["GroundedAssistant suggestion call"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking across the canvas cycles through pair candidates, each snapping two nodes together with their connecting edge highlighted.",
+        "visual": "The paired nodes pull toward each other on a taut spring; the edge thickens and glows orange proportional to its weight."
+      },
+      "mini_scenario": "The user flicks and the canvas snaps analysis::code_graph to evolve::graph, a heavy cross-cluster pair, and offers 'extract shared graph core'.",
+      "pitfall": "Pair weight is edge count, not semantic importance; a hot pair may just be a utility everyone imports, so read the relations before proposing a merge."
     },
     {
       "id": "evolve-07",
-      "title": "Gate actions through Gatekeeper compile and architecture checks",
-      "loop_role": "The verify stage's hard gate: `Gatekeeper::check_code_gates` evaluates compile/test and architecture constraints for an evolution action and returns a `GateResult`. Model it as a mandatory pass-through edge between act and remember — the loop may not record an outcome as success unless the gate passes.",
-      "affects": "Converts 'the model said it worked' into a typed `GateResult` the trust state can depend on. It is deliberately tiny (303 tokens) — a cheap, deterministic check that sits in front of every expensive model claim, matching the repo's stop-the-line rule: red gates stop the loop, they are never background noise.",
-      "touch_ux": "A portcullis/gate node on the act→remember edge: green when `GateResult` passes, red and physically blocking the edge when it fails — the connecting line visibly stops at the gate. Tap shows the gate checklist (compile, test, architecture) with per-item status; long-press reveals the exact failing command output. A gray gate means 'not yet run' — never render it green by default.",
-      "pointer": "src/evolve/gate.rs::Gatekeeper::check_code_gates"
+      "title": "Load a Preset to codify an improvement direction",
+      "loop_stage": "reason",
+      "pattern": "preset-scoped-task",
+      "intent": "Turn a vague 'improve context handling' into a contract-bearing task with invariants and a verify recipe.",
+      "how_it_shapes_the_loop": "Selecting a Preset injects its task prompt, invariants, context_recipe, and verify command into the loop, constraining what the act stage may change and how success is proven.",
+      "loop_objects_touched": ["Preset", "ContextMode", "ContextEnvelope"],
+      "wiring": {
+        "inputs_from": ["preset catalog (symbol-context-selection, split-giant-files, add-tool...)"],
+        "outputs_to": ["ApplyRun task prompt", "verify gate"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a preset chip onto a component node binds the direction to that target and unfurls its invariant list.",
+        "visual": "The preset chip lands with a clamp animation; invariant lines cascade below the node as a checklist ribbon."
+      },
+      "mini_scenario": "The user drags the 'split-giant-files' preset onto server.rs, and its invariant 'zero behavior change, tests green per move' locks into the run.",
+      "pitfall": "Presets carry invariants for a reason; running the task while dropping its context_recipe or verify command lets a change ship unproven."
     },
     {
       "id": "evolve-08",
-      "title": "Stream structured diagnostics from DiagnosticsEngine",
-      "loop_role": "Plugs into verify as the structured feedback channel: `DiagnosticsEngine::run` executes one of the fixed `AnalysisKind` commands (cargo_check, clippy, evolve tests) and parses JSON messages into `CompilerDiagnostic`s with `DiagnosticSpan`s, producing an `AnalysisReport`. The loop consumes this instead of raw build noise.",
-      "affects": "Shapes the tool-result object: browser requests can never supply executables or arbitrary args — the command set is fixed, output capped at `MAX_DIAGNOSTICS` (500) and `MAX_OUTPUT_BYTES` (64 KiB). Diagnostics carry real file/line spans, so verify feedback is evidence-addressable and can be cited by the grounded assistant rather than paraphrased.",
-      "touch_ux": "A radar-dish node that sweeps when an analysis runs; diagnostics land as pins on the affected file nodes (severity-colored: error red, warning amber). Tap a pin shows the `CompilerDiagnostic` message with its `DiagnosticSpan` highlighted in a peek-view of the source; pinch on the node toggles between the three `AnalysisKind` modes; the badge shows error/warning counts live. Long-press re-runs the same analysis kind.",
-      "pointer": "src/evolve/diagnostics.rs::DiagnosticsEngine"
+      "title": "Strip comments and dedup before tokenizing (Compact tier)",
+      "loop_stage": "foundation",
+      "pattern": "lossless-context-reduce",
+      "intent": "Fit full code into a smaller model's window without losing meaning.",
+      "how_it_shapes_the_loop": "ContextMode::Compact projects nodes with comments stripped and duplicates collapsed (~82% of full), shrinking the envelope while keeping executable meaning and line numbers intact.",
+      "loop_objects_touched": ["ContextMode", "ProjectedDocument", "Node"],
+      "wiring": {
+        "inputs_from": ["Full-tier Nodes"],
+        "outputs_to": ["ContextEnvelope for small-model review"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "A two-finger inward pinch on a node visibly compresses its source, comment lines evaporating first.",
+        "visual": "Grey comment lines fade and the node shrinks vertically with a concertina squeeze; a 'Compact 82%' badge settles at the base."
+      },
+      "mini_scenario": "The user pinches a Full node down to Compact so a 32k-window model can review it, keeping every statement but dropping doc noise.",
+      "pitfall": "Stripping must never renumber lines; if reduction shifts line offsets, later evidence citations point at the wrong code."
     },
     {
       "id": "evolve-09",
-      "title": "Evaluate merge readiness with honest GateState",
-      "loop_role": "The verify stage's scoreboard: `ReadinessEngine::evaluate` composes diagnostics, git status, and ontology validation into a `ReadinessReport` of `ReadinessGate`s, each with `GateEvidence` (source, detail, path, line). It also emits `DeterministicRecommendation`s — multi-hop `RecommendationHop` plans computed from the graph, not from model prose.",
-      "affects": "This is the trust/honesty backbone: `GateState` is Pass | Fail | Unknown, and Unknown is a first-class rendered state — a gate whose evidence wasn't collected must never show green. `evidence_complete: false` on a recommendation tells the UI the plan is partial. The `ready` flag is a conjunction of real gate states, so the loop's decision to merge is auditable per gate, per evidence line.",
-      "touch_ux": "A traffic-light cluster node, one lamp per `ReadinessGate` — green/amber/red map to Pass/Unknown/Fail, and Unknown is deliberately amber-blinking, never green. Tap a lamp lists its `GateEvidence` entries as tappable citation chips that jump to file:line; the recommendations panel shows each `DeterministicRecommendation` as a numbered hop chain you can drag onto the canvas as an action sequence. Badge: `ready` boolean plus count of non-Pass gates.",
-      "pointer": "src/evolve/readiness.rs::ReadinessEngine::evaluate"
+      "title": "Stage a proposed change in a shadow worktree via ApplyRun",
+      "loop_stage": "act",
+      "pattern": "shadow-stage-before-merge",
+      "intent": "Execute the improvement task in isolation so the live checkout is never touched until verified.",
+      "how_it_shapes_the_loop": "ApplyRun spawns 'selfware run <task> --yolo' inside a shadow git worktree at HEAD, moving ApplyStatus Running to Staged only after the diff passes scope and compile gates.",
+      "loop_objects_touched": ["ApplyRun", "ApplyStatus", "StagedDiff"],
+      "wiring": {
+        "inputs_from": ["Preset task", "ContextEnvelope"],
+        "outputs_to": ["verify gate", "StagedDiff preview"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the act node spawns a translucent shadow copy of the workspace beside it where the run executes.",
+        "visual": "A ghosted mirror workspace fades in; a spinner orbits it while Running, then it solidifies with a green 'Staged' banner."
+      },
+      "mini_scenario": "The user long-presses to stage the split-giant-files task; the shadow worktree compiles clean and flips to Staged with a StagedDiff of 6 files.",
+      "pitfall": "Never merge from a shadow that drifted; commit requires the StagedDiff digest to still match live HEAD's staged state or the fast-forward is refused."
     },
     {
       "id": "evolve-10",
-      "title": "Constrain model review with GroundedAssistant evidence",
-      "loop_role": "Plugs into plan as the model-facing review path with a grounding harness: `GroundedAssistant::review` requires claims and recommendations to cite `GroundingEvidence` IDs minted from exact workspace lines (`evidence_from_document`), and `validate_review_json` strips items with missing or unknown citations before they reach the UI; one malformed reply triggers `REVIEW_REPAIR_PROMPT` with full context retained.",
-      "affects": "Defines the evidence object and the trust state of model output: `GroundedClaim { text, evidence_ids }`, `GroundedRecommendation` with ordered `ActionHop`s, `TrustGateFinding`/`TrustGateSummary` from `gate_evidence_trust`, and `ReviewUsage` for token/cost accounting. The honesty rule is mechanical: uncited prose is deleted, not flagged — `trust_state: structural` means schema+citations were verified, never more.",
-      "touch_ux": "A magnifier-over-document node: each model claim renders as a speech chip physically tethered by lines to the evidence excerpts it cites; a claim with zero tethers is impossible to render (it was already stripped). Tap a tether jumps to the cited line range with `content_hash` shown; long-press a claim runs `gate_evidence_trust` and recolors the chip by trust finding. Badge: claims kept / claims stripped counts, plus `ReviewUsage.total_tokens` and cost.",
-      "pointer": "src/evolve/assistant.rs::GroundedAssistant"
+      "title": "Reject a staged run that escaped the src/docs scope",
+      "loop_stage": "verify",
+      "pattern": "scope-gate",
+      "intent": "Refuse any staged change that touches files outside the permitted src/ and docs/ boundary.",
+      "how_it_shapes_the_loop": "The verify gate inspects the StagedDiff file list; if any path leaves src/ or docs/, ApplyStatus transitions to Rejected before the change can ever be offered for merge.",
+      "loop_objects_touched": ["StagedDiff", "ApplyStatus", "ApplyRun"],
+      "wiring": {
+        "inputs_from": ["ApplyRun.StagedDiff"],
+        "outputs_to": ["Rejected state", "review UI"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the staged node's diff badge lists changed files; out-of-scope paths render struck through and the merge button greys out.",
+        "visual": "In-scope files list green; a rogue path flashes red and the whole node border pulses red with a 'Rejected: scope' tag."
+      },
+      "mini_scenario": "A staged run edited Cargo.toml alongside src changes; the scope gate flags it Rejected so the config edit never merges silently.",
+      "pitfall": "Scope must be checked on the actual diff, not the task's declared intent; an agent can wander outside its stated files."
     },
     {
       "id": "evolve-11",
-      "title": "Scan context for injection with TrustReport",
-      "loop_role": "A trust boundary on the perceive edge: before any assembled context reaches the model, `analyze_source` tags it with a `SourceKind` (Workspace, ToolOutput, ModelOutput, External, Memory, User) and `TrustLevel`, and `scan_injection` hunts instruction_override, role_switch, hidden_unicode, exfiltration_hint, encoded_blob, and tool_directive patterns.",
-      "affects": "Adds a pollution dimension to every context object: `TrustReport { source_id, source_kind, ... }` with `InjectionFinding`s carrying kind, severity (high/medium/low), line, and excerpt. External and ToolOutput provenance demotes trust; a high-severity finding should block or quarantine the envelope, so the loop's context window is a defended boundary, not an open pipe.",
-      "touch_ux": "A shield-filter node sitting on the edge into the model call; content flows through it visibly and findings stick to the filter as splatter marks colored by severity. Tap a splatter shows the `InjectionFinding` excerpt and explanation; the source-kind tint (workspace = cool blue, external = hot orange) propagates to every downstream envelope chip so provenance is visible at a glance. Badge: highest severity seen + finding count; long-press quarantines the source.",
-      "pointer": "src/evolve/context_trust.rs::scan_injection"
+      "title": "Merge a staged diff by digest match only",
+      "loop_stage": "control",
+      "pattern": "digest-gated-fast-forward",
+      "intent": "Commit the exact reviewed bytes, refusing to merge anything that changed since review.",
+      "how_it_shapes_the_loop": "commit_staged matches the run's StagedDiff digest against live HEAD and merges fast-forward-only, so the control layer guarantees the merged state equals the reviewed state.",
+      "loop_objects_touched": ["StagedDiff", "ApplyStatus", "ApplyRun"],
+      "wiring": {
+        "inputs_from": ["human approval", "StagedDiff digest"],
+        "outputs_to": ["Succeeded state", "live checkout"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing a line from the shadow node to the live workspace triggers the merge; the line only completes if digests match.",
+        "visual": "The connection snaps taut and turns solid green on a match, or recoils and snaps with a red flash on a digest mismatch."
+      },
+      "mini_scenario": "The user draws the merge line; digests match, the shadow fast-forwards into live, and ApplyStatus reads Succeeded.",
+      "pitfall": "If HEAD advanced after staging, the digest will not match and the merge must abort; forcing it would ship un-reviewed code."
     },
     {
       "id": "evolve-12",
-      "title": "Select task-scoped files with ContextSelection",
-      "loop_role": "A smarter perceive stage: `select` takes a `TaskKind` (Extend, Refactor, Consolidate, Cleanup, Understand) and picks exactly the files the task needs — for Refactor, the target's source plus dependents (blast radius) plus dependencies (context); for Consolidate, files with duplicate functions from `FnDedupAnalyzer`; for Cleanup, files with reachability-dead code from `DeadCodeAnalyzer`.",
-      "affects": "Shrinks and focuses the context window object: `ContextSelection` is a ranked list of `SelectedFile`s, each annotated with the role it plays and why — so budget is spent on relevance, not tier brute force. Because selection is deterministic for the same target + graph revision, it composes cleanly with envelope hashing and caching.",
-      "touch_ux": "A spotlight node: type or pick a `TaskKind` and the canvas dims everything except the selected files, which light up role-tinted (target = white, dependents = amber 'do not break', dependencies = cool gray context). Tap a lit file shows its `SelectedFile` rationale; drag the spotlight to retarget; pinch widens/narrows the selection radius. Badge: selected file count + total selected tokens vs the Full tier cost it replaces.",
-      "pointer": "src/evolve/context_selector.rs::select"
+      "title": "Run the readiness gates before allowing self-improvement",
+      "loop_stage": "verify",
+      "pattern": "preconditions-gate",
+      "intent": "Confirm the workspace is safe to self-modify: builds, lints, tests, clean git, graph integrity.",
+      "how_it_shapes_the_loop": "ReadinessEngine evaluates gates concurrently (cargo check, clippy, evolve tests, graph integrity, git clean) into a ReadinessReport whose ready flag gates whether the loop may proceed to act.",
+      "loop_objects_touched": ["ReadinessGate", "ReadinessReport"],
+      "wiring": {
+        "inputs_from": ["Graph", "workspace state"],
+        "outputs_to": ["gate decision (proceed / block)"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "A two-finger spread over the readiness node fans out its gate tiles, each running and settling to Pass/Fail/Unknown.",
+        "visual": "Gate tiles spin as spinners, then flip green (Pass), red (Fail), or grey (Unknown); the master node turns green only when all pass."
+      },
+      "mini_scenario": "The user spreads the readiness node; clippy fails on a warning, so the report reads not-ready and blocks the evolve run until fixed.",
+      "pitfall": "Unknown is not Pass; treating an Unknown coverage gate as green lets a change proceed without the evidence the gate was meant to provide."
     },
     {
       "id": "evolve-13",
-      "title": "Reduce prompt size with reduce_source and dedup_context",
-      "loop_role": "The compression step inside perceive: `reduce_source` strips comments and `cfg(test)` blocks (`strip_cfg_test_blocks`) to produce the Compact tier, and `dedup_context` removes repeated content across assembled documents. Both the tier measurer and the envelope projector call these, so measured size and shipped size converge.",
-      "affects": "Directly trades fidelity for budget on the context window object: Compact is roughly 82% of full, Lite (skeletons) roughly 18%. The honest-accounting hook: what `TierMeasurer` measures is what `build_envelope` ships, because they share this exact machinery — the canvas should show reduction as a measured delta, not a marketing percentage.",
-      "touch_ux": "A compressor-press node: feed it a document and it visibly squeezes — comments and test blocks flake off as gray particles with a live token counter dropping. Tap toggles before/after diff view (stripped ranges shown as folded gutters); pinch adjusts between strip-comments-only and strip-cfg-test levels; the badge shows tokens before → after and the realized ratio. Long-press previews what the same reduction costs in lost evidence lines.",
-      "pointer": "src/evolve/context_reduce.rs::reduce_source"
+      "title": "Attach a deterministic multi-hop fix recommendation",
+      "loop_stage": "reason",
+      "pattern": "multi-hop-recommendation",
+      "intent": "Turn a single diagnostic into an ordered, verifiable path of actions rather than one vague suggestion.",
+      "how_it_shapes_the_loop": "A DeterministicRecommendation carries ordered RecommendationHops (action, target, verification), so the reason stage emits a checkable plan the act stage can execute hop by hop.",
+      "loop_objects_touched": ["ReadinessReport", "ReadinessGate"],
+      "wiring": {
+        "inputs_from": ["gate diagnostics"],
+        "outputs_to": ["act stage", "review UI"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking down a recommendation node deals out its hops as a vertical stack of numbered action cards.",
+        "visual": "Hop cards cascade like a dealt hand; each shows an action verb, a target chip, and a small verify magnifier icon."
+      },
+      "mini_scenario": "Dead code is detected; the recommendation deals hops 'inspect symbol', 'run tests', 'stage deletion', each with its own verification.",
+      "pitfall": "Hops carry their own verification for a reason; executing a later hop before its predecessor's verify passes skips the safety the ordering encodes."
     },
     {
       "id": "evolve-14",
-      "title": "Launch self-improvement directions from Preset menu",
-      "loop_role": "The plan stage's menu: each `Preset` (e.g. `symbol-context-selection`, `dedup-clutter-strip`) bundles a task prompt, the logical-layer capability it touches, the invariants the run must not break, a `context_recipe`, and a `verify` command. `render_prompt` assembles it for the model. Wire preset → context recipe (composer) → apply run → verify — a full loop in one tap.",
-      "affects": "Parameterizes the whole loop per run: invariants become refuse-conditions on the trust state ('Cited evidence stays line-accurate', 'Selection is deterministic'), `verify` (default: `cargo build && cargo test; no clippy regressions`) becomes the gate, and the context recipe sets the envelope contents. Presets turn open-ended self-modification into enumerated, guard-railed directions.",
-      "touch_ux": "A menu-carousel node of preset tiles, each showing title, direction color (context = teal, refactor = violet, safety = red), and its capability tag. Tap a tile expands it to show task, invariants, and verify; a two-finger swipe right launches it as an apply run (spawning the evolve-06 conveyor). Invariant chips are draggable onto gates to attach them as refuse-conditions. Badge: number of presets + which direction is currently running.",
-      "pointer": "src/evolve/presets.rs::render_prompt"
+      "title": "Gate evidence through the context trust scanner before review",
+      "loop_stage": "verify",
+      "pattern": "trust-gate-before-model",
+      "intent": "Stop prompt-injection or exfiltration payloads hidden in workspace evidence from reaching the model.",
+      "how_it_shapes_the_loop": "gate_evidence_trust scans each GroundingEvidence for injection patterns, producing a TrustReport per source; a high-severity finding in non-trusted content blocks the send before any model call.",
+      "loop_objects_touched": ["GroundingEvidence", "TrustReport", "TrustGateSummary"],
+      "wiring": {
+        "inputs_from": ["assembled GroundingEvidence"],
+        "outputs_to": ["model review (if clean)", "TrustBlocked error (if not)"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the evidence bundle runs a scan sweep; flagged excerpts get a warning overlay and quarantine the bundle.",
+        "visual": "A scan-line sweeps the bundle top to bottom; clean evidence glows green, a flagged line pulses red with a shield-break icon."
+      },
+      "mini_scenario": "Model-output evidence contains an 'ignore prior instructions' string; the trust gate scores it high-risk and returns TrustBlocked before the review call.",
+      "pitfall": "Trusted first-party code is report-only and must not be blocked; over-blocking Workspace sources would make the gate useless. Only non-trusted high-severity findings block."
     },
     {
       "id": "evolve-15",
-      "title": "Propose actions, mutate only through GitEngine",
-      "loop_role": "Separates proposal from mutation in the act stage: `ActionEngine::propose` builds non-mutating `Action` proposals (Extend, Connect, BlockEvolution, Notify) and returns an `ActionResult` with only a suggested `branch_name` — the actual guarded branch creation is owned by `GitEngine::create_branch`, which first reports `GitStatusReport` / `GitFileState`. Model them as two nodes: propose (free, safe) → commit-to-git (guarded, explicit).",
-      "affects": "Keeps the loop's mutation surface honest: the stateless `ActionEngine` cannot touch the working tree by construction; `BranchResult` records what git actually did. Clean-tree checks at the apply endpoint guarantee a staged diff is exactly the agent's work — provenance of every change on the loop is attributable.",
-      "touch_ux": "Two linked nodes: a thought-bubble (proposals) and a locked padlock (git). Bubbles float freely — tap to preview the suggested branch name; dragging a bubble onto the padlock triggers `GitEngine::status` first, showing dirty files as warning chips that block the drop until resolved. A successful `create_branch` animates a new branch line growing off the repo node. Badge on the padlock: clean/dirty tree state and current branch.",
-      "pointer": "src/evolve/git.rs::GitEngine::create_branch"
+      "title": "Require every model claim to cite line-accurate evidence",
+      "loop_stage": "verify",
+      "pattern": "grounded-citation",
+      "intent": "Reject any review prose that is not backed by an evidence id pointing at exact workspace lines.",
+      "how_it_shapes_the_loop": "The review protocol validates each GroundedClaim's evidence_ids against the evidence set and drops uncited items, so only line-grounded claims reach the human on the verify stage.",
+      "loop_objects_touched": ["GroundingEvidence", "GroundedReview"],
+      "wiring": {
+        "inputs_from": ["model JSON response", "GroundingEvidence set"],
+        "outputs_to": ["review UI", "trust_state derivation"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a claim card jumps the canvas to the exact cited lines, highlighting the excerpt on the source node.",
+        "visual": "A citation thread animates from the claim to the source node; the excerpt lines flash yellow, uncited claims render greyed and struck."
+      },
+      "mini_scenario": "The model claims a race condition; tapping the claim scrolls to the cited lock lines. An uncited claim beside it is silently dropped.",
+      "pitfall": "An evidence_id must resolve inside the evidence set with a matching content_hash; a stale hash means the cited lines changed and the claim is no longer grounded."
     },
     {
       "id": "evolve-16",
-      "title": "Version the graph with OntologyEvolver stability gates",
-      "loop_role": "The remember stage: `OntologyStore::save`/`load` persists the evolve graph to YAML and `validate_graph` catches `DanglingEdge`s in a `ValidationReport`; `OntologyEvolver::propose_change` turns an `OntologyProposal` (AddConcept, MergeConcepts, SplitConcept) into an `OntologyVersion` of explicit `OntologyOperation`s (AddNode, RemoveNode, AddEdge, RemoveEdge) that `apply_change` commits through stability gates.",
-      "affects": "Gives the loop durable, auditable memory: graph revisions are versioned operations, not silent mutations — every concept add/merge/split is a replayable `OntologyVersion`. Validation failures (dangling edges) feed the readiness gates, so corrupt memory blocks the loop instead of poisoning downstream context.",
-      "touch_ux": "A version-tree node: each persisted graph is a ring on a timeline; tap a ring to diff it against the current graph (added/removed nodes and edges animate). Proposing a change shows the `OntologyOperation` list as a checklist you approve item-by-item before `apply_change` commits. `DanglingEdge`s render as red broken threads hanging off nodes — tap to see the `ValidationReport`. Badge: current version id + validation pass/fail.",
-      "pointer": "src/evolve/ontology_evolver.rs::OntologyEvolver"
+      "title": "Derive the review trust_state from grounding completeness",
+      "loop_stage": "verify",
+      "pattern": "trust-state-derivation",
+      "intent": "Label the review's reliability so the human knows whether every item is fully backed.",
+      "how_it_shapes_the_loop": "GroundedReview computes trust_state as 'verified' (citation-valid + complete evidence + semantic check), 'structural' (citation-valid), or 'degraded', shaping how much the loop trusts the review before acting.",
+      "loop_objects_touched": ["GroundedReview", "GroundingEvidence"],
+      "wiring": {
+        "inputs_from": ["validated claims + recommendations"],
+        "outputs_to": ["human decision", "act stage confidence"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the review node reveals a trust ring around it colored by trust_state.",
+        "visual": "A ring glows solid green for verified, amber for structural, and grey-dashed for degraded, pulsing gently."
+      },
+      "mini_scenario": "A review comes back 'structural': every claim is cited but the semantic cross-check was skipped, so the user reads carefully before merging.",
+      "pitfall": "Degraded still returns a 200 review; treating degraded like verified means acting on prose that may have dropped or unbacked items."
     },
     {
       "id": "evolve-17",
-      "title": "Answer queries with GroundedFact citations",
-      "loop_role": "A perceive-side Q&A path: `GraphRag::query` answers natural-language questions with `GroundedFact`s — each fact carries `file`, `line_range`, an exact unnumbered `excerpt`, and a SHA-256 `content_hash` of the complete file bytes, giving a stable, verifiable identity for every citation.",
-      "affects": "Upgrades model-facing answers into evidence objects: a fact's `content_hash` lets the loop detect when the underlying file drifted since the fact was minted (hash mismatch = stale citation). This is the same honesty machinery as the envelope — citations are bytes-plus-range, not vibes — and it feeds claims in the grounded assistant and readiness evidence alike.",
-      "touch_ux": "A question-mark satellite orbiting the graph: ask by tapping and typing; answers arrive as fact chips pinned by threads to the exact file:line ranges, each chip showing its truncated `content_hash`. A stale fact (file changed) fades and shows a 'hash drifted' badge — tap to re-mint. Pinch on a chip expands the excerpt to full surrounding context. Badge: facts on screen + count of drifted citations.",
-      "pointer": "src/evolve/graphrag.rs::GraphRag::query"
+      "title": "Repair invalid review JSON once, then fail typed",
+      "loop_stage": "foundation",
+      "pattern": "repair-then-typed-failure",
+      "intent": "Recover from a malformed model response without letting garbage or an empty review slip through.",
+      "how_it_shapes_the_loop": "On unparseable output the protocol appends a repair prompt and retries once; persistent failure surfaces a typed ReviewProtocolError (Invalid, Empty, Ungrounded, TrustBlocked) instead of a silent success.",
+      "loop_objects_touched": ["GroundedReview"],
+      "wiring": {
+        "inputs_from": ["model response"],
+        "outputs_to": ["typed error telemetry", "review UI"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking a failed review node cycles it through a single repair attempt animation before it settles into an error state.",
+        "visual": "The node shakes, a repair gear spins once, then it either heals green or stamps a typed error label in red."
+      },
+      "mini_scenario": "The model returns prose with a trailing comma; the repair prompt fixes it on retry, and the review parses cleanly the second time.",
+      "pitfall": "Retry exactly once; an unbounded repair loop burns budget and lets a stubbornly broken model stall the whole verify stage."
     },
     {
       "id": "evolve-18",
-      "title": "Hunt dead and duplicate code to feed act",
-      "loop_role": "Analysis that feeds the plan stage with targets: `DeadCodeAnalyzer::find` does reachability-based dead-code detection producing `DeadSymbol`s; `DeduplicationAnalyzer::find_duplicates` finds exact and near-duplicate clusters via `jaccard` similarity (`DuplicateKind`, `DuplicatePair`); `FnDedupAnalyzer::find` works at function level with `FnLocation`s and `DuplicateFnPair`s. Wire their outputs into `context_selector` (Consolidate/Cleanup task kinds) and into preset runs.",
-      "affects": "Creates the work items on the loop: each `DeadSymbol` or `DuplicateFnPair` is a candidate act target with real file/line locations, and removing them shrinks future context windows (less code = cheaper envelopes). Because detection is deterministic and reachability- or similarity-based, findings are evidence the readiness path can cite, not model speculation.",
-      "touch_ux": "A pair of detector nodes: a skull icon (dead code) and a twins icon (dupes). Findings render as grayed-out symbols (dead) or glowing link-lines between duplicate functions with a Jaccard score label; tap a link shows the pair side-by-side with the similarity computation; long-press sends the finding to the context selector as a Consolidate/Cleanup task. Badges: dead symbol count, duplicate cluster count, and tokens reclaimable.",
-      "pointer": "src/evolve/fn_dedup.rs::FnDedupAnalyzer"
+      "title": "Re-scan and refresh dirty nodes with the EvolutionLoop",
+      "loop_stage": "control",
+      "pattern": "incremental-reanalyze",
+      "intent": "Keep the Graph fresh after edits without re-scanning the entire tree.",
+      "how_it_shapes_the_loop": "EvolutionLoop.iterate re-analyzes only changed nodes and returns a LoopResult (reanalyzed, updated_nodes), so the control layer refreshes the perceive substrate cheaply each cycle.",
+      "loop_objects_touched": ["Graph", "Node"],
+      "wiring": {
+        "inputs_from": ["git diff / changed files"],
+        "outputs_to": ["refreshed Graph", "ContextMap rebuild"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "A two-finger rotate over the graph triggers a re-scan; only nodes with changes spin and update their metrics.",
+        "visual": "Changed nodes rotate and re-color as coverage/complexity metrics refresh; untouched nodes stay still and dim."
+      },
+      "mini_scenario": "After a merge, the user rotates the graph; only the 6 touched files re-analyze and their token counts update, the rest untouched.",
+      "pitfall": "Edges into changed nodes may also need refresh; reanalyzing a node's metrics but not its DependsOn edges leaves stale coupling data."
     },
     {
       "id": "evolve-19",
-      "title": "Preview deletions before touching source",
-      "loop_role": "A pre-act simulation step: `preview_deletion` takes a `DeletionTarget` and returns a `DeletionPreview` — the `ImpactEdge`s that would break and the `VerificationStep`s to run afterward — without mutating anything; `require_executable` keeps the preview honest about what verification can actually run. Model it as a sandbox branch off the act node: simulate first, then decide.",
-      "affects": "Adds a blast-radius object to the loop: `ImpactEdge`s name the dependents that would break, giving the plan stage a concrete cost for each deletion candidate (composing with dead-code findings from evolve-18). The preview is non-mutating by construction, so exploring destructive actions costs nothing and leaves no trust-state residue.",
-      "touch_ux": "A ghost-scissors node: hover-drag it over a symbol and the canvas renders the deletion as a ghost preview — the symbol turns translucent, `ImpactEdge`s light up as red fracture lines to dependents, and a `VerificationStep` checklist slides in at the bottom. Release to discard; a deliberate two-finger hold converts the preview into a real action proposal. Tap a fracture line to see exactly which dependent breaks. Badge: impacted edge count.",
-      "pointer": "src/evolve/deletion.rs::preview_deletion"
+      "title": "Classify a source by provenance before trusting its evidence",
+      "loop_stage": "perceive",
+      "pattern": "provenance-tagging",
+      "intent": "Assign each evidence source a trust level so downstream gates weight it correctly.",
+      "how_it_shapes_the_loop": "Every GroundingEvidence carries a SourceKind (Workspace, ToolOutput, ModelOutput, External, Memory, User) mapping to a TrustLevel, which amplifies or dampens the risk score the trust gate computes.",
+      "loop_objects_touched": ["GroundingEvidence", "TrustReport"],
+      "wiring": {
+        "inputs_from": ["evidence origin"],
+        "outputs_to": ["trust gate risk scoring"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping an evidence tile cycles a provenance badge showing its SourceKind and trust tier.",
+        "visual": "The badge color-codes: green for Workspace/User (Trusted), amber for ToolOutput/Memory (SemiTrusted), red-outline for ModelOutput/External (Untrusted)."
+      },
+      "mini_scenario": "A snippet pulled from a tool's stdout is tagged ToolOutput/SemiTrusted, so a medium finding in it weighs heavier than the same finding in first-party code.",
+      "pitfall": "Mislabeling ModelOutput as Workspace collapses the entire trust gate; provenance must be set at ingestion, not inferred later."
     },
     {
       "id": "evolve-20",
-      "title": "Host the whole loop on EvolveServer",
-      "loop_role": "The stage everything runs on: `EvolveServer` (axum) wires the graph, `ContextComposer`, `ActionEngine`, `IdeEngine`, `DiagnosticsEngine`, `GitEngine`, `ReadinessEngine`, and `GroundedAssistant` behind one HTTP router with a session-token header (`x-selfware-session`) and a strict CSP. `start`/`start_with_shutdown` run the workspace; `graph_json`/`save_graph` expose the loop state; `apply_registry` tracks runs. Every other node in this file is a route on this server.",
-      "affects": "Owns the shared loop objects as `Arc<RwLock<…>>` state: the graph revision, the composer mode, the apply registry — so concurrent canvas interactions are serialized through real locks, and `FitBudget`'s output-reserve convention (`max_tokens.min(context_length/4)`) is defined here and reused by context_fit. Session token + CSP make the loop's UI surface a defended boundary, matching the context_trust story.",
-      "touch_ux": "The canvas itself: the server is the floor plate under all other nodes, its health shown as a subtle grid tint (green grid = session valid, gray = expired token). Pinch fully out to see the whole loop as one routed system with live request edges pulsing between nodes; tap the floor shows server meta (routes, session, active apply runs). Long-press triggers graceful shutdown via `start_with_shutdown`. Badge: active session indicator + count of in-flight requests.",
-      "pointer": "src/evolve/server.rs::EvolveServer"
+      "title": "Prepend workspace orientation without making it citable",
+      "loop_stage": "reason",
+      "pattern": "orientation-not-evidence",
+      "intent": "Give the review model a navigational map of the tree while keeping citations grounded only in real evidence.",
+      "how_it_shapes_the_loop": "review_with_orientation prepends a workspace_orientation (taxonomy + component map) as non-citeable context, helping the reason stage navigate while the grounding validator still rejects any claim citing the orientation.",
+      "loop_objects_touched": ["ContextMap", "GroundedReview", "GroundingEvidence"],
+      "wiring": {
+        "inputs_from": ["ContextMap taxonomy"],
+        "outputs_to": ["model reasoning (navigation only)"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the orientation panel overlays a semi-transparent map atlas the model can 'see' but never cite.",
+        "visual": "The atlas floats above the canvas as a watermark layer; it has no citation anchors, rendered without the yellow tap-to-cite dots."
+      },
+      "mini_scenario": "The model uses the orientation to know that context_trust lives under evolve, but its actual finding cites the real line-hashed evidence, not the map.",
+      "pitfall": "Orientation must stay non-citeable; if a claim is allowed to cite the map, the review becomes grounded in a summary rather than in verifiable source lines."
     }
   ]
 }

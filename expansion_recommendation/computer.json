@@ -1,291 +1,270 @@
 {
-  "node_id": "computer",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (COMPUTER)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via computer context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize computer token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding computer dynamically does not invalidate active turn execution."
-  ],
+  "component": "computer",
+  "tier": "tooling",
+  "loop_stage": "act",
+  "summary": "The computer component is the loop's desktop-automation hand: MouseController (move, click, drag, scroll with Linear/EaseInOut/Bezier profiles), KeyboardController (type, key combos with a TypingProfile), ScreenCapture (CapturedScreen over a ScreenRegion), and WindowManager (WindowInfo/WindowId, display-server aware). Every action passes an ActionRateLimiter (default 10/sec) and a BLOCKED_COMBOS safety list, and first use per session needs confirmation. On the loop it is the archetypal act stage for GUI targets — it emits PointerEvents and KeyEvents into the OS — but its screen capture is also a raw perceive source. On a touch canvas its objects map one-to-one to real gestures: a loop-node's click becomes your tap, its drag becomes your drag, its pinch becomes a scroll.",
+  "loop_objects": ["MouseController", "KeyboardController", "PointerEvent", "KeyEvent", "MouseButton", "Point", "MovementProfile", "TypingProfile", "CapturedScreen", "ScreenRegion", "WindowInfo", "WindowId", "ActionRateLimiter", "BlockedCombo"],
+  "context_basis": "Recommendations formed with computer read in the context of the full engine (~600k budget framing), where every action is rate-limited, dangerous combos are blocked, first use needs confirmation, and all actions log to the audit trail.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Computer - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling computer under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "computer-01",
+      "title": "Capture the screen as a perceive source",
+      "loop_stage": "perceive",
+      "pattern": "observe-the-surface",
+      "intent": "Feed the loop a visual snapshot of the desktop before acting.",
+      "how_it_shapes_the_loop": "ScreenCapture produces a CapturedScreen the loop reads to ground its next act; it adds a perceive step but no OS mutation, so it is safe and idempotent.",
+      "loop_objects_touched": ["CapturedScreen", "ScreenRegion"],
+      "wiring": {"inputs_from": ["OS framebuffer"], "outputs_to": ["agent perceive", "reason stage"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the screen node grabs a fresh CapturedScreen and shows it as a thumbnail on the node.", "visual": "The node fills with the live capture; a shutter flash animates on grab."},
+      "mini_scenario": "Before clicking a button the loop captures the screen, locating the button's Point from the image.",
+      "pitfall": "A stale capture leads to clicking the wrong Point — re-capture after any UI change."
     },
     {
-      "example_id": 2,
-      "title": "Computer - High Token Load (600k Context)",
-      "loop_scenario": "Modeling computer under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "computer-02",
+      "title": "Scope capture to a ScreenRegion",
+      "loop_stage": "perceive",
+      "pattern": "focused-observation",
+      "intent": "Grab only the region that matters to cut noise and tokens.",
+      "how_it_shapes_the_loop": "A ScreenRegion (x,y,w,h) narrows the CapturedScreen so the perceive payload is smaller, keeping the loop's context budget lean.",
+      "loop_objects_touched": ["ScreenRegion", "CapturedScreen"],
+      "wiring": {"inputs_from": ["reason stage (region of interest)"], "outputs_to": ["agent perceive"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading two fingers on the screen node draws a rectangle that becomes the ScreenRegion.", "visual": "A selection rectangle rubber-bands out; the captured region renders inside it, the rest dimmed."},
+      "mini_scenario": "The loop captures just the dialog region to read its text without the whole 4K desktop.",
+      "pitfall": "A region outside screen bounds returns nothing — clamp the rectangle to the display."
     },
     {
-      "example_id": 3,
-      "title": "Computer - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling computer under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "computer-03",
+      "title": "Move the pointer to a target Point",
+      "loop_stage": "act",
+      "pattern": "position-then-act",
+      "intent": "Place the cursor precisely before a click.",
+      "how_it_shapes_the_loop": "MouseController moves to a Point using a MovementProfile; it is the act primitive that positions the loop's hand, one PointerEvent that the rate limiter counts.",
+      "loop_objects_touched": ["MouseController", "PointerEvent", "Point", "MovementProfile"],
+      "wiring": {"inputs_from": ["reason stage target Point"], "outputs_to": ["OS pointer"]},
+      "touch_interaction": {"gesture": "drag", "canvas_action": "Dragging the pointer node to a coordinate sets the target Point for the next move.", "visual": "A crosshair glides to the point along the chosen profile's curve; Bezier shows a natural arc."},
+      "mini_scenario": "The loop moves to (640,480) with a Bezier profile to look human before clicking submit.",
+      "pitfall": "Linear moves are instant and machine-obvious — for anti-bot targets prefer EaseInOut/Bezier."
     },
     {
-      "example_id": 4,
-      "title": "Computer - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling computer under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "computer-04",
+      "title": "Click with a chosen MouseButton",
+      "loop_stage": "act",
+      "pattern": "discrete-act",
+      "intent": "Trigger a UI element with the correct button.",
+      "how_it_shapes_the_loop": "A click emits a PointerEvent for Left/Right/Middle; it advances the loop from a positioned state to an interaction, counted by the ActionRateLimiter.",
+      "loop_objects_touched": ["MouseController", "PointerEvent", "MouseButton", "Point"],
+      "wiring": {"inputs_from": ["positioned Point"], "outputs_to": ["OS pointer", "verify stage"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the click node fires the configured button at the current Point.", "visual": "A ripple radiates from the point; the button badge (L/R/M) flashes on the node."},
+      "mini_scenario": "The loop left-clicks the 'Save' button, then captures the screen to verify the save dialog closed.",
+      "pitfall": "Right-click opens a context menu, not an activation — pick the button the target actually expects."
     },
     {
-      "example_id": 5,
-      "title": "Computer - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling computer under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "computer-05",
+      "title": "Drag from one Point to another",
+      "loop_stage": "act",
+      "pattern": "continuous-manipulation",
+      "intent": "Move a slider, node, or file by dragging.",
+      "how_it_shapes_the_loop": "A drag issues press-move-release PointerEvents between two Points; it is a compound act the loop treats atomically, still bounded by the rate limiter.",
+      "loop_objects_touched": ["MouseController", "PointerEvent", "Point", "MouseButton"],
+      "wiring": {"inputs_from": ["from Point", "to Point"], "outputs_to": ["OS pointer"]},
+      "touch_interaction": {"gesture": "drag", "canvas_action": "Dragging between two anchors on the pointer node defines the drag's from→to Points.", "visual": "A dashed path connects the anchors; a ghost cursor traces it on preview."},
+      "mini_scenario": "The loop drags a canvas node from (100,100) to (400,300) to reposition it in the target app.",
+      "pitfall": "A drag that crosses a drop-forbidden zone silently no-ops in some apps — verify the drop landed."
     },
     {
-      "example_id": 6,
-      "title": "Computer - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling computer under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "computer-06",
+      "title": "Scroll to bring a target into view",
+      "loop_stage": "act",
+      "pattern": "reveal-then-act",
+      "intent": "Expose an off-screen element before interacting.",
+      "how_it_shapes_the_loop": "A scroll PointerEvent shifts the viewport so a later act has its target visible; it is a preparatory act that changes perceive state.",
+      "loop_objects_touched": ["MouseController", "PointerEvent", "Point"],
+      "wiring": {"inputs_from": ["reason stage (target below fold)"], "outputs_to": ["OS pointer", "re-capture"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking on the scroll node emits scroll ticks in the flick direction.", "visual": "The node shows a scrollbar thumb sliding; momentum decays like a real flick."},
+      "mini_scenario": "The loop scrolls a long form down until the submit button enters the captured region.",
+      "pitfall": "Scroll amount is app-relative — re-capture and confirm the target is visible rather than assuming."
     },
     {
-      "example_id": 7,
-      "title": "Computer - Stream Chunk Processing",
-      "loop_scenario": "Modeling computer under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "computer-07",
+      "title": "Type text with a TypingProfile",
+      "loop_stage": "act",
+      "pattern": "emit-keystrokes",
+      "intent": "Enter text into a focused field.",
+      "how_it_shapes_the_loop": "KeyboardController emits a KeyEvent per character with base_delay/variation from the TypingProfile; the act's cadence is tunable and each keystroke counts against the rate limiter.",
+      "loop_objects_touched": ["KeyboardController", "KeyEvent", "TypingProfile"],
+      "wiring": {"inputs_from": ["reason stage text", "focused field"], "outputs_to": ["OS keyboard"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the keyboard node with text bound streams KeyEvents into the focused target.", "visual": "Characters appear one by one on the node with a per-key tick; jitter reflects the variation setting."},
+      "mini_scenario": "The loop types a search query with a 40ms±15ms profile so input looks human.",
+      "pitfall": "Type only into a confirmed-focused field — an unfocused type scatters keys or triggers shortcuts."
     },
     {
-      "example_id": 8,
-      "title": "Computer - Interactive User Interruption",
-      "loop_scenario": "Modeling computer under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "computer-08",
+      "title": "Send a safe key combo",
+      "loop_stage": "act",
+      "pattern": "shortcut-act",
+      "intent": "Invoke a keyboard shortcut like Ctrl+S.",
+      "how_it_shapes_the_loop": "A combo KeyEvent triggers app actions in one act; the loop reaches a result faster than mouse navigation, subject to the blocked-combo guard.",
+      "loop_objects_touched": ["KeyboardController", "KeyEvent"],
+      "wiring": {"inputs_from": ["reason stage shortcut"], "outputs_to": ["OS keyboard"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the combo node fires the bound key combination.", "visual": "The key caps light up together and flash; a chord glyph confirms the combo."},
+      "mini_scenario": "The loop sends Ctrl+S to save, then captures to confirm the modified indicator cleared.",
+      "pitfall": "Combos are app-focus sensitive — sending Ctrl+S to the wrong window saves the wrong thing."
     },
     {
-      "example_id": 9,
-      "title": "Computer - Subagent Delegation",
-      "loop_scenario": "Modeling computer under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "computer-09",
+      "title": "Block a dangerous combo before it fires",
+      "loop_stage": "verify",
+      "pattern": "gate-before-act",
+      "intent": "Refuse destructive system key combinations.",
+      "how_it_shapes_the_loop": "is_blocked_combo checks against BLOCKED_COMBOS (ctrl+alt+delete, cmd+q, alt+f4, TTY switches); a blocked combo aborts the act and routes the loop back to reason.",
+      "loop_objects_touched": ["KeyEvent", "BlockedCombo"],
+      "wiring": {"inputs_from": ["proposed KeyEvent"], "outputs_to": ["safety block", "control"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping a blocked combo node shakes it and refuses to fire.", "visual": "The combo node turns red with a 🚫 overlay; the keystroke never leaves the node."},
+      "mini_scenario": "The loop tries alt+f4 to close a window; is_blocked_combo rejects it, so the window stays open.",
+      "pitfall": "Normalization lowercases and strips spaces — a combo formatted oddly must still match the blocklist."
     },
     {
-      "example_id": 10,
-      "title": "Computer - Safety Policy Interception",
-      "loop_scenario": "Modeling computer under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "computer-10",
+      "title": "Throttle actions through the rate limiter",
+      "loop_stage": "control",
+      "pattern": "budget-guard",
+      "intent": "Cap action frequency to stay human-plausible and safe.",
+      "how_it_shapes_the_loop": "ActionRateLimiter.check() enforces max 10 actions/sec in a sliding window; when exceeded, the act must wait, pacing the loop's hand like a budget guard on iteration speed.",
+      "loop_objects_touched": ["ActionRateLimiter", "PointerEvent", "KeyEvent"],
+      "wiring": {"inputs_from": ["any mouse/keyboard act"], "outputs_to": ["OS input (gated)"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the rate-limiter node shows the current window count and remaining budget.", "visual": "A per-second gauge fills; when full the gauge reddens and queued acts stack."},
+      "mini_scenario": "A burst of 15 clicks in one second hits the limit; the 11th onward wait for the next window.",
+      "pitfall": "The window uses saturating_sub to survive clock skew — don't replace it with plain subtraction."
     },
     {
-      "example_id": 11,
-      "title": "Computer - Context Pruning & Compaction",
-      "loop_scenario": "Modeling computer under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "computer-11",
+      "title": "Enumerate windows with WindowManager",
+      "loop_stage": "perceive",
+      "pattern": "survey-targets",
+      "intent": "Discover available windows before choosing one to act on.",
+      "how_it_shapes_the_loop": "WindowManager lists WindowInfo (with WindowId) so the loop perceives the desktop topology and picks a target, without mutating anything.",
+      "loop_objects_touched": ["WindowManager", "WindowInfo", "WindowId"],
+      "wiring": {"inputs_from": ["display server"], "outputs_to": ["reason stage target selection"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch-out on the window node fans the open windows into a grid of WindowInfo cards.", "visual": "Each card shows a title and WindowId; the focused window is ringed."},
+      "mini_scenario": "The loop lists windows, finds the 'Terminal' WindowInfo, and targets its WindowId next.",
+      "pitfall": "Window lists change constantly — resolve the WindowId immediately before acting, not from a stale list."
     },
     {
-      "example_id": 12,
-      "title": "Computer - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling computer under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "computer-12",
+      "title": "Focus a window before interacting",
+      "loop_stage": "act",
+      "pattern": "focus-then-act",
+      "intent": "Ensure input goes to the intended window.",
+      "how_it_shapes_the_loop": "Raising/focusing a WindowId directs subsequent KeyEvents/PointerEvents there; it is a control-of-target act that scopes where the loop's hand lands.",
+      "loop_objects_touched": ["WindowManager", "WindowId", "WindowInfo"],
+      "wiring": {"inputs_from": ["selected WindowId"], "outputs_to": ["OS focus", "keyboard/mouse acts"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping a WindowInfo card raises and focuses that window.", "visual": "The tapped card lifts to the front with a focus glow; others recede."},
+      "mini_scenario": "The loop focuses the editor window, then types — guaranteeing keys land in the editor.",
+      "pitfall": "Focus can be stolen by popups between focus and type — re-verify focus for critical input."
     },
     {
-      "example_id": 13,
-      "title": "Computer - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling computer under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "computer-13",
+      "title": "Detect the display server for capability",
+      "loop_stage": "foundation",
+      "pattern": "capability-probe",
+      "intent": "Know whether automation is supported on this platform.",
+      "how_it_shapes_the_loop": "WindowManager.detect()/display_server()/is_supported() tell the loop if it can act at all (X11/Wayland/WSL/macOS limits), gating the whole computer act family.",
+      "loop_objects_touched": ["WindowManager", "WindowInfo"],
+      "wiring": {"inputs_from": ["OS display server"], "outputs_to": ["control (feature gate)"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the computer node reveals the detected backend and support status.", "visual": "A capability badge shows xdotool/WSL/unsupported; unsupported greys out the act nodes."},
+      "mini_scenario": "On macOS the loop detects mouse acts are unsupported and returns an explicit error instead of a silent no-op.",
+      "pitfall": "macOS mouse control errors explicitly by design — treat 'not supported' as a real failure, not success."
     },
     {
-      "example_id": 14,
-      "title": "Computer - Isolated Branch Staging",
-      "loop_scenario": "Modeling computer under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "computer-14",
+      "title": "Confirm first computer use per session",
+      "loop_stage": "control",
+      "pattern": "consent-gate",
+      "intent": "Require explicit approval before the loop touches the desktop.",
+      "how_it_shapes_the_loop": "First-use-per-session confirmation inserts a control checkpoint before any act, so the loop cannot silently seize the mouse/keyboard.",
+      "loop_objects_touched": ["ActionRateLimiter", "PointerEvent", "KeyEvent"],
+      "wiring": {"inputs_from": ["safety permissions"], "outputs_to": ["act (once approved)"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the first act raises a consent sheet the operator must approve.", "visual": "A shield overlay pulses; act nodes stay locked until the operator confirms."},
+      "mini_scenario": "The loop's first click of the session pauses for a 'allow desktop control?' confirmation.",
+      "pitfall": "Don't cache consent across sessions — the gate is per-session on purpose."
     },
     {
-      "example_id": 15,
-      "title": "Computer - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling computer under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "computer-15",
+      "title": "Audit every action to the trail",
+      "loop_stage": "learn",
+      "pattern": "provenance-log",
+      "intent": "Record what the loop did on the desktop for review.",
+      "how_it_shapes_the_loop": "Each mouse/keyboard act logs to the audit trail, giving the learn stage a durable record of PointerEvents/KeyEvents the loop emitted.",
+      "loop_objects_touched": ["PointerEvent", "KeyEvent", "ActionRateLimiter"],
+      "wiring": {"inputs_from": ["every act"], "outputs_to": ["safety audit JSONL"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking down the computer node scrolls the audit log of recent actions.", "visual": "A ledger panel lists timestamped click/type events with their targets."},
+      "mini_scenario": "After a run the operator scrolls the audit to confirm the loop only clicked the intended buttons.",
+      "pitfall": "Never suppress the audit for 'noisy' actions — the full trail is the safety record."
     },
     {
-      "example_id": 16,
-      "title": "Computer - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling computer under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "computer-16",
+      "title": "Choose a movement profile for realism",
+      "loop_stage": "reason",
+      "pattern": "shape-the-act",
+      "intent": "Pick how human the pointer path should look.",
+      "how_it_shapes_the_loop": "Selecting Linear/EaseInOut/Bezier as the MovementProfile shapes the act's kinematics; the reason stage trades speed for plausibility.",
+      "loop_objects_touched": ["MovementProfile", "MouseController", "Point"],
+      "wiring": {"inputs_from": ["reason stage (target's bot-sensitivity)"], "outputs_to": ["move act"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating a dial on the pointer node cycles Linear → EaseInOut → Bezier.", "visual": "A preview trail redraws per profile: a straight line, a smooth ease, or a natural arc."},
+      "mini_scenario": "For a captcha-guarded page the loop selects Bezier so the cursor path isn't robotically straight.",
+      "pitfall": "Bezier adds randomness — for pixel-exact targets confirm the final Point still lands dead-on."
     },
     {
-      "example_id": 17,
-      "title": "Computer - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling computer under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "computer-17",
+      "title": "Verify an act by re-capturing",
+      "loop_stage": "verify",
+      "pattern": "act-then-observe",
+      "intent": "Confirm the UI changed as expected after an action.",
+      "how_it_shapes_the_loop": "After a click/type the loop captures a new CapturedScreen and compares, closing the perceive→act→verify cycle for GUI work.",
+      "loop_objects_touched": ["CapturedScreen", "ScreenRegion", "PointerEvent"],
+      "wiring": {"inputs_from": ["prior act"], "outputs_to": ["verify stage", "learn"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the verify node overlays before/after captures for a visual diff.", "visual": "Changed pixels highlight; an unchanged region flags the act as possibly ineffective."},
+      "mini_scenario": "After clicking submit the loop re-captures and confirms a success toast appeared.",
+      "pitfall": "Compare a stable region — animations cause false diffs that look like the act failed."
     },
     {
-      "example_id": 18,
-      "title": "Computer - Gesture-based Node Filter",
-      "loop_scenario": "Modeling computer under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "computer-18",
+      "title": "Fall back across backends safely",
+      "loop_stage": "foundation",
+      "pattern": "backend-fallback",
+      "intent": "Keep automation working when xdotool is absent.",
+      "how_it_shapes_the_loop": "The mouse backend detects xdotool, else WSL PowerShell, else none — the loop's act layer adapts to the host without changing higher-stage logic.",
+      "loop_objects_touched": ["MouseController", "PointerEvent"],
+      "wiring": {"inputs_from": ["backend detection"], "outputs_to": ["OS pointer"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the pointer node shows which backend is driving the acts.", "visual": "A backend badge (xdotool / WSL) pins to the node; 'none' locks it red."},
+      "mini_scenario": "Under WSL2 without xdotool the loop routes clicks through PowerShell's mouse_event fallback.",
+      "pitfall": "Backends differ subtly in coordinate origins — re-validate Points when the backend changes."
     },
     {
-      "example_id": 19,
-      "title": "Computer - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling computer under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "computer-19",
+      "title": "Read a WindowInfo geometry to aim",
+      "loop_stage": "perceive",
+      "pattern": "geometry-grounding",
+      "intent": "Translate a window-relative target into absolute Points.",
+      "how_it_shapes_the_loop": "WindowInfo geometry lets the loop compute absolute Points from window-relative positions, grounding the act's coordinates in perceive data.",
+      "loop_objects_touched": ["WindowInfo", "WindowId", "Point"],
+      "wiring": {"inputs_from": ["WindowManager"], "outputs_to": ["move/click act"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch-in on a WindowInfo card zooms to its bounds with a coordinate grid.", "visual": "The window's frame renders with x/y/w/h labels; a tapped spot shows its absolute Point."},
+      "mini_scenario": "The loop reads the editor window's origin and adds a relative offset to click a menu inside it.",
+      "pitfall": "Window moves invalidate cached geometry — recompute Points after any focus or resize."
     },
     {
-      "example_id": 20,
-      "title": "Computer - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling computer under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "ComputerPayload"
-      ],
-      "component_loop_effect": "Determines how computer intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'computer' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "computer-20",
+      "title": "Compose a GUI macro on the canvas",
+      "loop_stage": "control",
+      "pattern": "sequence-of-acts",
+      "intent": "Wire a repeatable capture→move→click→type sequence.",
+      "how_it_shapes_the_loop": "Chaining computer acts under one control node builds a macro the loop replays; each link is a rate-limited, audited act, forming a deterministic sub-loop.",
+      "loop_objects_touched": ["MouseController", "KeyboardController", "PointerEvent", "KeyEvent", "CapturedScreen"],
+      "wiring": {"inputs_from": ["reason stage plan"], "outputs_to": ["OS input", "verify stage"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Drawing edges between capture, move, click, and type nodes composes them into an ordered macro.", "visual": "A pulsing pipeline animates the sequence order; each node lights as it executes."},
+      "mini_scenario": "The loop wires capture→locate button→move→click→verify into a login macro it runs each session.",
+      "pitfall": "Between macro steps the UI can shift — insert re-capture/verify links rather than trusting fixed Points."
     }
   ]
 }

@@ -1,291 +1,270 @@
 {
-  "node_id": "self_healing",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (SELF_HEALING)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via self_healing context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize self_healing token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding self_healing dynamically does not invalidate active turn execution."
-  ],
+  "component": "self_healing",
+  "tier": "tooling",
+  "loop_stage": "learn",
+  "summary": "The self_healing component is the learn-and-recover layer of the loop. ErrorLearner records each ErrorOccurrence, mines recurring ErrorPatterns, and recommends a RecoveryStrategy; the RecoveryTree classifies a FailureSignal into a FailureKind and dispatches a RecoveryDirective (retry, compress context, reload credentials, fallback); StateManager snapshots StateCheckpoints and restores them; HealthPredictor projects a HealthPrediction (Healthy/AtRisk/Degrading/FailureImminent) to act before failure. It turns the loop's ErrorRecovery branch from ad-hoc into a learning system that reshapes retry budget and state transitions.",
+  "loop_objects": ["ErrorOccurrence", "ErrorPattern", "RecoveryStrategy", "RecoveryAction", "FailureSignal", "FailureKind", "RecoveryDirective", "StateCheckpoint", "RecoveryResult", "HealthPrediction", "PredictedHealth", "RecoveryExecution"],
+  "context_basis": "Recommendations were formed reading src/self_healing/ (mod ErrorLearner/StateManager/HealthPredictor, recovery_tree, executor) in the context of the full engine at a ~600k budget framing, where self_healing drives the ErrorRecovery state of the Planning->Executing->ErrorRecovery loop.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Self_healing - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling self_healing under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "self_healing-01",
+      "title": "Record every error occurrence",
+      "loop_stage": "learn",
+      "pattern": "capture-error-signal",
+      "intent": "Log each failure with type, message, and context so patterns can emerge.",
+      "how_it_shapes_the_loop": "ErrorLearner.record ingests an ErrorOccurrence on every failure, building the memory the recovery decisions later draw on.",
+      "loop_objects_touched": ["ErrorOccurrence", "ErrorPattern"],
+      "wiring": {"inputs_from": ["failing ToolCall / loop error"], "outputs_to": ["ErrorLearner store", "pattern mining"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the self-healing node to see the latest recorded ErrorOccurrences as a stack.", "visual": "Each occurrence drops in as a red card tagged with its error_type and count."},
+      "mini_scenario": "A tool times out; ErrorLearner.record captures the occurrence with its context so a pattern can form across repeats.",
+      "pitfall": "Record with enough context to disambiguate; identical messages from different sites must not collapse into one pattern."
     },
     {
-      "example_id": 2,
-      "title": "Self_healing - High Token Load (600k Context)",
-      "loop_scenario": "Modeling self_healing under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "self_healing-02",
+      "title": "Mine recurring error patterns",
+      "loop_stage": "learn",
+      "pattern": "frequency-pattern-mining",
+      "intent": "Detect that the same failure keeps happening.",
+      "how_it_shapes_the_loop": "Repeated ErrorOccurrences roll up into an ErrorPattern with a count, raising the priority of a durable fix over one-off retries.",
+      "loop_objects_touched": ["ErrorPattern", "ErrorOccurrence"],
+      "wiring": {"inputs_from": ["ErrorOccurrence stream"], "outputs_to": ["ErrorLearner.patterns", "recommend_recovery"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread the node to fan out patterns ranked by frequency.", "visual": "Patterns render as bars whose length grows with occurrence count; hot patterns glow."},
+      "mini_scenario": "The same DNS failure recurs five times; the ErrorPattern count climbs and the learner elevates it as a systemic issue.",
+      "pitfall": "Age out stale patterns; a long-resolved issue that keeps a high count skews future recommendations."
     },
     {
-      "example_id": 3,
-      "title": "Self_healing - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling self_healing under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "self_healing-03",
+      "title": "Recommend a recovery strategy",
+      "loop_stage": "reason",
+      "pattern": "learned-strategy-lookup",
+      "intent": "Pick the recovery action most likely to work for this error type.",
+      "how_it_shapes_the_loop": "recommend_recovery returns a RecoveryStrategy (retry/restart/fallback/restore) that the ErrorRecovery branch executes instead of blind retry.",
+      "loop_objects_touched": ["RecoveryStrategy", "ErrorPattern", "RecoveryAction"],
+      "wiring": {"inputs_from": ["error_type + context", "learned patterns"], "outputs_to": ["RecoveryExecutor"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap an error pattern to see its recommended RecoveryStrategy and past success rate.", "visual": "The strategy chip shows an icon per action; its border thickness reflects historical success."},
+      "mini_scenario": "A context-overflow error matches a pattern whose learned strategy is compress-and-retry, so recommend_recovery returns that.",
+      "pitfall": "Prefer strategies with proven success rates; recommending an untested action for a critical error wastes the retry budget."
     },
     {
-      "example_id": 4,
-      "title": "Self_healing - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling self_healing under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "self_healing-04",
+      "title": "Classify a failure into a FailureKind",
+      "loop_stage": "reason",
+      "pattern": "taxonomy-classification",
+      "intent": "Turn a raw error message into a routable FailureKind.",
+      "how_it_shapes_the_loop": "classify maps the FailureSignal to a FailureKind (LlmUnreachable, RateLimited, ContextOverflow, ...), selecting which recovery branch the loop takes.",
+      "loop_objects_touched": ["FailureSignal", "FailureKind"],
+      "wiring": {"inputs_from": ["error message"], "outputs_to": ["RecoveryTree.resolve"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a failure event to reveal its classified FailureKind badge.", "visual": "Each kind has a distinct icon and color; ambiguous ones resolve to a gray Unknown tag."},
+      "mini_scenario": "An error 'timed out connecting' classifies as LlmUnreachable, not a generic ToolTimeout, thanks to the deliberate ordering.",
+      "pitfall": "Respect the classification order; checking generic timeout before connect phrases mis-routes network failures."
     },
     {
-      "example_id": 5,
-      "title": "Self_healing - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling self_healing under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "self_healing-05",
+      "title": "Dispatch a RecoveryDirective",
+      "loop_stage": "act",
+      "pattern": "directive-dispatch",
+      "intent": "Execute the concrete recovery the RecoveryTree resolved.",
+      "how_it_shapes_the_loop": "RecoveryTree.resolve returns a RecoveryDirective (Action, CompressContext, ReloadCredentials) that the loop applies before re-attempting.",
+      "loop_objects_touched": ["RecoveryDirective", "FailureKind", "ResolutionOutcome"],
+      "wiring": {"inputs_from": ["FailureSignal + RecoveryContext"], "outputs_to": ["retry attempt", "context compression", "client rebuild"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge from the recovery node back into the executor to apply the directive.", "visual": "The directive travels the edge as a labeled token (RETRY / COMPRESS / RELOAD) that lands on the target stage."},
+      "mini_scenario": "A ContextOverflow yields a CompressContext directive with a target_tokens, so the loop compresses history then retries.",
+      "pitfall": "Apply the directive before retrying, not after; retrying an overflowing context without compressing repeats the failure."
     },
     {
-      "example_id": 6,
-      "title": "Self_healing - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling self_healing under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "self_healing-06",
+      "title": "Compress context to recover from overflow",
+      "loop_stage": "control",
+      "pattern": "context-budget-recovery",
+      "intent": "Shrink the conversation to fit the model window and continue.",
+      "how_it_shapes_the_loop": "The CompressContext directive reduces token usage to roughly target_tokens, freeing budget so the loop can iterate again.",
+      "loop_objects_touched": ["RecoveryDirective", "FailureKind"],
+      "wiring": {"inputs_from": ["ContextOverflow FailureKind", "ContextOverflowCompress resolver"], "outputs_to": ["compressed Messages", "retry"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the context node to preview the compression target on a token gauge.", "visual": "The context bar squeezes from red-over-limit down to green-under-target as compression applies."},
+      "mini_scenario": "The window overflows; ContextOverflowCompress trims history to the target token count and the loop resumes without losing the task.",
+      "pitfall": "Preserve the task and recent tool results when compressing; over-aggressive trimming drops the goal itself."
     },
     {
-      "example_id": 7,
-      "title": "Self_healing - Stream Chunk Processing",
-      "loop_scenario": "Modeling self_healing under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "self_healing-07",
+      "title": "Reload credentials on auth failure",
+      "loop_stage": "act",
+      "pattern": "credential-refresh",
+      "intent": "Rebuild the client with a fresh key after a 401/403.",
+      "how_it_shapes_the_loop": "The ReloadCredentials directive picks a new key via CredentialReload and rebuilds the client, letting the same call succeed on retry.",
+      "loop_objects_touched": ["RecoveryDirective", "FailureKind"],
+      "wiring": {"inputs_from": ["AuthError FailureKind", "CredentialReload.find_available_key"], "outputs_to": ["rebuilt client", "retry"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the credential node to trigger a manual key reload from keyring/env.", "visual": "A key icon spins then locks green when a working credential is found, red if none available."},
+      "mini_scenario": "A 401 classifies as AuthError; find_available_key locates an alternate endpoint key and the rebuilt client retries successfully.",
+      "pitfall": "Bound reload attempts; endlessly rotating through exhausted keys turns auth recovery into a loop."
     },
     {
-      "example_id": 8,
-      "title": "Self_healing - Interactive User Interruption",
-      "loop_scenario": "Modeling self_healing under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "self_healing-08",
+      "title": "Back off on rate limits",
+      "loop_stage": "control",
+      "pattern": "rate-limit-backoff",
+      "intent": "Wait before retrying a 429 so the endpoint recovers.",
+      "how_it_shapes_the_loop": "RateLimitBackoff inserts an increasing delay before the retry, spacing out attempts within a max_attempts budget.",
+      "loop_objects_touched": ["FailureKind", "RecoveryDirective"],
+      "wiring": {"inputs_from": ["RateLimited FailureKind"], "outputs_to": ["delayed retry"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the retry edge to see the backoff delay and remaining attempts.", "visual": "A countdown ring shows the wait; the attempt counter ticks toward max_attempts."},
+      "mini_scenario": "A 429 classifies as RateLimited; RateLimitBackoff waits delay_ms then retries, doubling on repeated hits until max_attempts.",
+      "pitfall": "Honor Retry-After when present; a fixed backoff can still hammer an endpoint that asked for a longer wait."
     },
     {
-      "example_id": 9,
-      "title": "Self_healing - Subagent Delegation",
-      "loop_scenario": "Modeling self_healing under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "self_healing-09",
+      "title": "Checkpoint state before a risky act",
+      "loop_stage": "control",
+      "pattern": "snapshot-before-risk",
+      "intent": "Capture a restorable StateCheckpoint before a step that might fail.",
+      "how_it_shapes_the_loop": "StateManager.checkpoint records the current state so the loop can roll back instead of losing progress on failure.",
+      "loop_objects_touched": ["StateCheckpoint"],
+      "wiring": {"inputs_from": ["current loop state JSON"], "outputs_to": ["StateManager store"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the state node to drop a checkpoint pin on the loop timeline.", "visual": "A pin marker lands on the timeline with a description label and timestamp."},
+      "mini_scenario": "Before a multi-file edit, StateManager.checkpoint snapshots the state so a partial failure can be reverted.",
+      "pitfall": "Include the components that will change; a checkpoint missing the mutated component cannot fully restore it."
     },
     {
-      "example_id": 10,
-      "title": "Self_healing - Safety Policy Interception",
-      "loop_scenario": "Modeling self_healing under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "self_healing-10",
+      "title": "Restore from the latest checkpoint",
+      "loop_stage": "act",
+      "pattern": "rollback-restore",
+      "intent": "Revert to a known-good state after a failed step.",
+      "how_it_shapes_the_loop": "StateManager.restore returns a StateCheckpoint the loop reloads, transitioning from ErrorRecovery back to a consistent Executing state.",
+      "loop_objects_touched": ["StateCheckpoint"],
+      "wiring": {"inputs_from": ["StateManager.latest or by id"], "outputs_to": ["restored loop state"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap a checkpoint pin to restore the loop to that snapshot.", "visual": "The timeline rewinds visually to the pin; downstream state cards reset to the snapshot values."},
+      "mini_scenario": "A migration corrupts state; StateManager.latest returns the pre-migration checkpoint and the loop restores it.",
+      "pitfall": "Restore is only as good as the snapshot; restoring a checkpoint taken after the corruption reloads the bad state."
     },
     {
-      "example_id": 11,
-      "title": "Self_healing - Context Pruning & Compaction",
-      "loop_scenario": "Modeling self_healing under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "self_healing-11",
+      "title": "Predict health before it fails",
+      "loop_stage": "perceive",
+      "pattern": "predictive-degradation",
+      "intent": "Forecast a component sliding toward failure so the loop acts early.",
+      "how_it_shapes_the_loop": "HealthPredictor.predict emits a HealthPrediction with a PredictedHealth and time_until_issue, letting control intervene before a hard failure.",
+      "loop_objects_touched": ["HealthPrediction", "PredictedHealth"],
+      "wiring": {"inputs_from": ["HealthDataPoint history"], "outputs_to": ["preemptive RecoveryAction"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread the predictor node to see per-component health trajectories.", "visual": "Each component shows a trend line; a downward slope tints toward FailureImminent red."},
+      "mini_scenario": "Latency trends worsen; predict returns Degrading with a time_until_issue, so the loop preemptively switches to a fallback.",
+      "pitfall": "Act on AtRisk/Degrading, not only FailureImminent; waiting for imminent leaves no lead time to recover."
     },
     {
-      "example_id": 12,
-      "title": "Self_healing - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling self_healing under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "self_healing-12",
+      "title": "Attach a recommended action to a prediction",
+      "loop_stage": "reason",
+      "pattern": "prediction-to-action",
+      "intent": "Pair each forecast with the action that would head off the failure.",
+      "how_it_shapes_the_loop": "HealthPrediction.recommended_action gives control a ready RecoveryAction so the perceive->act path is short.",
+      "loop_objects_touched": ["HealthPrediction", "RecoveryAction", "PredictedHealth"],
+      "wiring": {"inputs_from": ["HealthPredictor"], "outputs_to": ["RecoveryExecutor"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a prediction card to reveal its recommended RecoveryAction button.", "visual": "The card shows the predicted status plus an actionable button tinted by urgency."},
+      "mini_scenario": "A FailureImminent prediction for the GPU recommends a restart action, which the operator triggers with one tap.",
+      "pitfall": "A recommendation is a hint, not a mandate; auto-executing a heavy action on a low-confidence prediction can thrash."
     },
     {
-      "example_id": 13,
-      "title": "Self_healing - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling self_healing under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "self_healing-13",
+      "title": "Track prediction accuracy",
+      "loop_stage": "learn",
+      "pattern": "calibrate-predictor",
+      "intent": "Learn whether past predictions were right to trust future ones.",
+      "how_it_shapes_the_loop": "record_outcome updates accuracy, so the loop can weight or ignore predictions from a poorly-calibrated predictor.",
+      "loop_objects_touched": ["HealthPrediction", "PredictedHealth"],
+      "wiring": {"inputs_from": ["actual outcome vs prediction"], "outputs_to": ["predictor accuracy stats"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the predictor to see its running accuracy score.", "visual": "An accuracy dial fills green as correct predictions accumulate, red as it mispredicts."},
+      "mini_scenario": "A predicted failure never materializes; record_outcome(false) lowers accuracy and future predictions are trusted less.",
+      "pitfall": "Feed real outcomes back consistently; an unlabeled predictor's accuracy is meaningless and misleading."
     },
     {
-      "example_id": 14,
-      "title": "Self_healing - Isolated Branch Staging",
-      "loop_scenario": "Modeling self_healing under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "self_healing-14",
+      "title": "Detect a deadlock with no progress",
+      "loop_stage": "perceive",
+      "pattern": "no-progress-deadlock",
+      "intent": "Notice when the loop is waiting without making progress.",
+      "how_it_shapes_the_loop": "DeadlockDetector.observe flags a Deadlock FailureKind after a threshold of waiting-without-progress, forcing a recovery transition.",
+      "loop_objects_touched": ["FailureKind", "FailureSignal"],
+      "wiring": {"inputs_from": ["is_waiting/made_progress observations"], "outputs_to": ["RecoveryTree with Deadlock kind"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the deadlock detector to see the current no-progress count against its threshold.", "visual": "A stall meter fills; crossing the threshold flashes a Deadlock badge on the loop."},
+      "mini_scenario": "The loop waits repeatedly with no progress; observe crosses the threshold and returns Deadlock so recovery can break it.",
+      "pitfall": "Reset the counter on genuine progress; forgetting to reset accumulates false deadlock signals."
     },
     {
-      "example_id": 15,
-      "title": "Self_healing - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling self_healing under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "self_healing-15",
+      "title": "Fall back to a local endpoint",
+      "loop_stage": "act",
+      "pattern": "endpoint-fallback",
+      "intent": "Switch to a local model when the primary endpoint is unreachable.",
+      "how_it_shapes_the_loop": "LocalEndpointFallback resolves an LlmUnreachable by redirecting the loop to a local endpoint so work continues degraded.",
+      "loop_objects_touched": ["FailureKind", "RecoveryDirective", "ResolutionOutcome"],
+      "wiring": {"inputs_from": ["LlmUnreachable FailureKind", "LocalEndpointFallback opt-in"], "outputs_to": ["redirected client"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotate the endpoint selector from Remote to Local to enable the fallback.", "visual": "The endpoint node swaps its cloud icon for a local-machine icon and turns amber to signal degraded mode."},
+      "mini_scenario": "The remote endpoint refuses connections; LocalEndpointFallback (opt-in) reroutes to the local model and the loop keeps running.",
+      "pitfall": "Fallback must be opt-in and capability-aware; silently downgrading to a weaker local model can degrade output quality."
     },
     {
-      "example_id": 16,
-      "title": "Self_healing - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling self_healing under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "self_healing-16",
+      "title": "Bound retries with the executor",
+      "loop_stage": "control",
+      "pattern": "retry-budget-guard",
+      "intent": "Cap how many times a pattern is retried before giving up.",
+      "how_it_shapes_the_loop": "RecoveryExecutor tracks retry_attempt_count per pattern and stops when exhausted, protecting the loop's overall budget.",
+      "loop_objects_touched": ["RecoveryExecution", "RecoveryStrategy"],
+      "wiring": {"inputs_from": ["RecoveryStrategy", "retry state"], "outputs_to": ["retry or terminal failure"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch a recovering node to see its attempt count against the retry cap.", "visual": "A segmented retry gauge fills per attempt; the last segment turns red at the cap."},
+      "mini_scenario": "A pattern hits its retry cap; the executor stops retrying and lets the loop transition to Failed rather than spinning.",
+      "pitfall": "Reset retry state after success with reset_retry_state; a stale count can prematurely exhaust a fresh failure."
     },
     {
-      "example_id": 17,
-      "title": "Self_healing - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling self_healing under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "self_healing-17",
+      "title": "Record recovery success rates",
+      "loop_stage": "learn",
+      "pattern": "outcome-feedback-loop",
+      "intent": "Feed recovery results back so strategy selection improves.",
+      "how_it_shapes_the_loop": "record_recovery marks a strategy success/failure, updating success_rate so recommend_recovery favors what actually works.",
+      "loop_objects_touched": ["RecoveryResult", "RecoveryStrategy", "ErrorPattern"],
+      "wiring": {"inputs_from": ["RecoveryExecution outcome"], "outputs_to": ["ErrorLearner strategy stats"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick a completed recovery card into the learner to log its outcome.", "visual": "The card animates into the learner and the associated strategy's success ring updates."},
+      "mini_scenario": "A retry strategy succeeds; record_recovery logs the win and raises that strategy's rank for the pattern.",
+      "pitfall": "Attribute the outcome to the strategy that actually ran, not the recommended one, if they diverged."
     },
     {
-      "example_id": 18,
-      "title": "Self_healing - Gesture-based Node Filter",
-      "loop_scenario": "Modeling self_healing under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "self_healing-18",
+      "title": "Handle disk-full failures distinctly",
+      "loop_stage": "reason",
+      "pattern": "resource-specific-recovery",
+      "intent": "Route ENOSPC to a cleanup recovery rather than a blind retry.",
+      "how_it_shapes_the_loop": "classify maps a disk-full message to DiskFull, letting the RecoveryTree pick a space-reclaiming path instead of retrying the doomed write.",
+      "loop_objects_touched": ["FailureKind", "RecoveryDirective"],
+      "wiring": {"inputs_from": ["ENOSPC error"], "outputs_to": ["cleanup recovery"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a DiskFull failure to see its dedicated recovery path.", "visual": "The failure badge shows a disk icon; its recovery edge routes to a cleanup node, not retry."},
+      "mini_scenario": "A write fails with ENOSPC; classify returns DiskFull so recovery reclaims space before re-attempting the write.",
+      "pitfall": "Do not retry DiskFull without freeing space; an immediate retry just reproduces the same ENOSPC."
     },
     {
-      "example_id": 19,
-      "title": "Self_healing - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling self_healing under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "self_healing-19",
+      "title": "Register custom resolvers on the tree",
+      "loop_stage": "foundation",
+      "pattern": "extensible-recovery-tree",
+      "intent": "Add new FailureKind-to-Resolution mappings without changing the loop.",
+      "how_it_shapes_the_loop": "RecoveryTree.register wires a resolver for a FailureKind, extending the ErrorRecovery branch's coverage as new failure modes appear.",
+      "loop_objects_touched": ["FailureKind", "RecoveryDirective", "ResolutionOutcome"],
+      "wiring": {"inputs_from": ["custom Resolution impl"], "outputs_to": ["RecoveryTree.resolve dispatch"]},
+      "touch_interaction": {"gesture": "drag", "canvas_action": "Drag a resolver chip onto a FailureKind slot in the recovery tree to bind it.", "visual": "The slot fills with the resolver's icon; unbound kinds show a dashed placeholder."},
+      "mini_scenario": "A new provider-specific error kind is added; register binds a custom resolver so resolve dispatches it correctly.",
+      "pitfall": "Cover the FailureKinds you care about; an unregistered kind falls through to Unknown with generic handling."
     },
     {
-      "example_id": 20,
-      "title": "Self_healing - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling self_healing under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "Self_healingPayload"
-      ],
-      "component_loop_effect": "Determines how self_healing intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'self_healing' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "self_healing-20",
+      "title": "Compose the ErrorRecovery branch end to end",
+      "loop_stage": "learn",
+      "pattern": "self-healing-pipeline",
+      "intent": "Wire learning, classification, recovery, and prediction into one recovery subsystem.",
+      "how_it_shapes_the_loop": "Chains ErrorLearner (record+recommend) -> RecoveryTree (classify+directive) -> RecoveryExecutor (bounded retry) -> StateManager (rollback), with HealthPredictor pre-empting failures.",
+      "loop_objects_touched": ["ErrorOccurrence", "FailureKind", "RecoveryDirective", "StateCheckpoint", "HealthPrediction"],
+      "wiring": {"inputs_from": ["loop error", "health telemetry"], "outputs_to": ["retry / compress / reload / restore", "Executing or Failed"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch to collapse the self-healing sub-nodes into one recovery node on the loop's ErrorRecovery edge.", "visual": "Collapsed it shows a healing-cross badge with the active strategy; spread reveals the learner, tree, executor, state, and predictor pipeline."},
+      "mini_scenario": "An error is recorded and classified, the tree emits a CompressContext directive within the retry budget, and on repeated failure StateManager restores the last checkpoint.",
+      "pitfall": "Keep learning and acting in order: classify before dispatching, checkpoint before risky recovery, and feed outcomes back so the system actually learns."
     }
   ]
 }

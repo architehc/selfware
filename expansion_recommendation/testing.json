@@ -1,291 +1,270 @@
 {
-  "node_id": "testing",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (TESTING)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via testing context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize testing token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding testing dynamically does not invalidate active turn execution."
-  ],
+  "component": "testing",
+  "tier": "tooling",
+  "loop_stage": "verify",
+  "summary": "The testing component is the evidence-producing verify stage of the loop. The VerificationGate runs an ordered set of language-aware checks (syntax, format, lint, typecheck, test, security) over the project after edits, grading the result against a QaProfile and QaWeights into a QualityGrade and VerificationReport. VisualVerifier and VisualStateTracker verify UI screenshots against expectations and detect stuck visual loops. It gates the act->learn transition: work is only accepted as done when the VerificationReport passes, reshaping the loop into a verify-then-commit cycle.",
+  "loop_objects": ["VerificationGate", "VerificationReport", "CheckResult", "CheckType", "VerificationError", "QaProfile", "QaStage", "QaStageResult", "QualityGrade", "VisualVerificationResult", "VisualDiffResult", "LoopDetectionResult"],
+  "context_basis": "Recommendations were formed reading src/testing/ (verification VerificationGate, qa_profiles, visual_verification, language_qa) in the context of the full engine at a ~600k budget framing, where the gate replaces inline post-edit verification in the act stage.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Testing - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling testing under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "testing-01",
+      "title": "Gate the act with a verification pass",
+      "loop_stage": "verify",
+      "pattern": "verify-then-accept",
+      "intent": "Only mark work done when the VerificationGate reports success.",
+      "how_it_shapes_the_loop": "Inserts a VerificationGate.run after edits; a failing VerificationReport keeps the loop iterating instead of transitioning to Completed.",
+      "loop_objects_touched": ["VerificationGate", "VerificationReport"],
+      "wiring": {"inputs_from": ["edited files from act"], "outputs_to": ["Completed on pass", "reason on fail"]},
+      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge from the act node into the verification gate before the loop can reach Completed.", "visual": "The gate renders as a checklist card; it pulses while running, then stamps a green PASS or red FAIL."},
+      "mini_scenario": "The agent edits code and the gate runs; the VerificationReport fails on a type error, so the loop reasons about a fix rather than finishing.",
+      "pitfall": "Never accept completion without a passing report; a skipped gate lets broken edits count as done."
     },
     {
-      "example_id": 2,
-      "title": "Testing - High Token Load (600k Context)",
-      "loop_scenario": "Modeling testing under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "testing-02",
+      "title": "Detect repo language to pick checks",
+      "loop_stage": "perceive",
+      "pattern": "language-aware-verification",
+      "intent": "Run the right toolchain checks for the project's language.",
+      "how_it_shapes_the_loop": "RepoLanguage detection (from_extension/from_manifest) selects a LanguageCheckSet so the verify stage uses the correct linters and compilers.",
+      "loop_objects_touched": ["CheckType", "VerificationGate"],
+      "wiring": {"inputs_from": ["project files", "manifest"], "outputs_to": ["LanguageCheckSet selection"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the gate to see the detected language and the check set it will run.", "visual": "A language badge (Rust/Python/TS/Go) appears with the enabled check icons beneath it."},
+      "mini_scenario": "A Cargo.toml is present; from_manifest detects Rust and the gate wires in cargo check, clippy, and fmt.",
+      "pitfall": "Mixed-language repos need a hint; relying on one manifest can miss checks for a secondary language."
     },
     {
-      "example_id": 3,
-      "title": "Testing - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling testing under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "testing-03",
+      "title": "Order QA stages syntax-to-security",
+      "loop_stage": "verify",
+      "pattern": "staged-quality-pipeline",
+      "intent": "Run cheap checks before expensive ones and fail fast.",
+      "how_it_shapes_the_loop": "QaStage order (Syntax, Format, Lint, TypeCheck, Test, Security) lets the gate short-circuit early, saving loop budget on obviously broken edits.",
+      "loop_objects_touched": ["QaStage", "QaStageResult", "VerificationReport"],
+      "wiring": {"inputs_from": ["edited code"], "outputs_to": ["per-stage QaStageResult"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread the gate to fan the stages into an ordered pipeline of chips.", "visual": "Stages light green left-to-right; a failing stage turns red and halts the ones downstream."},
+      "mini_scenario": "A syntax error fails the first stage, so the gate never spends time running the full test suite.",
+      "pitfall": "Keep the cheap-to-expensive order; running Test before Syntax wastes budget on unparseable code."
     },
     {
-      "example_id": 4,
-      "title": "Testing - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling testing under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "testing-04",
+      "title": "Grade the run against a QaProfile",
+      "loop_stage": "verify",
+      "pattern": "weighted-quality-grade",
+      "intent": "Convert stage results into a single QualityGrade.",
+      "how_it_shapes_the_loop": "compute_score applies QaWeights to QaStageResults; QualityGrade.from_score decides whether the loop's output meets the bar.",
+      "loop_objects_touched": ["QaProfile", "QaStageResult", "QualityGrade"],
+      "wiring": {"inputs_from": ["QaStageResults", "QaWeights"], "outputs_to": ["accept/reject decision"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the gate to collapse per-stage detail into a single letter grade.", "visual": "A grade medallion (A-F) with a weighted score ring; passing grades glow gold."},
+      "mini_scenario": "Lint and test pass but security is weak; the weighted score lands a B, which the strict profile rejects.",
+      "pitfall": "Match the profile to the task; a minimal profile can grade risky code as passing by under-weighting security."
     },
     {
-      "example_id": 5,
-      "title": "Testing - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling testing under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "testing-05",
+      "title": "Choose fast vs thorough config",
+      "loop_stage": "reason",
+      "pattern": "budget-scoped-verification",
+      "intent": "Trade verification depth against loop budget.",
+      "how_it_shapes_the_loop": "VerificationConfig::fast or ::thorough sets how many checks run, scaling the verify stage's cost per iteration.",
+      "loop_objects_touched": ["VerificationGate", "QaProfile"],
+      "wiring": {"inputs_from": ["remaining budget"], "outputs_to": ["enabled check depth"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotate the gate's depth dial between Fast and Thorough.", "visual": "Fast shows a lean two-stage strip; Thorough expands to the full six-stage pipeline."},
+      "mini_scenario": "Mid-loop with tight budget, the gate runs the fast config (syntax+lint only), deferring full tests to the final iteration.",
+      "pitfall": "Do not ship on fast alone; a final thorough pass must run before declaring the task complete."
     },
     {
-      "example_id": 6,
-      "title": "Testing - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling testing under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "testing-06",
+      "title": "Report errors with severity",
+      "loop_stage": "verify",
+      "pattern": "severity-tagged-report",
+      "intent": "Distinguish blocking errors from warnings in the report.",
+      "how_it_shapes_the_loop": "VerificationError with ErrorSeverity lets the loop treat warnings as non-blocking while errors force another iteration.",
+      "loop_objects_touched": ["VerificationError", "ErrorSeverity", "VerificationReport"],
+      "wiring": {"inputs_from": ["check output"], "outputs_to": ["blocking vs advisory decision"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the report to expand errors grouped by severity.", "visual": "Errors render red, warnings amber; a count badge per severity sits on the report card."},
+      "mini_scenario": "A lint pass yields warnings but no errors; the gate lets the loop proceed while surfacing the warnings.",
+      "pitfall": "Do not block on every warning; treating advisory lint as fatal stalls the loop on non-issues."
     },
     {
-      "example_id": 7,
-      "title": "Testing - Stream Chunk Processing",
-      "loop_scenario": "Modeling testing under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "testing-07",
+      "title": "Run a custom post-edit test command",
+      "loop_stage": "verify",
+      "pattern": "project-specific-check",
+      "intent": "Verify with the project's own test command after edits.",
+      "how_it_shapes_the_loop": "set_post_edit_test_command adds a CustomCheck the gate runs, tying the verify stage to the repo's real test harness.",
+      "loop_objects_touched": ["CustomCheck", "CheckResult", "VerificationGate"],
+      "wiring": {"inputs_from": ["configured test command"], "outputs_to": ["CheckResult in report"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the gate to type or edit the post-edit test command.", "visual": "A command chip attaches to the gate; it spins while the command runs and colors by exit code."},
+      "mini_scenario": "The gate runs npm test after each edit; a failing suite feeds a red CheckResult back into the loop.",
+      "pitfall": "Scope the command to the changed area when possible; a full slow suite on every edit throttles the loop."
     },
     {
-      "example_id": 8,
-      "title": "Testing - Interactive User Interruption",
-      "loop_scenario": "Modeling testing under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "testing-08",
+      "title": "Exclude generated files from checks",
+      "loop_stage": "foundation",
+      "pattern": "scope-the-verification",
+      "intent": "Skip vendored or generated files that would pollute the report.",
+      "how_it_shapes_the_loop": "is_excluded filters files out of the check set so the verify stage grades only authored code.",
+      "loop_objects_touched": ["VerificationGate", "VerificationReport"],
+      "wiring": {"inputs_from": ["exclude globs"], "outputs_to": ["filtered check target set"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick an excluded file chip off the gate's target list.", "visual": "Excluded files gray out with a strike-through; the target count drops."},
+      "mini_scenario": "A generated protobuf file triggers lint noise; is_excluded drops it so the report reflects only hand-written code.",
+      "pitfall": "Exclude noise, not real code; over-broad excludes can hide genuine failures from the gate."
     },
     {
-      "example_id": 9,
-      "title": "Testing - Subagent Delegation",
-      "loop_scenario": "Modeling testing under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "testing-09",
+      "title": "Track side effects of verification",
+      "loop_stage": "verify",
+      "pattern": "side-effect-awareness",
+      "intent": "Know when a check itself mutated the workspace.",
+      "how_it_shapes_the_loop": "SideEffect/SideEffectType flags that a formatter or fixer changed files, so the loop re-reads state before continuing.",
+      "loop_objects_touched": ["SideEffect", "SideEffectType", "VerificationReport"],
+      "wiring": {"inputs_from": ["auto-fixing checks"], "outputs_to": ["state re-read in perceive"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the report to see which checks produced side effects.", "visual": "Side-effect checks show a small wrench badge indicating files were modified."},
+      "mini_scenario": "A format check rewrites files; the SideEffect flag tells the loop to re-perceive the workspace before the next reasoning step.",
+      "pitfall": "Re-read after side-effecting checks; stale in-context file content diverges from what the formatter wrote."
     },
     {
-      "example_id": 10,
-      "title": "Testing - Safety Policy Interception",
-      "loop_scenario": "Modeling testing under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "testing-10",
+      "title": "Verify a UI against expectation",
+      "loop_stage": "verify",
+      "pattern": "visual-assertion",
+      "intent": "Confirm a rendered screen matches the intended UI.",
+      "how_it_shapes_the_loop": "VisualVerifier produces a VisualVerificationResult that gates whether a UI-changing act is accepted.",
+      "loop_objects_touched": ["VisualVerificationResult", "ElementVerification"],
+      "wiring": {"inputs_from": ["screenshot", "expected description"], "outputs_to": ["accept/reject UI change"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread on the screenshot node to zoom into verified UI elements.", "visual": "Matched elements outline green, missing or wrong ones outline red with a mismatch label."},
+      "mini_scenario": "After a layout edit, VisualVerifier checks the screenshot; a missing button yields a failing ElementVerification and the loop retries.",
+      "pitfall": "Verify against a specific expectation, not just 'looks fine'; vague checks pass broken UIs."
     },
     {
-      "example_id": 11,
-      "title": "Testing - Context Pruning & Compaction",
-      "loop_scenario": "Modeling testing under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "testing-11",
+      "title": "Diff two UI states visually",
+      "loop_stage": "verify",
+      "pattern": "before-after-visual-diff",
+      "intent": "Measure what actually changed on screen after an act.",
+      "how_it_shapes_the_loop": "VisualDiffResult quantifies the delta between screenshots, letting the loop confirm the intended visual change occurred.",
+      "loop_objects_touched": ["VisualDiffResult", "LayoutAnalysis"],
+      "wiring": {"inputs_from": ["before/after screenshots"], "outputs_to": ["change-confirmed decision"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotate a slider to wipe between the before and after screenshots.", "visual": "Changed regions highlight with a colored overlay; the diff percentage shows on the node."},
+      "mini_scenario": "An edit should recolor a header; the VisualDiffResult confirms the header region changed and nothing else regressed.",
+      "pitfall": "Ignore trivial pixel noise; a raw diff without tolerance flags anti-aliasing as a real change."
     },
     {
-      "example_id": 12,
-      "title": "Testing - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling testing under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "testing-12",
+      "title": "Detect a stuck visual loop",
+      "loop_stage": "control",
+      "pattern": "visual-loop-break",
+      "intent": "Notice the agent repeating the same screen without progress.",
+      "how_it_shapes_the_loop": "VisualStateTracker flags a LoopDetectionResult when screenshots repeat, forcing a RecoveryStrategy instead of endless retries.",
+      "loop_objects_touched": ["LoopDetectionResult", "ScreenshotState"],
+      "wiring": {"inputs_from": ["screenshot history + perceptual hash"], "outputs_to": ["RecoveryStrategy trigger"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the tracker to see the repeated-state count against the stuck threshold.", "visual": "Repeated frames stack with a pulsing loop icon; crossing the threshold flashes a break-loop alert."},
+      "mini_scenario": "The agent keeps clicking a dialog that never closes; matching perceptual hashes trip the stuck threshold and the loop switches tactics.",
+      "pitfall": "Compare perceptual hashes with a similarity tolerance; exact-match only misses near-identical stuck states."
     },
     {
-      "example_id": 13,
-      "title": "Testing - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling testing under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "testing-13",
+      "title": "Hash screens to spot repetition",
+      "loop_stage": "perceive",
+      "pattern": "perceptual-state-fingerprint",
+      "intent": "Fingerprint each screen to compare states cheaply.",
+      "how_it_shapes_the_loop": "compute_perceptual_hash and compute_hash_similarity let the tracker record ScreenshotStates and detect near-duplicates across iterations.",
+      "loop_objects_touched": ["ScreenshotState", "LoopDetectionResult"],
+      "wiring": {"inputs_from": ["screenshot path"], "outputs_to": ["VisualStateTracker history"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap a frame to see its perceptual hash and similarity to recent frames.", "visual": "Each frame shows a compact hash chip; similar frames link with a dotted resemblance line."},
+      "mini_scenario": "Two consecutive screens hash to near-identical values; has_similar_state returns true, feeding the loop detector.",
+      "pitfall": "Tune the similarity threshold; too tight over-flags, too loose lets a genuinely stuck loop slip through."
     },
     {
-      "example_id": 14,
-      "title": "Testing - Isolated Branch Staging",
-      "loop_scenario": "Modeling testing under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "testing-14",
+      "title": "Recommend a recovery on visual stall",
+      "loop_stage": "reason",
+      "pattern": "visual-recovery-strategy",
+      "intent": "Pick a way out when the UI is stuck.",
+      "how_it_shapes_the_loop": "A RecoveryStrategy from the visual tracker redirects the loop (e.g. reload, alternate path) instead of repeating the failing action.",
+      "loop_objects_touched": ["LoopDetectionResult", "VisualVerificationResult"],
+      "wiring": {"inputs_from": ["LoopDetectionResult"], "outputs_to": ["alternate act path"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the stuck alert to choose from suggested recovery strategies.", "visual": "A radial menu of recovery options fans out; the recommended one is pre-highlighted."},
+      "mini_scenario": "Detecting a stuck modal, the tracker recommends a page reload, breaking the repeated-click cycle.",
+      "pitfall": "Escalate strategies; repeating the same recovery that already failed just nests one loop inside another."
     },
     {
-      "example_id": 15,
-      "title": "Testing - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling testing under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "testing-15",
+      "title": "Delegate to language QA runners",
+      "loop_stage": "verify",
+      "pattern": "toolchain-delegation",
+      "intent": "Use each language's native QA tools rather than inline heuristics.",
+      "how_it_shapes_the_loop": "QaLanguage.detect selects the language QA runner so the verify stage invokes real linters/compilers, replacing inline Python/Node/Go checks.",
+      "loop_objects_touched": ["QaStage", "CheckResult"],
+      "wiring": {"inputs_from": ["project root detection"], "outputs_to": ["native toolchain CheckResults"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the language QA node to see which runner and tools were selected.", "visual": "A toolchain badge lists the invoked binaries (clippy, mypy, eslint, go vet)."},
+      "mini_scenario": "detect finds a Python project; the gate runs mypy and ruff instead of a hand-rolled syntax heuristic.",
+      "pitfall": "Ensure the toolchain is installed; a missing linter must surface as unavailable, not as a silent pass."
     },
     {
-      "example_id": 16,
-      "title": "Testing - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling testing under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "testing-16",
+      "title": "Cache last results for quick recheck",
+      "loop_stage": "control",
+      "pattern": "incremental-reverify",
+      "intent": "Avoid re-running unchanged checks every iteration.",
+      "how_it_shapes_the_loop": "last_results holds the prior VerificationReport so the loop can re-verify only what changed, cutting verify cost per iteration.",
+      "loop_objects_touched": ["VerificationReport", "VerificationGate"],
+      "wiring": {"inputs_from": ["previous run", "changed files"], "outputs_to": ["scoped re-verification"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick the gate to re-run only the checks touching changed files.", "visual": "Unchanged stages stay dimmed with cached green; only affected stages re-animate."},
+      "mini_scenario": "One file changed; the gate reuses last_results for untouched checks and only reruns the affected stage.",
+      "pitfall": "Invalidate the cache on config or dependency changes; a cross-cutting change can invalidate all cached stages."
     },
     {
-      "example_id": 17,
-      "title": "Testing - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling testing under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "testing-17",
+      "title": "Analyze layout beyond pixels",
+      "loop_stage": "verify",
+      "pattern": "structural-ui-check",
+      "intent": "Verify UI structure and alignment, not just color.",
+      "how_it_shapes_the_loop": "LayoutAnalysis inspects element arrangement so the gate can reject structurally broken UIs that a color diff would miss.",
+      "loop_objects_touched": ["LayoutAnalysis", "UiElement", "VisualVerificationResult"],
+      "wiring": {"inputs_from": ["screenshot", "expected layout"], "outputs_to": ["structural verdict"]},
+      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread to overlay a layout grid on the screenshot with detected UiElements.", "visual": "Elements snap to bounding boxes; misaligned ones flag with a red guide line."},
+      "mini_scenario": "A button overlaps a field; LayoutAnalysis flags the collision even though colors matched, so the gate rejects.",
+      "pitfall": "Combine structural and pixel checks; either alone misses a class of UI regressions."
     },
     {
-      "example_id": 18,
-      "title": "Testing - Gesture-based Node Filter",
-      "loop_scenario": "Modeling testing under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "testing-18",
+      "title": "Mock external APIs during verification",
+      "loop_stage": "foundation",
+      "pattern": "hermetic-verification",
+      "intent": "Make tests deterministic by stubbing network dependencies.",
+      "how_it_shapes_the_loop": "mock_api provides stubbed responses so the verify stage does not depend on flaky external services, stabilizing the loop's pass/fail signal.",
+      "loop_objects_touched": ["CheckResult", "VerificationReport"],
+      "wiring": {"inputs_from": ["mock definitions"], "outputs_to": ["deterministic CheckResults"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the gate to attach a mock API profile for the test run.", "visual": "A mock badge attaches; outbound network edges reroute to a stub node."},
+      "mini_scenario": "A test hitting a payment API uses mock_api stubs, so the verify result reflects code correctness, not upstream availability.",
+      "pitfall": "Keep mocks faithful to the real contract; a stale stub can pass code that breaks against the live API."
     },
     {
-      "example_id": 19,
-      "title": "Testing - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling testing under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "testing-19",
+      "title": "Feed the report into the learn stage",
+      "loop_stage": "learn",
+      "pattern": "evidence-to-memory",
+      "intent": "Turn a verification outcome into durable evidence.",
+      "how_it_shapes_the_loop": "The VerificationReport becomes Evidence the learn stage records, so future loops know which checks a change must satisfy.",
+      "loop_objects_touched": ["VerificationReport", "QualityGrade"],
+      "wiring": {"inputs_from": ["VerificationGate result"], "outputs_to": ["learn stage / memory"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick a passed report into the memory node to record it as evidence.", "visual": "The report card animates into memory and leaves a small verified-evidence marker."},
+      "mini_scenario": "A passing report is stored as evidence; a later regression can be traced to the check that once passed.",
+      "pitfall": "Record the grade and the failing checks, not just pass/fail; the detail is what makes the evidence useful later."
     },
     {
-      "example_id": 20,
-      "title": "Testing - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling testing under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "TestingPayload"
-      ],
-      "component_loop_effect": "Determines how testing intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'testing' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "testing-20",
+      "title": "Compose the verify stage as one gate",
+      "loop_stage": "verify",
+      "pattern": "verification-aggregate",
+      "intent": "Fuse language checks, QA grading, and visual verification into one gate node.",
+      "how_it_shapes_the_loop": "Chains RepoLanguage detection -> staged QA pipeline -> QualityGrade -> optional VisualVerifier so one gate decides accept/iterate for every act.",
+      "loop_objects_touched": ["VerificationGate", "QaStageResult", "QualityGrade", "VisualVerificationResult", "VerificationReport"],
+      "wiring": {"inputs_from": ["act stage edits", "screenshots"], "outputs_to": ["Completed on pass", "reason on fail", "learn evidence"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch to collapse the verification sub-nodes into one gate chip on the act->done edge.", "visual": "Collapsed it shows a checkmark with the current grade; spread reveals the language, QA pipeline, grade, and visual sub-nodes."},
+      "mini_scenario": "An edit flows through language detection, the six QA stages, a B+ grade, and a visual check; all pass, so the gate accepts and records evidence.",
+      "pitfall": "Order it correctly: detect language, run cheap-to-expensive stages, grade, then visual-verify, and always emit a report even on early failure."
     }
   ]
 }

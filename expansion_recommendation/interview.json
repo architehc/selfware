@@ -1,291 +1,410 @@
 {
-  "node_id": "interview",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (INTERVIEW)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via interview context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize interview token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding interview dynamically does not invalidate active turn execution."
-  ],
+  "component": "interview",
+  "tier": "tooling",
+  "loop_stage": "perceive",
+  "summary": "The interview component runs a pre-task structured questionnaire that scopes the work before the agent loop starts. run_interview asks language, framework, project type, testing preference, output location, and scope questions (analyze_task heuristics and detect_existing_project pre-fill defaults), collects answers into an InterviewSession, converts them to a validated InterviewContext, and serializes them via to_system_prompt_section into the agent's system prompt. On the loop it is a boundary 'perceive'/'control' node: it perceives operator intent up front and constrains the loop's plan and budget before the first Planning transition, and it is skippable at any point via Esc.",
+  "loop_objects": ["InterviewQuestion", "InterviewSession", "InterviewContext", "ProjectType", "TestingPreference", "ProjectScope", "QuestionOption", "TaskHints", "Plan", "Budget"],
+  "context_basis": "Recommendations were formed by reading src/interview.rs in the context of the full engine's ~600k-token budget framing, so each move treats the interview as a cheap pre-loop scoping pass that shrinks the plan's search space and constrains budget before any tokens are spent iterating.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Interview - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling interview under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "interview-01",
+      "title": "Scope the task before the loop starts",
+      "loop_stage": "perceive",
+      "pattern": "perceive-before-plan",
+      "intent": "Capture operator intent as structured context so the first plan is grounded, not guessed.",
+      "how_it_shapes_the_loop": "run_interview runs before the Planning transition and produces an InterviewContext; the loop enters its first iteration already knowing language, scope, and constraints instead of inferring them from the raw task string.",
+      "loop_objects_touched": ["InterviewContext", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["raw task string", "cwd"],
+        "outputs_to": ["system prompt", "planner"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the interview node at the loop's entrance to begin the pre-task questionnaire.",
+        "visual": "The node sits as a gate before the Planning node, glowing amber until answered, then green as context is committed."
+      },
+      "mini_scenario": "Before planning, the interview asks six questions; the answers become the InterviewContext the planner reads on iteration one.",
+      "pitfall": "The interview must run before the first plan — asking mid-loop wastes the scoping value, since the plan is already committed."
     },
     {
-      "example_id": 2,
-      "title": "Interview - High Token Load (600k Context)",
-      "loop_scenario": "Modeling interview under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "interview-02",
+      "title": "Analyze the task to pre-fill defaults",
+      "loop_stage": "perceive",
+      "pattern": "heuristic-priming",
+      "intent": "Reduce operator effort by inferring likely answers from the task text.",
+      "how_it_shapes_the_loop": "analyze_task returns TaskHints (suggests_web_api, suggests_cli, mentioned_languages, ...); the loop pre-selects defaults so fewer questions need answering, tightening scope faster.",
+      "loop_objects_touched": ["TaskHints", "InterviewQuestion"],
+      "wiring": {
+        "inputs_from": ["task string keywords"],
+        "outputs_to": ["question defaults", "InterviewSession"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a question node to see the TaskHints that pre-selected its default.",
+        "visual": "The inferred default option is pre-highlighted with a small 'from task' badge explaining the guess."
+      },
+      "mini_scenario": "The task says 'build a REST API in Rust'; analyze_task flags suggests_web_api and mentions Rust, pre-filling both questions.",
+      "pitfall": "Heuristics are hints, not answers — always let the operator override the pre-fill; a wrong guess silently mis-scopes the loop."
     },
     {
-      "example_id": 3,
-      "title": "Interview - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling interview under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "interview-03",
+      "title": "Skip language when the project is known",
+      "loop_stage": "control",
+      "pattern": "conditional-question",
+      "intent": "Avoid asking what the environment already answers.",
+      "how_it_shapes_the_loop": "detect_existing_project inspects for Cargo.toml, package.json, pyproject.toml, or go.mod; when a language is detected the language question is skipped, so the loop scopes without redundant prompting.",
+      "loop_objects_touched": ["InterviewQuestion", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["cwd project markers"],
+        "outputs_to": ["skipped question", "InterviewSession.language"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick past the language question node when the detected project auto-answers it.",
+        "visual": "The language node renders pre-filled and dimmed with a 'detected: Rust' chip, non-interactive."
+      },
+      "mini_scenario": "The cwd holds Cargo.toml; the interview detects Rust, skips the language question, and moves straight to framework.",
+      "pitfall": "Detection keys on marker files — an unusual layout without them still prompts, so don't assume detection always fires."
     },
     {
-      "example_id": 4,
-      "title": "Interview - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling interview under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "interview-04",
+      "title": "Offer language-aware framework choices",
+      "loop_stage": "perceive",
+      "pattern": "contextual-options",
+      "intent": "Present only frameworks that fit the chosen language.",
+      "how_it_shapes_the_loop": "The framework question's QuestionOptions depend on the selected language (axum/actix/tokio for Rust, FastAPI/Flask/Django for Python, ...); the loop's plan inherits a coherent language+framework pair.",
+      "loop_objects_touched": ["InterviewQuestion", "QuestionOption", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["selected language"],
+        "outputs_to": ["InterviewSession.framework"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread the framework node to fan out the options valid for the selected language.",
+        "visual": "Only language-compatible framework chips appear; incompatible ones are absent rather than greyed."
+      },
+      "mini_scenario": "Language is Python, so the framework question offers FastAPI, Flask, and Django rather than Rust web frameworks.",
+      "pitfall": "Don't offer cross-language frameworks — an axum option under Python would let the operator scope an impossible plan."
     },
     {
-      "example_id": 5,
-      "title": "Interview - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling interview under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "interview-05",
+      "title": "Classify the project type",
+      "loop_stage": "perceive",
+      "pattern": "type-classification",
+      "intent": "Fix the shape of the deliverable so the plan targets the right structure.",
+      "how_it_shapes_the_loop": "The project-type question maps to the ProjectType enum (CliTool, WebApi, FrontendUi, Library, FullStack, Script, Other); the loop plans a CLI scaffold vs a web service based on this single choice.",
+      "loop_objects_touched": ["InterviewQuestion", "ProjectType", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["project-type selection", "TaskHints"],
+        "outputs_to": ["InterviewContext.project_type", "planner scaffold"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a project-type chip to lock the deliverable shape for the loop.",
+        "visual": "Selected type highlights and stamps a type icon (terminal, globe, book) on the interview node."
+      },
+      "mini_scenario": "The operator picks WebApi; the plan scaffolds routes and handlers rather than a library crate.",
+      "pitfall": "ProjectType::Other(String) carries a freeform label — the plan must read the string, not assume a built-in variant."
     },
     {
-      "example_id": 6,
-      "title": "Interview - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling interview under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "interview-06",
+      "title": "Choose a testing discipline",
+      "loop_stage": "control",
+      "pattern": "verify-policy",
+      "intent": "Decide up front how much the loop's verify stage will invest in tests.",
+      "how_it_shapes_the_loop": "The testing question maps to TestingPreference (Tdd, TestsAfter, Minimal, None); this sets how aggressively the loop's verify stage writes and runs tests each iteration.",
+      "loop_objects_touched": ["InterviewQuestion", "TestingPreference", "InterviewContext"],
+      "wiring": {
+        "inputs_from": ["testing-preference selection"],
+        "outputs_to": ["verify-stage policy", "system prompt"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag the testing dial from None through Minimal, TestsAfter, to Tdd to set verify intensity.",
+        "visual": "A four-notch dial; the verify node downstream brightens as the notch climbs toward Tdd."
+      },
+      "mini_scenario": "The operator selects Tdd; the loop writes a failing test before each implementation act throughout the run.",
+      "pitfall": "TestingPreference::None means the verify stage skips test authoring — don't silently add tests the operator opted out of."
     },
     {
-      "example_id": 7,
-      "title": "Interview - Stream Chunk Processing",
-      "loop_scenario": "Modeling interview under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "interview-07",
+      "title": "Bound expected effort with scope",
+      "loop_stage": "control",
+      "pattern": "budget-anchor",
+      "intent": "Anchor the loop's budget expectation to a size class before it starts iterating.",
+      "how_it_shapes_the_loop": "The scope question maps to ProjectScope (Quick <100, Small 100-500, Medium 500-2000, Large 2000+ lines); the loop uses this to right-size its budget and iteration count expectations.",
+      "loop_objects_touched": ["InterviewQuestion", "ProjectScope", "Budget"],
+      "wiring": {
+        "inputs_from": ["scope selection", "TaskHints"],
+        "outputs_to": ["Budget sizing", "planner iteration estimate"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the scope node to compress or expand the expected line-count band.",
+        "visual": "A size gauge spans Quick to Large; the loop's budget ring resizes to match the chosen band."
+      },
+      "mini_scenario": "The operator picks Small; the loop expects a 100-500 line deliverable and sizes its budget for a short run.",
+      "pitfall": "Scope is an expectation, not a hard cap — don't let the loop refuse legitimate work that overruns the estimated band."
     },
     {
-      "example_id": 8,
-      "title": "Interview - Interactive User Interruption",
-      "loop_scenario": "Modeling interview under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "interview-08",
+      "title": "Ask a freeform sub-question for output location",
+      "loop_stage": "perceive",
+      "pattern": "conditional-freeform",
+      "intent": "Capture a custom subdirectory when the operator wants a new location.",
+      "how_it_shapes_the_loop": "Selecting 'new subdirectory' triggers ask_freeform to collect the path; the loop's file-writing acts are then scoped to that directory instead of the cwd.",
+      "loop_objects_touched": ["InterviewQuestion", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["output-location choice", "freeform path input"],
+        "outputs_to": ["InterviewContext.output_dir"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the 'new subdirectory' option to open its freeform text field on the canvas.",
+        "visual": "A text input slides out beneath the option; the entered path appears as a scoped-directory chip."
+      },
+      "mini_scenario": "The operator chooses a new subdir and types 'service/'; the loop writes all generated files under service/.",
+      "pitfall": "The output-location question is skipped inside an existing project — don't force a new-dir prompt when work belongs in place."
     },
     {
-      "example_id": 9,
-      "title": "Interview - Subagent Delegation",
-      "loop_scenario": "Modeling interview under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "interview-09",
+      "title": "Serialize answers into the system prompt",
+      "loop_stage": "control",
+      "pattern": "context-injection",
+      "intent": "Deliver the scoped context to the loop in the form it actually reads.",
+      "how_it_shapes_the_loop": "to_system_prompt_section formats the InterviewContext as a '## Interview Context (user-specified preferences)' markdown block injected into the agent's system prompt, so every iteration sees the constraints.",
+      "loop_objects_touched": ["InterviewContext"],
+      "wiring": {
+        "inputs_from": ["InterviewContext"],
+        "outputs_to": ["agent system prompt"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw a connection from the interview node into the system-prompt node to inject the context block.",
+        "visual": "A context ribbon flows along the edge and docks as a labeled section inside the prompt node."
+      },
+      "mini_scenario": "The context serializes to a markdown section listing Rust, axum, WebApi, Tdd; the planner reads it on every turn.",
+      "pitfall": "Inject the section once, before the loop — regenerating it mid-run risks contradicting decisions the loop already made."
     },
     {
-      "example_id": 10,
-      "title": "Interview - Safety Policy Interception",
-      "loop_scenario": "Modeling interview under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "interview-10",
+      "title": "Detect an empty interview and fall back to defaults",
+      "loop_stage": "control",
+      "pattern": "graceful-default",
+      "intent": "Let the loop proceed on best judgment when the operator answered nothing.",
+      "how_it_shapes_the_loop": "is_empty checks whether every field is None/empty; if the operator skipped everything, the caller omits the context section and the loop plans on its own defaults rather than an empty scaffold.",
+      "loop_objects_touched": ["InterviewContext", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["fully-skipped InterviewSession"],
+        "outputs_to": ["default planning path"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick past the entire interview to skip it; the node collapses to a 'defaults' marker.",
+        "visual": "The interview node greys out with an 'empty — using best judgment' badge, and no context edge is drawn."
+      },
+      "mini_scenario": "The operator hits Esc at the first question; is_empty is true, no section is injected, and the loop uses its own defaults.",
+      "pitfall": "An empty context is valid — don't inject a blank interview section, which would tell the loop the operator wants nothing rather than left it open."
     },
     {
-      "example_id": 11,
-      "title": "Interview - Context Pruning & Compaction",
-      "loop_scenario": "Modeling interview under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "interview-11",
+      "title": "Skip the whole interview with Esc",
+      "loop_stage": "control",
+      "pattern": "opt-out",
+      "intent": "Give the operator an instant escape from scoping.",
+      "how_it_shapes_the_loop": "read_line_or_esc detects Esc in TTY mode and returns LineInput::Esc; pressing it at any question stops the questionnaire and returns whatever was collected, so the loop starts immediately.",
+      "loop_objects_touched": ["InterviewQuestion", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["Esc keypress"],
+        "outputs_to": ["partial InterviewSession", "loop start"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick down anywhere on the questionnaire to abort remaining questions.",
+        "visual": "Remaining question nodes fade and the loop's Planning gate unlocks immediately."
+      },
+      "mini_scenario": "After answering language and framework, the operator hits Esc; those two answers persist and the loop begins.",
+      "pitfall": "Esc keeps partial answers, it doesn't discard them — don't treat a mid-interview Esc as an empty context."
     },
     {
-      "example_id": 12,
-      "title": "Interview - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling interview under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "interview-12",
+      "title": "Present numbered multiple-choice questions",
+      "loop_stage": "perceive",
+      "pattern": "structured-choice",
+      "intent": "Collect an unambiguous answer via a keyed menu.",
+      "how_it_shapes_the_loop": "ask_multiple_choice renders QuestionOptions with char keys and reads a TTY-aware selection, returning None on Esc or the chosen label; the loop receives a clean enum-mappable answer rather than free text.",
+      "loop_objects_touched": ["InterviewQuestion", "QuestionOption"],
+      "wiring": {
+        "inputs_from": ["numbered option keys"],
+        "outputs_to": ["selected label", "enum parser"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a numbered option chip to select it.",
+        "visual": "Each option is a keyed chip (a, b, c); the tapped chip fills solid and the rest dim."
+      },
+      "mini_scenario": "The scope question shows keys a-d; the operator taps 'b' for Small and ask_multiple_choice returns its label.",
+      "pitfall": "A None return means skipped, not a default choice — the caller must distinguish 'no answer' from 'first option'."
     },
     {
-      "example_id": 13,
-      "title": "Interview - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling interview under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "interview-13",
+      "title": "Handle non-interactive input gracefully",
+      "loop_stage": "foundation",
+      "pattern": "tty-fallback",
+      "intent": "Keep the interview working when stdin is piped, not a terminal.",
+      "how_it_shapes_the_loop": "read_line_or_esc falls back to a plain read_line in non-interactive mode (no crossterm raw mode); the loop can still be scoped from a script without a TTY, or cleanly skip.",
+      "loop_objects_touched": ["InterviewQuestion", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["piped stdin"],
+        "outputs_to": ["collected answers or skip"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the interview node to see whether it's in interactive or piped-input mode.",
+        "visual": "A mode badge shows a keyboard glyph for TTY or a pipe glyph for scripted input."
+      },
+      "mini_scenario": "A CI job pipes answers into selfware init; the fallback read_line consumes them line by line without raw-mode.",
+      "pitfall": "Esc detection needs raw TTY mode — in piped mode there's no Esc, so scripts must supply explicit skip lines instead."
     },
     {
-      "example_id": 14,
-      "title": "Interview - Isolated Branch Staging",
-      "loop_scenario": "Modeling interview under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "interview-14",
+      "title": "Map answers into typed enums",
+      "loop_stage": "reason",
+      "pattern": "parse-to-domain",
+      "intent": "Turn free labels into the domain enums the loop reasons over.",
+      "how_it_shapes_the_loop": "parse_project_type, parse_testing_preference, and parse_scope convert selected labels into ProjectType/TestingPreference/ProjectScope; the loop reasons over typed values, not strings.",
+      "loop_objects_touched": ["ProjectType", "TestingPreference", "ProjectScope", "InterviewContext"],
+      "wiring": {
+        "inputs_from": ["selected labels"],
+        "outputs_to": ["InterviewContext typed fields"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap an answered question to see its label resolve into a typed enum value.",
+        "visual": "The label chip morphs into a typed badge (e.g. 'Web API' -> ProjectType::WebApi)."
+      },
+      "mini_scenario": "The 'Full TDD' label parses to TestingPreference::Tdd, which the verify stage reads directly.",
+      "pitfall": "An unrecognized custom label falls through to Other(String) — the loop must handle the freeform case, not panic on an unknown enum."
     },
     {
-      "example_id": 15,
-      "title": "Interview - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling interview under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "interview-15",
+      "title": "Convert a session into a validated context",
+      "loop_stage": "control",
+      "pattern": "validate-before-use",
+      "intent": "Promote raw collected answers into a context the loop can trust.",
+      "how_it_shapes_the_loop": "session_to_context turns the raw InterviewSession (optional fields) into an InterviewContext carrying the task and validated fields; the loop consumes a coherent, task-bound context rather than loose answers.",
+      "loop_objects_touched": ["InterviewSession", "InterviewContext"],
+      "wiring": {
+        "inputs_from": ["InterviewSession"],
+        "outputs_to": ["InterviewContext"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the session node to consolidate its scattered answers into a single context card.",
+        "visual": "Loose answer chips draw together into one bound InterviewContext card stamped with the task."
+      },
+      "mini_scenario": "session_to_context folds the answers plus the original task into one InterviewContext the planner reads.",
+      "pitfall": "The context binds the task alongside the answers — dropping the task on conversion strips the answers of what they scope."
     },
     {
-      "example_id": 16,
-      "title": "Interview - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling interview under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "interview-16",
+      "title": "Infer scope for script-like tasks",
+      "loop_stage": "reason",
+      "pattern": "default-inference",
+      "intent": "Pre-answer scope when the task obviously implies a small script.",
+      "how_it_shapes_the_loop": "infer_scope_default returns 'a' (Quick) when TaskHints.suggests_script, else None; the loop's budget starts small for throwaway scripts without asking.",
+      "loop_objects_touched": ["TaskHints", "ProjectScope", "InterviewQuestion"],
+      "wiring": {
+        "inputs_from": ["TaskHints.suggests_script"],
+        "outputs_to": ["scope question default"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the scope node to see why Quick was pre-selected for a script task.",
+        "visual": "The Quick notch is pre-lit with a 'script detected' tag explaining the inference."
+      },
+      "mini_scenario": "The task 'write a quick script to rename files' pre-selects Quick scope, so the loop budgets for a short run.",
+      "pitfall": "Inference returns None when unsure — don't fabricate a scope default; an absent default correctly leaves the question open."
     },
     {
-      "example_id": 17,
-      "title": "Interview - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling interview under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "interview-17",
+      "title": "Skip framework for script or unknown language",
+      "loop_stage": "control",
+      "pattern": "conditional-question",
+      "intent": "Avoid asking for a framework where none applies.",
+      "how_it_shapes_the_loop": "The framework question is skipped when the task suggests a script or no language is known; the loop scopes without a meaningless framework choice.",
+      "loop_objects_touched": ["InterviewQuestion", "TaskHints"],
+      "wiring": {
+        "inputs_from": ["TaskHints", "known language state"],
+        "outputs_to": ["skipped framework question"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick past the framework node when the task is a bare script.",
+        "visual": "The framework node collapses with a 'not applicable' badge and no options shown."
+      },
+      "mini_scenario": "The task is a shell one-liner script; the framework question is skipped entirely and the loop proceeds.",
+      "pitfall": "Skipping framework is correct for scripts — don't force a framework onto a task that has no framework concept."
     },
     {
-      "example_id": 18,
-      "title": "Interview - Gesture-based Node Filter",
-      "loop_scenario": "Modeling interview under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "interview-18",
+      "title": "Accumulate extra notes as freeform scope",
+      "loop_stage": "perceive",
+      "pattern": "open-capture",
+      "intent": "Let the operator add constraints the fixed questions don't cover.",
+      "how_it_shapes_the_loop": "InterviewSession.extra_notes (Vec<String>) collects freeform lines; these flow into the system prompt so the loop honors constraints outside the standard question set.",
+      "loop_objects_touched": ["InterviewSession", "InterviewContext"],
+      "wiring": {
+        "inputs_from": ["freeform note input"],
+        "outputs_to": ["InterviewContext.extra_notes", "system prompt"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw a line from a sticky-note bubble to the interview node to append an extra note.",
+        "visual": "Each note appears as a stacked sticky chip on the interview node, order preserved."
+      },
+      "mini_scenario": "The operator adds 'must be dependency-free'; the note lands in extra_notes and constrains the loop's plan.",
+      "pitfall": "Extra notes are unstructured — the loop must actually read them; treating them as decoration lets real constraints slip."
     },
     {
-      "example_id": 19,
-      "title": "Interview - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling interview under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "interview-19",
+      "title": "Infer project type from task signals",
+      "loop_stage": "reason",
+      "pattern": "default-inference",
+      "intent": "Pre-select the likely project type to shorten the questionnaire.",
+      "how_it_shapes_the_loop": "infer_project_type_default returns a char key from TaskHints ('b' web_api, 'a' cli, 'c' frontend, 'd' library, 'f' script); the loop pre-fills the type question, needing only confirmation.",
+      "loop_objects_touched": ["TaskHints", "ProjectType", "InterviewQuestion"],
+      "wiring": {
+        "inputs_from": ["TaskHints signals"],
+        "outputs_to": ["project-type default"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the type node to see which task signal chose the default key.",
+        "visual": "The inferred type chip is pre-lit with the matching signal name shown beneath it."
+      },
+      "mini_scenario": "The task mentions 'CLI tool'; infer_project_type_default returns 'a' and pre-selects CliTool for confirmation.",
+      "pitfall": "The inference maps to a char key, not a final enum — the operator's confirmation still runs through parse_project_type."
     },
     {
-      "example_id": 20,
-      "title": "Interview - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling interview under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "InterviewPayload"
-      ],
-      "component_loop_effect": "Determines how interview intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'interview' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "interview-20",
+      "title": "Distinguish TypeScript from JavaScript on detection",
+      "loop_stage": "perceive",
+      "pattern": "precise-detection",
+      "intent": "Detect the exact language variant so the plan targets the right toolchain.",
+      "how_it_shapes_the_loop": "detect_existing_project checks tsconfig.json vs package.json alone to tell TypeScript from JavaScript (and pyproject.toml/setup.py/requirements.txt for Python); the loop scopes to the precise ecosystem.",
+      "loop_objects_touched": ["InterviewQuestion", "InterviewSession"],
+      "wiring": {
+        "inputs_from": ["project marker files"],
+        "outputs_to": ["detected language", "skipped language question"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the detected-language chip to see which marker file resolved the variant.",
+        "visual": "The chip shows 'TypeScript' with a tsconfig.json footnote, distinct from a plain package.json JS detection."
+      },
+      "mini_scenario": "The cwd has both package.json and tsconfig.json; detection reports TypeScript, so the plan targets ts tooling.",
+      "pitfall": "A package.json without tsconfig.json is JavaScript, not TypeScript — conflating them scopes the loop to the wrong toolchain."
     }
   ]
 }

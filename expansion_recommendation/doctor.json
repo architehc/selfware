@@ -1,291 +1,410 @@
 {
-  "node_id": "doctor",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (DOCTOR)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via doctor context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize doctor token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding doctor dynamically does not invalidate active turn execution."
-  ],
+  "component": "doctor",
+  "tier": "tooling",
+  "loop_stage": "foundation",
+  "summary": "Doctor is the loop's preflight environment checker: it runs 30+ async DoctorChecks across categories (Core, Platform, Languages, Rust/Python/Node/Go tools, ComputerControl, Container, Browser, Security, Configuration), verifies the Rust MSRV, inspects selfware log health, and validates the loaded Config. Each DoctorCheck carries an Ok/Warning/Missing status, optional version, and an actionable fix_hint; the DoctorReport rolls these into OverallHealth (Healthy/Degraded/Broken) and an exit code. It gates whether the loop even has the tools it needs before the first act.",
+  "loop_objects": ["DoctorCheck", "CheckStatus", "Category", "DoctorReport", "OverallHealth", "MSRV", "fix_hint"],
+  "context_basis": "recommendations were formed with src/doctor.rs read in the context of the full engine (~600k budget framing), where doctor runs before the loop starts to confirm required tools and a valid Config exist, exiting non-zero if any required check FAILs.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Doctor - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling doctor under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "doctor-01",
+      "title": "Preflight the environment before the loop starts",
+      "loop_stage": "foundation",
+      "pattern": "preflight-gate",
+      "intent": "Confirm all required tools exist before spending budget on the first act.",
+      "how_it_shapes_the_loop": "The DoctorReport gates loop entry: a Broken health with a required Missing check exits non-zero, so the loop never begins against a broken environment.",
+      "loop_objects_touched": ["DoctorReport", "OverallHealth", "DoctorCheck"],
+      "wiring": {
+        "inputs_from": ["system PATH", "loaded Config"],
+        "outputs_to": ["loop entry gate", "exit code"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the doctor node runs a full preflight and stamps the loop's start gate.",
+        "visual": "A health badge fills: green Healthy, amber Degraded, red Broken; the start gate unlocks only when not Broken."
+      },
+      "mini_scenario": "Doctor finds git and rustc present but ripgrep Missing; health is Degraded so the loop starts with a warning.",
+      "pitfall": "Only required (Core) failures should block; treating an optional Missing as fatal needlessly refuses to start."
     },
     {
-      "example_id": 2,
-      "title": "Doctor - High Token Load (600k Context)",
-      "loop_scenario": "Modeling doctor under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "doctor-02",
+      "title": "Check a single tool with a timeout",
+      "loop_stage": "foundation",
+      "pattern": "bounded-probe",
+      "intent": "Verify one binary is present and get its version without hanging.",
+      "how_it_shapes_the_loop": "check_tool runs the version command under CHECK_TIMEOUT (5s) and yields a DoctorCheck, so a stuck binary degrades gracefully instead of freezing preflight.",
+      "loop_objects_touched": ["DoctorCheck", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["tool binary on PATH"],
+        "outputs_to": ["DoctorReport aggregation"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing a tool chip re-probes just that tool.",
+        "visual": "The chip spins briefly; resolves to green with a version string or red 'Missing'."
+      },
+      "mini_scenario": "check_tool('rg') returns Ok with 'ripgrep 14.1.0'; a hung binary would time out to Missing after 5s.",
+      "pitfall": "Some tools print version to stderr; a check that only reads stdout wrongly reports a present tool as Missing."
     },
     {
-      "example_id": 3,
-      "title": "Doctor - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling doctor under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "doctor-03",
+      "title": "Run all checks concurrently",
+      "loop_stage": "foundation",
+      "pattern": "fanout-preflight",
+      "intent": "Keep preflight fast by probing every tool in parallel.",
+      "how_it_shapes_the_loop": "Heterogeneous CheckFut futures are collected and driven with join_all, so 30+ checks complete in roughly the slowest single probe rather than their sum.",
+      "loop_objects_touched": ["DoctorCheck", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["per-tool CheckFut futures"],
+        "outputs_to": ["DoctorReport.checks vector"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the doctor node fans out all check chips at once, each resolving independently.",
+        "visual": "Dozens of chips light up simultaneously and flip to their status as each future resolves."
+      },
+      "mini_scenario": "All 30 checks fan out; the whole preflight finishes in ~5s bounded by the slowest timeout, not 150s.",
+      "pitfall": "Each check must be independent; a check that mutates shared state under join_all can race the others."
     },
     {
-      "example_id": 4,
-      "title": "Doctor - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling doctor under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "doctor-04",
+      "title": "Verify the project MSRV",
+      "loop_stage": "foundation",
+      "pattern": "version-floor-check",
+      "intent": "Ensure the installed Rust toolchain meets the minimum supported version.",
+      "how_it_shapes_the_loop": "check_msrv compares the toolchain against MSRV ('1.91'); a too-old toolchain yields a Missing/Warning DoctorCheck that flags a build risk before the loop compiles anything.",
+      "loop_objects_touched": ["DoctorCheck", "MSRV", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["rustc --version"],
+        "outputs_to": ["DoctorReport", "build-risk gate"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the Rust chip shows detected version vs required MSRV side by side.",
+        "visual": "A version dial reads green if >= 1.91, amber if below with the gap highlighted."
+      },
+      "mini_scenario": "Detected rustc 1.89 vs MSRV 1.91 raises a Warning, warning the loop that compilation may fail.",
+      "pitfall": "MSRV is kept in sync with Cargo.toml's rust-version; a drifted constant misreports the true floor."
     },
     {
-      "example_id": 5,
-      "title": "Doctor - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling doctor under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "doctor-05",
+      "title": "Validate the loaded Config",
+      "loop_stage": "foundation",
+      "pattern": "config-sanity-gate",
+      "intent": "Catch a broken endpoint or bad paths before the loop uses them.",
+      "how_it_shapes_the_loop": "config_checks parses the endpoint URL, resolves allowed_paths glob roots, and checks for an api_key on remote endpoints, so a misconfigured loop is caught at foundation, not mid-run.",
+      "loop_objects_touched": ["DoctorCheck", "Category", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["loaded Config"],
+        "outputs_to": ["DoctorReport (Configuration category)"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the config chip runs the pure config sanity checks.",
+        "visual": "Each config aspect (endpoint, paths, key) gets its own sub-chip; a bad endpoint flashes red."
+      },
+      "mini_scenario": "config_checks flags 'invalid endpoint `htp://x`' as Missing so the loop doesn't fail on its first API call.",
+      "pitfall": "config_checks is pure (no LLM I/O); a passing config here still doesn't prove the endpoint is actually reachable."
     },
     {
-      "example_id": 6,
-      "title": "Doctor - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling doctor under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "doctor-06",
+      "title": "Warn on the cwd-shadows-global config trap",
+      "loop_stage": "foundation",
+      "pattern": "provenance-warning",
+      "intent": "Explain why a global config seems ignored.",
+      "how_it_shapes_the_loop": "config_checks detects when a cwd selfware.toml shadows ~/.config/selfware/config.toml and surfaces it as a DoctorCheck message, so the loop's operator understands which config is actually in effect.",
+      "loop_objects_touched": ["DoctorCheck", "Category"],
+      "wiring": {
+        "inputs_from": ["loaded_config_path()", "home config path"],
+        "outputs_to": ["operator diagnostic"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the config-file chip shows the full precedence chain.",
+        "visual": "The active config path glows; a shadowed global is drawn ghosted beneath it with a warning tag."
+      },
+      "mini_scenario": "Doctor reports 'config: ./selfware.toml (shadowing ~/.config/selfware/config.toml)' clearing up the confusion.",
+      "pitfall": "This is Ok-status informational; treating a legitimate cwd override as an error would be a false alarm."
     },
     {
-      "example_id": 7,
-      "title": "Doctor - Stream Chunk Processing",
-      "loop_scenario": "Modeling doctor under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "doctor-07",
+      "title": "Inspect selfware log health",
+      "loop_stage": "observe",
+      "pattern": "self-log-scan",
+      "intent": "Surface recent errors and anomalies from the engine's own logs.",
+      "how_it_shapes_the_loop": "check_log_health scans the newest log file (500 lines) for error lines and anomalies, turning the loop's own past into a Warning DoctorCheck with a `tail` fix_hint.",
+      "loop_objects_touched": ["DoctorCheck", "CheckStatus", "fix_hint"],
+      "wiring": {
+        "inputs_from": ["selfware log directory"],
+        "outputs_to": ["DoctorReport (Core category)"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the log-health chip scrolls the recent error summary.",
+        "visual": "A green chip when clean; amber with an error/anomaly count when the last run left errors."
+      },
+      "mini_scenario": "check_log_health reports '12 error lines, 3 anomalies in selfware.log.2026-07-29' with a tail hint.",
+      "pitfall": "It only scans the newest 500 lines; a problem older than that window won't show in the health check."
     },
     {
-      "example_id": 8,
-      "title": "Doctor - Interactive User Interruption",
-      "loop_scenario": "Modeling doctor under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "doctor-08",
+      "title": "Roll checks into OverallHealth",
+      "loop_stage": "verify",
+      "pattern": "aggregate-to-verdict",
+      "intent": "Collapse many checks into a single go/degraded/no-go verdict.",
+      "how_it_shapes_the_loop": "DoctorReport computes OverallHealth from the worst required status, giving the loop one Healthy/Degraded/Broken signal to branch on instead of 30 individual results.",
+      "loop_objects_touched": ["DoctorReport", "OverallHealth", "DoctorCheck"],
+      "wiring": {
+        "inputs_from": ["all DoctorCheck results"],
+        "outputs_to": ["loop entry branch", "exit_code()"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the doctor node collapses all chips into one health verdict badge.",
+        "visual": "The badge takes the color of the worst required check: green, amber, or red."
+      },
+      "mini_scenario": "One Missing Core tool among 29 passing yields Broken; the loop halts with a non-zero exit code.",
+      "pitfall": "A single required Missing dominates the verdict; don't mark optional tools required or you'll block on non-essentials."
     },
     {
-      "example_id": 9,
-      "title": "Doctor - Subagent Delegation",
-      "loop_scenario": "Modeling doctor under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "doctor-09",
+      "title": "Categorize checks by concern",
+      "loop_stage": "observe",
+      "pattern": "grouped-diagnostics",
+      "intent": "Let the operator scan health by area (Core, Languages, Security...).",
+      "how_it_shapes_the_loop": "Each DoctorCheck carries a Category, so the report groups results and the loop can decide, e.g., to proceed with BrowserAutomation missing but not Core.",
+      "loop_objects_touched": ["Category", "DoctorCheck", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["per-check Category tag"],
+        "outputs_to": ["grouped report view"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading a category header expands its member checks.",
+        "visual": "Category headers show a rollup color; expanding reveals the per-tool chips beneath."
+      },
+      "mini_scenario": "The Security category is all-green while ContainerTools shows docker Missing, an optional gap the loop tolerates.",
+      "pitfall": "Category is advisory for grouping; the loop's block decision must key off required-vs-optional, not category alone."
     },
     {
-      "example_id": 10,
-      "title": "Doctor - Safety Policy Interception",
-      "loop_scenario": "Modeling doctor under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "doctor-10",
+      "title": "Attach an actionable fix_hint to every failure",
+      "loop_stage": "learn",
+      "pattern": "self-remediating-diagnostics",
+      "intent": "Let the operator (or agent) fix a gap without reading docs.",
+      "how_it_shapes_the_loop": "Each failing DoctorCheck carries a fix_hint (e.g. an install command), so a Degraded loop can hand the agent a concrete remediation to act on.",
+      "loop_objects_touched": ["fix_hint", "DoctorCheck", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["failing DoctorCheck"],
+        "outputs_to": ["agent remediation step", "operator"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping a red chip reveals its fix_hint as a copyable command.",
+        "visual": "A hint card slides out beneath the failing chip with a one-line remediation."
+      },
+      "mini_scenario": "ripgrep Missing shows fix_hint 'brew install ripgrep', which the agent runs then re-checks.",
+      "pitfall": "Hints are best-effort per platform; a macOS-only hint may be wrong on Linux, so validate before auto-running."
     },
     {
-      "example_id": 11,
-      "title": "Doctor - Context Pruning & Compaction",
-      "loop_scenario": "Modeling doctor under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "doctor-11",
+      "title": "Probe an npx-delivered tool",
+      "loop_stage": "foundation",
+      "pattern": "indirect-tool-probe",
+      "intent": "Verify a tool that runs via npx rather than a global binary.",
+      "how_it_shapes_the_loop": "check_npx_tool probes a Node-delivered tool under the NodeTools category, so the loop knows whether npx-based tooling (e.g. an MCP server) is usable before wiring it in.",
+      "loop_objects_touched": ["DoctorCheck", "Category", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["npx + node on PATH"],
+        "outputs_to": ["DoctorReport (NodeTools)"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing an npx tool chip re-runs the indirect probe.",
+        "visual": "The chip shows a small 'npx' tag; resolves green if the package resolves, red otherwise."
+      },
+      "mini_scenario": "check_npx_tool for a language server confirms it resolves, so the loop enables that LSP integration.",
+      "pitfall": "npx probes can hit the network on first run; a slow probe may time out even when the tool is installable."
     },
     {
-      "example_id": 12,
-      "title": "Doctor - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling doctor under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "doctor-12",
+      "title": "Check macOS accessibility permission",
+      "loop_stage": "foundation",
+      "pattern": "platform-permission-check",
+      "intent": "Confirm computer-control has the OS permission it needs.",
+      "how_it_shapes_the_loop": "check_accessibility (platform-gated) reports whether Accessibility is granted, so the loop disables the ComputerControl act path when the permission is missing rather than failing mid-gesture.",
+      "loop_objects_touched": ["DoctorCheck", "Category", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["OS accessibility API"],
+        "outputs_to": ["ComputerControl enablement gate"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the accessibility chip re-queries the OS permission state.",
+        "visual": "A lock icon opens green when granted, stays red-locked when denied."
+      },
+      "mini_scenario": "Accessibility is denied, so the loop keeps computer-control tools disabled and warns the operator to grant it.",
+      "pitfall": "This check is platform-specific; on non-macOS the check has a different implementation and shouldn't be assumed present."
     },
     {
-      "example_id": 13,
-      "title": "Doctor - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling doctor under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "doctor-13",
+      "title": "Verify screen-capture (xcap) support",
+      "loop_stage": "foundation",
+      "pattern": "capability-probe",
+      "intent": "Confirm the screenshot backend actually works on this platform.",
+      "how_it_shapes_the_loop": "check_xcap probes screen capture, so the loop only enables visual-verification/computer-vision act steps when capture is functional.",
+      "loop_objects_touched": ["DoctorCheck", "Category", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["xcap screen-capture backend"],
+        "outputs_to": ["visual-verification enablement"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the capture chip attempts a test screenshot.",
+        "visual": "A camera icon flashes; green with a thumbnail on success, red on failure."
+      },
+      "mini_scenario": "check_xcap succeeds, so the loop enables screenshot-based verify steps for UI work.",
+      "pitfall": "Capture can succeed but be empty under headless/permission constraints; a green here isn't a guarantee of usable pixels."
     },
     {
-      "example_id": 14,
-      "title": "Doctor - Isolated Branch Staging",
-      "loop_scenario": "Modeling doctor under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "doctor-14",
+      "title": "Run doctor as a CLI subcommand",
+      "loop_stage": "control",
+      "pattern": "operator-invoked-diagnostics",
+      "intent": "Let the operator diagnose the environment on demand.",
+      "how_it_shapes_the_loop": "`selfware doctor` prints the report and returns exit_code(), giving CI and operators a scriptable health gate outside the running loop.",
+      "loop_objects_touched": ["DoctorReport", "OverallHealth"],
+      "wiring": {
+        "inputs_from": ["operator CLI invocation"],
+        "outputs_to": ["stdout report", "process exit code"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the doctor node toward the terminal lane runs it as a CLI command.",
+        "visual": "A terminal panel prints the categorized report; the exit code chip turns green (0) or red (non-zero)."
+      },
+      "mini_scenario": "CI runs `selfware doctor`; a Broken health returns a non-zero exit and fails the pipeline early.",
+      "pitfall": "exit_code maps Broken to non-zero; CI that ignores the exit code loses the gate's protective value."
     },
     {
-      "example_id": 15,
-      "title": "Doctor - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling doctor under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "doctor-15",
+      "title": "Feed doctor results into llm_doctor",
+      "loop_stage": "foundation",
+      "pattern": "chained-diagnostics",
+      "intent": "Reuse config sanity checks as the first step of LLM diagnostics.",
+      "how_it_shapes_the_loop": "config_checks and CheckStatus are consumed by llm_doctor's Step 0, so the LLM-backend diagnosis inherits the same validated Config foundation.",
+      "loop_objects_touched": ["DoctorCheck", "CheckStatus", "Category"],
+      "wiring": {
+        "inputs_from": ["config_checks output"],
+        "outputs_to": ["llm_doctor Step 0"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing an edge from the config chip to the llm_doctor node chains the checks.",
+        "visual": "The config sub-chips replicate into the llm_doctor node's Step 0 lane."
+      },
+      "mini_scenario": "llm_doctor imports config_checks so an invalid endpoint is caught once and reused across both diagnostics.",
+      "pitfall": "CheckStatus maps into CheckOutcome (Ok->Pass, Warning->Warn, Missing->Fail); a mismatched mapping mislabels severity downstream."
     },
     {
-      "example_id": 16,
-      "title": "Doctor - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling doctor under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "doctor-16",
+      "title": "Warn on optional language toolchain gaps",
+      "loop_stage": "reason",
+      "pattern": "graceful-degradation",
+      "intent": "Let the loop proceed with reduced capability rather than fail.",
+      "how_it_shapes_the_loop": "A Missing Python/Node/Go tool yields a Warning (not a required failure), so the reason stage can plan around the gap while OverallHealth stays Degraded, not Broken.",
+      "loop_objects_touched": ["DoctorCheck", "CheckStatus", "Category"],
+      "wiring": {
+        "inputs_from": ["language toolchain probes"],
+        "outputs_to": ["reason-stage capability map"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the Languages category shows which toolchains are present.",
+        "visual": "Present toolchains glow green; missing ones show amber 'optional' tags, not red."
+      },
+      "mini_scenario": "Go is missing but the task is Rust-only; the loop runs Degraded and simply avoids Go-language verification.",
+      "pitfall": "Degraded is not Broken; treating every optional gap as fatal denies otherwise-runnable tasks."
     },
     {
-      "example_id": 17,
-      "title": "Doctor - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling doctor under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "doctor-17",
+      "title": "Report a tool version for compatibility",
+      "loop_stage": "observe",
+      "pattern": "version-provenance",
+      "intent": "Record which version of a tool the loop will call.",
+      "how_it_shapes_the_loop": "DoctorCheck.version captures the detected version, so the observe stage can correlate later tool behavior with the exact binary version in play.",
+      "loop_objects_touched": ["DoctorCheck", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["tool version output"],
+        "outputs_to": ["observe-stage provenance record"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a green tool chip reveals its detected version.",
+        "visual": "The version string appears as a small mono-font tag under the chip."
+      },
+      "mini_scenario": "Doctor records 'git 2.45.0'; a later git behavior quirk is traced back to that version.",
+      "pitfall": "Version is Optional; a tool present but with an unparsed version shows Ok-with-None, not a failure."
     },
     {
-      "example_id": 18,
-      "title": "Doctor - Gesture-based Node Filter",
-      "loop_scenario": "Modeling doctor under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "doctor-18",
+      "title": "Re-run doctor after remediation",
+      "loop_stage": "verify",
+      "pattern": "verify-after-fix",
+      "intent": "Confirm a fix actually resolved a Missing check.",
+      "how_it_shapes_the_loop": "After the agent runs a fix_hint, re-running the relevant DoctorCheck verifies the transition from Missing to Ok before the loop trusts the tool.",
+      "loop_objects_touched": ["DoctorCheck", "CheckStatus", "fix_hint"],
+      "wiring": {
+        "inputs_from": ["agent remediation result"],
+        "outputs_to": ["updated DoctorReport"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping a just-fixed chip re-probes it.",
+        "visual": "The chip animates from red through amber to green on a successful re-check."
+      },
+      "mini_scenario": "After installing ripgrep, re-running the check flips it Ok and OverallHealth returns to Healthy.",
+      "pitfall": "Re-check the specific tool, not the whole report, or a slow full fanout wastes budget verifying one fix."
     },
     {
-      "example_id": 19,
-      "title": "Doctor - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling doctor under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "doctor-19",
+      "title": "Gate security-sensitive act steps",
+      "loop_stage": "control",
+      "pattern": "security-precondition",
+      "intent": "Ensure security tooling is present before risky operations.",
+      "how_it_shapes_the_loop": "A Missing Security-category check lets control withhold security-dependent act steps, so the loop degrades safely rather than acting without its guardrail tools.",
+      "loop_objects_touched": ["DoctorCheck", "Category", "CheckStatus"],
+      "wiring": {
+        "inputs_from": ["Security category probes"],
+        "outputs_to": ["control gate on risky act steps"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the Security header shows which guard tools are available.",
+        "visual": "A shield header glows green when the security set is complete, amber when partial."
+      },
+      "mini_scenario": "A secret-scanner is Missing, so the loop refuses to auto-commit until the guard is restored.",
+      "pitfall": "Doctor reports presence, not correctness; a present-but-misconfigured security tool still passes here."
     },
     {
-      "example_id": 20,
-      "title": "Doctor - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling doctor under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "DoctorPayload"
-      ],
-      "component_loop_effect": "Determines how doctor intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'doctor' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "doctor-20",
+      "title": "Print the human-readable report",
+      "loop_stage": "learn",
+      "pattern": "operator-facing-summary",
+      "intent": "Give a person a scannable health readout of the environment.",
+      "how_it_shapes_the_loop": "DoctorReport.print renders categorized, color-coded checks with fix hints beneath failures, translating the loop's foundation state into human-actionable output.",
+      "loop_objects_touched": ["DoctorReport", "DoctorCheck", "OverallHealth", "fix_hint"],
+      "wiring": {
+        "inputs_from": ["aggregated DoctorReport"],
+        "outputs_to": ["operator terminal"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the report node zooms from the health badge into the full printed breakdown.",
+        "visual": "A scrollable panel lists checks by category with green/amber/red markers and inline fix hints."
+      },
+      "mini_scenario": "The printed report shows 28 Ok, 2 Warning, 0 Missing with two fix hints, and an overall Degraded verdict.",
+      "pitfall": "The print is presentation only; automated callers should read the structured checks/exit_code, not scrape the text."
     }
   ]
 }

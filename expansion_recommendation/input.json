@@ -1,291 +1,270 @@
 {
-  "node_id": "input",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (INPUT)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via input context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize input token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding input dynamically does not invalidate active turn execution."
-  ],
+  "component": "input",
+  "tier": "tooling",
+  "loop_stage": "perceive",
+  "summary": "The input component is the loop's front door for the operator. SelfwareEditor wraps reedline to provide an IDE-like REPL: history-backed, syntax-highlighted, with a Tab-cycling completion menu, Emacs/Vi modes, and keybindings that surface slash commands ('/'), cycle execution mode (Shift+Tab), toggle YOLO (Ctrl+Y), and open an external editor (Ctrl+X). read_line returns a ReadlineResult (Line, Interrupt, Eof, HostCommand). The command_registry catalogs CommandEntry items by CommandCategory and answers is_known_command. On the loop it is the primary perceive source for human intent and the injection point for control signals (mode changes, interrupts) — it turns raw keystrokes into either a task Message or a HostCommand that reshapes the driver.",
+  "loop_objects": ["SelfwareEditor", "ReadlineResult", "InputConfig", "InputMode", "CommandEntry", "CommandCategory", "Keybindings", "Message", "HostCommand", "SelfwareCompleter", "SelfwarePrompt"],
+  "context_basis": "Recommendations formed with input read in the context of the full engine (~600k budget framing), where the REPL feeds the agent loop and ExecuteHostCommand sentinels (__toggle_yolo__, __cycle_mode__) route control changes back into the driver.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Input - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling input under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "input-01",
+      "title": "Read a line as the loop's perceive entry",
+      "loop_stage": "perceive",
+      "pattern": "elicit-intent",
+      "intent": "Capture the operator's request to seed a turn.",
+      "how_it_shapes_the_loop": "read_line returns ReadlineResult::Line, which becomes the Message that starts the loop's Planning phase; it is the canonical perceive source for human intent.",
+      "loop_objects_touched": ["SelfwareEditor", "ReadlineResult", "Message"],
+      "wiring": {"inputs_from": ["operator keystrokes"], "outputs_to": ["agent Planning"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the input node focuses the on-canvas prompt and raises the soft keyboard.", "visual": "The prompt node glows and shows a blinking caret; the typed line renders live."},
+      "mini_scenario": "The operator types 'refactor the parser' and presses enter; the loop starts a turn from that line.",
+      "pitfall": "An empty line should be a no-op, not an empty task — filter blanks before starting a turn."
     },
     {
-      "example_id": 2,
-      "title": "Input - High Token Load (600k Context)",
-      "loop_scenario": "Modeling input under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "input-02",
+      "title": "Route a HostCommand into loop control",
+      "loop_stage": "control",
+      "pattern": "control-injection",
+      "intent": "Let keybindings change loop behavior without a task.",
+      "how_it_shapes_the_loop": "Lines wrapped in __sentinels__ return ReadlineResult::HostCommand, which the driver interprets as a control action (mode/YOLO) rather than a Message, mutating loop control directly.",
+      "loop_objects_touched": ["ReadlineResult", "HostCommand"],
+      "wiring": {"inputs_from": ["ExecuteHostCommand keybinding"], "outputs_to": ["agent control"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping a control keycap emits its host command into the driver node.", "visual": "The command travels as a distinct control-colored pulse, not a normal text bubble."},
+      "mini_scenario": "Shift+Tab yields '__cycle_mode__'; the loop advances execution mode instead of running a task.",
+      "pitfall": "Detect sentinels by the __prefix/suffix__ shape — a user literally typing that must be handled deliberately."
     },
     {
-      "example_id": 3,
-      "title": "Input - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling input under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "input-03",
+      "title": "Complete a command via Tab menu",
+      "loop_stage": "perceive",
+      "pattern": "assisted-input",
+      "intent": "Speed correct command entry with a cycling menu.",
+      "how_it_shapes_the_loop": "The Tab binding tries hint-complete, inline complete, then opens the columnar menu and cycles — narrowing perceive input to valid commands the loop can act on.",
+      "loop_objects_touched": ["SelfwareCompleter", "SelfwareEditor", "CommandEntry"],
+      "wiring": {"inputs_from": ["command_registry names"], "outputs_to": ["read_line"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking through the completion menu cycles candidate entries; tapping one accepts it.", "visual": "A single-column menu with a ' > ' marker highlights the current pick."},
+      "mini_scenario": "The operator types 'chec', hits Tab, and the menu offers /checkpoint which they accept.",
+      "pitfall": "Completion sources must stay in sync with the registry — a stale list offers dead commands."
     },
     {
-      "example_id": 4,
-      "title": "Input - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling input under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "input-04",
+      "title": "Open the slash-command menu on '/'",
+      "loop_stage": "perceive",
+      "pattern": "quick-command",
+      "intent": "Surface commands the instant the user types '/'.",
+      "how_it_shapes_the_loop": "The '/' keybinding inserts the char and immediately opens the completion menu, funneling the operator toward registered CommandEntry actions the loop understands.",
+      "loop_objects_touched": ["SelfwareEditor", "CommandEntry", "SelfwareCompleter"],
+      "wiring": {"inputs_from": ["command_registry"], "outputs_to": ["read_line"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the '/' key on the soft keyboard pops the slash-command overlay.", "visual": "A menu unfurls under the caret listing slash commands by category."},
+      "mini_scenario": "Typing '/' shows /undo, /timeline, /stats; the operator taps /stats to inspect the loop.",
+      "pitfall": "The menu must reflect only known commands — is_known_command should back what it offers."
     },
     {
-      "example_id": 5,
-      "title": "Input - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling input under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "input-05",
+      "title": "Cycle execution mode with Shift+Tab",
+      "loop_stage": "control",
+      "pattern": "mode-cycle",
+      "intent": "Switch how autonomously the loop acts.",
+      "how_it_shapes_the_loop": "Shift+Tab emits __cycle_mode__ to rotate normal → auto-edit → yolo → daemon, changing whether the loop pauses for confirmations at each act.",
+      "loop_objects_touched": ["HostCommand", "ReadlineResult"],
+      "wiring": {"inputs_from": ["Shift+BackTab binding"], "outputs_to": ["agent execution mode"]},
+      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating two fingers on the mode node cycles the execution mode ring.", "visual": "A ring badge steps color: grey → amber → red → blue as autonomy rises."},
+      "mini_scenario": "The operator rotates to auto-edit so file edits apply without a per-edit prompt.",
+      "pitfall": "Landing on yolo removes all confirmations — the UI must make that transition unmistakable."
     },
     {
-      "example_id": 6,
-      "title": "Input - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling input under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "input-06",
+      "title": "Toggle YOLO with Ctrl+Y",
+      "loop_stage": "control",
+      "pattern": "guard-toggle",
+      "intent": "Flip confirmation-free execution on or off.",
+      "how_it_shapes_the_loop": "Ctrl+Y emits __toggle_yolo__; the driver flips the confirmation guard, directly reshaping whether act transitions gate.",
+      "loop_objects_touched": ["HostCommand", "ReadlineResult"],
+      "wiring": {"inputs_from": ["Ctrl+Y binding"], "outputs_to": ["agent confirmation guard"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the YOLO toggle flips the guard state.", "visual": "The toggle snaps red-on / grey-off with a warning pulse when enabling."},
+      "mini_scenario": "The operator hits Ctrl+Y to enable YOLO for a trusted batch, then again to restore prompts.",
+      "pitfall": "A stuck YOLO state is dangerous — always reflect the live guard state, never a stale label."
     },
     {
-      "example_id": 7,
-      "title": "Input - Stream Chunk Processing",
-      "loop_scenario": "Modeling input under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "input-07",
+      "title": "Handle Ctrl+C as an interrupt signal",
+      "loop_stage": "control",
+      "pattern": "cancel-signal",
+      "intent": "Let the operator abort the current turn.",
+      "how_it_shapes_the_loop": "Signal::CtrlC maps to ReadlineResult::Interrupt, which the driver treats as a cancel, transitioning a running loop toward a clean stop.",
+      "loop_objects_touched": ["ReadlineResult", "SelfwareEditor"],
+      "wiring": {"inputs_from": ["Ctrl+C"], "outputs_to": ["agent cancel"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the stop node sends an interrupt to the active turn.", "visual": "A red stop glyph pulses; the running node winds down to a halted state."},
+      "mini_scenario": "A long run goes astray; the operator presses Ctrl+C and the loop stops before the next act.",
+      "pitfall": "Interrupt should cancel gracefully at a safe boundary, not corrupt in-flight state."
     },
     {
-      "example_id": 8,
-      "title": "Input - Interactive User Interruption",
-      "loop_scenario": "Modeling input under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "input-08",
+      "title": "Handle Ctrl+D as end-of-input",
+      "loop_stage": "control",
+      "pattern": "session-end",
+      "intent": "Exit the REPL cleanly.",
+      "how_it_shapes_the_loop": "Signal::CtrlD maps to ReadlineResult::Eof, ending the perceive stream so the loop tears down the session.",
+      "loop_objects_touched": ["ReadlineResult", "SelfwareEditor"],
+      "wiring": {"inputs_from": ["Ctrl+D"], "outputs_to": ["session teardown"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the input node down and off-screen ends the session like an EOF.", "visual": "The prompt node slides away and the canvas dims to a closed state."},
+      "mini_scenario": "The operator presses Ctrl+D on an empty prompt; the loop persists state and exits.",
+      "pitfall": "Distinguish Eof from Interrupt — Eof ends the session, Interrupt only cancels a turn."
     },
     {
-      "example_id": 9,
-      "title": "Input - Subagent Delegation",
-      "loop_scenario": "Modeling input under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "input-09",
+      "title": "Insert a newline with Ctrl+J",
+      "loop_stage": "perceive",
+      "pattern": "multiline-input",
+      "intent": "Compose multi-line prompts without submitting.",
+      "how_it_shapes_the_loop": "Ctrl+J inserts a newline instead of submitting, letting the operator build a richer Message before the loop consumes it.",
+      "loop_objects_touched": ["SelfwareEditor", "Message"],
+      "wiring": {"inputs_from": ["Ctrl+J binding"], "outputs_to": ["read_line buffer"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping a soft return key adds a line to the prompt without sending it.", "visual": "The prompt box grows to accommodate the new line; the caret drops down."},
+      "mini_scenario": "The operator pastes a multi-line spec using Ctrl+J between lines, then submits it whole.",
+      "pitfall": "Only Enter submits — don't let a bare newline key double as submit or prompts fragment."
     },
     {
-      "example_id": 10,
-      "title": "Input - Safety Policy Interception",
-      "loop_scenario": "Modeling input under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "input-10",
+      "title": "Edit the prompt in an external editor",
+      "loop_stage": "perceive",
+      "pattern": "offload-composition",
+      "intent": "Compose a long prompt in $EDITOR.",
+      "how_it_shapes_the_loop": "Ctrl+X opens the buffer in VISUAL/EDITOR/vi via a temp file, returning the edited text as the loop's next Message.",
+      "loop_objects_touched": ["SelfwareEditor", "Message"],
+      "wiring": {"inputs_from": ["Ctrl+X binding", "$EDITOR"], "outputs_to": ["read_line buffer"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the input node opens a full-screen editor sheet for the prompt.", "visual": "The prompt expands to a full editor pane; on close its content returns to the caret."},
+      "mini_scenario": "The operator hits Ctrl+X, writes a detailed brief in vim, saves, and the loop receives it.",
+      "pitfall": "The temp file is per-process — clean it up so stale prompt drafts don't leak."
     },
     {
-      "example_id": 11,
-      "title": "Input - Context Pruning & Compaction",
-      "loop_scenario": "Modeling input under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "input-11",
+      "title": "Search history with Ctrl+R",
+      "loop_stage": "perceive",
+      "pattern": "recall-prior-intent",
+      "intent": "Reuse a previous command from history.",
+      "how_it_shapes_the_loop": "FileBackedHistory (max 10k) lets the operator recall past lines, so the loop can be re-seeded with a proven prior Message.",
+      "loop_objects_touched": ["SelfwareEditor", "InputConfig", "Message"],
+      "wiring": {"inputs_from": ["history file"], "outputs_to": ["read_line buffer"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking up on the input node scrolls back through history entries.", "visual": "Prior commands surface as ghosted suggestions; the match highlights as you refine."},
+      "mini_scenario": "The operator recalls 'run the e2e suite' from last session and re-submits it.",
+      "pitfall": "Lines beginning with a space are excluded from history — don't rely on those being recallable."
     },
     {
-      "example_id": 12,
-      "title": "Input - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling input under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "input-12",
+      "title": "Toggle Emacs/Vi input mode",
+      "loop_stage": "foundation",
+      "pattern": "modal-editing",
+      "intent": "Match the operator's preferred editing style.",
+      "how_it_shapes_the_loop": "toggle_vim_mode rebuilds the editor with the other InputMode; it changes how keystrokes are parsed, a foundation choice that doesn't alter loop control.",
+      "loop_objects_touched": ["InputMode", "InputConfig", "SelfwareEditor"],
+      "wiring": {"inputs_from": ["mode toggle"], "outputs_to": ["editor keybindings"]},
+      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the mode chip switches between Emacs and Vi editing.", "visual": "The chip flips label EMACS/VI; a Vi mode adds a normal/insert indicator."},
+      "mini_scenario": "A Vi user double-taps to Vi mode and navigates the prompt with hjkl.",
+      "pitfall": "Rebuilding the editor must preserve history and completers — don't drop them on toggle."
     },
     {
-      "example_id": 13,
-      "title": "Input - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling input under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "input-13",
+      "title": "Accept an inline hint with Right arrow",
+      "loop_stage": "perceive",
+      "pattern": "predictive-accept",
+      "intent": "Adopt the suggested completion of a line.",
+      "how_it_shapes_the_loop": "Right arrow completes the history hint if present, else moves the cursor — smoothing perceive so common Messages type themselves.",
+      "loop_objects_touched": ["SelfwareEditor", "Message"],
+      "wiring": {"inputs_from": ["DefaultHinter"], "outputs_to": ["read_line buffer"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking right on the prompt accepts the ghosted hint completion.", "visual": "The dimmed hint solidifies into the line as it is accepted."},
+      "mini_scenario": "The operator types 'git ' and the hint 'git status' appears; a right-flick accepts it.",
+      "pitfall": "Right must fall back to cursor-move when there's no hint, or navigation breaks mid-line."
     },
     {
-      "example_id": 14,
-      "title": "Input - Isolated Branch Staging",
-      "loop_scenario": "Modeling input under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "input-14",
+      "title": "Dismiss the menu with Escape",
+      "loop_stage": "control",
+      "pattern": "abort-selection",
+      "intent": "Close a menu without committing a choice.",
+      "how_it_shapes_the_loop": "Esc maps to ReedlineEvent::Esc, closing the completion menu so the operator resumes free input without dispatching a command.",
+      "loop_objects_touched": ["SelfwareEditor", "SelfwareCompleter"],
+      "wiring": {"inputs_from": ["Esc binding"], "outputs_to": ["read_line"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping outside the menu overlay dismisses it without selecting.", "visual": "The menu collapses and the caret returns to the unaltered line."},
+      "mini_scenario": "The operator opens the slash menu by accident and taps away to dismiss it.",
+      "pitfall": "Esc must not clear the typed line — only the menu; losing the buffer frustrates the operator."
     },
     {
-      "example_id": 15,
-      "title": "Input - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling input under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "input-15",
+      "title": "Catalog commands by CommandCategory",
+      "loop_stage": "foundation",
+      "pattern": "registry-index",
+      "intent": "Organize available commands for discovery.",
+      "how_it_shapes_the_loop": "command_registry groups CommandEntry by CommandCategory and exposes command_names/description; it is the foundation catalog the perceive layer and palette draw from.",
+      "loop_objects_touched": ["CommandEntry", "CommandCategory"],
+      "wiring": {"inputs_from": ["static registry"], "outputs_to": ["completer", "palette", "help"]},
+      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch-out on the registry node fans commands into category clusters.", "visual": "Commands group under category headers, each cluster color-coded."},
+      "mini_scenario": "The palette lists commands grouped as session, safety, and inspection categories.",
+      "pitfall": "Every offered command must appear in the registry — completions outside it dispatch nothing."
     },
     {
-      "example_id": 16,
-      "title": "Input - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling input under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "input-16",
+      "title": "Validate a command before dispatch",
+      "loop_stage": "verify",
+      "pattern": "known-command-gate",
+      "intent": "Reject unknown slash commands cleanly.",
+      "how_it_shapes_the_loop": "is_known_command gates dispatch so a mistyped '/xyz' is caught at verify rather than becoming a silent no-op or a task.",
+      "loop_objects_touched": ["CommandEntry", "ReadlineResult"],
+      "wiring": {"inputs_from": ["read_line line"], "outputs_to": ["command dispatch or error"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping an unrecognized command flashes the input node red with a 'not a command' hint.", "visual": "The token underlines red; a suggestion of the nearest known command appears."},
+      "mini_scenario": "The operator types '/undoo'; the gate rejects it and suggests /undo.",
+      "pitfall": "Don't treat an unknown slash command as a plain task — surface the error instead."
     },
     {
-      "example_id": 17,
-      "title": "Input - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling input under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "input-17",
+      "title": "Render context in the prompt",
+      "loop_stage": "perceive",
+      "pattern": "situated-prompt",
+      "intent": "Show model, step, and context usage at the prompt.",
+      "how_it_shapes_the_loop": "set_prompt_full_context updates SelfwarePrompt with model/step/context_pct, so the operator perceives the loop's budget state right where they type.",
+      "loop_objects_touched": ["SelfwarePrompt", "SelfwareEditor"],
+      "wiring": {"inputs_from": ["agent (model, step, context %)"], "outputs_to": ["prompt render"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the prompt chip expands the model/step/context readout.", "visual": "The prompt shows 'Qwen3.5 · step 4 · 62%'; the percent tints as it climbs."},
+      "mini_scenario": "At 88% context the prompt turns amber, nudging the operator to compact before continuing.",
+      "pitfall": "Keep context_pct fresh — a stale prompt understates real budget pressure."
     },
     {
-      "example_id": 18,
-      "title": "Input - Gesture-based Node Filter",
-      "loop_scenario": "Modeling input under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "input-18",
+      "title": "Highlight input syntax live",
+      "loop_stage": "perceive",
+      "pattern": "syntactic-feedback",
+      "intent": "Give immediate visual structure to what's typed.",
+      "how_it_shapes_the_loop": "SelfwareHighlighter colors the line as it's entered, improving the fidelity of the perceive channel so the operator catches mistakes before submitting.",
+      "loop_objects_touched": ["SelfwareHighlighter", "SelfwareEditor"],
+      "wiring": {"inputs_from": ["typed line"], "outputs_to": ["prompt render"]},
+      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the input node toggles syntax highlighting on the live line.", "visual": "Commands, paths, and flags render in distinct colors as they're typed."},
+      "mini_scenario": "A slash command colors differently from a plain task, so the operator sees which they're issuing.",
+      "pitfall": "Highlighting is cosmetic — never let a color rule change what the command actually does."
     },
     {
-      "example_id": 19,
-      "title": "Input - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling input under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "input-19",
+      "title": "Seed completer with live tool names",
+      "loop_stage": "foundation",
+      "pattern": "context-aware-completion",
+      "intent": "Complete against the actually-registered tools.",
+      "how_it_shapes_the_loop": "InputConfig.tool_names populates SelfwareCompleter so completion reflects the loop's real tool set, keeping perceive aligned with act capability.",
+      "loop_objects_touched": ["InputConfig", "SelfwareCompleter"],
+      "wiring": {"inputs_from": ["ToolRegistry names"], "outputs_to": ["completer"]},
+      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the completer node refreshes it against the current tool registry.", "visual": "Tool suggestions repopulate; newly registered tools appear in the menu."},
+      "mini_scenario": "After MCP tools register, the completer offers them so the operator can reference them by name.",
+      "pitfall": "Rebuild the completer when tools change — a fixed list omits dynamically registered tools."
     },
     {
-      "example_id": 20,
-      "title": "Input - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling input under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "InputPayload"
-      ],
-      "component_loop_effect": "Determines how input intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'input' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "input-20",
+      "title": "Persist history across sessions",
+      "loop_stage": "learn",
+      "pattern": "durable-recall",
+      "intent": "Keep command history between runs.",
+      "how_it_shapes_the_loop": "FileBackedHistory writes to the data-local history file, so the learn stage carries prior operator intent forward into future loops.",
+      "loop_objects_touched": ["InputConfig", "SelfwareEditor"],
+      "wiring": {"inputs_from": ["prior session lines"], "outputs_to": ["next session history"]},
+      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the history node shows the persisted command log across sessions.", "visual": "A timeline of past commands scrolls, grouped by session date."},
+      "mini_scenario": "Restarting selfware, the operator flicks up and recalls yesterday's build command instantly.",
+      "pitfall": "Ensure the history parent dir exists (create_dir_all) or persistence silently fails."
     }
   ]
 }

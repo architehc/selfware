@@ -1,291 +1,410 @@
 {
-  "node_id": "llm_doctor",
-  "category": "tooling",
-  "shipped_in_bulk": false,
-  "reachable_via_expand": true,
-  "context_capacity_load": "600k_tokens",
-  "touch_canvas_modeling": {
-    "node_color": "#7c3aed",
-    "touch_gesture_navigation": [
-      "Single-tap: Select node and open quick stats HUD",
-      "Double-tap: Expand/collapse child components on touch canvas",
-      "Long-press: Open interactive visual configuration wheel",
-      "Pinch-to-zoom: Scale node detail from summary chip to full telemetry view",
-      "Two-finger drag: Draw dynamic pipeline edge connection to another node"
-    ],
-    "visual_card_state": "Tooling Subgraph Node (LLM_DOCTOR)",
-    "expand_behavior": "Dynamically fetched from graph server on expand touch gesture"
-  },
-  "loop_impact_analysis": {
-    "primary_loop_phase": "Delegated Tooling Extension",
-    "state_mutation_scope": "Mutates loop state via llm_doctor context boundaries.",
-    "concurrency_and_blocking": "Non-blocking async worker execution with lock safety."
-  },
-  "recommendations_for_engine": [
-    "Optimize llm_doctor token accounting for 600k context scale using measured envelope tiering.",
-    "Provide touch-native visual handles for direct manipulation on mobile/tablet touch displays.",
-    "Enforce strict state invariants so expanding llm_doctor dynamically does not invalidate active turn execution."
-  ],
+  "component": "llm_doctor",
+  "tier": "tooling",
+  "loop_stage": "foundation",
+  "summary": "LLM Doctor is the loop's model-backend qualifier: a 7-step diagnosis that runs config sanity (Step 0), detects the Backend (sglang/vllm/ollama/llama.cpp/lmstudio), lists ModelInfo and checks max_model_len against MIN_RECOMMENDED_CONTEXT, validates the chat template, runs a connectivity/latency test measuring tokens_per_second and tool_calling_works, then probes a capability matrix (tool calling, SSE streaming, chat_template_kwargs thinking, multimodal). Every probe is a DoctorCheckResult (Pass/Warn/Fail/Skip) with a fix_hint, rolled into a DoctorReport with had_failures. It confirms the reason engine can actually do what the loop assumes before the first LLM call.",
+  "loop_objects": ["Backend", "ModelInfo", "DoctorCheckResult", "CheckOutcome", "DoctorReport", "ConnectionTestResult", "Capabilities", "tool_calling_works", "tokens_per_second", "max_model_len"],
+  "context_basis": "recommendations were formed with src/llm_doctor.rs read in the context of the full engine (~600k budget framing), where the reason stage depends on tool-calling, streaming, thinking, and adequate context; llm_doctor qualifies those capabilities before the loop trusts them.",
   "examples": [
     {
-      "example_id": 1,
-      "title": "Llm_doctor - Initial Handshake & Warm Start",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Initial Handshake & Warm Start' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SessionToken",
-        "ContextEnvelope",
-        "ConfigGuard",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during initial handshake & warm start.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of SessionToken and drag connection to adjacent loop components."
+      "id": "llm_doctor-01",
+      "title": "Qualify the reason backend before the loop runs",
+      "loop_stage": "foundation",
+      "pattern": "backend-qualification-gate",
+      "intent": "Confirm the LLM endpoint can serve the loop's reasoning needs before spending budget.",
+      "how_it_shapes_the_loop": "run_llm_doctor builds a DoctorReport whose had_failures flag gates the loop: a Fail on a capability the reason stage depends on stops the loop before its first LLM call.",
+      "loop_objects_touched": ["DoctorReport", "DoctorCheckResult", "CheckOutcome"],
+      "wiring": {
+        "inputs_from": ["loaded Config endpoint + model"],
+        "outputs_to": ["loop entry gate", "reason stage enablement"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the llm_doctor node runs the full 7-step diagnosis and stamps the reason gate.",
+        "visual": "A capability matrix badge fills; the reason gate glows green only when had_failures is false."
+      },
+      "mini_scenario": "Diagnosis passes tool-calling and streaming but fails thinking; the loop starts with thinking-control disabled.",
+      "pitfall": "had_failures reflects Fail outcomes only; a Warn (e.g. no tool_calls produced) doesn't block but still degrades the loop."
     },
     {
-      "example_id": 2,
-      "title": "Llm_doctor - High Token Load (600k Context)",
-      "loop_scenario": "Modeling llm_doctor under scenario 'High Token Load (600k Context)' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ContextWindow",
-        "TokenUsage",
-        "EnvelopeTier",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during high token load (600k context).",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of ContextWindow and drag connection to adjacent loop components."
+      "id": "llm_doctor-02",
+      "title": "Detect the backend from the endpoint",
+      "loop_stage": "perceive",
+      "pattern": "backend-fingerprint",
+      "intent": "Identify whether the endpoint is vLLM, SGLang, Ollama, llama.cpp, or LM Studio.",
+      "how_it_shapes_the_loop": "detect_backend inspects headers and the models body to resolve a Backend enum, so later steps and the loop tune capability expectations to that server's known behavior.",
+      "loop_objects_touched": ["Backend", "ModelInfo"],
+      "wiring": {
+        "inputs_from": ["endpoint /models response + headers"],
+        "outputs_to": ["capability probes", "recommendations tree"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the backend chip shows the detected server and its detection evidence.",
+        "visual": "A server icon morphs to the detected backend's logo; Unknown shows a question-mark badge with the hint."
+      },
+      "mini_scenario": "Detection reads vLLM headers and reports Backend::Vllm, so the loop expects native SSE streaming.",
+      "pitfall": "Backend::Unknown(hint) still runs the probes; don't skip capability testing just because detection was ambiguous."
     },
     {
-      "example_id": 3,
-      "title": "Llm_doctor - Parallel Async Loop Execution",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Parallel Async Loop Execution' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "AsyncTask",
-        "LoopGuard",
-        "WorkerChannel",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during parallel async loop execution.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of AsyncTask and drag connection to adjacent loop components."
+      "id": "llm_doctor-03",
+      "title": "List available models on the endpoint",
+      "loop_stage": "perceive",
+      "pattern": "model-enumeration",
+      "intent": "Confirm the configured model is actually served.",
+      "how_it_shapes_the_loop": "Step 2 populates available_models and a model_available DoctorCheckResult, so the loop fails fast if it's pointed at a model the backend doesn't host.",
+      "loop_objects_touched": ["ModelInfo", "DoctorCheckResult", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["endpoint /models listing"],
+        "outputs_to": ["model_available check", "reason stage model selection"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the model chip fans out every model ID the endpoint lists.",
+        "visual": "The configured model highlights green if present, red if absent among the listed IDs."
+      },
+      "mini_scenario": "The config names 'Qwen3.5-122B' and it appears in available_models, so model_available passes.",
+      "pitfall": "A model present under a slightly different ID still fails the exact match; verify the exact served id string."
     },
     {
-      "example_id": 4,
-      "title": "Llm_doctor - Error Recovery & Retry Loop",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Error Recovery & Retry Loop' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ErrorState",
-        "RetryBudget",
-        "FallbackStrategy",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during error recovery & retry loop.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of ErrorState and drag connection to adjacent loop components."
+      "id": "llm_doctor-04",
+      "title": "Check context length against the recommended floor",
+      "loop_stage": "verify",
+      "pattern": "context-floor-check",
+      "intent": "Ensure the model's context is big enough for the loop's working set.",
+      "how_it_shapes_the_loop": "Step 2 compares max_model_len and the configured context_length to MIN_RECOMMENDED_CONTEXT (32768), warning when the loop's context budget outruns the model's window.",
+      "loop_objects_touched": ["ModelInfo", "max_model_len", "DoctorCheckResult"],
+      "wiring": {
+        "inputs_from": ["ModelInfo.max_model_len", "config context_length"],
+        "outputs_to": ["context-budget warning", "control budget guard"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the context gauge compares configured vs backend max_model_len.",
+        "visual": "A bar shows the configured window against the backend max; amber if below the 32k floor or above the max."
+      },
+      "mini_scenario": "Backend max_model_len is 8192 but config asks for 32k; a Warn fires so the loop clamps its context budget.",
+      "pitfall": "Configured context above backend max_model_len silently truncates at runtime; the loop must respect the backend ceiling."
     },
     {
-      "example_id": 5,
-      "title": "Llm_doctor - Touch Canvas Node Expansion",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Touch Canvas Node Expansion' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "VisualNode",
-        "GestureEvent",
-        "ExpandedViewport",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during touch canvas node expansion.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of VisualNode and drag connection to adjacent loop components."
+      "id": "llm_doctor-05",
+      "title": "Validate the chat template",
+      "loop_stage": "verify",
+      "pattern": "template-check",
+      "intent": "Confirm the backend applies a usable chat format.",
+      "how_it_shapes_the_loop": "Step 3 checks the chat template so the reason stage's messages are formatted correctly; a broken template would corrupt every prompt the loop sends.",
+      "loop_objects_touched": ["DoctorCheckResult", "Backend"],
+      "wiring": {
+        "inputs_from": ["backend template metadata"],
+        "outputs_to": ["reason-stage prompt formatting"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the template chip shows the detected chat format.",
+        "visual": "A green check for a recognized template; amber when the format can't be confirmed."
+      },
+      "mini_scenario": "The Qwen chat template is detected, so the loop trusts role formatting for its multi-turn prompts.",
+      "pitfall": "A missing template can make a backend silently concatenate roles; verify format before trusting multi-turn behavior."
     },
     {
-      "example_id": 6,
-      "title": "Llm_doctor - State Mutation & Checkpoint",
-      "loop_scenario": "Modeling llm_doctor under scenario 'State Mutation & Checkpoint' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "TurnState",
-        "DeltaDiff",
-        "CheckpointHash",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during state mutation & checkpoint.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of TurnState and drag connection to adjacent loop components."
+      "id": "llm_doctor-06",
+      "title": "Run a connectivity and latency test",
+      "loop_stage": "observe",
+      "pattern": "latency-probe",
+      "intent": "Measure round-trip latency before the loop depends on the endpoint.",
+      "how_it_shapes_the_loop": "Step 5's ConnectionTestResult records latency and feeds latency_ms into the report, giving control a per-call cost estimate for its iteration budget.",
+      "loop_objects_touched": ["ConnectionTestResult", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["a live completion request"],
+        "outputs_to": ["latency_ms", "control iteration-time budget"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the latency chip fires a test request and shows the round trip.",
+        "visual": "A stopwatch fills; green for fast, amber for slow, with the millisecond figure."
+      },
+      "mini_scenario": "The connection test returns 480ms latency, which control uses to estimate total time for a 12-iteration loop.",
+      "pitfall": "The connection test has a 30-45s timeout; a cold-loading model can look 'slow' on the first probe but be fast after."
     },
     {
-      "example_id": 7,
-      "title": "Llm_doctor - Stream Chunk Processing",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Stream Chunk Processing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "StreamChunk",
-        "TokenAccumulator",
-        "UIEvent",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during stream chunk processing.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of StreamChunk and drag connection to adjacent loop components."
+      "id": "llm_doctor-07",
+      "title": "Estimate tokens per second",
+      "loop_stage": "observe",
+      "pattern": "throughput-probe",
+      "intent": "Know the generation speed the loop can expect.",
+      "how_it_shapes_the_loop": "extract_tokens_per_second derives tokens_per_second from the test response, letting control predict how long generation-heavy iterations will take.",
+      "loop_objects_touched": ["ConnectionTestResult", "tokens_per_second"],
+      "wiring": {
+        "inputs_from": ["test completion timing + usage"],
+        "outputs_to": ["tokens_per_second", "control time estimate"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the throughput gauge expands to a tokens/sec readout.",
+        "visual": "A speedometer needle settles on the measured rate; low rates tint amber."
+      },
+      "mini_scenario": "The probe reports 38 tok/s, so control estimates a 4k-token response will take ~2 minutes.",
+      "pitfall": "Throughput is Optional; if the response lacks usage timing it's None, and the loop must not assume a rate."
     },
     {
-      "example_id": 8,
-      "title": "Llm_doctor - Interactive User Interruption",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Interactive User Interruption' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PauseSignal",
-        "UserPrompt",
-        "InterruptState",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during interactive user interruption.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of PauseSignal and drag connection to adjacent loop components."
+      "id": "llm_doctor-08",
+      "title": "Probe whether tool calling actually works",
+      "loop_stage": "verify",
+      "pattern": "capability-liveness-probe",
+      "intent": "Confirm the backend emits real tool_calls, not just claims support.",
+      "how_it_shapes_the_loop": "Step 5 sets tool_calling_works by checking whether a probe request produced tool_calls; the loop's act stage only trusts tool-based flows when this is true.",
+      "loop_objects_touched": ["tool_calling_works", "DoctorCheckResult", "CheckOutcome"],
+      "wiring": {
+        "inputs_from": ["a tool-forcing probe request"],
+        "outputs_to": ["act-stage tool enablement"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the tool-calling chip runs a forced tool-call probe.",
+        "visual": "A wrench icon lights green on tool_calls produced, amber on 'did not produce tool_calls'."
+      },
+      "mini_scenario": "The probe forces a function call and the model returns tool_calls, so the loop enables its tool-execution path.",
+      "pitfall": "tool_calling_works is Option<bool>; None (probe skipped/unreachable) is not the same as false and shouldn't disable tools outright."
     },
     {
-      "example_id": 9,
-      "title": "Llm_doctor - Subagent Delegation",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Subagent Delegation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SubagentTask",
-        "ParentSession",
-        "ResponseFuture",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during subagent delegation.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of SubagentTask and drag connection to adjacent loop components."
+      "id": "llm_doctor-09",
+      "title": "Probe SSE streaming support",
+      "loop_stage": "verify",
+      "pattern": "streaming-probe",
+      "intent": "Confirm the loop can stream tokens for responsive output.",
+      "how_it_shapes_the_loop": "probe_capabilities sets streaming from whether an SSE request returned chunks; the loop enables incremental UI/verify only when streaming actually responds.",
+      "loop_objects_touched": ["Capabilities", "DoctorCheckResult"],
+      "wiring": {
+        "inputs_from": ["an SSE streaming probe request"],
+        "outputs_to": ["streaming capability chip", "UI/output stage"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the streaming chip fires an SSE probe and watches for chunks.",
+        "visual": "Token chunks stream across the chip as dots when SSE responds; a flat line when it doesn't."
+      },
+      "mini_scenario": "The probe gets SSE chunks so the loop streams responses; the fix_hint warns to disable proxy buffering if not.",
+      "pitfall": "A reverse proxy buffering SSE can make streaming falsely appear broken; the fix_hint flags this exact cause."
     },
     {
-      "example_id": 10,
-      "title": "Llm_doctor - Safety Policy Interception",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Safety Policy Interception' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "PolicyCheck",
-        "ToolCall",
-        "AuditRecord",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during safety policy interception.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of PolicyCheck and drag connection to adjacent loop components."
+      "id": "llm_doctor-10",
+      "title": "Probe chat_template_kwargs thinking support",
+      "loop_stage": "verify",
+      "pattern": "thinking-control-probe",
+      "intent": "Confirm the backend accepts Qwen-style thinking toggles.",
+      "how_it_shapes_the_loop": "The thinking probe checks whether the backend honors chat_template_kwargs; if not, the loop's reason stage cannot control the thinking budget and must opt out.",
+      "loop_objects_touched": ["Capabilities", "DoctorCheckResult", "Backend"],
+      "wiring": {
+        "inputs_from": ["a chat_template_kwargs probe request"],
+        "outputs_to": ["reason-stage thinking control"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the thinking chip toggles a probe with enable_thinking on/off.",
+        "visual": "A brain icon glows when kwargs are accepted; greys out when ignored."
+      },
+      "mini_scenario": "SGLang accepts chat_template_kwargs, so the loop can disable thinking on cheap steps to save tokens.",
+      "pitfall": "A backend that ignores the kwarg looks like it accepted it; the fix_hint recommends explicit opt-out via extra_body."
     },
     {
-      "example_id": 11,
-      "title": "Llm_doctor - Context Pruning & Compaction",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Context Pruning & Compaction' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MemoryIndex",
-        "SummaryNode",
-        "PrunedTokens",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during context pruning & compaction.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of MemoryIndex and drag connection to adjacent loop components."
+      "id": "llm_doctor-11",
+      "title": "Heuristically flag a multimodal model",
+      "loop_stage": "perceive",
+      "pattern": "capability-heuristic",
+      "intent": "Guess whether the model can handle vision input.",
+      "how_it_shapes_the_loop": "looks_multimodal inspects the model name to set Capabilities.multimodal, so the loop only wires image inputs into reason when the model plausibly supports them.",
+      "loop_objects_touched": ["Capabilities", "ModelInfo"],
+      "wiring": {
+        "inputs_from": ["configured model name"],
+        "outputs_to": ["multimodal capability chip", "vision input path"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the multimodal chip shows whether the name heuristic matched.",
+        "visual": "An eye icon opens green for likely-vision, greyed for text-only."
+      },
+      "mini_scenario": "A model named '...-VL' matches the heuristic, so the loop offers screenshot inputs to the reason stage.",
+      "pitfall": "This is a name heuristic, not a live probe; a mislabeled model can falsely enable (or hide) real vision support."
     },
     {
-      "example_id": 12,
-      "title": "Llm_doctor - Touch Drag-and-Drop Workflow",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Touch Drag-and-Drop Workflow' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "CanvasNode",
-        "ConnectorEdge",
-        "TouchPointer",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during touch drag-and-drop workflow.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of CanvasNode and drag connection to adjacent loop components."
+      "id": "llm_doctor-12",
+      "title": "Render the unified capability matrix",
+      "loop_stage": "observe",
+      "pattern": "capability-matrix",
+      "intent": "Present tools/streaming/thinking/multimodal as one PASS/WARN/FAIL grid.",
+      "how_it_shapes_the_loop": "Step 7 pushes each probe into report.capabilities as a DoctorCheckResult, giving the loop one matrix to decide which reason/act features to enable.",
+      "loop_objects_touched": ["Capabilities", "DoctorCheckResult", "CheckOutcome", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["all Step 7 probes"],
+        "outputs_to": ["feature-enablement decisions"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the matrix node expands the four capability rows.",
+        "visual": "A 4-row grid: each row green/amber/red with its detail and fix hint on tap."
+      },
+      "mini_scenario": "The matrix shows tools PASS, streaming PASS, thinking WARN, multimodal SKIP, guiding the loop's feature flags.",
+      "pitfall": "Each row is independent; a PASS on streaming says nothing about tool calling, so read the whole matrix, not one cell."
     },
     {
-      "example_id": 13,
-      "title": "Llm_doctor - Multi-turn Memory Consolidation",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Multi-turn Memory Consolidation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "WorkingMemory",
-        "ShortTermTier",
-        "LongTermTier",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during multi-turn memory consolidation.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of WorkingMemory and drag connection to adjacent loop components."
+      "id": "llm_doctor-13",
+      "title": "Skip probes when the endpoint is unreachable",
+      "loop_stage": "control",
+      "pattern": "skip-on-precondition",
+      "intent": "Avoid meaningless probe failures when the endpoint is down.",
+      "how_it_shapes_the_loop": "When Step 1 reachability fails, downstream capability checks yield CheckOutcome::Skip rather than Fail, so the loop distinguishes 'unreachable' from 'unsupported'.",
+      "loop_objects_touched": ["CheckOutcome", "DoctorCheckResult", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["endpoint_reachable result"],
+        "outputs_to": ["downstream capability outcomes"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a skipped chip explains it was skipped because the endpoint was unreachable.",
+        "visual": "Skipped chips render greyed with a dashed border rather than red."
+      },
+      "mini_scenario": "The endpoint is down; streaming/tools/thinking all show Skip, telling the loop to fix connectivity first.",
+      "pitfall": "Skip is not Fail; treating skipped capabilities as failures blames the model for what is really a network problem."
     },
     {
-      "example_id": 14,
-      "title": "Llm_doctor - Isolated Branch Staging",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Isolated Branch Staging' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "ShadowWorktree",
-        "StagedDiff",
-        "APPLY_LOCK",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during isolated branch staging.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of ShadowWorktree and drag connection to adjacent loop components."
+      "id": "llm_doctor-14",
+      "title": "Reuse config checks as Step 0",
+      "loop_stage": "foundation",
+      "pattern": "shared-config-gate",
+      "intent": "Catch config errors before any network probe.",
+      "how_it_shapes_the_loop": "Step 0 runs doctor::config_checks and maps CheckStatus to CheckOutcome, so a bad endpoint or missing key fails cheaply before the loop attempts a live call.",
+      "loop_objects_touched": ["DoctorCheckResult", "CheckOutcome", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["doctor::config_checks(config)"],
+        "outputs_to": ["report.config_checks", "probe gating"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing an edge from the doctor config node into Step 0 seeds the diagnosis.",
+        "visual": "Config sub-chips populate the Step 0 lane before the network steps light up."
+      },
+      "mini_scenario": "Step 0 flags a missing api_key on a remote endpoint, so llm_doctor never wastes a request that would 401.",
+      "pitfall": "The Ok->Pass/Warning->Warn/Missing->Fail mapping must stay faithful, or a Missing config would mislabel as a mere Warn."
     },
     {
-      "example_id": 15,
-      "title": "Llm_doctor - Real-time Telemetry Emission",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Real-time Telemetry Emission' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "MetricPoint",
-        "EventBus",
-        "LogStream",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during real-time telemetry emission.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of MetricPoint and drag connection to adjacent loop components."
+      "id": "llm_doctor-15",
+      "title": "Emit a machine-readable report for CI",
+      "loop_stage": "control",
+      "pattern": "structured-report",
+      "intent": "Let CI and programmatic callers gate on the diagnosis without parsing text.",
+      "how_it_shapes_the_loop": "DoctorReport is Serialize, so JSON mode exposes every probe outcome, letting an automated loop-launcher decide go/no-go from structured fields.",
+      "loop_objects_touched": ["DoctorReport", "DoctorCheckResult", "CheckOutcome"],
+      "wiring": {
+        "inputs_from": ["completed 7-step diagnosis"],
+        "outputs_to": ["CI gate", "programmatic launcher"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the report node toward the CI lane exports it as JSON.",
+        "visual": "The matrix collapses into a JSON document card with had_failures highlighted."
+      },
+      "mini_scenario": "CI reads report.had_failures=true and refuses to launch the loop against an unqualified backend.",
+      "pitfall": "Consume the structured fields, not the pretty-printed matrix; scraping human output breaks on formatting changes."
     },
     {
-      "example_id": 16,
-      "title": "Llm_doctor - Tool Result Spilling & Parsing",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Tool Result Spilling & Parsing' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "SpillFile",
-        "SummaryBadge",
-        "ToolResult",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during tool result spilling & parsing.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of SpillFile and drag connection to adjacent loop components."
+      "id": "llm_doctor-16",
+      "title": "Merge extra_body into the probe request",
+      "loop_stage": "foundation",
+      "pattern": "faithful-probe-config",
+      "intent": "Probe with the same request shape the loop will actually use.",
+      "how_it_shapes_the_loop": "Probes use merge_extra_body so chat_template_kwargs and other extra params match production, making the capability verdict trustworthy for the real loop.",
+      "loop_objects_touched": ["Capabilities", "DoctorCheckResult", "Backend"],
+      "wiring": {
+        "inputs_from": ["config extra_body"],
+        "outputs_to": ["probe request payload"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the probe chip shows the exact request body including merged extra_body.",
+        "visual": "The chip flips to reveal the JSON payload with extra_body fields highlighted."
+      },
+      "mini_scenario": "The thinking probe merges enable_thinking=false so its result reflects how the loop will actually call the model.",
+      "pitfall": "Probing without the loop's extra_body can pass a capability the real requests then trip on, giving false confidence."
     },
     {
-      "example_id": 17,
-      "title": "Llm_doctor - Dynamic Constraint Adaptation",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Dynamic Constraint Adaptation' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FitnessScore",
-        "TierMeasurer",
-        "BudgetCut",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during dynamic constraint adaptation.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FitnessScore and drag connection to adjacent loop components."
+      "id": "llm_doctor-17",
+      "title": "Build a recommendations tree on failure",
+      "loop_stage": "learn",
+      "pattern": "guided-remediation",
+      "intent": "Turn probe failures into concrete backend fixes.",
+      "how_it_shapes_the_loop": "Step 6 assembles remediation recommendations (fix_hints per capability), so a Degraded loop can hand the operator or agent a prioritized fix list.",
+      "loop_objects_touched": ["DoctorCheckResult", "DoctorReport"],
+      "wiring": {
+        "inputs_from": ["failed/warned probes"],
+        "outputs_to": ["operator remediation", "agent fix step"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the recommendations node expands the fix tree by capability.",
+        "visual": "A branching tree; each leaf is a fix_hint card tied to its failing capability."
+      },
+      "mini_scenario": "Thinking WARN yields a hint to use vLLM/SGLang with a Qwen template, guiding the operator's next move.",
+      "pitfall": "Recommendations are backend-specific; applying a vLLM hint to Ollama can make things worse, so match the detected Backend."
     },
     {
-      "example_id": 18,
-      "title": "Llm_doctor - Gesture-based Node Filter",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Gesture-based Node Filter' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FilterQuery",
-        "ComponentCard",
-        "UIState",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during gesture-based node filter.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FilterQuery and drag connection to adjacent loop components."
+      "id": "llm_doctor-18",
+      "title": "Warn when tool_calls aren't produced",
+      "loop_stage": "reason",
+      "pattern": "degrade-not-fail",
+      "intent": "Let the loop fall back to text parsing when native tool-calls are absent.",
+      "how_it_shapes_the_loop": "A tool-calling Warn ('model did not produce tool_calls') tells the loop to route the act stage through text-based tool extraction instead of assuming native calls.",
+      "loop_objects_touched": ["tool_calling_works", "DoctorCheckResult", "CheckOutcome"],
+      "wiring": {
+        "inputs_from": ["tool-calling probe outcome"],
+        "outputs_to": ["reason-stage tool-invocation strategy"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the amber tool chip shows the fallback strategy.",
+        "visual": "The wrench icon shows amber with a 'text-fallback' sub-tag."
+      },
+      "mini_scenario": "The model returns text but no tool_calls; the loop switches to parsing tool intents from the text body.",
+      "pitfall": "Warn is not Fail; hard-disabling tools on a Warn throws away a workable text-based tool path."
     },
     {
-      "example_id": 19,
-      "title": "Llm_doctor - Fail-safe Fallback Trigger",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Fail-safe Fallback Trigger' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FallbackPayload",
-        "EmergencyState",
-        "HealthBadge",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during fail-safe fallback trigger.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FallbackPayload and drag connection to adjacent loop components."
+      "id": "llm_doctor-19",
+      "title": "Bound every probe with a timeout",
+      "loop_stage": "control",
+      "pattern": "bounded-diagnosis",
+      "intent": "Keep the diagnosis from hanging on a stuck endpoint.",
+      "how_it_shapes_the_loop": "HTTP_TIMEOUT (10s) bounds each probe and the connection test has its own 30-45s window, so a wedged backend degrades to Skip/Fail instead of freezing loop startup.",
+      "loop_objects_touched": ["DoctorCheckResult", "ConnectionTestResult", "CheckOutcome"],
+      "wiring": {
+        "inputs_from": ["probe HTTP requests"],
+        "outputs_to": ["timely DoctorReport"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the timeout dial adjusts the probe patience within its bounds.",
+        "visual": "A countdown ring on each in-flight probe; a timed-out probe snaps to a dashed Skip/Fail state."
+      },
+      "mini_scenario": "A hung endpoint times out each probe at 10s, so the whole diagnosis returns in seconds with Skip results.",
+      "pitfall": "Connection-test timeouts are longer than probe timeouts; a cold model needs the longer window, don't clamp it too tight."
     },
     {
-      "example_id": 20,
-      "title": "Llm_doctor - Final Turn Consensus & Exit",
-      "loop_scenario": "Modeling llm_doctor under scenario 'Final Turn Consensus & Exit' within a 600k context window visual loop.",
-      "objects_on_loop": [
-        "FinalAnswer",
-        "SessionExit",
-        "AuditSummary",
-        "Llm_doctorPayload"
-      ],
-      "component_loop_effect": "Determines how llm_doctor intercepts, transforms, or routes loop state during final turn consensus & exit.",
-      "touch_screen_workflow": "User performs touch action on the 'llm_doctor' canvas node to reveal real-time status of FinalAnswer and drag connection to adjacent loop components."
+      "id": "llm_doctor-20",
+      "title": "Gate loop features on the final verdict",
+      "loop_stage": "foundation",
+      "pattern": "capability-to-feature-flags",
+      "intent": "Translate the matrix into which loop features are on.",
+      "how_it_shapes_the_loop": "The loop reads the completed DoctorReport and enables tool-execution, streaming output, thinking control, and vision input only where the matching capability passed, shaping every downstream stage's options.",
+      "loop_objects_touched": ["DoctorReport", "Capabilities", "CheckOutcome"],
+      "wiring": {
+        "inputs_from": ["report.capabilities matrix"],
+        "outputs_to": ["reason/act/output feature flags"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the matrix into the loop node applies the capabilities as feature flags.",
+        "visual": "Passed capabilities light their corresponding loop-stage nodes; failed ones leave those nodes dim."
+      },
+      "mini_scenario": "Tools PASS and streaming PASS light the act and output nodes; thinking WARN leaves thinking-control off.",
+      "pitfall": "Enable per-capability, not all-or-nothing; disabling every feature because one capability failed cripples an otherwise-usable loop."
     }
   ]
 }

@@ -1,168 +1,410 @@
 {
-  "module": "agent",
-  "generated": "2026-07-28",
-  "full_tokens": 214917,
-  "loop_role": "The agent module is the loop itself: it drives perceive → plan → act → verify → remember per turn via AgentLoop/AgentState, run_task, tool dispatch, compression, checkpoints, and failure classification.",
+  "component": "agent",
+  "tier": "full",
+  "loop_stage": "control",
+  "summary": "The agent component is the loop driver: a budget-guarded state machine (Planning -> Executing -> ErrorRecovery -> Completed/Failed) implemented by AgentLoop over AgentState. run_task resets loop state, seeds a TaskCheckpoint and Plan, then iterates turns that call the LLM, collect ToolCalls, execute them, and advance state until the task completes or the iteration/token/wall budget is exhausted. It owns iteration counting, valid state transitions, recovery hints, plan-mode gating, and cumulative budget accounting.",
+  "loop_objects": ["AgentState", "AgentLoop", "Plan", "PlanStep", "TaskCheckpoint", "Budget", "Message", "FailureMode", "RecoveryStrategy", "GuardCounters"],
+  "context_basis": "recommendations were formed with src/agent/ read in the context of the full engine (~600k budget framing), grounded in loop_control.rs AgentState/AgentLoop, task_runner.rs run_task, plan_mode.rs Plan/PlanStep, recovery.rs, and mod.rs budget derivation.",
   "examples": [
     {
       "id": "agent-01",
-      "title": "Model the loop state machine with AgentLoop and AgentState",
-      "loop_role": "AgentLoop is the canonical loop skeleton: AgentState::Planning → Executing{step} → ErrorRecovery{error} → Completed | Failed{reason}, with transition_to() rejecting illegal jumps via InvalidStateTransition. Wire every loop stage as a state, and drive stage advancement by calling next_state() once per turn — note Planning never consumes an iteration slot, so the model gets max_iterations execution turns plus one planning turn.",
-      "affects": "Owns the loop's step/iteration counters (current_step, current_iteration) and the iteration budget. approaching_limit_warning() injects a system message at 80%/90% of max_iterations so the LLM wraps up gracefully; approaching_limit_band() ensures each band warning fires exactly once instead of spamming the context window with duplicate warnings. restore_progress(step, iteration) rehydrates counters from a checkpoint; reset_for_task() prevents queued tasks from inheriting a spent iteration budget.",
-      "touch_ux": "Render as the central ring of the canvas: five state nodes (planning, executing, error_recovery, completed, failed) connected by only the legal transition edges from is_valid_transition — draw invalid edges as red dashed stubs that snap back on drag. Tap a state node to select it; long-press Executing to scrub through step history; pinch on the ring zooms between state-level and per-turn detail. Live badge: 'iter 12/40 · step 7' plus an amber pulse when approaching_limit_band() crosses 80, red at 90.",
-      "pointer": "src/agent/loop_control.rs::AgentLoop"
+      "title": "Seed the state machine at Planning",
+      "loop_stage": "control",
+      "pattern": "single-entry-state-init",
+      "intent": "Guarantee every task starts in a known Planning state with a zeroed iteration counter.",
+      "how_it_shapes_the_loop": "AgentLoop::new sets state=Planning and iteration=0; run_task calls reset_for_task so a queued follow-up cannot inherit the previous task's counter and trip max-iterations immediately.",
+      "loop_objects_touched": ["AgentState", "AgentLoop"],
+      "wiring": {
+        "inputs_from": ["task string", "config.agent.max_iterations"],
+        "outputs_to": ["AgentState::Planning", "first reason turn"]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "User drags the Planning node from the palette onto the canvas as the loop's single entry point; it snaps to the start anchor.",
+        "visual": "Planning node renders cyan with a slow breathing pulse to signal it is armed but not yet consuming budget."
+      },
+      "mini_scenario": "A new task arrives; run_task calls reset_for_task, the loop lands in Planning, and the counter reads 0 before the first LLM turn.",
+      "pitfall": "Reusing an Agent for a follow-up without reset_for_task carries stale iteration counts and can fail the new task on turn one."
     },
     {
       "id": "agent-02",
-      "title": "Drive end-to-end tasks through run_task and run_execution_loop_inner",
-      "loop_role": "run_task is the outer harness of the loop: it builds the plan, transitions Planning → Executing via transition_from_planning_to_executing, then loops run_execution_loop_inner per iteration. PlannedToolExecution (from create_plan's output) lets execute_planned_tool_calls_if_any short-circuit the first act stage with the plan's tool calls before the LLM free-runs. Use LoopMode to distinguish fresh runs from continue_execution resumes.",
-      "affects": "Owns cumulative token budget and termination: finalize_natural_completion and finalize_failure_mode convert loop exit into a structured FailureMode and write it to failure_mode_artifact_dir. build_progress_injection(step) injects progress state into context each iteration; recovery_failure_advice(error) turns errors into corrective directives pushed onto the message history — both directly mutate the context window the next perceive stage sees.",
-      "touch_ux": "A horizontal timeline scrubber of iterations, each tick a turn chip colored by its LoopMode and terminal FailureKind. Tap a tick to open that turn's detail; two-finger drag across ticks replays the run; long-press the timeline to set a resume point that calls continue_execution. Live badge: current step number, elapsed wall time, and a token-burn sparkline fed by memory_stats.",
-      "pointer": "src/agent/task_runner.rs::run_task"
+      "title": "Advance only through valid transitions",
+      "loop_stage": "control",
+      "pattern": "guarded-transition",
+      "intent": "Prevent illegal jumps between loop states (e.g. Completed back to Executing).",
+      "how_it_shapes_the_loop": "transition_to consults is_valid_transition; an InvalidStateTransition error is returned rather than corrupting the state, so the state graph stays a legal DAG of Planning->Executing->(ErrorRecovery)->Completed/Failed.",
+      "loop_objects_touched": ["AgentState", "AgentLoop"],
+      "wiring": {
+        "inputs_from": ["current AgentState"],
+        "outputs_to": ["next AgentState", "InvalidStateTransition on violation"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "User draws a finger edge from one state node to another; the canvas rejects and snaps back any edge that is not in the allowed transition set.",
+        "visual": "A legal edge draws solid green; an illegal edge flashes red and dissolves with a shake."
+      },
+      "mini_scenario": "After Completed, a stray attempt to re-enter Executing is refused by is_valid_transition and the loop stays terminal.",
+      "pitfall": "Bypassing transition_to via set_state's expect() will panic on an invalid edge instead of surfacing a recoverable error."
     },
     {
       "id": "agent-03",
-      "title": "Execute one loop turn with execute_step_internal",
-      "loop_role": "execute_step_internal is one full perceive → act cycle: it sends the message history to the LLM, collects tool calls, dispatches them, and decides whether the loop continues (returns bool). Its guards model stall detection: note_mutation_no_tool_stall fires when a mutation task produces no tool calls, note_mutation_zero_edit_stall when tools ran but no edit landed, and check_files_guard catches writes that target only read files (writes_target_only_read_files). stale_verification_rescue_call injects a rescue tool call when verification goes stale.",
-      "affects": "Directly mutates the loop's evidence objects: appends assistant responses and tool results to the message history, bumps mutating_tool_call_count / consecutive_no_tool_call_turns, and records guard fire counts that failure_mode.rs later classifies. is_observational_shell_batch marks read-only shell batches so the progress guard doesn't misclassify exploration as a stall — this keeps trust state honest about what 'progress' means.",
-      "touch_ux": "Render as a stacked card per turn: top strip = LLM request, middle row = tool call chips, bottom strip = stall-guard verdict. Tap a tool chip for its args/result; long-press a guard-firing turn to see which guard (no-tool, zero-edit, files) tripped and its diagnosis string; pinch collapses consecutive observational batches into one 'exploration' cluster. Live badge: guard fire counters and a red border flash when a stall guard triggers.",
-      "pointer": "src/agent/execution.rs::execute_step_internal"
+      "title": "Count iterations without charging Planning",
+      "loop_stage": "control",
+      "pattern": "budget-scoped-iteration",
+      "intent": "Give the model max_iterations execution turns plus one free Planning turn.",
+      "how_it_shapes_the_loop": "next_state increments iteration only when the state is not Planning; once iteration exceeds max_iterations it forces AgentState::Failed with 'Max iterations exceeded'.",
+      "loop_objects_touched": ["AgentLoop", "AgentState", "Budget"],
+      "wiring": {
+        "inputs_from": ["AgentState", "max_iterations"],
+        "outputs_to": ["AgentState::Executing", "AgentState::Failed"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "User pinches the Executing node to reveal a ring gauge showing iterations consumed against the max_iterations budget.",
+        "visual": "The gauge fills amber as iterations climb and turns red on the turn that forces Failed."
+      },
+      "mini_scenario": "On the turn where iteration crosses max_iterations, next_state returns Failed and the loop halts cleanly instead of spinning forever.",
+      "pitfall": "Incrementing the counter during Planning would silently rob the model of one execution turn."
     },
     {
       "id": "agent-04",
-      "title": "Gate mutating tools behind PlanModeManager approval",
-      "loop_role": "PlanModeManager implements a human-in-the-loop plan stage: enter_plan_mode switches the agent into a read-only perceive+plan phase where is_tool_allowed rejects every non-readonly tool (is_readonly_tool), parse_plan_from_llm extracts a Plan of PlanSteps, and only approve_plan flips PlanModeState to active so the act stage can execute. Model this as a hard edge between plan and act that requires a user tap.",
-      "affects": "Controls trust and permission state: until is_approved, the tool dispatch layer sees a policy refusal for mutating calls, so no write touches the filesystem and budget is spent only on planning turns. The stored Plan (step_count, completed_count, next_pending_step) becomes loop memory — mark_in_progress/mark_done/mark_failed track execution evidence against the approved plan, feeding progress telemetry.",
-      "touch_ux": "A modal 'plan card' that overlays the canvas: plan steps as a vertical checklist with StepStatus icons, mutating-tool edges rendered as locked (padlock glyph) until approve. Tap a step to expand its context; swipe-right on the card = approve_plan (haptic confirm), swipe-left = reject and stay in plan mode; long-press a locked tool edge to see why it's gated. Live badge: 'PLAN MODE · 3/7 steps · approval pending'.",
-      "pointer": "src/agent/plan_mode.rs::PlanModeManager"
+      "title": "Warn before the iteration wall",
+      "loop_stage": "control",
+      "pattern": "approach-limit-signal",
+      "intent": "Let the model wrap up before it is force-failed for running out of turns.",
+      "how_it_shapes_the_loop": "approaching_limit_warning and approaching_limit_band inject a system Message when the loop nears max_iterations, nudging the model toward a final answer while it still has budget.",
+      "loop_objects_touched": ["AgentLoop", "Message", "Budget"],
+      "wiring": {
+        "inputs_from": ["iteration count", "max_iterations"],
+        "outputs_to": ["injected system Message", "next reason turn"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the Executing node opens a threshold slider that sets when the wrap-up warning fires.",
+        "visual": "The node grows an amber warning badge that pulses faster as the loop approaches the band."
+      },
+      "mini_scenario": "At band 2 the loop injects 'you are nearly out of turns; finalize now' and the model produces its answer on the next turn.",
+      "pitfall": "Warning too late (only at the last turn) leaves no room for the model to actually finish."
     },
     {
       "id": "agent-05",
-      "title": "Batch parallel-safe tool calls with execute_parallel_tools",
-      "loop_role": "tool_dispatch is the act stage proper: execute_parallel_tools groups a turn's collected tool calls and runs is_parallel_safe ones concurrently, falling back to execute_single_tool_in_batch for the rest. Before anything runs, current_task_tool_policy_violation and reject_tool_call_before_execution let you model policy as a pre-act filter, and maybe_block_progressless_batch stops a whole batch that repeats already-failed calls.",
-      "affects": "Shapes tool results and budget: parallel execution compresses wall-clock per turn but all results land in the same context window at once, so batch size directly trades latency against context pressure. remember_failed_tool + build_failed_tool_retry_suppressed_message implement retry memory — repeated failures on the same tool get suppressed with an explanatory message instead of burning tokens on identical doomed calls, which feeds FailureKind::RetryLoop classification later.",
-      "touch_ux": "Tool calls render as chips that magnetically cluster when is_parallel_safe — a cluster shows a '×N parallel' badge and runs with a shared progress ring; unsafe tools chain as serial arrows. Tap a chip for args; long-press to force-serialize it (drag it out of the cluster); a suppressed-retry chip renders greyed with a strikethrough and tap reveals the suppression reason. Live badge: in-flight tool count and last ToolCallCompleted elapsed_ms.",
-      "pointer": "src/agent/tool_dispatch/mod.rs::execute_parallel_tools"
+      "title": "Perceive the task and build the L1 tree",
+      "loop_stage": "perceive",
+      "pattern": "perceive-before-plan",
+      "intent": "Ground the loop in the repository before any planning happens.",
+      "how_it_shapes_the_loop": "run_task sets modality from the task, builds the L1 project tree, and for Review modality auto-loads L2 skeletons so the model perceives structure without reading 100+ files one by one.",
+      "loop_objects_touched": ["Plan", "Message", "TaskCheckpoint"],
+      "wiring": {
+        "inputs_from": ["task string", "context_map"],
+        "outputs_to": ["system Message preamble", "Planning turn"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "User spreads two fingers over the Perceive node to expand it into the layered L1/L2 context map view.",
+        "visual": "The node blooms into a nested tree; loaded skeletons glow, unloaded ones stay dim."
+      },
+      "mini_scenario": "A 'review the config module' task classifies as Review modality, auto-loads skeletons, and the model plans against real structure.",
+      "pitfall": "Skipping the L1 build makes the model blind-read files, burning budget on discovery it could have perceived up front."
     },
     {
       "id": "agent-06",
-      "title": "Classify tool errors with ToolErrorKind and recovery_hint",
-      "loop_role": "ToolErrorKind turns raw tool failures into structured loop signals: classify(error_text) buckets an error, as_str gives a stable label, and recovery_hint produces the corrective text injected into the next perceive turn. task_requires_mutation lets the loop distinguish 'mutation task stalled' from 'read-only task finished', so error recovery routes differently per task class.",
-      "affects": "Feeds the ErrorRecovery{error} state transition in AgentLoop and the evidence strings in FailureMode. Because recovery_hint text is appended to the message history, classification quality directly determines how many recovery turns (and tokens) the loop spends; a good hint ends recovery in one turn, a bad one loops until MAX_NO_ACTION_PROMPTS.",
-      "touch_ux": "Error objects render as hexagonal nodes attached to the tool chip that produced them, colored by ToolErrorKind (permission=orange, not-found=blue, timeout=purple). Tap to expand the error chain; long-press to preview the recovery_hint message before it's injected; drag the hexagon onto a different loop stage to reroute recovery strategy. Live badge: consecutive failure count per tool name.",
-      "pointer": "src/agent/tool_dispatch/helpers.rs::ToolErrorKind"
+      "title": "Compose a Plan of PlanSteps",
+      "loop_stage": "reason",
+      "pattern": "explicit-plan-graph",
+      "intent": "Turn the task into an ordered, trackable list of steps.",
+      "how_it_shapes_the_loop": "Plan::add_step appends PlanSteps; next_pending_step drives which step the loop tackles, and completed_count/is_complete tell the control layer when the plan is exhausted.",
+      "loop_objects_touched": ["Plan", "PlanStep"],
+      "wiring": {
+        "inputs_from": ["reasoned task decomposition"],
+        "outputs_to": ["Executing turns", "verification gate"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the Reason node opens an editable step list the user can reorder by dragging rows.",
+        "visual": "Each PlanStep is a chip: grey pending, blue in-progress, green done, red failed."
+      },
+      "mini_scenario": "The planner emits steps 'find files', 'implement', 'cargo_check', 'cargo_test'; the loop pulls next_pending_step each turn.",
+      "pitfall": "A plan with no completion check lets the loop mark done before is_complete is actually true."
     },
     {
       "id": "agent-07",
-      "title": "Bound every tool call with run_tool_bounded and ToolHalt",
-      "loop_role": "run_tool_bounded wraps each act-stage tool future in a race against step_timeout_secs and the agent's cancel token, returning ToolHalt::TimedOut or ToolHalt::Cancelled when the tool loses the race. Model it as the loop's per-action circuit breaker: ESC/abort and deadlines become first-class loop events instead of hung turns.",
-      "affects": "Protects wall-clock budget and keeps trust state honest: a halted tool produces an explicit halt result (not a silent gap), which flows into tool results, ProgressEvent::ToolCallCompleted{ok:false}, and eventually FailureKind::Timeout evidence. The 50ms cancel polling means user interruption lands mid-batch, so partially-completed parallel batches must be reconciled in the message history.",
-      "touch_ux": "Each running tool chip shows a shrinking countdown ring for its deadline; a user two-finger tap (the canvas ESC gesture) animates the cancel token propagating — in-flight chips freeze with a 'cancelled' stamp. Long-press the ring to extend the deadline; pinch on a halted chip shows the partial output captured before the halt. Live badge: time-remaining ms and a red flash on ToolHalt.",
-      "pointer": "src/agent/tool_dispatch/spill.rs::run_tool_bounded"
+      "title": "Gate execution behind plan approval",
+      "loop_stage": "control",
+      "pattern": "gate-before-act",
+      "intent": "Hold the loop in a read-only planning phase until the user approves.",
+      "how_it_shapes_the_loop": "toggle_plan_mode / is_in_plan_mode keep the loop from mutating; approve_plan flips is_plan_approved so Executing can begin, converting plan mode into an explicit control checkpoint.",
+      "loop_objects_touched": ["Plan", "AgentState", "PlanModeState"],
+      "wiring": {
+        "inputs_from": ["stored Plan", "user approval signal"],
+        "outputs_to": ["AgentState::Executing"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "A padlock badge sits on the edge into Executing; tapping it once toggles approval and unlocks the edge.",
+        "visual": "Locked edge is dashed grey; on approval it turns solid green and the padlock springs open."
+      },
+      "mini_scenario": "In plan mode the model drafts a Plan, the user taps approve, is_plan_approved becomes true, and only then does the loop start editing.",
+      "pitfall": "Letting mutating tools run while is_in_plan_mode is still true defeats the entire dry-run guarantee."
     },
     {
       "id": "agent-08",
-      "title": "Validate tool calls against schemas before dispatch",
-      "loop_role": "validate_tool_call / validate_tool_calls sit between perceive (LLM emits tool-call JSON) and act (dispatch): every call is checked against the tool's JSON schema, and failures become AgentDecision::Aborted{reason} turns instead of runtime tool crashes. Model it as a validation gate node on the perceive→act edge.",
-      "affects": "Prevents malformed calls from corrupting tool results or filesystem state, and converts schema errors into corrective messages the model can fix next turn — at the cost of an extra loop iteration. High validation-failure rates are a model-capability signal (weak local models emitting malformed XML), which pairs with recovery.rs's looks_like_malformed_tool_xml detection.",
-      "touch_ux": "A funnel-shaped gate node on the perceive→act edge; invalid calls shatter into red shards at the funnel mouth with the schema violation text, valid calls pass through with a green check ripple. Tap a shard to diff the emitted args against the schema; long-press the funnel to toggle strict/lenient mode. Live badge: validation pass/fail ratio for the session.",
-      "pointer": "src/agent/tool_validator.rs::validate_tool_call"
+      "title": "Mark step progress as the loop runs",
+      "loop_stage": "control",
+      "pattern": "state-annotated-progress",
+      "intent": "Keep an honest record of which steps are in-flight, done, or failed.",
+      "how_it_shapes_the_loop": "PlanStep::mark_in_progress/mark_done/mark_failed update StepStatus so progress reporting and the completion gate reason over real per-step state rather than turn counts.",
+      "loop_objects_touched": ["PlanStep", "Plan"],
+      "wiring": {
+        "inputs_from": ["tool execution outcome"],
+        "outputs_to": ["progress display", "completion gate"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "User flicks a step chip right to mark done or left to mark failed, mirroring what the loop records automatically.",
+        "visual": "A right flick fills the chip green with a checkmark; a left flick fills red with a reason tooltip."
+      },
+      "mini_scenario": "After cargo_test passes, the loop calls mark_done on that PlanStep and completed_count ticks up.",
+      "pitfall": "Marking a step done before its verifying tool succeeds inflates completed_count and can trigger premature completion."
     },
     {
       "id": "agent-09",
-      "title": "Recover from prose-only turns with ActionPrompt and force-fallback",
-      "loop_role": "recovery.rs models the ErrorRecovery stage for the most common local-model failure: the model emits intent prose instead of tool calls. The no-action check returns ActionPrompt::NotNeeded | Corrected | ForceFallback — Corrected injects a text correction and re-prompts, and after FORCE_FALLBACK_AFTER (3) ignored corrections the loop force-executes a safe discovery tool (pick_required_tool_fallback, e.g. directory_tree via FILE_DISCOVERY_TOOLS) so progress continues even when the model won't cooperate. MAX_NO_ACTION_PROMPTS (20 consecutive) and MAX_TOTAL_NO_ACTION_PROMPTS (500 lifetime) bound the recovery loop.",
-      "affects": "Directly spends context and iteration budget on nudge messages; hash_text_signature deduplicates identical prose so the loop doesn't count the same hallucination twice, and strip_gemma_thinking keeps model-specific reasoning tags out of the evidence. The no-action counters are primary evidence for FailureKind::NontermProse, and fallback tool calls write real tool results into history — turning a stalled turn into genuine exploration evidence.",
-      "touch_ux": "Render recovery as a spiral path branching off the main loop: each Corrected nudge is a yellow waypoint, the ForceFallback is a green 'autopilot' node that physically drags the loop back onto the act stage. Tap a waypoint to read the injected correction; long-press the spiral to see the no-action counter vs its caps; pinch zooms from the spiral back to the main timeline. Live badge: 'no-action 4/20 · total 31/500' with the gauge filling amber.",
-      "pointer": "src/agent/recovery.rs::ActionPrompt"
+      "title": "Divert into ErrorRecovery on failure",
+      "loop_stage": "control",
+      "pattern": "error-diversion",
+      "intent": "Route recoverable failures through a dedicated recovery state instead of failing the whole task.",
+      "how_it_shapes_the_loop": "A failing tool transitions Executing -> ErrorRecovery { error }; is_valid_transition permits ErrorRecovery -> Executing so the loop can retry, or ErrorRecovery -> Failed if unrecoverable.",
+      "loop_objects_touched": ["AgentState", "RecoveryStrategy"],
+      "wiring": {
+        "inputs_from": ["failed ToolResult"],
+        "outputs_to": ["AgentState::Executing (retry)", "AgentState::Failed"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "User draws a recovery loop edge from Executing to the ErrorRecovery node and back, forming a visible retry cycle.",
+        "visual": "The ErrorRecovery node glows orange and the retry edge animates a return arrow when a retry is chosen."
+      },
+      "mini_scenario": "A flaky network tool fails, the loop enters ErrorRecovery, emits a hint, then transitions back to Executing to retry.",
+      "pitfall": "Allowing unlimited ErrorRecovery->Executing cycles without a counter turns recovery into an infinite retry loop."
     },
     {
       "id": "agent-10",
-      "title": "Enforce honest completion with mutation_completion_gate",
-      "loop_role": "The completion gate is the verify stage's honesty enforcer: when the model claims 'done', mutation_completion_gate checks the claim against real evidence — diff_paths_for_completion_gate and committed_paths_for_completion_gate compare claimed edits against actual git/diff state, has_successful_verification_tool_call requires a verification tool to have run, and non_code_artifact_readback forces readback of produced artifacts (via artifact_readback_guidance) before accepting completion. Refusals become AgentDecision::Refused{reason} and the loop continues.",
-      "affects": "This is the trust-state keystone: it prevents FailureKind::FakeComplete (model said 'Final answer:' with zero mutations) from ever rendering as success. Gate refusals inject refusal text into context (spending tokens to buy honesty), and validate_workflow_edits plus task_is_test_writing_task / task_has_source_change_intent tailor gate strictness to task type so read-only tasks aren't falsely blocked.",
-      "touch_ux": "A vault-door node between act and completed: the door only opens when evidence pins (diff paths, verification checkmark, artifact readback) all light up green; a refusal slams it with the refusal text scrolling across. Tap a pin to inspect its evidence; long-press the door for the full gate trace; swipe-up on a refusal to send the gate's guidance back as a nudge. Live badge: 'gate: 2/3 pins · verification missing'.",
-      "pointer": "src/agent/verification.rs::mutation_completion_gate"
+      "title": "Build an error-recovery hint for the model",
+      "loop_stage": "learn",
+      "pattern": "hint-on-failure",
+      "intent": "Feed the model a concrete next-step suggestion instead of a bare error.",
+      "how_it_shapes_the_loop": "build_error_recovery_hint turns a tool name and error into guidance (e.g. connection may self-heal next attempt) injected as a Message so the next reason turn adapts rather than repeats.",
+      "loop_objects_touched": ["Message", "RecoveryStrategy", "FailureMode"],
+      "wiring": {
+        "inputs_from": ["tool name", "error string"],
+        "outputs_to": ["injected Message", "next reason turn"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the ErrorRecovery node reveals the generated hint text bubble that will be injected.",
+        "visual": "A speech-bubble badge fades in over the node carrying the hint preview."
+      },
+      "mini_scenario": "After a failed http_request the loop injects 'the connection may recover automatically; retry once' and the model retries deliberately.",
+      "pitfall": "Injecting a generic hint for a deterministic error (bad path) wastes a turn re-attempting the same doomed call."
     },
     {
       "id": "agent-11",
-      "title": "Classify every run outcome with FailureMode::classify",
-      "loop_role": "FailureMode::classify is the loop's post-mortem stage: it reads observational counters off the Agent (mutating_tool_call_count, progress_guard_fire_count, prefill_400_count, no-action counters) plus the RunOutcome and emits a FailureMode{kind, evidence, advice}. FailureKind distinguishes REAL_EDIT (Success), honest NO_CHANGES, READ_LOOP, NONTERM_PROSE, RETRY_LOOP, FAKE_COMPLETE, BUDGET_EXHAUSTED, BLOCKED_BY_SAFETY, PREFILL_BREAKER, and more — write_artifact persists it, cli_banner prints the ✅/❌ verdict.",
-      "affects": "Pure observational read — never mutates the agent — which is exactly why it's trustworthy: the classifier can't heal the run it judges. is_nonfailure (Success | NoChange) keeps the banner and the ProgressEvent stream in agreement (TaskCompleted vs TaskFailed), so downstream dashboards and SWE-bench harnesses consume one consistent verdict instead of grepping logs.",
-      "touch_ux": "A verdict stamp that lands on the run timeline at termination: green REAL_EDIT seal, grey NO_CHANGES, red failure tags with the one-line evidence etched beneath. Tap the stamp to expand evidence+advice; long-press to open the raw artifact JSON; drag the stamp onto a prior turn to jump to the turn whose counters caused the verdict. Live badge: the tag() string plus counter summary ('3 mutating, guard×2').",
-      "pointer": "src/agent/failure_mode.rs::FailureMode"
+      "title": "Detect and break a stuck loop",
+      "loop_stage": "control",
+      "pattern": "thrash-guard",
+      "intent": "Stop the loop from repeating the same fruitless action forever.",
+      "how_it_shapes_the_loop": "consecutive_no_tool_call_turns and GuardCounters (no-action prompts, mutation-gate rejections, prefill 400 breaker) escalate pressure and can force Failed, converting silent spinning into a bounded, observable stop.",
+      "loop_objects_touched": ["GuardCounters", "AgentState", "FailureMode"],
+      "wiring": {
+        "inputs_from": ["turn outcomes", "tool-call counts"],
+        "outputs_to": ["escalating Message", "AgentState::Failed"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the control hub surfaces the guard-counter dials for no-action, mutation-gate, and prefill breakers.",
+        "visual": "Each dial reddens as its counter climbs; crossing the threshold flashes a stop icon."
+      },
+      "mini_scenario": "Three consecutive no-tool-call turns raise the guard, inject a firmer directive, and if ignored transition the loop to Failed.",
+      "pitfall": "Setting the guard threshold too low kills legitimately slow reasoning turns that just happen not to call a tool."
     },
     {
       "id": "agent-12",
-      "title": "Compress context in three layers with CompressionOrchestrator",
-      "loop_role": "The CompressionOrchestrator is the remember stage's pressure valve: run_micro / run_auto / run_full implement the three-layer system (CompressionMethod::Micro | Auto | Full) — micro prunes stale tool results, auto summarizes at AutoCompactConfig thresholds, full rewrites history to a structured summary. check_and_compress runs the tier decision each turn; the AutoCompactManager circuit breaker (record_failure → is_circuit_open) stops compression loops that keep failing.",
-      "affects": "Directly rewrites the context window: CompressionMetrics and total_tokens_saved quantify what was reclaimed, FileAccessTracker (record_access, get_recent_files) preserves recently-touched file context across compaction so the next perceive turn doesn't re-read. compression_stats on Agent exposes all of this live; the circuit breaker protects budget by refusing to spend LLM tokens on summarization that keeps erroring.",
-      "touch_ux": "A reservoir glyph attached to the context window meter: three nested rings (micro/auto/full) fill as their thresholds approach, and a compression event animates the ring draining with tokens-saved counted up. Tap a ring to preview what would be evicted; long-press to force run_full now; a tripped circuit breaker shows as a red clamp on the rings. Live badge: 'ctx 61% · saved 84k · breaker closed'.",
-      "pointer": "src/agent/compression.rs::CompressionOrchestrator"
+      "title": "Latch the wall-clock budget",
+      "loop_stage": "foundation",
+      "pattern": "absolute-deadline-latch",
+      "intent": "Give the whole loop a hard wall-clock ceiling that resume cannot reset.",
+      "how_it_shapes_the_loop": "budget_elapsed_secs sums prior_elapsed_secs with the current run, so max_wall_secs is measured against total lifetime; the loop stops when the deadline passes regardless of state.",
+      "loop_objects_touched": ["Budget", "TaskCheckpoint"],
+      "wiring": {
+        "inputs_from": ["task_start_time", "prior_elapsed_secs", "config.agent.max_wall_secs"],
+        "outputs_to": ["AgentState::Failed (budget stop)"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "User rotates a two-finger dial on the foundation node to set the wall-clock ceiling for the entire loop.",
+        "visual": "A clock ring drains as wall time is consumed and turns red when the deadline is latched shut."
+      },
+      "mini_scenario": "A task resumed from checkpoint keeps its original deadline because budget_elapsed_secs carries prior_elapsed_secs forward.",
+      "pitfall": "Resetting elapsed time on resume would hand the loop an unlimited effective budget and break the ceiling."
     },
     {
       "id": "agent-13",
-      "title": "Load code token-aware with ContextMap levels",
-      "loop_role": "ContextMap models the perceive stage's codebase ingestion as a budgeted loading plan: files live at ContextMode levels — tree entry → skeleton (load_skeleton) → full content (load_full) — and can_load / compress_to_fit / downgrade_to_skeleton / evict_to_tree keep total_tokens under budget. set_modality_from_task picks a ContextModality (from_task) so a Q&A task and a refactor task load differently; focus_on_query and recommend_context surface the files the current loop turn actually needs.",
-      "affects": "Owns the context budget ledger: budget(), remaining(), usage_fraction(), should_compress(), compression_headroom(), thinking_reserve() are the numbers the loop's compression and prompt stages consume. LevelCosts (l1/l2/l3) and LoadEstimate make every loading decision measured, not heuristic — per the repo's AGENTS.md rule 'measured, not estimated'. auto_optimize rebalances levels as the loop's focus shifts between turns.",
-      "touch_ux": "A treemap of the codebase where each file tile's fill encodes its level: outline only = tree entry, wireframe = skeleton, solid = full. Tap a tile to promote it a level (load_skeleton → load_full) if can_load; long-press to demote/evict; pinch zooms from directory level down to file level; two-finger drag a tile onto the context reservoir to force-load it. Live badge: 'ctx 142k/400k · headroom 38k · reserve 12k'.",
-      "pointer": "src/agent/context_map.rs::ContextMap"
+      "title": "Derive the context/token budget at startup",
+      "loop_stage": "foundation",
+      "pattern": "budget-from-context",
+      "intent": "Fit the conversation inside the model's real context window before the first turn.",
+      "how_it_shapes_the_loop": "Agent::new calls config.derive_context_budget to compute max_context_tokens and reserved output, sizing the compressor to the usable conversation budget rather than the raw output cap.",
+      "loop_objects_touched": ["Budget", "Config", "Message"],
+      "wiring": {
+        "inputs_from": ["Config.context_length", "Config.max_tokens", "token_safety_margin"],
+        "outputs_to": ["compressor", "every reason turn"]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the foundation node fans out three bars: total context, safety margin, and usable conversation budget.",
+        "visual": "The usable-budget bar glows green; the safety margin is shown hatched and reserved."
+      },
+      "mini_scenario": "At startup the loop reserves 20% margin and derives max_context_tokens, so the compressor keeps turns inside the window.",
+      "pitfall": "Sizing the compressor to token_budget (the output cap) instead of max_context_tokens overflows the real window."
     },
     {
       "id": "agent-14",
-      "title": "Rewrite history safely with compress_to_structured_summary",
-      "loop_role": "compress_to_structured_summary is the deep-remember operation: it collapses message history to a target token budget while enforce_tool_call_pair_invariants guarantees no assistant tool_call is orphaned from its tool result (has_kept_tool_result_for_call / has_kept_prior_assistant_call) and is_critical_context_message pins system/critical messages. Model it as a context-window surgery node that must preserve API-level message invariants or the next perceive turn 400s.",
-      "affects": "The correctness of the entire post-compression loop depends on the pair invariants — a dangling tool_call without its result is rejected by most chat APIs, turning a compression into a run-ending error. The structured summary format preserves task state and evidence (rather than freeform prose), so verification gates and failure classification still see real signal after compaction.",
-      "touch_ux": "A film-strip of messages with kept messages as solid frames and dropped ones fading; tool_call/result pairs are linked by an unbreakable bracket that glows red if a drag would orphan one — the canvas physically blocks the drop. Tap a frame to pin/unpin it (critical messages show a lock); long-press the strip to preview the summary text. Live badge: 'kept 23/118 msgs · pairs intact ✓'.",
-      "pointer": "src/agent/context_management.rs::compress_to_structured_summary"
+      "title": "Compress history to reclaim budget",
+      "loop_stage": "control",
+      "pattern": "reclaim-by-compaction",
+      "intent": "Free conversation budget mid-loop without losing task continuity.",
+      "how_it_shapes_the_loop": "compact_micro/compact_auto/compact_full shrink the Message history via the CompressionOrchestrator, letting the loop keep iterating instead of dying on context overflow.",
+      "loop_objects_touched": ["Message", "Budget", "TaskCheckpoint"],
+      "wiring": {
+        "inputs_from": ["growing Message history", "budget pressure"],
+        "outputs_to": ["compacted Message history", "next reason turn"]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the history strip collapses old turns into a single summary card while keeping recent turns expanded.",
+        "visual": "Collapsed turns fold into a stacked card with a token-saved badge; recent turns stay crisp."
+      },
+      "mini_scenario": "As budget nears the ceiling the loop runs compact_auto, folds early turns to a summary, and continues executing.",
+      "pitfall": "Compacting away the task statement or key evidence strands the model with no anchor for the remaining work."
     },
     {
       "id": "agent-15",
-      "title": "Split prompts at the static/dynamic boundary with SystemPromptBuilder",
-      "loop_role": "SystemPromptBuilder models the perceive stage's prompt assembly for cache efficiency: add_static sections (stable system instructions) go before the boundary, add_dynamic sections (per-turn state) after it, and build_cached + static_cache_key let the provider cache the static prefix across turns. split_at_boundary and the DynamicSection trait define exactly where the volatile half begins.",
-      "affects": "Directly cuts token cost and latency on every loop turn: a stable static prefix means prompt caching hits, so cumulative_token_usage grows by the dynamic delta instead of the full system prompt each iteration. PromptStats (static_section_count / dynamic_section_count) quantifies the split; misordering a volatile section into the static half silently busts the cache and inflates budget burn.",
-      "touch_ux": "The prompt renders as a two-tone bar: left half solid blue (static, with a cache-hit lightning bolt when static_cache_key hits), right half striped (dynamic, shimmering as it changes per turn). Tap either half to list its sections; drag a section across the boundary to reclassify it — the bolt breaks if you pollute the static half; long-press shows PromptStats. Live badge: 'cache HIT · static 4 sections · dynamic 3'.",
-      "pointer": "src/agent/prompt_builder.rs::SystemPromptBuilder"
+      "title": "Snapshot progress into a TaskCheckpoint",
+      "loop_stage": "learn",
+      "pattern": "durable-progress-snapshot",
+      "intent": "Persist enough loop state that the task can resume after interruption.",
+      "how_it_shapes_the_loop": "run_task creates a TaskCheckpoint holding current_step, current_iteration, messages, tool_calls, and cumulative budget; the loop updates it so continue_execution can pick up mid-flight.",
+      "loop_objects_touched": ["TaskCheckpoint", "Budget", "Message"],
+      "wiring": {
+        "inputs_from": ["AgentState", "Message history", "budget counters"],
+        "outputs_to": ["CheckpointManager", "continue_execution"]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the control hub drops a checkpoint pin onto the timeline capturing the current loop state.",
+        "visual": "A pin badge with the step/iteration numbers materializes and pulses once to confirm the save."
+      },
+      "mini_scenario": "Mid-task the loop writes a checkpoint; after a crash, continue_execution restores step and iteration and resumes.",
+      "pitfall": "Overwriting the checkpoint's task_description on a reused Agent points the completion gate at the wrong task."
     },
     {
       "id": "agent-16",
-      "title": "Suspend and resume runs with to_checkpoint and resume",
-      "loop_role": "checkpointing.rs is the remember stage's persistence: to_checkpoint(task_id, task_description) snapshots the full agent (message history, loop counters, budget caps via restore_budget_caps_from_checkpoint) into a TaskCheckpoint, and Agent::resume(config, task_id) rehydrates a run mid-loop — task_runner's continue_execution and AgentLoop::restore_progress pick the loop up exactly where it stopped. consolidate_session_memory folds session memory into the checkpoint.",
-      "affects": "Checkpoints freeze every loop object: context window (messages), evidence (tool_call_content_preview truncates tool history safely with truncate_bytes_char_boundary), loop counters, and budget caps — so a resumed run can't silently exceed the budget its predecessor was granted. This is what makes multi-hour runs and crash recovery honest: the resume path restores measured state, not a fresh optimistic start.",
-      "touch_ux": "Checkpoints are bookmark gems embedded in the run timeline; tap one to preview its snapshot (step, iteration, message count, budget caps), long-press to resume from it — the timeline animates rewinding to the gem then playing forward; pinch on a gem diffs two checkpoints. Live badge: 'ckpt #3 · step 12 · 41 msgs · caps restored'.",
-      "pointer": "src/agent/checkpointing.rs::resume"
+      "title": "Enforce explicit required tools before answering",
+      "loop_stage": "control",
+      "pattern": "required-tool-gate",
+      "intent": "Refuse to finish until tools the task explicitly named have actually run.",
+      "how_it_shapes_the_loop": "run_task extracts explicit_task_tools, activates them, and appends a directive so the completion path blocks a final answer until each required tool has succeeded.",
+      "loop_objects_touched": ["Plan", "Message", "TaskCheckpoint"],
+      "wiring": {
+        "inputs_from": ["task string", "tool registry list"],
+        "outputs_to": ["activated tools", "completion gate"]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "User draws mandatory edges from named tool nodes into a 'required' collar around the completion node.",
+        "visual": "Each required tool edge is amber and thick until its tool succeeds, then it turns green and thins."
+      },
+      "mini_scenario": "A task says 'use cargo_test'; the loop activates it and will not emit a final answer until cargo_test has passed.",
+      "pitfall": "Marking a required tool satisfied on a failed call lets the loop answer without the evidence it was told to gather."
     },
     {
       "id": "agent-17",
-      "title": "Stream loop telemetry through EvolutionBus events",
-      "loop_role": "The EvolutionBus is the loop's nervous system for the evolve stage: EvolutionEvent variants (AgentFocus, AgentStream, ToolInvoked, ToolCompleted, AgentStateChange, TierUpdate, BuildResult) plus Throughput(ThroughputSnapshot) are emitted at loop points and fanned out to subscribers (emit / subscribe / subscriber_count). ThroughputTracker (record_tokens_in/out, request_started/completed, concurrent_requests) measures real token rates; ContextTier and TierEntry (Describe | Work | Integrate | Edit) track which context tier the agent operates in.",
-      "affects": "Read-only side channel — it observes the loop's objects (tokens, tool invocations, AgentActivityState: idle | thinking | tool_call | streaming | verifying | done) without mutating them, so telemetry can never distort the run it measures. EvolutionBridgeEmitter bridges agent internals to the bus, letting a DAG visualization render the exact same state machine AgentLoop enforces.",
-      "touch_ux": "This is the canvas's live data plane: AgentStateChange events drive node colors (thinking=blue pulse, tool_call=orange, verifying=green, done=grey), Throughput feeds an edge thickness between agent node and LLM node proportional to tokens/sec. Tap the bus node to list subscribers; long-press to pause the event stream and inspect a single event payload; pinch zooms the throughput sparkline. Live badge: 'tok/s 312 · 2 in-flight · tier: Edit'.",
-      "pointer": "src/agent/evolution_events.rs::EvolutionBus"
+      "title": "Escalate to careful/rigor mode",
+      "loop_stage": "reason",
+      "pattern": "adaptive-rigor",
+      "intent": "Slow the loop down and add verification when outcomes look risky.",
+      "how_it_shapes_the_loop": "should_enter_rigor inspects a ResolutionOutcome and, when it warrants, injects careful_mode_directive so subsequent reason turns are more methodical and completion requires verification.",
+      "loop_objects_touched": ["Message", "FailureMode", "AgentState"],
+      "wiring": {
+        "inputs_from": ["ResolutionOutcome", "failure counters"],
+        "outputs_to": ["careful-mode Message", "verification gate"]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the Reason node with two fingers dials rigor from fast to careful, adding verify sub-steps.",
+        "visual": "At higher rigor the node deepens to indigo and grows an extra verification sub-node."
+      },
+      "mini_scenario": "After a shaky resolution the loop enters rigor, injects the careful directive, and demands verification before completing.",
+      "pitfall": "Entering rigor on every minor hiccup makes routine tasks crawl and burns the wall-clock budget."
     },
     {
       "id": "agent-18",
-      "title": "Emit structured progress with ProgressEvent and ProgressEmitter",
-      "loop_role": "ProgressEvent is the single source of truth for 'what is the agent doing right now' across TUI and headless: StepStarted, LlmRequestSent, LlmResponseReceived, ToolCallStarted/Completed, GuardFired{kind,count}, StepCompleted{mutating_tools_so_far}, SubprocessStarted/Completed, TaskCompleted/TaskFailed, and TurnDecision{decision,detail} for turns that ended without tools. The ProgressEmitter trait (Arc<dyn>) fans one stream out to MultiProgressEmitter consumers — StderrProgressEmitter for greppable headless logs, RecordingProgressEmitter for tests, NoopProgressEmitter when off.",
-      "affects": "Observational only, but it defines loop legibility: GuardFired surfaces stall-guard trips live (same counters failure_mode.rs later classifies), and TurnDecision makes refused/no-op turns visible instead of silent step gaps — an honesty mechanism, since a turn that did nothing still leaves a named trace. kinds() and snapshot() let dashboards enumerate the event vocabulary.",
-      "touch_ux": "A status ribbon along the canvas bottom: the current ProgressEvent renders as scrolling chips (tool chips show args_short from short_args_for), GuardFired chips pulse red with their count, TurnDecision chips render hollow to signal 'nothing happened'. Tap a chip to freeze and expand it; long-press the ribbon to switch emitters (stderr vs recording); two-finger swipe scrubs event history. Live badge: current event kind + mutating_tools_so_far counter.",
-      "pointer": "src/agent/progress.rs::ProgressEvent"
+      "title": "Verify before declaring Completed",
+      "loop_stage": "verify",
+      "pattern": "completion-gate",
+      "intent": "Block the Completed transition until the work is actually verified.",
+      "how_it_shapes_the_loop": "completion_requires_verification and the baseline-dirty capture make the Executing -> Completed transition conditional on evidence, so the loop cannot self-declare success on unverified edits.",
+      "loop_objects_touched": ["AgentState", "TaskCheckpoint", "PlanStep"],
+      "wiring": {
+        "inputs_from": ["verification results", "baseline dirty paths"],
+        "outputs_to": ["AgentState::Completed", "back to Executing"]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "A checkmark gate sits on the edge into Completed; it stays greyed until verification evidence lands, then becomes tappable.",
+        "visual": "The gate icon is a hollow check while unverified and fills solid green once evidence passes."
+      },
+      "mini_scenario": "The model claims done, but the completion gate holds the loop in Executing until cargo_test evidence appears.",
+      "pitfall": "Counting pre-existing uncommitted changes as new work lets the gate pass on edits the loop never made."
     },
     {
       "id": "agent-19",
-      "title": "Capture per-turn evidence with TurnArtifact and AgentDecision",
-      "loop_role": "turn_artifacts.rs writes a forensic record of every perceive→decide cycle: each LLM call produces a TurnArtifact with the sanitized request body (sanitize_request_body strips secrets), raw response, finish_reason, token counts, reasoning_content (Qwen/DeepSeek think-tags), parsed_tool_calls, and the AgentDecision — ExecutedTools{tools}, NoToolCall, NudgeInjected{reason}, Aborted{reason}, Completed{text}, or Refused{reason}. write_artifact persists to .selfware/turns/turn_NNNN.json.",
-      "affects": "Zero loop impact at runtime (opt-in via agent.disable_turn_artifacts = false) but it is the ground truth for post-mortems of NONTERM_PROSE, gate refusals, and oscillation: AgentDecision names exactly what the loop did with each model response, so trust claims ('the gate refused turn 14 twice') are verifiable from artifacts, not memory. Sanitization keeps the evidence shareable without leaking secrets.",
-      "touch_ux": "Each turn chip on the timeline carries a paperclip glyph when an artifact exists; tap to open the artifact card with the AgentDecision rendered as a verdict icon (hammer=executed, ghost=no-tool-call, syringe=nudge, stop-sign=aborted, flag=completed, shield=refused); long-press to reveal request/response JSON side-by-side; pinch to diff two turns' artifacts. Live badge: decision icon of the latest turn + elapsed_ms.",
-      "pointer": "src/agent/turn_artifacts.rs::TurnArtifact"
+      "title": "Classify the terminal failure mode",
+      "loop_stage": "learn",
+      "pattern": "labeled-termination",
+      "intent": "Record why a loop ended so the outcome is diagnosable, not just 'failed'.",
+      "how_it_shapes_the_loop": "last_run_failure_mode captures a FailureMode (budget stop, max iterations, unrecoverable error) on the terminal transition, and terminal_event_emitted guards against double-emitting the end event.",
+      "loop_objects_touched": ["FailureMode", "AgentState"],
+      "wiring": {
+        "inputs_from": ["terminal AgentState", "guard counters"],
+        "outputs_to": ["terminal AgentEvent", "learning session"]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping a terminal node reveals its labeled failure/success reason and the single terminal event it emitted.",
+        "visual": "Failed nodes carry a red tag with the mode label; Completed nodes carry a green success tag."
+      },
+      "mini_scenario": "The loop hits the wall-clock ceiling; last_run_failure_mode is set to a budget stop and exactly one terminal event fires.",
+      "pitfall": "Emitting the terminal event twice (missing the terminal_event_emitted latch) confuses downstream listeners."
     },
     {
       "id": "agent-20",
-      "title": "Steer a running loop from the interactive queue",
-      "loop_role": "interactive/mod.rs models the human as a loop participant: run_task_with_queue runs the task loop while drain_pending_messages interleaves user input between iterations — enqueue_pending_message lets the user inject steering text that becomes a message in the next perceive turn without aborting the run. after_task_run handles post-loop hooks, and the ESC/cancel wiring (shared with run_tool_bounded's cancel token) makes interrupt a first-class loop transition rather than a kill.",
-      "affects": "User-injected PendingMessages mutate the context window mid-run, redirecting plan and act stages; the cancel path converts a hard interrupt into structured ToolHalt::Cancelled evidence and a clean Failed state instead of corrupted partial state. handle_explain_command and print_execution_debug expose the loop's objects (tool calls, task state) to the user on demand — interactive introspection of evidence without stopping the loop.",
-      "touch_ux": "A floating input orb docked at the canvas edge: dragging the orb onto the running loop enqueues a PendingMessage (the orb dissolves into a chat bubble that slides into the next turn's context); a force-touch on the running loop node is the ESC gesture, propagating the cancel token with a freeze-frame animation. Tap the queue icon to see pending messages; long-press a queued bubble to edit or drop it before the next iteration consumes it. Live badge: '2 queued · ESC armed'.",
-      "pointer": "src/agent/interactive/mod.rs::run_task_with_queue"
+      "title": "Reset cleanly for the next queued task",
+      "loop_stage": "control",
+      "pattern": "clean-slate-reset",
+      "intent": "Ensure a reused Agent starts the next task with no residue from the last.",
+      "how_it_shapes_the_loop": "run_task clears failed-tool attempts, no-action prompt state, failure-mode counters, required tools, cumulative token/cost usage, and dirty-path baseline before the new loop begins.",
+      "loop_objects_touched": ["Budget", "GuardCounters", "TaskCheckpoint", "FailureMode"],
+      "wiring": {
+        "inputs_from": ["previous task terminal state"],
+        "outputs_to": ["fresh AgentState::Planning", "new TaskCheckpoint"]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "User flicks the whole canvas downward to sweep the previous run's counters and badges off before the next task drops in.",
+        "visual": "Old badges fade and slide away; the state graph resets to the single breathing Planning node."
+      },
+      "mini_scenario": "A queued follow-up task starts; run_task wipes cumulative usage and counters so its budget and guards start from zero.",
+      "pitfall": "Forgetting to reset cumulative_token_usage bleeds the previous task's spend into the next task's budget accounting."
     }
   ]
 }
