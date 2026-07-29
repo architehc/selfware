@@ -83,13 +83,18 @@ impl GraphBuilder {
             // Benchmark tooling under src/ is tooling, not product code:
             // excluding it from the code tiers saves ~77k full / ~10k lite
             // tokens of context that never describes the product
-            // (DEBLOAT_STATE.md).
+            // (DEBLOAT_STATE.md). swl/ is the experimental workflow-language
+            // runtime — used by CLI/orchestration but not product context
+            // (−46k full tokens).
             let is_tooling_module = {
                 let module = relative
                     .components()
                     .nth(1)
                     .and_then(|c| c.as_os_str().to_str());
-                matches!(module, Some("bench_harness") | Some("vlm_bench"))
+                matches!(
+                    module,
+                    Some("bench_harness") | Some("vlm_bench") | Some("swl")
+                )
             };
             let is_code = matches!(source_set, SourceSet::Code)
                 && is_production_source_class(file_class)

@@ -9,8 +9,8 @@
 
 | Metric | Baseline | Previous (2026-07-25) | Delta |
 |---|---|---|---|
-| Full (all Code nodes) | 1,327,929 | 1,359,882 | −31,953 (bench/vlm exclusion 2026-07-28) |
-| Lite (skeletons/verbatim) | 214,776 | 172,243 | +42,533 (non-rs shipped, minus exclusion) |
+| Full (all Code nodes) | 1,282,200 | 1,359,882 | −77,682 (bench/vlm + swl exclusions) |
+| Lite (skeletons/verbatim) | 205,479 | 172,243 | +33,236 (non-rs shipped, minus exclusions) |
 | Compact | ~1.04M | 1,099,370 | — |
 | Map (component cards) | ~24.5k | 26,949 | — |
 | Production files | 342 in tiers (376 total incl. tooling) | 380 | bench/vlm → Auxiliary |
@@ -46,7 +46,7 @@ Full per-module table: `curl :7777/api/context/map` (evolve server) or
 | Item | Tokens at stake | Status |
 |---|---|---|
 | bench_harness + vlm_bench excluded from production tiers (they're tooling, not product code) | ~~−77k full, −10k lite~~ | [done] 2026-07-28 — measured −80.7k/−10.3k |
-| swl/ (experimental) — exclude or lower to orchestration executor (CONSOLIDATION_PLAN #1) | −46k full | [open] — owner decision |
+| swl/ classified as tooling (kept for CLI/orchestration, excluded from tiers) | ~~−46k full~~ | [done] 2026-07-28 — measured −45.7k/−9.3k lite |
 | tokens.rs dead subsystem | ~~1,489 src lines~~ | [done] 2026-07-28 |
 | tier_allocator duplicate tier system | ~~1,200 lines~~ | [done] 2026-07-28 |
 | Dead deps (lru, tokio-test) + ~30 dead items | ~~895 lines~~ | [done] 2026-07-28 |
