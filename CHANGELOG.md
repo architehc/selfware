@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.8-beta.1] - 2026-07-29
+
+### Added
+- **Trust-gated agent loop**: every tool result is scanned at ingestion via `context_trust` — high-severity injection patterns sanitized inline (never dropped), hidden unicode blocked, trusted Rust source report-only; `trust:N` status badge; `safety.trust_gate_tool_results` kill switch. Closes the original Rec 2 invariant on both paths.
+- Expansion catalog API: `GET /api/expansion/index|{component}|{component}/{example_id}` serving the 580-example library live; catalog validator (`scripts/validate_expansion.py`) + generated `index.json`
+- 4 workspace screenshots on the website (PR architehc/selfware.design#1)
+
+### Fixed
+- `expand` reaches Auxiliary (tooling) nodes again — Bulk-vs-OnDemand separation restored
+- package.rs credential hygiene; apply rejects protected paths + symlinks; `/undo` hash-verify + atomic writes; exit codes walk the cause chain; short-term memory budget accounting; staged-apply banner persists across navigation
+
 ## [0.6.7] - 2026-07-29
 
 ### Added
@@ -255,7 +266,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.7...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.8-beta.1...HEAD
+[0.6.8-beta.1]: https://github.com/architehc/selfware/compare/v0.6.7...v0.6.8-beta.1
 [0.6.7]: https://github.com/architehc/selfware/compare/v0.6.6...v0.6.7
 [0.6.6]: https://github.com/architehc/selfware/compare/v0.6.5...v0.6.6
 [0.6.5]: https://github.com/architehc/selfware/compare/v0.6.4...v0.6.5
