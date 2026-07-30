@@ -1,0 +1,53 @@
+# Deep-research mode — Fara1.5-27B (V100, llama.cpp :8090) drives the agent
+# loop as the fast browser/collector; GLM-5.2 (:30000) is available as the
+# `strategist` model profile for planning/synthesis consults.
+#
+# Usage: selfware run -c fara-research.toml "<research task>"
+#        (run from /home/rig/selfware so ./research/ collects the notes)
+
+endpoint = "http://127.0.0.1:8090/v1"
+model = "Fara1.5-27B"
+max_tokens = 2048
+context_length = 32768
+
+# Thinking stays ON here: collection quality is markedly better with it
+# (~17 min/sub-query on the V100). fara-research-fast.toml disables it for
+# quick-and-shallow runs (FAST=1 in deep-research.sh).
+
+[models.strategist]
+endpoint = "http://127.0.0.1:30000/v1"
+model = "/home/rig/models/glm-5.2-awq-int4"
+max_tokens = 1024
+context_length = 4096
+modalities = ["text"]
+native_function_calling = false
+
+[models.fara]
+endpoint = "http://127.0.0.1:8090/v1"
+model = "Fara1.5-27B"
+max_tokens = 2048
+context_length = 32768
+modalities = ["text", "vision"]
+native_function_calling = false
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 100
+step_timeout_secs = 600
+# XML tool calling — works uniformly across llama.cpp and sglang backends.
+native_function_calling = false
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
