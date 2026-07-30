@@ -1843,7 +1843,10 @@ pub(crate) fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        // floor_char_boundary: byte-slicing at max_len-3 panics when a
+        // multi-byte char straddles the cut (dry_run's twin already does this).
+        let end = s.floor_char_boundary(max_len.saturating_sub(3));
+        format!("{}...", &s[..end])
     }
 }
 

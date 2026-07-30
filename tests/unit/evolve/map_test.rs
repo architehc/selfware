@@ -199,3 +199,24 @@ fn build_map_and_expand_round_trip() {
     // Unknown component yields nothing.
     assert!(expand(&graph, dir.path(), "crate::missing", None, false).is_none());
 }
+
+#[test]
+fn expand_works_for_auxiliary_nodes() {
+    // Bulk-vs-OnDemand separation: Auxiliary nodes (tooling, docs) are excluded
+    // from bulk tiers but must remain expandable (regression: expand used to
+    // hard-require NodeLayer::Code).
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("src/ui/mod.rs");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "pub fn render() {}\n").unwrap();
+    let mut node = Node::code("crate::ui", "src/ui/mod.rs");
+    node.layer = NodeLayer::Auxiliary;
+    node.tokens = 10;
+    let graph = Graph {
+        nodes: vec![node],
+        edges: vec![],
+    };
+    let content = expand(&graph, dir.path(), "crate::ui", None, true);
+    assert!(content.is_some(), "expand must reach Auxiliary nodes");
+    assert!(content.unwrap().contains("render"));
+}

@@ -675,57 +675,7 @@ impl Agent {
 
             if input == "/undo" {
                 if let Some(checkpoint) = self.edit_history.undo() {
-                    let mut restored = 0;
-                    for (path, snapshot) in &checkpoint.files {
-                        // Hash-verify before writing: if the file changed since
-                        // the checkpoint, the undo would silently clobber newer
-                        // content (review finding — hash was computed but never
-                        // checked).
-                        let current_hash = match tokio::fs::read_to_string(path).await {
-                            Ok(content) => crate::session::edit_history::compute_hash(&content),
-                            Err(_) => snapshot.hash.clone(), // missing file is safe to restore
-                        };
-                        if current_hash != snapshot.hash {
-                            // File drifted since the checkpoint — restoring would
-                            // overwrite newer work. Skip with an honest report.
-                            let snapshot_hash_matches =
-                                crate::session::edit_history::compute_hash(&snapshot.content)
-                                    == snapshot.hash;
-                            if !snapshot_hash_matches {
-                                // Snapshot itself is corrupt — never write corrupt data.
-                                println!(
-                                    "  {} Skipped {} (snapshot hash mismatch — corrupt checkpoint)",
-                                    "✗".bright_red(),
-                                    path.display().to_string().bright_white()
-                                );
-                                continue;
-                            }
-                            println!(
-                                "  {} Skipped {} (file changed since checkpoint — undo would clobber newer edits)",
-                                "⚠".bright_yellow(),
-                                path.display().to_string().bright_white()
-                            );
-                            continue;
-                        }
-                        // Atomic write: temp file + rename, never a torn write.
-                        let tmp = path.with_extension(format!(
-                            "{}.undo-tmp",
-                            path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
-                        ));
-                        let written = tokio::fs::write(&tmp, &snapshot.content).await.is_ok()
-                            && tokio::fs::rename(&tmp, path).await.is_ok();
-                        if !written {
-                            let _ = tokio::fs::remove_file(&tmp).await;
-                        }
-                        if written {
-                            println!(
-                                "  {} Restored {}",
-                                "✓".bright_green(),
-                                path.display().to_string().bright_white()
-                            );
-                            restored += 1;
-                        }
-                    }
+                    let restored = restore_checkpoint_guarded(&checkpoint.files).await;
                     if restored == 0 {
                         println!(
                             "{} Undo: {} (no files to restore)",
@@ -1249,22 +1199,7 @@ impl Agent {
                     if idx < timeline.len() {
                         let checkpoint_id = timeline[idx].id;
                         if let Some(checkpoint) = self.edit_history.goto(checkpoint_id) {
-                            let mut restored = 0;
-                            let files: Vec<_> = checkpoint
-                                .files
-                                .iter()
-                                .map(|(p, s)| (p.clone(), s.content.clone()))
-                                .collect();
-                            for (path, content) in &files {
-                                if tokio::fs::write(path, content).await.is_ok() {
-                                    println!(
-                                        "  {} Restored {}",
-                                        "✓".bright_green(),
-                                        path.display().to_string().bright_white()
-                                    );
-                                    restored += 1;
-                                }
-                            }
+                            let restored = restore_checkpoint_guarded(&checkpoint.files).await;
                             println!(
                                 "{} Restored checkpoint {} ({} file(s))",
                                 "⏪".bright_green(),
@@ -1314,6 +1249,65 @@ impl Agent {
                 );
                 println!();
                 continue;
+            }
+
+            // ── Guarded checkpoint restore (shared by /undo and /restore <n>) ──
+
+            /// Restore a checkpoint's files with integrity guards: drift detection
+            /// (skip files that changed since the checkpoint — undo must never clobber
+            /// newer work), corrupt-snapshot rejection, and atomic temp+rename writes.
+            /// Returns the number of files actually restored.
+            async fn restore_checkpoint_guarded(
+                files: &std::collections::HashMap<
+                    std::path::PathBuf,
+                    crate::session::edit_history::FileSnapshot,
+                >,
+            ) -> usize {
+                let mut restored = 0;
+                for (path, snapshot) in files {
+                    let current_hash = match tokio::fs::read_to_string(path).await {
+                        Ok(content) => crate::session::edit_history::compute_hash(&content),
+                        Err(_) => snapshot.hash.clone(), // missing file is safe to restore
+                    };
+                    if current_hash != snapshot.hash {
+                        let snapshot_ok =
+                            crate::session::edit_history::compute_hash(&snapshot.content)
+                                == snapshot.hash;
+                        if !snapshot_ok {
+                            println!(
+                                "  {} Skipped {} (snapshot hash mismatch — corrupt checkpoint)",
+                                "✗".bright_red(),
+                                path.display().to_string().bright_white()
+                            );
+                            continue;
+                        }
+                        println!(
+                "  {} Skipped {} (file changed since checkpoint — restore would clobber newer edits)",
+                "⚠".bright_yellow(),
+                path.display().to_string().bright_white()
+            );
+                        continue;
+                    }
+                    // Atomic write: temp file + rename, never a torn write.
+                    let tmp = path.with_extension(format!(
+                        "{}.undo-tmp",
+                        path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
+                    ));
+                    let written = tokio::fs::write(&tmp, &snapshot.content).await.is_ok()
+                        && tokio::fs::rename(&tmp, path).await.is_ok();
+                    if !written {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                    }
+                    if written {
+                        println!(
+                            "  {} Restored {}",
+                            "✓".bright_green(),
+                            path.display().to_string().bright_white()
+                        );
+                        restored += 1;
+                    }
+                }
+                restored
             }
 
             // /execute - Approve plan and execute

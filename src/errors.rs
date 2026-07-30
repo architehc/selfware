@@ -339,16 +339,20 @@ pub type Result<T> = std::result::Result<T, SelfwareError>;
 
 /// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
 pub fn is_confirmation_error(e: &anyhow::Error) -> bool {
-    // Check if wrapped as SelfwareError::Agent(AgentError::ConfirmationRequired)
-    if let Some(SelfwareError::Agent(AgentError::ConfirmationRequired { .. })) =
-        e.downcast_ref::<SelfwareError>()
-    {
-        return true;
-    }
+    // Walk the whole cause chain: anyhow::Context-wrapped errors hide the
+    // ConfirmationRequired underneath, and only the outermost layer downcasts.
+    for cause in e.chain() {
+        // Check if wrapped as SelfwareError::Agent(AgentError::ConfirmationRequired)
+        if let Some(SelfwareError::Agent(AgentError::ConfirmationRequired { .. })) =
+            cause.downcast_ref::<SelfwareError>()
+        {
+            return true;
+        }
 
-    // Also check if AgentError was returned directly into anyhow (e.g. from execution.rs)
-    if let Some(AgentError::ConfirmationRequired { .. }) = e.downcast_ref::<AgentError>() {
-        return true;
+        // Also check if AgentError was returned directly into anyhow (e.g. from execution.rs)
+        if let Some(AgentError::ConfirmationRequired { .. }) = cause.downcast_ref::<AgentError>() {
+            return true;
+        }
     }
 
     false
