@@ -1,9 +1,30 @@
 {
   "component": "orchestration",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "control",
   "summary": "The orchestration component runs multi-agent loops. Its WorkflowExecutor (src/orchestration/workflows.rs) drives a DAG of WorkflowSteps (Tool, Shell, Llm, Condition, Loop, SubWorkflow, Guardrail) with retries, timeouts, and cycle detection; its Swarm coordinator drives role-typed Agents through task assignment, weighted Votes, and Decisions resolved by a ConflictStrategy over SharedMemory; MultiAgentChat fans one completion out per Agent under a BudgetGuard and a tokio Semaphore; and the VisualFeedbackLoop iterates act-capture-evaluate against a VisualScore quality_threshold. On the loop it is the control driver that spawns, sequences, and reconciles parallel sub-loops.",
-  "loop_objects": ["Workflow", "WorkflowStep", "StepType", "WorkflowContext", "StepResult", "WorkflowStatus", "Swarm", "Agent", "AgentRole", "SwarmTask", "Vote", "Decision", "ConflictStrategy", "SharedMemory", "MultiAgentChat", "AgentResult", "MultiAgentEvent", "VisualFeedbackLoop", "VisualScore", "VisualLoopResult"],
+  "loop_objects": [
+    "Workflow",
+    "WorkflowStep",
+    "StepType",
+    "WorkflowContext",
+    "StepResult",
+    "WorkflowStatus",
+    "Swarm",
+    "Agent",
+    "AgentRole",
+    "SwarmTask",
+    "Vote",
+    "Decision",
+    "ConflictStrategy",
+    "SharedMemory",
+    "MultiAgentChat",
+    "AgentResult",
+    "MultiAgentEvent",
+    "VisualFeedbackLoop",
+    "VisualScore",
+    "VisualLoopResult"
+  ],
   "context_basis": "Recommendations were formed with src/orchestration/ read in the context of the full engine under a ~600k budget framing; fan-out and swarm coordination assume a shared budget that must be guarded across many concurrent sub-agents.",
   "examples": [
     {
@@ -13,10 +34,21 @@
       "pattern": "dag-execution",
       "intent": "Run steps in dependency order so each starts only when its inputs are ready.",
       "how_it_shapes_the_loop": "WorkflowExecutor::execute loads a Workflow, builds a WorkflowContext, and runs WorkflowSteps respecting depends_on, so the control layer sequences the sub-loop deterministically.",
-      "loop_objects_touched": ["Workflow", "WorkflowStep", "WorkflowContext", "StepResult"],
+      "loop_objects_touched": [
+        "Workflow",
+        "WorkflowStep",
+        "WorkflowContext",
+        "StepResult"
+      ],
       "wiring": {
-        "inputs_from": ["workflow definition (crate::orchestration::workflows::Workflow)", "WorkflowInputs"],
-        "outputs_to": ["StepResults", "WorkflowStatus"]
+        "inputs_from": [
+          "workflow definition (crate::orchestration::workflows::Workflow)",
+          "WorkflowInputs"
+        ],
+        "outputs_to": [
+          "StepResults",
+          "WorkflowStatus"
+        ]
       },
       "touch_interaction": {
         "gesture": "draw-connection",
@@ -33,10 +65,17 @@
       "pattern": "retry-with-timeout",
       "intent": "Give a flaky step bounded retries without letting it hang the loop.",
       "how_it_shapes_the_loop": "WorkflowExecutor::execute_step_with_retry wraps a step in a tokio::select against its RetryConfig timeout and retries up to max_attempts with delay, so the control layer contains transient failures.",
-      "loop_objects_touched": ["WorkflowStep", "StepResult"],
+      "loop_objects_touched": [
+        "WorkflowStep",
+        "StepResult"
+      ],
       "wiring": {
-        "inputs_from": ["WorkflowStep RetryConfig"],
-        "outputs_to": ["StepResult (Completed / Failed)"]
+        "inputs_from": [
+          "WorkflowStep RetryConfig"
+        ],
+        "outputs_to": [
+          "StepResult (Completed / Failed)"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -53,10 +92,19 @@
       "pattern": "conditional-branch",
       "intent": "Choose the next steps based on a runtime condition over the context.",
       "how_it_shapes_the_loop": "A Condition StepType evaluates its 'if' via WorkflowContext::evaluate_condition (success(), failed(), equality) and runs the then or else branch inline, so the reason stage forks the workflow path at runtime.",
-      "loop_objects_touched": ["StepType", "WorkflowContext", "StepResult"],
+      "loop_objects_touched": [
+        "StepType",
+        "WorkflowContext",
+        "StepResult"
+      ],
       "wiring": {
-        "inputs_from": ["prior StepResults", "WorkflowContext variables"],
-        "outputs_to": ["selected branch steps"]
+        "inputs_from": [
+          "prior StepResults",
+          "WorkflowContext variables"
+        ],
+        "outputs_to": [
+          "selected branch steps"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -73,10 +121,20 @@
       "pattern": "step-iteration",
       "intent": "Run a body of steps once per item, keyed per iteration.",
       "how_it_shapes_the_loop": "A Loop StepType splits its 'in' list and runs 'do' steps per item, storing each result as step_id@idx in the WorkflowContext, so the control layer expands one node into an indexed sequence.",
-      "loop_objects_touched": ["StepType", "WorkflowContext", "StepResult"],
+      "loop_objects_touched": [
+        "StepType",
+        "WorkflowContext",
+        "StepResult"
+      ],
       "wiring": {
-        "inputs_from": ["iteration list", "loop variable"],
-        "outputs_to": ["per-iteration StepResults", "aggregate result"]
+        "inputs_from": [
+          "iteration list",
+          "loop variable"
+        ],
+        "outputs_to": [
+          "per-iteration StepResults",
+          "aggregate result"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -93,10 +151,17 @@
       "pattern": "safe-substitution",
       "intent": "Inject context values into a shell command without opening an injection hole.",
       "how_it_shapes_the_loop": "WorkflowContext::substitute_shell_safe POSIX-quotes interpolated values before a Shell StepType runs, so the foundation layer prevents a malicious variable from escaping the command.",
-      "loop_objects_touched": ["StepType", "WorkflowContext"],
+      "loop_objects_touched": [
+        "StepType",
+        "WorkflowContext"
+      ],
       "wiring": {
-        "inputs_from": ["WorkflowContext variables"],
-        "outputs_to": ["safely-quoted shell command"]
+        "inputs_from": [
+          "WorkflowContext variables"
+        ],
+        "outputs_to": [
+          "safely-quoted shell command"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -113,10 +178,17 @@
       "pattern": "guardrail-fail-closed",
       "intent": "Block the workflow when a safety condition is violated.",
       "how_it_shapes_the_loop": "A Guardrail StepType evaluates its condition via the GuardrailEngine over a GuardrailContext; a block or unknown EvaluationResult returns an error, so the verify stage halts the loop rather than proceeding unsafely.",
-      "loop_objects_touched": ["StepType", "WorkflowContext"],
+      "loop_objects_touched": [
+        "StepType",
+        "WorkflowContext"
+      ],
       "wiring": {
-        "inputs_from": ["GuardrailContext built from WorkflowContext variables"],
-        "outputs_to": ["block (Err) or allow (Ok)"]
+        "inputs_from": [
+          "GuardrailContext built from WorkflowContext variables"
+        ],
+        "outputs_to": [
+          "block (Err) or allow (Ok)"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -133,10 +205,19 @@
       "pattern": "sub-loop-nesting",
       "intent": "Compose a workflow out of reusable sub-workflows without infinite recursion.",
       "how_it_shapes_the_loop": "A SubWorkflow StepType executes with an appended WorkflowContext::workflow_call_stack and a recursion_depth cap, so the control layer nests sub-loops while detecting call cycles across workflow boundaries.",
-      "loop_objects_touched": ["StepType", "WorkflowContext", "Workflow"],
+      "loop_objects_touched": [
+        "StepType",
+        "WorkflowContext",
+        "Workflow"
+      ],
       "wiring": {
-        "inputs_from": ["sub-workflow name", "mapped inputs"],
-        "outputs_to": ["merged sub-workflow outputs"]
+        "inputs_from": [
+          "sub-workflow name",
+          "mapped inputs"
+        ],
+        "outputs_to": [
+          "merged sub-workflow outputs"
+        ]
       },
       "touch_interaction": {
         "gesture": "double-tap",
@@ -153,10 +234,21 @@
       "pattern": "role-matched-assignment",
       "intent": "Route each task to an available specialist most likely to do it well.",
       "how_it_shapes_the_loop": "Swarm::assign_task matches a SwarmTask's required_roles to idle Agents by highest trust_score and sets them Working, so the act stage dispatches work to the fittest agent per role.",
-      "loop_objects_touched": ["Swarm", "SwarmTask", "Agent", "AgentRole"],
+      "loop_objects_touched": [
+        "Swarm",
+        "SwarmTask",
+        "Agent",
+        "AgentRole"
+      ],
       "wiring": {
-        "inputs_from": ["queued SwarmTask (crate::orchestration::swarm::coordinator::queue_task)", "idle Agents"],
-        "outputs_to": ["assigned agents", "task InProgress"]
+        "inputs_from": [
+          "queued SwarmTask (crate::orchestration::swarm::coordinator::queue_task)",
+          "idle Agents"
+        ],
+        "outputs_to": [
+          "assigned agents",
+          "task InProgress"
+        ]
       },
       "touch_interaction": {
         "gesture": "drag",
@@ -173,10 +265,20 @@
       "pattern": "agent-recycling",
       "intent": "Return finished agents to the pool so future tasks can use them.",
       "how_it_shapes_the_loop": "Swarm::complete_task records the result, updates the Agent's trust_score and task counts, then sets it Idle, so the control layer keeps the agent pool circulating instead of freezing agents in Completed.",
-      "loop_objects_touched": ["Swarm", "Agent", "SwarmTask"],
+      "loop_objects_touched": [
+        "Swarm",
+        "Agent",
+        "SwarmTask"
+      ],
       "wiring": {
-        "inputs_from": ["task result", "success flag"],
-        "outputs_to": ["Agent Idle", "task Completed"]
+        "inputs_from": [
+          "task result",
+          "success flag"
+        ],
+        "outputs_to": [
+          "Agent Idle",
+          "task Completed"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -193,10 +295,20 @@
       "pattern": "weighted-consensus",
       "intent": "Let the swarm decide among options with each vote weighted by expertise and trust.",
       "how_it_shapes_the_loop": "Swarm::create_decision opens a Decision; each Agent's Vote carries weighted_value = confidence x role_priority x trust_score, so the reason stage aggregates opinions by earned authority.",
-      "loop_objects_touched": ["Decision", "Vote", "Agent", "AgentRole"],
+      "loop_objects_touched": [
+        "Decision",
+        "Vote",
+        "Agent",
+        "AgentRole"
+      ],
       "wiring": {
-        "inputs_from": ["question + options", "Agent Votes (Swarm::vote)"],
-        "outputs_to": ["resolved Decision outcome"]
+        "inputs_from": [
+          "question + options",
+          "Agent Votes (Swarm::vote)"
+        ],
+        "outputs_to": [
+          "resolved Decision outcome"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -213,10 +325,19 @@
       "pattern": "conflict-resolution",
       "intent": "Break a tie or clash of votes with an explicit resolution rule.",
       "how_it_shapes_the_loop": "Swarm::resolve_conflict applies a ConflictStrategy (PriorityWins, ConfidenceWins, MajorityWins, HumanIntervention, AcceptAll), so the verify stage turns a Conflict Decision into a determinate outcome or escalates it.",
-      "loop_objects_touched": ["Decision", "ConflictStrategy", "Vote"],
+      "loop_objects_touched": [
+        "Decision",
+        "ConflictStrategy",
+        "Vote"
+      ],
       "wiring": {
-        "inputs_from": ["conflicted Votes"],
-        "outputs_to": ["Decision outcome", "human escalation"]
+        "inputs_from": [
+          "conflicted Votes"
+        ],
+        "outputs_to": [
+          "Decision outcome",
+          "human escalation"
+        ]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
@@ -233,10 +354,18 @@
       "pattern": "shared-blackboard",
       "intent": "Let agents exchange intermediate results without direct coupling.",
       "how_it_shapes_the_loop": "SharedMemory offers write/read/peek/delete with an access log bounded to a ring buffer, so the foundation layer gives the swarm a common blackboard that cannot grow unbounded.",
-      "loop_objects_touched": ["SharedMemory", "Agent", "Swarm"],
+      "loop_objects_touched": [
+        "SharedMemory",
+        "Agent",
+        "Swarm"
+      ],
       "wiring": {
-        "inputs_from": ["agent writes (SharedMemory::write)"],
-        "outputs_to": ["other agents' reads (SharedMemory::read)"]
+        "inputs_from": [
+          "agent writes (SharedMemory::write)"
+        ],
+        "outputs_to": [
+          "other agents' reads (SharedMemory::read)"
+        ]
       },
       "touch_interaction": {
         "gesture": "draw-connection",
@@ -253,10 +382,20 @@
       "pattern": "budget-scoped-fanout",
       "intent": "Run many specialist perspectives in parallel with bounded concurrency.",
       "how_it_shapes_the_loop": "MultiAgentChat::run_task spawns one chat_completion per Agent gated by a tokio Semaphore sized to MultiAgentConfig::max_concurrency, so the act stage parallelizes perspectives without unbounded fan-out.",
-      "loop_objects_touched": ["MultiAgentChat", "Agent", "AgentResult"],
+      "loop_objects_touched": [
+        "MultiAgentChat",
+        "Agent",
+        "AgentResult"
+      ],
       "wiring": {
-        "inputs_from": ["task", "MultiAgentConfig roles"],
-        "outputs_to": ["AgentResults", "MultiAgentEvent::AllCompleted"]
+        "inputs_from": [
+          "task",
+          "MultiAgentConfig roles"
+        ],
+        "outputs_to": [
+          "AgentResults",
+          "MultiAgentEvent::AllCompleted"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -273,10 +412,19 @@
       "pattern": "shared-budget-guard",
       "intent": "Cap total tokens and cost across all parallel agents.",
       "how_it_shapes_the_loop": "MultiAgentChat wraps the fan-out in a BudgetGuard enforcing max_budget_tokens and max_cost_usd, so the control layer skips agents once the shared budget is exhausted.",
-      "loop_objects_touched": ["MultiAgentChat", "Agent", "AgentResult"],
+      "loop_objects_touched": [
+        "MultiAgentChat",
+        "Agent",
+        "AgentResult"
+      ],
       "wiring": {
-        "inputs_from": ["budget limits", "per-agent token estimate"],
-        "outputs_to": ["AgentResult or skip (MultiAgentEvent::AgentFailed)"]
+        "inputs_from": [
+          "budget limits",
+          "per-agent token estimate"
+        ],
+        "outputs_to": [
+          "AgentResult or skip (MultiAgentEvent::AgentFailed)"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -293,10 +441,18 @@
       "pattern": "fail-fast-cancellation",
       "intent": "Stop wasting budget on siblings once one agent has failed the task.",
       "how_it_shapes_the_loop": "Under MultiAgentFailurePolicy::FailFast, the first agent error signals a shared tokio::sync::Notify that cancels the remaining tasks, so the control layer aborts the fan-out early.",
-      "loop_objects_touched": ["MultiAgentChat", "MultiAgentEvent", "AgentResult"],
+      "loop_objects_touched": [
+        "MultiAgentChat",
+        "MultiAgentEvent",
+        "AgentResult"
+      ],
       "wiring": {
-        "inputs_from": ["first agent failure"],
-        "outputs_to": ["cancellation of remaining agents"]
+        "inputs_from": [
+          "first agent failure"
+        ],
+        "outputs_to": [
+          "cancellation of remaining agents"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -313,10 +469,19 @@
       "pattern": "event-streaming",
       "intent": "Observe the fan-out live rather than waiting for the final batch.",
       "how_it_shapes_the_loop": "MultiAgentChat emits MultiAgentEvents (AgentStarted, AgentCompleted, AgentFailed, AllCompleted) over an mpsc channel, so the perceive stage watches the parallel loop unfold in real time.",
-      "loop_objects_touched": ["MultiAgentEvent", "AgentResult", "MultiAgentChat"],
+      "loop_objects_touched": [
+        "MultiAgentEvent",
+        "AgentResult",
+        "MultiAgentChat"
+      ],
       "wiring": {
-        "inputs_from": ["agent lifecycle transitions (MultiAgentChat::with_events)"],
-        "outputs_to": ["UI stream", "monitoring"]
+        "inputs_from": [
+          "agent lifecycle transitions (MultiAgentChat::with_events)"
+        ],
+        "outputs_to": [
+          "UI stream",
+          "monitoring"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -333,10 +498,20 @@
       "pattern": "iterate-to-threshold",
       "intent": "Refine a visual output until a critic scores it good enough.",
       "how_it_shapes_the_loop": "VisualFeedbackLoop runs act-capture-evaluate until VisualScore.overall meets quality_threshold or max_iterations, so the verify stage closes a self-correcting visual sub-loop.",
-      "loop_objects_touched": ["VisualFeedbackLoop", "VisualScore", "VisualLoopResult"],
+      "loop_objects_touched": [
+        "VisualFeedbackLoop",
+        "VisualScore",
+        "VisualLoopResult"
+      ],
       "wiring": {
-        "inputs_from": ["captured render (CaptureMethod)", "vision model critic"],
-        "outputs_to": ["VisualLoopResult", "next iteration or stop"]
+        "inputs_from": [
+          "captured render (CaptureMethod)",
+          "vision model critic"
+        ],
+        "outputs_to": [
+          "VisualLoopResult",
+          "next iteration or stop"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -353,10 +528,18 @@
       "pattern": "structured-critique",
       "intent": "Turn a vision model's prose into per-dimension scores plus suggestions.",
       "how_it_shapes_the_loop": "parse_critic_response tolerates markdown fences and extracts a VisualScore (composition, hierarchy, readability, consistency, accessibility, weighted overall via compute_overall), so the reason stage gets actionable per-axis feedback.",
-      "loop_objects_touched": ["VisualScore", "VisualFeedbackLoop"],
+      "loop_objects_touched": [
+        "VisualScore",
+        "VisualFeedbackLoop"
+      ],
       "wiring": {
-        "inputs_from": ["vision model response (build_critic_prompt answer)"],
-        "outputs_to": ["VisualScore", "next-iteration prompt"]
+        "inputs_from": [
+          "vision model response (build_critic_prompt answer)"
+        ],
+        "outputs_to": [
+          "VisualScore",
+          "next-iteration prompt"
+        ]
       },
       "touch_interaction": {
         "gesture": "double-tap",
@@ -373,10 +556,17 @@
       "pattern": "pressure-backpressure",
       "intent": "Refuse new tasks when the swarm is already saturated.",
       "how_it_shapes_the_loop": "Swarm::queue_task checks crate::resource::ResourcePressure and fails to enqueue when it is High or Critical, so the control layer applies backpressure instead of overcommitting agents.",
-      "loop_objects_touched": ["Swarm", "SwarmTask"],
+      "loop_objects_touched": [
+        "Swarm",
+        "SwarmTask"
+      ],
       "wiring": {
-        "inputs_from": ["resource pressure signal (set_resource_pressure)"],
-        "outputs_to": ["queued task or rejection"]
+        "inputs_from": [
+          "resource pressure signal (set_resource_pressure)"
+        ],
+        "outputs_to": [
+          "queued task or rejection"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -393,10 +583,19 @@
       "pattern": "timeout-sweep",
       "intent": "Prevent pending decisions from blocking the swarm indefinitely.",
       "how_it_shapes_the_loop": "Swarm::sweep_timed_out_decisions marks Decisions older than decision_timeout_secs (default 300, set via with_decision_timeout) as TimedOut, so the control layer unblocks agents waiting on a vote that never resolved.",
-      "loop_objects_touched": ["Decision", "Swarm"],
+      "loop_objects_touched": [
+        "Decision",
+        "Swarm"
+      ],
       "wiring": {
-        "inputs_from": ["pending Decisions", "decision_timeout_secs"],
-        "outputs_to": ["TimedOut Decisions", "unblocked agents"]
+        "inputs_from": [
+          "pending Decisions",
+          "decision_timeout_secs"
+        ],
+        "outputs_to": [
+          "TimedOut Decisions",
+          "unblocked agents"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",

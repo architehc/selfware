@@ -1,9 +1,32 @@
 {
   "component": "analysis",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "perceive",
   "summary": "The analysis component is the engine's retrieval and search substrate for the perceive stage. It runs three tiers over code: a BM25Index for lexical keyword search, a VectorStore of embedded CodeChunks searched through an HNSW VectorIndex for semantic recall, and a CodeGraph / WorkspaceGraph of GraphNodes and GraphEdges for structural traversal. An ErrorAnalyzer classifies RawErrors into AnalyzedErrors with FixSuggestions, and the tech_debt module scores and prioritizes DebtItems. On the loop it is how the agent finds the right code: chunk, index, search, filter, rank, then feed grounded results into reasoning.",
-  "loop_objects": ["CodeChunk", "ChunkMetadata", "ChunkType", "BM25Index", "BM25Result", "VectorStore", "VectorIndex", "SearchFilter", "EmbeddingBackend", "GraphNode", "GraphEdge", "NodeType", "EdgeType", "CodeGraph", "WorkspaceGraphOptions", "WorkspaceGraphSummary", "RawError", "AnalyzedError", "ErrorCategory", "FixSuggestion", "ErrorAnalyzer", "DebtItem"],
+  "loop_objects": [
+    "CodeChunk",
+    "ChunkMetadata",
+    "ChunkType",
+    "BM25Index",
+    "BM25Result",
+    "VectorStore",
+    "VectorIndex",
+    "SearchFilter",
+    "EmbeddingBackend",
+    "GraphNode",
+    "GraphEdge",
+    "NodeType",
+    "EdgeType",
+    "CodeGraph",
+    "WorkspaceGraphOptions",
+    "WorkspaceGraphSummary",
+    "RawError",
+    "AnalyzedError",
+    "ErrorCategory",
+    "FixSuggestion",
+    "ErrorAnalyzer",
+    "DebtItem"
+  ],
   "context_basis": "Recommendations formed with src/analysis/ read in the context of the full engine under a ~600k budget framing; hybrid lexical/semantic/structural retrieval assumes a large codebase whose relevant slices must be surfaced without loading everything.",
   "examples": [
     {
@@ -13,10 +36,21 @@
       "pattern": "chunk-first",
       "intent": "Break code into retrievable units with metadata so every index has something coherent to hold.",
       "how_it_shapes_the_loop": "chunk_rust splits a file into symbol-aware CodeChunks (falling back to chunk_fixed_size), each stamped with ChunkMetadata, giving the perceive stage the atomic units all three search tiers index.",
-      "loop_objects_touched": ["CodeChunk", "ChunkMetadata", "ChunkType"],
+      "loop_objects_touched": [
+        "CodeChunk",
+        "ChunkMetadata",
+        "ChunkType"
+      ],
       "wiring": {
-        "inputs_from": ["source files", "vector_store::chunk_rust"],
-        "outputs_to": ["BM25Index", "VectorStore::add_chunk", "CodeGraph"]
+        "inputs_from": [
+          "source files",
+          "vector_store::chunk_rust"
+        ],
+        "outputs_to": [
+          "BM25Index",
+          "VectorStore::add_chunk",
+          "CodeGraph"
+        ]
       },
       "touch_interaction": {
         "gesture": "drag",
@@ -33,10 +67,18 @@
       "pattern": "lexical-index-build",
       "intent": "Enable fast exact-term retrieval over symbol names and documented words.",
       "how_it_shapes_the_loop": "BM25Index::add_batch ingests chunks (with_params tunes k1/b), tokenizing camelCase and snake_case into term frequencies and IDF, arming the perceive stage with O(fast) keyword lookup.",
-      "loop_objects_touched": ["BM25Index", "CodeChunk"],
+      "loop_objects_touched": [
+        "BM25Index",
+        "CodeChunk"
+      ],
       "wiring": {
-        "inputs_from": ["CodeChunks"],
-        "outputs_to": ["BM25Index::search", "hybrid ranking"]
+        "inputs_from": [
+          "CodeChunks"
+        ],
+        "outputs_to": [
+          "BM25Index::search",
+          "hybrid ranking"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -53,10 +95,19 @@
       "pattern": "lexical-lookup",
       "intent": "Retrieve chunks that contain the query's exact terms, ranked by BM25 score.",
       "how_it_shapes_the_loop": "BM25Index::search returns BM25Results (document id plus score) that the perceive stage folds into context; contains and terms let the loop probe index coverage before searching.",
-      "loop_objects_touched": ["BM25Index", "BM25Result"],
+      "loop_objects_touched": [
+        "BM25Index",
+        "BM25Result"
+      ],
       "wiring": {
-        "inputs_from": ["user query", "BM25Index"],
-        "outputs_to": ["hybrid ranking", "LlmContext"]
+        "inputs_from": [
+          "user query",
+          "BM25Index"
+        ],
+        "outputs_to": [
+          "hybrid ranking",
+          "LlmContext"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -73,10 +124,18 @@
       "pattern": "stale-index-refresh",
       "intent": "Keep keyword search honest as the codebase mutates under the loop.",
       "how_it_shapes_the_loop": "BM25Index::remove drops a stale document and rebuild recomputes the whole statistics table, letting the control layer schedule re-indexing between loop turns instead of mid-search.",
-      "loop_objects_touched": ["BM25Index", "CodeChunk"],
+      "loop_objects_touched": [
+        "BM25Index",
+        "CodeChunk"
+      ],
       "wiring": {
-        "inputs_from": ["file-change events", "BM25Index::remove"],
-        "outputs_to": ["fresh BM25Index::search results"]
+        "inputs_from": [
+          "file-change events",
+          "BM25Index::remove"
+        ],
+        "outputs_to": [
+          "fresh BM25Index::search results"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -93,10 +152,21 @@
       "pattern": "semantic-embedding",
       "intent": "Turn code chunks into vectors so meaning-based recall becomes possible.",
       "how_it_shapes_the_loop": "VectorStore::add_chunk embeds each CodeChunk through the configured EmbeddingBackend (with_api_key arms the Http backend) and inserts the normalized vector into the HNSW VectorIndex.",
-      "loop_objects_touched": ["VectorStore", "EmbeddingBackend", "CodeChunk", "VectorIndex"],
+      "loop_objects_touched": [
+        "VectorStore",
+        "EmbeddingBackend",
+        "CodeChunk",
+        "VectorIndex"
+      ],
       "wiring": {
-        "inputs_from": ["CodeChunks", "EmbeddingBackend"],
-        "outputs_to": ["VectorIndex (HNSW)", "VectorStore::search"]
+        "inputs_from": [
+          "CodeChunks",
+          "EmbeddingBackend"
+        ],
+        "outputs_to": [
+          "VectorIndex (HNSW)",
+          "VectorStore::search"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -113,10 +183,20 @@
       "pattern": "semantic-knn",
       "intent": "Retrieve the chunks whose meaning is closest to the query, not just its words.",
       "how_it_shapes_the_loop": "VectorStore::search embeds the query and runs HNSW k-NN ranked by cosine_similarity, returning scored chunks the perceive stage folds into context.",
-      "loop_objects_touched": ["VectorStore", "VectorIndex", "CodeChunk"],
+      "loop_objects_touched": [
+        "VectorStore",
+        "VectorIndex",
+        "CodeChunk"
+      ],
       "wiring": {
-        "inputs_from": ["query", "VectorIndex"],
-        "outputs_to": ["hybrid ranking", "LlmContext"]
+        "inputs_from": [
+          "query",
+          "VectorIndex"
+        ],
+        "outputs_to": [
+          "hybrid ranking",
+          "LlmContext"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -133,10 +213,19 @@
       "pattern": "scoped-retrieval",
       "intent": "Restrict search to relevant files, chunk types, languages, or a min score.",
       "how_it_shapes_the_loop": "A SearchFilter built with with_file_pattern, with_chunk_type, with_language and with_min_score narrows candidates via matches before ranking, so the perceive stage only ingests chunks that pass the scope.",
-      "loop_objects_touched": ["SearchFilter", "ChunkType", "CodeChunk"],
+      "loop_objects_touched": [
+        "SearchFilter",
+        "ChunkType",
+        "CodeChunk"
+      ],
       "wiring": {
-        "inputs_from": ["raw search results"],
-        "outputs_to": ["ranked results", "LlmContext"]
+        "inputs_from": [
+          "raw search results"
+        ],
+        "outputs_to": [
+          "ranked results",
+          "LlmContext"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -153,10 +242,18 @@
       "pattern": "type-weighted-ranking",
       "intent": "Prefer higher-signal chunk kinds when two results score similarly.",
       "how_it_shapes_the_loop": "ChunkType::weight (Function outranks Import) multiplies raw similarity, and metadata set via with_symbol/with_tag sharpens matchability, so the reason stage ranks a matching function above a matching import at equal cosine.",
-      "loop_objects_touched": ["ChunkType", "ChunkMetadata", "CodeChunk"],
+      "loop_objects_touched": [
+        "ChunkType",
+        "ChunkMetadata",
+        "CodeChunk"
+      ],
       "wiring": {
-        "inputs_from": ["semantic search results"],
-        "outputs_to": ["final ranked list"]
+        "inputs_from": [
+          "semantic search results"
+        ],
+        "outputs_to": [
+          "final ranked list"
+        ]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
@@ -173,10 +270,20 @@
       "pattern": "hybrid-fusion",
       "intent": "Get the precision of keyword match plus the recall of semantic similarity.",
       "how_it_shapes_the_loop": "The reason stage merges BM25Results from BM25Index::search with scored chunks from VectorStore::search, so a chunk strong on either exact terms or meaning surfaces, widening what the loop can find.",
-      "loop_objects_touched": ["BM25Result", "BM25Index", "VectorStore"],
+      "loop_objects_touched": [
+        "BM25Result",
+        "BM25Index",
+        "VectorStore"
+      ],
       "wiring": {
-        "inputs_from": ["BM25Index::search results", "VectorStore::search results"],
-        "outputs_to": ["fused ranked list", "LlmContext"]
+        "inputs_from": [
+          "BM25Index::search results",
+          "VectorStore::search results"
+        ],
+        "outputs_to": [
+          "fused ranked list",
+          "LlmContext"
+        ]
       },
       "touch_interaction": {
         "gesture": "pinch",
@@ -193,10 +300,20 @@
       "pattern": "soft-delete",
       "intent": "Remove stale chunks from results without an expensive index rebuild, then sweep when health drops.",
       "how_it_shapes_the_loop": "VectorStore::remove_chunk and remove_file mark entries deleted and rebuild_id_index keeps lookups coherent; the control layer calls compact only when check_health or verify_index_integrity reports the index has degraded.",
-      "loop_objects_touched": ["VectorStore", "VectorIndex", "CodeChunk"],
+      "loop_objects_touched": [
+        "VectorStore",
+        "VectorIndex",
+        "CodeChunk"
+      ],
       "wiring": {
-        "inputs_from": ["stale chunk ids", "check_health report"],
-        "outputs_to": ["filtered search results", "compacted VectorIndex"]
+        "inputs_from": [
+          "stale chunk ids",
+          "check_health report"
+        ],
+        "outputs_to": [
+          "filtered search results",
+          "compacted VectorIndex"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -213,10 +330,20 @@
       "pattern": "error-classification",
       "intent": "Turn raw compiler output into categorized, ordered errors the loop can act on.",
       "how_it_shapes_the_loop": "ErrorAnalyzer::analyze maps each RawError to an AnalyzedError with an ErrorCategory and priority; analyze_batch, group_by_category and first_to_fix give the perceive stage an ordered queue instead of a wall of text.",
-      "loop_objects_touched": ["ErrorAnalyzer", "RawError", "AnalyzedError", "ErrorCategory"],
+      "loop_objects_touched": [
+        "ErrorAnalyzer",
+        "RawError",
+        "AnalyzedError",
+        "ErrorCategory"
+      ],
       "wiring": {
-        "inputs_from": ["compiler stderr (RawError)"],
-        "outputs_to": ["first_to_fix queue", "error recovery"]
+        "inputs_from": [
+          "compiler stderr (RawError)"
+        ],
+        "outputs_to": [
+          "first_to_fix queue",
+          "error recovery"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -233,10 +360,17 @@
       "pattern": "fix-proposal",
       "intent": "Propose a concrete fix and mark whether it is safe to apply automatically.",
       "how_it_shapes_the_loop": "Each AnalyzedError carries a FixSuggestion whose confidence and auto-fix flag let the reason stage decide between applying a safe fix directly and routing a risky one to review before the act stage.",
-      "loop_objects_touched": ["FixSuggestion", "AnalyzedError"],
+      "loop_objects_touched": [
+        "FixSuggestion",
+        "AnalyzedError"
+      ],
       "wiring": {
-        "inputs_from": ["AnalyzedError"],
-        "outputs_to": ["act stage (auto-fix or review)"]
+        "inputs_from": [
+          "AnalyzedError"
+        ],
+        "outputs_to": [
+          "act stage (auto-fix or review)"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -253,10 +387,22 @@
       "pattern": "structural-graph-build",
       "intent": "Represent the codebase as a traversable structure so structural queries become possible.",
       "how_it_shapes_the_loop": "add_node and add_edge (or connect) assemble GraphNodes via add_file/add_module/add_function/add_struct/add_trait, linked by typed GraphEdges, giving the foundation layer a structure beside the text indices.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge", "NodeType", "EdgeType"],
+      "loop_objects_touched": [
+        "CodeGraph",
+        "GraphNode",
+        "GraphEdge",
+        "NodeType",
+        "EdgeType"
+      ],
       "wiring": {
-        "inputs_from": ["parsed symbols"],
-        "outputs_to": ["find_path", "find_cycles", "build_workspace_graph"]
+        "inputs_from": [
+          "parsed symbols"
+        ],
+        "outputs_to": [
+          "find_path",
+          "find_cycles",
+          "build_workspace_graph"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -273,10 +419,20 @@
       "pattern": "neighborhood-traversal",
       "intent": "See what a symbol uses and what uses it before touching it.",
       "how_it_shapes_the_loop": "From a node found by get_node_by_id, outgoing_edges/incoming_edges and the dependencies/dependents helpers give the perceive stage the immediate structural neighborhood around a change target.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge"],
+      "loop_objects_touched": [
+        "CodeGraph",
+        "GraphNode",
+        "GraphEdge"
+      ],
       "wiring": {
-        "inputs_from": ["focus symbol", "CodeGraph"],
-        "outputs_to": ["impact preview", "reason stage"]
+        "inputs_from": [
+          "focus symbol",
+          "CodeGraph"
+        ],
+        "outputs_to": [
+          "impact preview",
+          "reason stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "double-tap",
@@ -293,10 +449,18 @@
       "pattern": "path-finding",
       "intent": "Discover how one code entity reaches another through the dependency structure.",
       "how_it_shapes_the_loop": "CodeGraph::find_path runs BFS over GraphEdges between two GraphNodes, giving the reason stage the concrete chain linking a caller to a callee.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge"],
+      "loop_objects_touched": [
+        "CodeGraph",
+        "GraphNode",
+        "GraphEdge"
+      ],
       "wiring": {
-        "inputs_from": ["source and target GraphNode"],
-        "outputs_to": ["reason stage (impact analysis)"]
+        "inputs_from": [
+          "source and target GraphNode"
+        ],
+        "outputs_to": [
+          "reason stage (impact analysis)"
+        ]
       },
       "touch_interaction": {
         "gesture": "draw-connection",
@@ -313,10 +477,18 @@
       "pattern": "cycle-detection",
       "intent": "Flag circular dependencies that signal fragile architecture.",
       "how_it_shapes_the_loop": "CodeGraph::find_cycles surfaces circular GraphEdge chains, letting the verify stage reject or warn on structures that would tangle the dependency order.",
-      "loop_objects_touched": ["CodeGraph", "GraphEdge"],
+      "loop_objects_touched": [
+        "CodeGraph",
+        "GraphEdge"
+      ],
       "wiring": {
-        "inputs_from": ["CodeGraph edges"],
-        "outputs_to": ["verify gate", "DebtItem flagging"]
+        "inputs_from": [
+          "CodeGraph edges"
+        ],
+        "outputs_to": [
+          "verify gate",
+          "DebtItem flagging"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -333,10 +505,18 @@
       "pattern": "hub-identification",
       "intent": "Find the most-connected entities that a change would ripple through.",
       "how_it_shapes_the_loop": "CodeGraph::node_metrics computes per-node degree and find_hubs ranks the top GraphNodes, so the reason stage knows which entities are high-impact before proposing a change near them; subgraph can isolate a hub's region.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode"],
+      "loop_objects_touched": [
+        "CodeGraph",
+        "GraphNode"
+      ],
       "wiring": {
-        "inputs_from": ["node_metrics"],
-        "outputs_to": ["impact assessment", "reason stage"]
+        "inputs_from": [
+          "node_metrics"
+        ],
+        "outputs_to": [
+          "impact assessment",
+          "reason stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "pinch",
@@ -353,10 +533,21 @@
       "pattern": "focus-neighborhood",
       "intent": "Retrieve a bounded structural neighborhood around one symbol of interest.",
       "how_it_shapes_the_loop": "build_workspace_graph assembles the workspace-wide graph and summarize_graph applies WorkspaceGraphOptions (focus, depth, node cap) to produce a WorkspaceGraphSummary, giving the perceive stage a size-capped subgraph.",
-      "loop_objects_touched": ["WorkspaceGraphOptions", "WorkspaceGraphSummary", "GraphNode", "GraphEdge"],
+      "loop_objects_touched": [
+        "WorkspaceGraphOptions",
+        "WorkspaceGraphSummary",
+        "GraphNode",
+        "GraphEdge"
+      ],
       "wiring": {
-        "inputs_from": ["focus symbol", "WorkspaceGraphOptions"],
-        "outputs_to": ["LlmContext", "reason stage"]
+        "inputs_from": [
+          "focus symbol",
+          "WorkspaceGraphOptions"
+        ],
+        "outputs_to": [
+          "LlmContext",
+          "reason stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "pinch",
@@ -373,10 +564,18 @@
       "pattern": "debt-prioritization",
       "intent": "Rank technical debt so the loop fixes the highest-value items first.",
       "how_it_shapes_the_loop": "The tech_debt module scores each DebtItem — total_cost compounds fix_cost with monthly_interest, severity_weight scales impact, and hotspot_score folds in churn_rate — then prioritize and generate_roadmap order the work for the reason stage.",
-      "loop_objects_touched": ["DebtItem"],
+      "loop_objects_touched": [
+        "DebtItem"
+      ],
       "wiring": {
-        "inputs_from": ["detected DebtItems", "hotspot_score metrics"],
-        "outputs_to": ["improvement roadmap", "reason stage"]
+        "inputs_from": [
+          "detected DebtItems",
+          "hotspot_score metrics"
+        ],
+        "outputs_to": [
+          "improvement roadmap",
+          "reason stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -393,10 +592,21 @@
       "pattern": "graph-rendering",
       "intent": "Export the structural graph as a diagram a human can read and reason over.",
       "how_it_shapes_the_loop": "CodeGraph::render and render_to emit DOT, Mermaid, ASCII, or PlantUML (cluster and with_direction shape layout), and render_workspace_graph does the same at workspace scale, letting the act stage produce a human-facing artifact from the structure the loop reasons on.",
-      "loop_objects_touched": ["CodeGraph", "GraphNode", "GraphEdge", "WorkspaceGraphSummary"],
+      "loop_objects_touched": [
+        "CodeGraph",
+        "GraphNode",
+        "GraphEdge",
+        "WorkspaceGraphSummary"
+      ],
       "wiring": {
-        "inputs_from": ["CodeGraph", "WorkspaceGraphSummary"],
-        "outputs_to": ["diagram artifact", "human review"]
+        "inputs_from": [
+          "CodeGraph",
+          "WorkspaceGraphSummary"
+        ],
+        "outputs_to": [
+          "diagram artifact",
+          "human review"
+        ]
       },
       "touch_interaction": {
         "gesture": "double-tap",

@@ -1,9 +1,30 @@
 {
   "component": "cognitive",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "learn",
   "summary": "The cognitive component is the engine's memory and reflection substrate for the learn stage. It runs a 4-tier HierarchicalMemory (Working, ShortTerm, LongTerm, Archive) over MemoryEntry items, records Episodes with EpisodeOutcome and related_episodes links, indexes the codebase as a knowledge graph of Entities and RelationTypes plus a SymbolIndex, maintains a SelfModel with an IntrospectionEngine and ModificationEngine, ranks improvement strategies via a MetaLearner of StrategyScores, retrieves code context through the RagEngine, and splits the token window by TaskType with the TokenBudgetAllocator. On the loop it closes the cycle: CognitiveSystem.record_episode captures what happened, memory tiers promote what mattered, introspection grounds the agent's own state, and CognitiveSystem.build_context feeds an LlmContext back into the next perceive/reason pass.",
-  "loop_objects": ["Episode", "MemoryEntry", "HierarchicalMemory", "SelfModel", "ReferenceState", "IntrospectionTarget", "ProposedModification", "CodeModification", "Entity", "RelationType", "SymbolIndex", "TokenBudget", "LlmContext", "CodeContext", "MetaLearner", "StrategyScore", "Lesson", "CognitiveState", "CyclePhase", "WorkingContext"],
+  "loop_objects": [
+    "Episode",
+    "MemoryEntry",
+    "HierarchicalMemory",
+    "SelfModel",
+    "ReferenceState",
+    "IntrospectionTarget",
+    "ProposedModification",
+    "CodeModification",
+    "Entity",
+    "RelationType",
+    "SymbolIndex",
+    "TokenBudget",
+    "LlmContext",
+    "CodeContext",
+    "MetaLearner",
+    "StrategyScore",
+    "Lesson",
+    "CognitiveState",
+    "CyclePhase",
+    "WorkingContext"
+  ],
   "context_basis": "Recommendations formed with src/cognitive/ read in the context of the full engine under a ~600k budget framing; TokenBudgetAllocator ratios (e.g. SelfImprovement 10/10/70 with a 10% reserve) and memory-tier capacities assume a large context that must be actively partitioned across working/episodic/semantic recall.",
   "examples": [
     {
@@ -13,10 +34,19 @@
       "pattern": "relevance-recall",
       "intent": "Bring past experiences that match the query into working context before reasoning.",
       "how_it_shapes_the_loop": "EpisodicMemory.retrieve_relevant ranks Episodes by relevance_score and Importance, injecting top-k into the LlmContext so the perceive stage arrives pre-loaded with prior outcomes.",
-      "loop_objects_touched": ["Episode", "LlmContext"],
+      "loop_objects_touched": [
+        "Episode",
+        "LlmContext"
+      ],
       "wiring": {
-        "inputs_from": ["query text", "EpisodicMemory store"],
-        "outputs_to": ["CognitiveSystem.build_context", "LlmContext"]
+        "inputs_from": [
+          "query text",
+          "EpisodicMemory store"
+        ],
+        "outputs_to": [
+          "CognitiveSystem.build_context",
+          "LlmContext"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -33,10 +63,19 @@
       "pattern": "experience-capture",
       "intent": "Persist what just happened, its EpisodeOutcome, and any lessons for future recall.",
       "how_it_shapes_the_loop": "After the act stage, CognitiveSystem.record_episode writes an Episode (EpisodeType, content, EpisodeOutcome, related_episodes), giving the learn stage a durable trace to promote and mine.",
-      "loop_objects_touched": ["Episode", "Lesson"],
+      "loop_objects_touched": [
+        "Episode",
+        "Lesson"
+      ],
       "wiring": {
-        "inputs_from": ["act stage result", "verify outcome (Success/Error)"],
-        "outputs_to": ["EpisodicMemory", "MetaLearner"]
+        "inputs_from": [
+          "act stage result",
+          "verify outcome (Success/Error)"
+        ],
+        "outputs_to": [
+          "EpisodicMemory",
+          "MetaLearner"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -53,10 +92,18 @@
       "pattern": "tier-promotion",
       "intent": "Move memories that keep proving useful into durable storage.",
       "how_it_shapes_the_loop": "HierarchicalMemory.promote moves a MemoryEntry from ShortTermMemory to LongTermMemory when check_promotion sees access count and Importance cross their thresholds, reshaping what survives across sessions.",
-      "loop_objects_touched": ["MemoryEntry", "HierarchicalMemory"],
+      "loop_objects_touched": [
+        "MemoryEntry",
+        "HierarchicalMemory"
+      ],
       "wiring": {
-        "inputs_from": ["ShortTermMemory.check_promotion", "MemoryEntry access count"],
-        "outputs_to": ["LongTermMemory.store"]
+        "inputs_from": [
+          "ShortTermMemory.check_promotion",
+          "MemoryEntry access count"
+        ],
+        "outputs_to": [
+          "LongTermMemory.store"
+        ]
       },
       "touch_interaction": {
         "gesture": "drag",
@@ -73,10 +120,18 @@
       "pattern": "budget-by-task-type",
       "intent": "Allocate the context window to working/episodic/semantic recall according to what the task needs.",
       "how_it_shapes_the_loop": "TokenBudgetAllocator.allocation_ratios maps the detected TaskType to an AllocationRatios split (SelfImprovement = working 10 / episodic 10 / semantic 70 / reserve 10), so the control layer partitions the window before context assembly.",
-      "loop_objects_touched": ["TokenBudget", "LlmContext"],
+      "loop_objects_touched": [
+        "TokenBudget",
+        "LlmContext"
+      ],
       "wiring": {
-        "inputs_from": ["TokenBudgetAllocator.suggest_task_type(query)"],
-        "outputs_to": ["CognitiveSystem.build_context", "context assembly"]
+        "inputs_from": [
+          "TokenBudgetAllocator.suggest_task_type(query)"
+        ],
+        "outputs_to": [
+          "CognitiveSystem.build_context",
+          "context assembly"
+        ]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
@@ -93,10 +148,22 @@
       "pattern": "context-merge",
       "intent": "Fuse working, episodic, semantic, and self context into one prompt within budget.",
       "how_it_shapes_the_loop": "CognitiveSystem.build_context merges the WorkingContext, retrieved Episodes, RAG CodeContext, and SelfImprovementContext into one LlmContext with estimate_tokens, and is_within_budget lets the loop gate on it before the model call.",
-      "loop_objects_touched": ["LlmContext", "CodeContext", "WorkingContext", "Episode"],
+      "loop_objects_touched": [
+        "LlmContext",
+        "CodeContext",
+        "WorkingContext",
+        "Episode"
+      ],
       "wiring": {
-        "inputs_from": ["WorkingContext", "EpisodicMemory", "SemanticMemory", "SelfModel"],
-        "outputs_to": ["reason stage (model call)"]
+        "inputs_from": [
+          "WorkingContext",
+          "EpisodicMemory",
+          "SemanticMemory",
+          "SelfModel"
+        ],
+        "outputs_to": [
+          "reason stage (model call)"
+        ]
       },
       "touch_interaction": {
         "gesture": "pinch",
@@ -113,10 +180,20 @@
       "pattern": "self-query",
       "intent": "Answer 'what is my state / what can I do' from the self-reference system rather than guessing.",
       "how_it_shapes_the_loop": "IntrospectionEngine.introspect resolves an IntrospectionTarget (CurrentState, Capabilities, Memory, Performance, Decisions) against the ReferenceState, feeding the reason stage grounded facts about itself instead of confabulation.",
-      "loop_objects_touched": ["IntrospectionTarget", "ReferenceState", "SelfModel"],
+      "loop_objects_touched": [
+        "IntrospectionTarget",
+        "ReferenceState",
+        "SelfModel"
+      ],
       "wiring": {
-        "inputs_from": ["introspection query", "SelfReferenceSystem"],
-        "outputs_to": ["reason stage", "ProposedModification generation"]
+        "inputs_from": [
+          "introspection query",
+          "SelfReferenceSystem"
+        ],
+        "outputs_to": [
+          "reason stage",
+          "ProposedModification generation"
+        ]
       },
       "touch_interaction": {
         "gesture": "double-tap",
@@ -133,10 +210,18 @@
       "pattern": "meta-reasoning-ascent",
       "intent": "Reason about the agent's own reasoning at increasing depth.",
       "how_it_shapes_the_loop": "ReferenceState.set_level moves the current ReferenceLevel (Direct, Meta, MetaMeta, Reflective); ascending a level reframes the reason stage from 'what' to 'why I decided that way'.",
-      "loop_objects_touched": ["ReferenceState", "SelfModel"],
+      "loop_objects_touched": [
+        "ReferenceState",
+        "SelfModel"
+      ],
       "wiring": {
-        "inputs_from": ["current reasoning trace"],
-        "outputs_to": ["strategy adjustment", "MetaLearner"]
+        "inputs_from": [
+          "current reasoning trace"
+        ],
+        "outputs_to": [
+          "strategy adjustment",
+          "MetaLearner"
+        ]
       },
       "touch_interaction": {
         "gesture": "spread",
@@ -153,10 +238,18 @@
       "pattern": "strategy-ranking",
       "intent": "Choose which kind of self-improvement to attempt next based on what has worked.",
       "how_it_shapes_the_loop": "MetaLearner.analyze_strategies maintains a StrategyScore per ImprovementCategory via an EMA of success_rate and in_cooldown flags, biasing the reason stage toward historically successful categories.",
-      "loop_objects_touched": ["MetaLearner", "StrategyScore"],
+      "loop_objects_touched": [
+        "MetaLearner",
+        "StrategyScore"
+      ],
       "wiring": {
-        "inputs_from": ["improvement outcome records"],
-        "outputs_to": ["next improvement selection", "reason stage"]
+        "inputs_from": [
+          "improvement outcome records"
+        ],
+        "outputs_to": [
+          "next improvement selection",
+          "reason stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -173,10 +266,20 @@
       "pattern": "structural-indexing",
       "intent": "Add a code symbol to the queryable graph so cross-file references resolve.",
       "how_it_shapes_the_loop": "A new Entity (Function, Struct, Trait...) is inserted with its RelationTypes (Calls, Uses, Implements), extending the knowledge graph the perceive stage queries to ground reasoning in real code.",
-      "loop_objects_touched": ["Entity", "RelationType", "SymbolIndex"],
+      "loop_objects_touched": [
+        "Entity",
+        "RelationType",
+        "SymbolIndex"
+      ],
       "wiring": {
-        "inputs_from": ["source scan", "SymbolIndex"],
-        "outputs_to": ["knowledge graph", "RAG grounding"]
+        "inputs_from": [
+          "source scan",
+          "SymbolIndex"
+        ],
+        "outputs_to": [
+          "knowledge graph",
+          "RAG grounding"
+        ]
       },
       "touch_interaction": {
         "gesture": "drag",
@@ -193,10 +296,19 @@
       "pattern": "graph-traversal",
       "intent": "Follow Calls/Uses/DependsOn edges to gather the Entities a question spans.",
       "how_it_shapes_the_loop": "The reason stage walks RelationType edges from a seed Entity to collect a connected subgraph, grounding multi-hop reasoning in real dependencies rather than guesses.",
-      "loop_objects_touched": ["Entity", "RelationType"],
+      "loop_objects_touched": [
+        "Entity",
+        "RelationType"
+      ],
       "wiring": {
-        "inputs_from": ["seed Entity", "knowledge graph"],
-        "outputs_to": ["LlmContext", "reason stage"]
+        "inputs_from": [
+          "seed Entity",
+          "knowledge graph"
+        ],
+        "outputs_to": [
+          "LlmContext",
+          "reason stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "draw-connection",
@@ -213,10 +325,19 @@
       "pattern": "retrieval-augmentation",
       "intent": "Surface the code most relevant to the query within the token budget.",
       "how_it_shapes_the_loop": "RagEngine.retrieve searches the built index, applies RagConfig (top_k, min relevance), and returns a RetrievedContext the perceive stage folds into the LlmContext as a CodeContext.",
-      "loop_objects_touched": ["CodeContext", "LlmContext"],
+      "loop_objects_touched": [
+        "CodeContext",
+        "LlmContext"
+      ],
       "wiring": {
-        "inputs_from": ["query", "RagConfig (top_k, thresholds)"],
-        "outputs_to": ["SemanticMemory", "LlmContext"]
+        "inputs_from": [
+          "query",
+          "RagConfig (top_k, thresholds)"
+        ],
+        "outputs_to": [
+          "SemanticMemory",
+          "LlmContext"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -233,10 +354,19 @@
       "pattern": "risk-tagged-proposal",
       "intent": "Suggest a concrete change to the agent's own code, tagged by risk before review.",
       "how_it_shapes_the_loop": "ModificationEngine.propose emits a ProposedModification (ModificationType, target, risk_level: RiskLevel), so the reason stage hands the act stage a change carrying its own risk gate.",
-      "loop_objects_touched": ["ProposedModification", "SelfModel"],
+      "loop_objects_touched": [
+        "ProposedModification",
+        "SelfModel"
+      ],
       "wiring": {
-        "inputs_from": ["IntrospectionEngine result", "MetaLearner ranking"],
-        "outputs_to": ["validate / execute review path", "act stage"]
+        "inputs_from": [
+          "IntrospectionEngine result",
+          "MetaLearner ranking"
+        ],
+        "outputs_to": [
+          "validate / execute review path",
+          "act stage"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -253,10 +383,19 @@
       "pattern": "self-model-update",
       "intent": "Keep the agent's self-representation current after it changes its own code.",
       "how_it_shapes_the_loop": "SelfReferenceSystem.track_modification records an applied CodeModification (file_path, change_type, success) into the SelfModel's recent_changes, so subsequent introspection reflects the agent's true, evolved self.",
-      "loop_objects_touched": ["CodeModification", "SelfModel"],
+      "loop_objects_touched": [
+        "CodeModification",
+        "SelfModel"
+      ],
       "wiring": {
-        "inputs_from": ["applied change", "act stage"],
-        "outputs_to": ["SelfModel.recent_changes", "introspection"]
+        "inputs_from": [
+          "applied change",
+          "act stage"
+        ],
+        "outputs_to": [
+          "SelfModel.recent_changes",
+          "introspection"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -273,10 +412,17 @@
       "pattern": "cycle-phase-advance",
       "intent": "Drive the cognitive state machine through Plan, Do, Verify, Reflect.",
       "how_it_shapes_the_loop": "CognitiveState.advance_phase steps cycle_phase through CyclePhase (Plan -> Do -> Verify -> Reflect), giving the control layer an explicit phase that dictates what the loop does next.",
-      "loop_objects_touched": ["CognitiveState", "CyclePhase"],
+      "loop_objects_touched": [
+        "CognitiveState",
+        "CyclePhase"
+      ],
       "wiring": {
-        "inputs_from": ["phase completion signal"],
-        "outputs_to": ["next stage dispatch"]
+        "inputs_from": [
+          "phase completion signal"
+        ],
+        "outputs_to": [
+          "next stage dispatch"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -293,10 +439,16 @@
       "pattern": "usage-driven-adaptation",
       "intent": "Correct the token split when real usage drifts from the TaskType preset.",
       "how_it_shapes_the_loop": "TokenBudgetAllocator.record_usage accumulates UsageSnapshots and adapt() shifts future AllocationRatios toward the observed distribution, so the learn stage tunes control-layer allocation over time.",
-      "loop_objects_touched": ["TokenBudget"],
+      "loop_objects_touched": [
+        "TokenBudget"
+      ],
       "wiring": {
-        "inputs_from": ["UsageSnapshot history"],
-        "outputs_to": ["next AllocationRatios split"]
+        "inputs_from": [
+          "UsageSnapshot history"
+        ],
+        "outputs_to": [
+          "next AllocationRatios split"
+        ]
       },
       "touch_interaction": {
         "gesture": "two-finger-rotate",
@@ -313,10 +465,19 @@
       "pattern": "episode-linking",
       "intent": "Connect Episodes that share a cause so recurring patterns become visible.",
       "how_it_shapes_the_loop": "Setting an Episode's related_episodes (or with_related) stitches experiences into chains the learn stage can mine, turning isolated events into a detectable pattern.",
-      "loop_objects_touched": ["Episode", "Lesson"],
+      "loop_objects_touched": [
+        "Episode",
+        "Lesson"
+      ],
       "wiring": {
-        "inputs_from": ["new Episode", "prior Episodes"],
-        "outputs_to": ["pattern detection", "MetaLearner"]
+        "inputs_from": [
+          "new Episode",
+          "prior Episodes"
+        ],
+        "outputs_to": [
+          "pattern detection",
+          "MetaLearner"
+        ]
       },
       "touch_interaction": {
         "gesture": "draw-connection",
@@ -333,10 +494,17 @@
       "pattern": "capacity-eviction",
       "intent": "Free tier capacity by demoting or dropping the least valuable memory.",
       "how_it_shapes_the_loop": "When a tier hits its MemoryConfig capacity, HierarchicalMemory demotes the lowest Importance/access MemoryEntry to ArchiveMemory or drops it, keeping the perceive stage's recall lean.",
-      "loop_objects_touched": ["MemoryEntry", "HierarchicalMemory"],
+      "loop_objects_touched": [
+        "MemoryEntry",
+        "HierarchicalMemory"
+      ],
       "wiring": {
-        "inputs_from": ["tier capacity limit (MemoryConfig)"],
-        "outputs_to": ["ArchiveMemory / drop"]
+        "inputs_from": [
+          "tier capacity limit (MemoryConfig)"
+        ],
+        "outputs_to": [
+          "ArchiveMemory / drop"
+        ]
       },
       "touch_interaction": {
         "gesture": "flick",
@@ -353,10 +521,18 @@
       "pattern": "task-type-detection",
       "intent": "Classify the query so budget and recall strategy fit its shape.",
       "how_it_shapes_the_loop": "TokenBudgetAllocator.suggest_task_type inspects the query and returns a TaskType (Conversation, CodeAnalysis, SelfImprovement, Debugging...), steering the control layer's budget split and the perceive stage's recall mix.",
-      "loop_objects_touched": ["TokenBudget", "LlmContext"],
+      "loop_objects_touched": [
+        "TokenBudget",
+        "LlmContext"
+      ],
       "wiring": {
-        "inputs_from": ["raw query"],
-        "outputs_to": ["TokenBudgetAllocator", "recall strategy"]
+        "inputs_from": [
+          "raw query"
+        ],
+        "outputs_to": [
+          "TokenBudgetAllocator",
+          "recall strategy"
+        ]
       },
       "touch_interaction": {
         "gesture": "tap",
@@ -373,10 +549,20 @@
       "pattern": "lesson-distillation",
       "intent": "Distill a reusable insight from what just succeeded or failed.",
       "how_it_shapes_the_loop": "During the Reflect CyclePhase, a Lesson is distilled from the verified Episode outcome and stored, so the learn stage turns a single event into guidance the next reason pass can apply.",
-      "loop_objects_touched": ["Lesson", "Episode", "CognitiveState", "CyclePhase"],
+      "loop_objects_touched": [
+        "Lesson",
+        "Episode",
+        "CognitiveState",
+        "CyclePhase"
+      ],
       "wiring": {
-        "inputs_from": ["verified Episode outcome"],
-        "outputs_to": ["LongTermMemory", "future reasoning"]
+        "inputs_from": [
+          "verified Episode outcome"
+        ],
+        "outputs_to": [
+          "LongTermMemory",
+          "future reasoning"
+        ]
       },
       "touch_interaction": {
         "gesture": "long-press",
@@ -393,10 +579,19 @@
       "pattern": "working-set-refresh",
       "intent": "Reset the immediate context to the current conversation, task, and active code.",
       "how_it_shapes_the_loop": "The WorkingContext (messages, current task, ActiveCodeContext) is refreshed each turn via add_message and active-code updates, so the foundation layer always assembles the LlmContext around the true present state.",
-      "loop_objects_touched": ["WorkingContext", "LlmContext", "CognitiveState"],
+      "loop_objects_touched": [
+        "WorkingContext",
+        "LlmContext",
+        "CognitiveState"
+      ],
       "wiring": {
-        "inputs_from": ["latest messages (add_message)", "current task"],
-        "outputs_to": ["CognitiveSystem.build_context"]
+        "inputs_from": [
+          "latest messages (add_message)",
+          "current task"
+        ],
+        "outputs_to": [
+          "CognitiveSystem.build_context"
+        ]
       },
       "touch_interaction": {
         "gesture": "double-tap",

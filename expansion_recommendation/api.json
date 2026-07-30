@@ -1,9 +1,19 @@
 {
   "component": "api",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "reason",
   "summary": "The api component is the reason/LLM-IO stage of the loop: ApiClient (client.rs) sends the Message history to the model via chat (blocking) or chat_stream (SSE), returning a ChatResponse with Choices and Usage. tool_calling.rs extracts ToolCalls from native tool_calls or by robustly parsing model text, attach_tools puts ToolDefinitions on the request, and types.rs Message constructors plus validate_structure keep the wire format valid. RetryConfig backoff and a latched WallClockBudgetExceeded deadline guard every billable call, and StreamingResponse::collect reassembles StreamChunks into a canonical response.",
-  "loop_objects": ["ApiClient", "Message", "ChatResponse", "Choice", "ToolCall", "ToolDefinition", "Usage", "StreamChunk", "ChatMetadata"],
+  "loop_objects": [
+    "ApiClient",
+    "Message",
+    "ChatResponse",
+    "Choice",
+    "ToolCall",
+    "ToolDefinition",
+    "Usage",
+    "StreamChunk",
+    "ChatMetadata"
+  ],
   "context_basis": "Recommendations formed with src/api/ read in the context of the full engine (~600k budget framing), grounded in client.rs ApiClient/chat/chat_stream/RetryConfig/WallClockBudgetExceeded, types.rs Message/ChatResponse/Usage/ToolCall, streaming.rs StreamingResponse/StreamChunk, and tool_calling.rs extract_tool_calls/attach_tools.",
   "examples": [
     {
@@ -13,9 +23,27 @@
       "pattern": "blocking-reason-turn",
       "intent": "Produce one model turn from the current conversation state.",
       "how_it_shapes_the_loop": "ApiClient::chat posts the Message history and returns a ChatResponse whose first Choice carries the assistant Message; this is the reason step that yields either final text or ToolCalls for the act stage.",
-      "loop_objects_touched": ["ApiClient", "Message", "ChatResponse", "Choice"],
-      "wiring": {"inputs_from": ["Message history", "ToolDefinition list"], "outputs_to": ["assistant Message", "act stage"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the Reason node fires a single ApiClient::chat request and lands the ChatResponse card beneath it.", "visual": "The node spins while in flight and settles green when the ChatResponse arrives, red on an error kind."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "Message",
+        "ChatResponse",
+        "Choice"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "Message history",
+          "ToolDefinition list"
+        ],
+        "outputs_to": [
+          "assistant Message",
+          "act stage"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the Reason node fires a single ApiClient::chat request and lands the ChatResponse card beneath it.",
+        "visual": "The node spins while in flight and settles green when the ChatResponse arrives, red on an error kind."
+      },
       "mini_scenario": "The loop sends the history to ApiClient::chat, gets an assistant Message with two ToolCalls in its Choice, and hands them to dispatch.",
       "pitfall": "Sending a history with no user Message can trigger a provider 400; validate_structure must pass before the request leaves."
     },
@@ -26,9 +54,26 @@
       "pattern": "incremental-reason",
       "intent": "Render partial output and tool calls as they arrive rather than blocking to completion.",
       "how_it_shapes_the_loop": "ApiClient::chat_stream returns a StreamingResponse whose into_channel stream emits StreamChunk content, reasoning, tool-call and usage variants, letting the loop show progress and prepare the act stage before the turn finishes.",
-      "loop_objects_touched": ["ApiClient", "StreamChunk", "Usage"],
-      "wiring": {"inputs_from": ["Message history"], "outputs_to": ["StreamChunk stream", "ui perceive frame", "act stage"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the Reason node opens a live token lane fed by StreamingResponse::into_channel that fills left to right as chunks arrive.", "visual": "Content chunks type out in real time; a ToolCallDelta chunk pops a half-formed tool chip onto the lane."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "StreamChunk",
+        "Usage"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "Message history"
+        ],
+        "outputs_to": [
+          "StreamChunk stream",
+          "ui perceive frame",
+          "act stage"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the Reason node opens a live token lane fed by StreamingResponse::into_channel that fills left to right as chunks arrive.",
+        "visual": "Content chunks type out in real time; a ToolCallDelta chunk pops a half-formed tool chip onto the lane."
+      },
       "mini_scenario": "The model streams reasoning then a tool call; the UI shows the text live while StreamChunk deltas queue the tool as it lands.",
       "pitfall": "Failing to accumulate ToolCallDelta fragments by index yields a truncated, unparseable ToolCall."
     },
@@ -39,9 +84,25 @@
       "pattern": "stream-to-response",
       "intent": "Reassemble streamed chunks into a single canonical assistant Message.",
       "how_it_shapes_the_loop": "StreamingResponse::collect drains the StreamChunk stream and merges content plus ToolCallDelta fragments into one ChatResponse, so downstream code treats streamed and blocking turns identically.",
-      "loop_objects_touched": ["StreamChunk", "ChatResponse", "ToolCall"],
-      "wiring": {"inputs_from": ["StreamChunk stream"], "outputs_to": ["assembled ChatResponse", "act stage"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the stream lane collapses the chunk trail into a single settled ChatResponse card via collect.", "visual": "Chunks converge and merge into one card with a completion checkmark and the finish_reason badge."},
+      "loop_objects_touched": [
+        "StreamChunk",
+        "ChatResponse",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "StreamChunk stream"
+        ],
+        "outputs_to": [
+          "assembled ChatResponse",
+          "act stage"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the stream lane collapses the chunk trail into a single settled ChatResponse card via collect.",
+        "visual": "Chunks converge and merge into one card with a completion checkmark and the finish_reason badge."
+      },
       "mini_scenario": "The loop streams for the UI but calls StreamingResponse::collect before dispatch, so the recovered ToolCalls are complete.",
       "pitfall": "Reading content chunks but ignoring the accumulator loses tool-call fragments spread across ToolCallDelta values."
     },
@@ -52,9 +113,24 @@
       "pattern": "tool-surface-injection",
       "intent": "Tell the model which tools it may call this turn.",
       "how_it_shapes_the_loop": "attach_tools sets the request tools from the ToolDefinition/FunctionDefinition list and, when native function calling is on, enables automatic tool choice, shaping the model's available act surface for the reason turn.",
-      "loop_objects_touched": ["ToolDefinition", "ApiClient"],
-      "wiring": {"inputs_from": ["tool registry definitions"], "outputs_to": ["request body", "model tool selection"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "User draws edges from tool nodes into the Reason node to declare which ToolDefinitions attach_tools exposes this turn.", "visual": "Each attached tool shows a small plug icon on the Reason node's rim with its FunctionDefinition name."},
+      "loop_objects_touched": [
+        "ToolDefinition",
+        "ApiClient"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "tool registry definitions"
+        ],
+        "outputs_to": [
+          "request body",
+          "model tool selection"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "User draws edges from tool nodes into the Reason node to declare which ToolDefinitions attach_tools exposes this turn.",
+        "visual": "Each attached tool shows a small plug icon on the Reason node's rim with its FunctionDefinition name."
+      },
       "mini_scenario": "The loop attaches the critical tool's FunctionDefinition so the model can emit a native ToolCall for it.",
       "pitfall": "Attaching the full tool catalog every turn wastes context; attach only what the turn needs."
     },
@@ -65,9 +141,24 @@
       "pattern": "native-then-text-parse",
       "intent": "Get structured ToolCalls out of the model turn regardless of format.",
       "how_it_shapes_the_loop": "extract_tool_calls reads message.tool_calls when present and otherwise falls back to extract_tool_calls_from_text, so both native-FC and text-only models feed the same act stage.",
-      "loop_objects_touched": ["ToolCall", "Message"],
-      "wiring": {"inputs_from": ["assistant Message"], "outputs_to": ["ToolCall batch", "act stage"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the response card splits out the ToolCall chips extract_tool_calls recovered.", "visual": "Native calls render with a solid plug icon; text-parsed calls render with a dashed 'recovered' icon."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "assistant Message"
+        ],
+        "outputs_to": [
+          "ToolCall batch",
+          "act stage"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the response card splits out the ToolCall chips extract_tool_calls recovered.",
+        "visual": "Native calls render with a solid plug icon; text-parsed calls render with a dashed 'recovered' icon."
+      },
       "mini_scenario": "A model without native FC emits a JSON block in text; extract_tool_calls_from_text recovers the ToolCall and the loop runs it.",
       "pitfall": "Assuming native tool_calls exist for every model drops the calls of text-only backends entirely."
     },
@@ -78,9 +169,23 @@
       "pattern": "resilient-parse",
       "intent": "Recover tool calls even when the model wraps them in prose or slightly malformed JSON.",
       "how_it_shapes_the_loop": "extract_tool_calls_from_text delegates to the tool parser and parsed_to_tool_call assigns a synthetic id, so imperfect model output still becomes a valid ToolCall for the act stage.",
-      "loop_objects_touched": ["ToolCall", "Message"],
-      "wiring": {"inputs_from": ["assistant text content"], "outputs_to": ["ToolCall with synthetic id"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing a recovered tool chip shows the raw text span parsed_to_tool_call built it from.", "visual": "Recovered chips carry a repair-wrench badge and a tooltip with the source span."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "assistant text content"
+        ],
+        "outputs_to": [
+          "ToolCall with synthetic id"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing a recovered tool chip shows the raw text span parsed_to_tool_call built it from.",
+        "visual": "Recovered chips carry a repair-wrench badge and a tooltip with the source span."
+      },
       "mini_scenario": "The model emits a fenced JSON tool call inside a paragraph; extract_tool_calls_from_text recovers it and parsed_to_tool_call mints the id.",
       "pitfall": "A non-unique synthetic id collides tool results and breaks call-to-result pairing on the next turn."
     },
@@ -91,9 +196,25 @@
       "pattern": "result-feedback-message",
       "intent": "Close the act-to-reason loop by returning execution output to the model.",
       "how_it_shapes_the_loop": "Message::tool binds role='tool' content to its tool_call_id so the next chat turn perceives the outcome and reasons about the next move.",
-      "loop_objects_touched": ["Message", "ToolCall"],
-      "wiring": {"inputs_from": ["tool result JSON", "tool_call_id"], "outputs_to": ["Message history", "next reason turn"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "User draws an edge from a tool result card back into the Message history strip feeding the next turn.", "visual": "The Message::tool bubble renders grey, tagged with the tool_call_id it answers."},
+      "loop_objects_touched": [
+        "Message",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "tool result JSON",
+          "tool_call_id"
+        ],
+        "outputs_to": [
+          "Message history",
+          "next reason turn"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "User draws an edge from a tool result card back into the Message history strip feeding the next turn.",
+        "visual": "The Message::tool bubble renders grey, tagged with the tool_call_id it answers."
+      },
       "mini_scenario": "cargo_test output is wrapped via Message::tool keyed to its call id and the model reads it on the next ApiClient::chat turn.",
       "pitfall": "A tool Message whose tool_call_id matches no prior ToolCall is rejected by strict providers."
     },
@@ -104,9 +225,22 @@
       "pattern": "wire-format-normalization",
       "intent": "Keep the request in a shape providers accept.",
       "how_it_shapes_the_loop": "Message::validate_structure and validate check the history built from Message::system/user/assistant constructors, catching orphan tool messages and bad ordering so the reason turn never dies on a provider 400.",
-      "loop_objects_touched": ["Message"],
-      "wiring": {"inputs_from": ["raw Message history"], "outputs_to": ["validated request body"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "User flicks the history strip to run validate_structure; invalid bubbles fly to a problem tray.", "visual": "Valid bubbles glow a steady border; structural violations flash red with the failing rule label."},
+      "loop_objects_touched": [
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "raw Message history"
+        ],
+        "outputs_to": [
+          "validated request body"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "User flicks the history strip to run validate_structure; invalid bubbles fly to a problem tray.",
+        "visual": "Valid bubbles glow a steady border; structural violations flash red with the failing rule label."
+      },
       "mini_scenario": "A resumed history with a dangling tool Message fails validate_structure and is repaired before the request is sent.",
       "pitfall": "Skipping validation on resumed histories can send an out-of-order payload that the provider rejects."
     },
@@ -117,9 +251,22 @@
       "pattern": "content-sanitization",
       "intent": "Avoid provider 400s when the assistant turn has no visible text.",
       "how_it_shapes_the_loop": "Message::assistant_with_reasoning stores the reasoning trace alongside empty content, so a tool-only assistant turn still forms a valid Message for the next request instead of an empty bubble.",
-      "loop_objects_touched": ["Message"],
-      "wiring": {"inputs_from": ["assistant Message with ToolCalls"], "outputs_to": ["sanitized Message history"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping an empty assistant bubble fills it with the reasoning carried by assistant_with_reasoning.", "visual": "Empty bubbles show a hollow outline that fills solid once the reasoning is attached."},
+      "loop_objects_touched": [
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "assistant Message with ToolCalls"
+        ],
+        "outputs_to": [
+          "sanitized Message history"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping an empty assistant bubble fills it with the reasoning carried by assistant_with_reasoning.",
+        "visual": "Empty bubbles show a hollow outline that fills solid once the reasoning is attached."
+      },
       "mini_scenario": "A tool-only turn has empty content; Message::assistant_with_reasoning keeps the trace so the next request stays valid.",
       "pitfall": "Leaving assistant content empty makes some providers 400 and stalls the loop mid-turn."
     },
@@ -130,9 +277,24 @@
       "pattern": "per-turn-accounting",
       "intent": "Track how much budget each reason turn consumes.",
       "how_it_shapes_the_loop": "The ChatResponse carries Usage (prompt/completion/total tokens); the loop adds it to the cumulative budget that guards iteration and wall-clock stops.",
-      "loop_objects_touched": ["Usage", "ChatResponse"],
-      "wiring": {"inputs_from": ["ChatResponse.usage"], "outputs_to": ["cumulative budget", "control stops"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching the Reason node reveals a Usage meter for the last turn and the running total.", "visual": "A dual bar shows prompt vs completion tokens; it deepens red as the cumulative total climbs."},
+      "loop_objects_touched": [
+        "Usage",
+        "ChatResponse"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ChatResponse.usage"
+        ],
+        "outputs_to": [
+          "cumulative budget",
+          "control stops"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching the Reason node reveals a Usage meter for the last turn and the running total.",
+        "visual": "A dual bar shows prompt vs completion tokens; it deepens red as the cumulative total climbs."
+      },
       "mini_scenario": "Each turn's Usage is summed so the loop knows when it is nearing its token budget and can stop early.",
       "pitfall": "Trusting a Usage where total != prompt + completion corrupts budget accounting downstream."
     },
@@ -143,9 +305,24 @@
       "pattern": "observable-reason",
       "intent": "Record exactly what was sent and how the turn resolved.",
       "how_it_shapes_the_loop": "ApiClient::chat_with_meta and chat_stream_with_meta return a ChatMetadata (request body, elapsed time, finish reason, token counts) alongside the response, giving the learn stage a full trace of each reason turn.",
-      "loop_objects_touched": ["ChatMetadata", "Usage"],
-      "wiring": {"inputs_from": ["request + response"], "outputs_to": ["debug log", "checkpoint"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the Reason node opens the ChatMetadata drawer with the request body and timing.", "visual": "A ledger badge shows elapsed ms and finish_reason; slow turns glow amber."},
+      "loop_objects_touched": [
+        "ChatMetadata",
+        "Usage"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "request + response"
+        ],
+        "outputs_to": [
+          "debug log",
+          "checkpoint"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the Reason node opens the ChatMetadata drawer with the request body and timing.",
+        "visual": "A ledger badge shows elapsed ms and finish_reason; slow turns glow amber."
+      },
       "mini_scenario": "A turn is logged via chat_with_meta with its finish_reason and elapsed time so a stall can later be diagnosed.",
       "pitfall": "Logging the raw request body without redaction can leak the credential into the trace."
     },
@@ -156,9 +333,24 @@
       "pattern": "backoff-retry",
       "intent": "Survive transient 429/5xx without failing the whole turn.",
       "how_it_shapes_the_loop": "with_retry_config installs a RetryConfig that retries retryable statuses with backoff, so a flaky provider does not immediately push the loop into ErrorRecovery.",
-      "loop_objects_touched": ["ApiClient", "ChatResponse"],
-      "wiring": {"inputs_from": ["failed HTTP response"], "outputs_to": ["retried request", "ChatResponse or typed error"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the Reason node opens the RetryConfig dial for max attempts and delay.", "visual": "During retries the node shows a countdown ring for the backoff window."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "ChatResponse"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "failed HTTP response"
+        ],
+        "outputs_to": [
+          "retried request",
+          "ChatResponse or typed error"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the Reason node opens the RetryConfig dial for max attempts and delay.",
+        "visual": "During retries the node shows a countdown ring for the backoff window."
+      },
       "mini_scenario": "A 429 makes the client wait out the RetryConfig backoff then retry, and the turn succeeds on attempt two.",
       "pitfall": "Retrying non-retryable statuses wastes budget; keep the RetryConfig status list conservative."
     },
@@ -169,9 +361,25 @@
       "pattern": "deadline-shared-across-calls",
       "intent": "Bound total LLM-IO time even across retries and multiple turns.",
       "how_it_shapes_the_loop": "The wall-clock deadline is latched on the first billable request and shared across all retries and calls; once expired, WallClockBudgetExceeded is raised before any new request as a budget stop, not a network error.",
-      "loop_objects_touched": ["ApiClient", "ChatMetadata"],
-      "wiring": {"inputs_from": ["max wall-clock config", "first request timestamp"], "outputs_to": ["WallClockBudgetExceeded", "control stop"]},
-      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating a dial on the Reason node sets the shared wall-clock ceiling guarding every ApiClient call.", "visual": "A clock ring shared across turns drains and locks red when WallClockBudgetExceeded trips."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "ChatMetadata"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "max wall-clock config",
+          "first request timestamp"
+        ],
+        "outputs_to": [
+          "WallClockBudgetExceeded",
+          "control stop"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating a dial on the Reason node sets the shared wall-clock ceiling guarding every ApiClient call.",
+        "visual": "A clock ring shared across turns drains and locks red when WallClockBudgetExceeded trips."
+      },
       "mini_scenario": "Mid-run the wall budget expires; the next chat call is refused with WallClockBudgetExceeded, classified as a budget stop.",
       "pitfall": "Classifying a wall-budget stop as a network error mislabels the failure mode and triggers pointless retries."
     },
@@ -182,9 +390,24 @@
       "pattern": "overflow-to-compaction",
       "intent": "React to a too-large request by slimming the payload rather than dying.",
       "how_it_shapes_the_loop": "When the request would exceed the window, Message::strip_images drops heavy ImageUrl blocks from history and validate re-checks the result, letting the loop retry the reason turn smaller instead of failing.",
-      "loop_objects_touched": ["Message", "ChatResponse"],
-      "wiring": {"inputs_from": ["oversized Message history"], "outputs_to": ["slimmed history", "retried reason turn"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "On overflow the history strip auto-pinches, shedding ImageUrl thumbnails before the request is retried.", "visual": "The node flashes an overflow badge, image blocks fold away, and the turn re-fires."},
+      "loop_objects_touched": [
+        "Message",
+        "ChatResponse"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "oversized Message history"
+        ],
+        "outputs_to": [
+          "slimmed history",
+          "retried reason turn"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "On overflow the history strip auto-pinches, shedding ImageUrl thumbnails before the request is retried.",
+        "visual": "The node flashes an overflow badge, image blocks fold away, and the turn re-fires."
+      },
       "mini_scenario": "A multimodal history overflows the window; strip_images removes old screenshots, validate passes, and chat succeeds.",
       "pitfall": "Retrying the same oversized payload unchanged guarantees the same failure; always shrink before resend."
     },
@@ -195,9 +418,24 @@
       "pattern": "reasoning-budget",
       "intent": "Control how much hidden reasoning the model spends per turn.",
       "how_it_shapes_the_loop": "ThinkingMode (enabled, disabled, or a token budget) shapes the reasoning depth of each turn, trading token spend for deliberation on hard steps.",
-      "loop_objects_touched": ["ApiClient", "StreamChunk"],
-      "wiring": {"inputs_from": ["config / task difficulty"], "outputs_to": ["request body", "reasoning StreamChunks"]},
-      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotating the Reason node dials ThinkingMode from off to a token budget for deeper reasoning.", "visual": "Higher thinking deepens the node color and opens a separate reasoning stream lane."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "StreamChunk"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "config / task difficulty"
+        ],
+        "outputs_to": [
+          "request body",
+          "reasoning StreamChunks"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotating the Reason node dials ThinkingMode from off to a token budget for deeper reasoning.",
+        "visual": "Higher thinking deepens the node color and opens a separate reasoning stream lane."
+      },
       "mini_scenario": "For a tricky refactor the loop sets a ThinkingMode budget so the model reasons harder before acting.",
       "pitfall": "Leaving a large thinking budget on for trivial turns wastes tokens the loop budget cannot spare."
     },
@@ -208,9 +446,24 @@
       "pattern": "multimodal-perceive-input",
       "intent": "Let the model see a screenshot or diagram as part of the reason turn.",
       "how_it_shapes_the_loop": "Message::user_multimodal builds a Message with ContentBlock text plus ImageUrl parts; has_images and image_count let the loop track how much visual payload the history carries.",
-      "loop_objects_touched": ["Message"],
-      "wiring": {"inputs_from": ["screenshot capture", "user prompt"], "outputs_to": ["Message history", "reason turn"]},
-      "touch_interaction": {"gesture": "drag", "canvas_action": "User drags an image thumbnail onto the Reason node, wrapping it into a user_multimodal Message.", "visual": "The bubble gains an image thumbnail chip; image_count badges the history strip."},
+      "loop_objects_touched": [
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "screenshot capture",
+          "user prompt"
+        ],
+        "outputs_to": [
+          "Message history",
+          "reason turn"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "User drags an image thumbnail onto the Reason node, wrapping it into a user_multimodal Message.",
+        "visual": "The bubble gains an image thumbnail chip; image_count badges the history strip."
+      },
       "mini_scenario": "The operator drops a UI screenshot on the node; Message::user_multimodal attaches it and the model critiques the layout.",
       "pitfall": "Images bloat token counts fast — check image_count before the request or the turn overflows the window."
     },
@@ -221,9 +474,23 @@
       "pattern": "endpoint-capability-probe",
       "intent": "Pick the right request shape for the actual provider behind the endpoint.",
       "how_it_shapes_the_loop": "ApiClient::detect_backend identifies which backend the endpoint speaks, so from_settings can build a client whose chat/completion paths match the provider's capabilities before any billable call.",
-      "loop_objects_touched": ["ApiClient"],
-      "wiring": {"inputs_from": ["endpoint config"], "outputs_to": ["ApiClient::from_settings", "request shape"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the Reason node's endpoint chip runs detect_backend and shows the identified provider.", "visual": "The chip fills with the provider's badge; an unknown backend shows a question-mark outline."},
+      "loop_objects_touched": [
+        "ApiClient"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "endpoint config"
+        ],
+        "outputs_to": [
+          "ApiClient::from_settings",
+          "request shape"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the Reason node's endpoint chip runs detect_backend and shows the identified provider.",
+        "visual": "The chip fills with the provider's badge; an unknown backend shows a question-mark outline."
+      },
       "mini_scenario": "At startup detect_backend identifies the endpoint, and from_settings builds an ApiClient tuned to it.",
       "pitfall": "Assuming every endpoint is fully OpenAI-compatible sends fields the backend rejects on turn one."
     },
@@ -234,9 +501,24 @@
       "pattern": "fallback-reason-path",
       "intent": "Keep reasoning working on backends that only expose text completion.",
       "how_it_shapes_the_loop": "ApiClient::completion sends a CompletionRequest and returns a CompletionResponse with CompletionChoices, giving the loop a reason path when chat-style tool calling is unavailable.",
-      "loop_objects_touched": ["ApiClient", "Message"],
-      "wiring": {"inputs_from": ["prompt text"], "outputs_to": ["CompletionResponse text", "text-parse fallback"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking the Reason node sideways swaps it from chat mode to the completion lane.", "visual": "The node re-tints to show the completion path; tool chips gain a 'text-parse' watermark."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "prompt text"
+        ],
+        "outputs_to": [
+          "CompletionResponse text",
+          "text-parse fallback"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking the Reason node sideways swaps it from chat mode to the completion lane.",
+        "visual": "The node re-tints to show the completion path; tool chips gain a 'text-parse' watermark."
+      },
       "mini_scenario": "detect_backend finds a completion-only server; the loop routes through ApiClient::completion and parses tool calls from text.",
       "pitfall": "Do not attach_tools on a completion-only backend — the field is ignored and tool calls must come from text parsing."
     },
@@ -247,9 +529,23 @@
       "pattern": "config-driven-client",
       "intent": "Construct one correctly configured client from the resolved config.",
       "how_it_shapes_the_loop": "ApiClient::from_settings builds the client from config, chat_with_profile selects a named profile for a turn, and config() exposes the resolved settings — a foundation seam every reason turn depends on.",
-      "loop_objects_touched": ["ApiClient"],
-      "wiring": {"inputs_from": ["resolved config"], "outputs_to": ["configured ApiClient", "all reason turns"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the Reason node lists profiles; tapping one re-arms the node for chat_with_profile.", "visual": "The node's base ring shows the active profile name; switching profiles cross-fades the ring color."},
+      "loop_objects_touched": [
+        "ApiClient"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "resolved config"
+        ],
+        "outputs_to": [
+          "configured ApiClient",
+          "all reason turns"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the Reason node lists profiles; tapping one re-arms the node for chat_with_profile.",
+        "visual": "The node's base ring shows the active profile name; switching profiles cross-fades the ring color."
+      },
       "mini_scenario": "The loop builds the client via from_settings, then runs one hard turn through chat_with_profile with the deep-reasoning profile.",
       "pitfall": "Constructing ad-hoc clients with ApiClient::new in multiple places drifts retry/endpoint settings apart."
     },
@@ -260,9 +556,23 @@
       "pattern": "progress-sidechannel",
       "intent": "Show request lifecycle events without changing the reason result.",
       "how_it_shapes_the_loop": "with_progress_emitter attaches an emitter to the ApiClient so each chat/chat_stream call reports progress events the UI renders; it observes the reason stage without altering its output.",
-      "loop_objects_touched": ["ApiClient", "StreamChunk"],
-      "wiring": {"inputs_from": ["ApiClient request lifecycle"], "outputs_to": ["ui perceive frame"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch-in on the Reason node expands the progress emitter's event feed for the in-flight request.", "visual": "A side rail ticks off send/wait/first-byte events; the node halo breathes while waiting."},
+      "loop_objects_touched": [
+        "ApiClient",
+        "StreamChunk"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ApiClient request lifecycle"
+        ],
+        "outputs_to": [
+          "ui perceive frame"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch-in on the Reason node expands the progress emitter's event feed for the in-flight request.",
+        "visual": "A side rail ticks off send/wait/first-byte events; the node halo breathes while waiting."
+      },
       "mini_scenario": "With with_progress_emitter attached, the UI shows 'request sent, awaiting first byte' during a slow chat_stream turn.",
       "pitfall": "The emitter must never block the request path — a slow observer stalls every billable turn."
     }

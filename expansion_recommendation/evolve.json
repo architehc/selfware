@@ -1,9 +1,29 @@
 {
   "component": "evolve",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "learn",
   "summary": "The evolve component is the self-improvement layer of the loop: GraphBuilder scans the repository into a deterministic Node/Edge Graph, map.rs projects it into a ContextMap of ComponentCards, ContextComposer and TierMeasurer pick a context tier (Map/Lite/Compact/Full) that fits the budget, context_selector and pair_suggest choose what to read and what to change, presets codify improvement directions, and apply.rs stages proposed edits in a shadow worktree (ApplyRun/StagedDiff) that readiness gates, the trust scanner, and the grounded review protocol must clear before a digest-gated commit. On the loop it is the reflective 'learn' driver that decides what to change and how much context to spend deciding it.",
-  "loop_objects": ["Graph", "Node", "Edge", "ContextMode", "ContextMap", "ComponentCard", "ContextEnvelope", "ProjectedDocument", "ComponentPair", "Preset", "ApplyRun", "ApplyStatus", "StagedDiff", "ReadinessGate", "ReadinessReport", "GroundingEvidence", "GroundedReview", "TrustReport", "TrustGateSummary"],
+  "loop_objects": [
+    "Graph",
+    "Node",
+    "Edge",
+    "ContextMode",
+    "ContextMap",
+    "ComponentCard",
+    "ContextEnvelope",
+    "ProjectedDocument",
+    "ComponentPair",
+    "Preset",
+    "ApplyRun",
+    "ApplyStatus",
+    "StagedDiff",
+    "ReadinessGate",
+    "ReadinessReport",
+    "GroundingEvidence",
+    "GroundedReview",
+    "TrustReport",
+    "TrustGateSummary"
+  ],
   "context_basis": "Recommendations formed with crate::evolve read in the context of the full engine (~600k budget framing); tier choices and map-vs-full tradeoffs assume the whole tree must remain describable within that envelope.",
   "examples": [
     {
@@ -13,9 +33,25 @@
       "pattern": "scan-then-model",
       "intent": "Build the factual substrate (files, symbols, DependsOn edges) that every later loop stage reads from.",
       "how_it_shapes_the_loop": "GraphBuilder::scan_src walks src/ into Nodes and Edges with layer tags (code/test/auxiliary/structure), giving the perceive stage a stable graph revision that all context projections and reviews key off.",
-      "loop_objects_touched": ["Graph", "Node", "Edge"],
-      "wiring": {"inputs_from": ["filesystem src/ tree"], "outputs_to": ["crate::evolve::map (build_map)", "crate::evolve::clusters (clustered)"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the scanner node runs scan_src and the canvas populates with one node per source file, edges tracing in as imports resolve.", "visual": "Nodes fade in grouped by NodeLayer color (code cyan, test green, auxiliary grey); a revision badge stamps the graph with its scan id."},
+      "loop_objects_touched": [
+        "Graph",
+        "Node",
+        "Edge"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "filesystem src/ tree"
+        ],
+        "outputs_to": [
+          "crate::evolve::map (build_map)",
+          "crate::evolve::clusters (clustered)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the scanner node runs scan_src and the canvas populates with one node per source file, edges tracing in as imports resolve.",
+        "visual": "Nodes fade in grouped by NodeLayer color (code cyan, test green, auxiliary grey); a revision badge stamps the graph with its scan id."
+      },
       "mini_scenario": "The loop boots; scan_src produces 47 code nodes, and every later perceive/reason move reads from this single Graph instead of re-walking the disk.",
       "pitfall": "Never mix layers silently — Graph::code vs Graph::test exist so reasoning about production coupling isn't polluted by test-only edges."
     },
@@ -26,9 +62,25 @@
       "pattern": "map-then-expand",
       "intent": "Understand the whole tree's shape at the smallest resident token cost before committing budget to any component.",
       "how_it_shapes_the_loop": "build_map projects the Graph into one ComponentCard per module (doc line + public fns/types), so the perceive stage pays map tokens instead of full source and defers detail pulls to map::expand.",
-      "loop_objects_touched": ["ContextMap", "ComponentCard", "Graph"],
-      "wiring": {"inputs_from": ["crate::evolve (Graph)"], "outputs_to": ["reason stage (which card to expand)", "ContextEnvelope"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinching out collapses every component node into its compact card, revealing the full tree as a grid of index cards.", "visual": "Cards render dim slate with a token badge; the grid breathes with a soft settle animation as full source folds away."},
+      "loop_objects_touched": [
+        "ContextMap",
+        "ComponentCard",
+        "Graph"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "crate::evolve (Graph)"
+        ],
+        "outputs_to": [
+          "reason stage (which card to expand)",
+          "ContextEnvelope"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinching out collapses every component node into its compact card, revealing the full tree as a grid of index cards.",
+        "visual": "Cards render dim slate with a token badge; the grid breathes with a soft settle animation as full source folds away."
+      },
       "mini_scenario": "The user pinches out, sees 39 evolve cards at a few thousand tokens total, and taps 'crate::evolve::apply' to read just its doc line and symbol list.",
       "pitfall": "The Map is a navigation index, not citable evidence — symbol names are indexed but bodies are absent, so expand the card before making line-level claims."
     },
@@ -39,9 +91,26 @@
       "pattern": "detail-on-demand",
       "intent": "Pull just the interface surface of a chosen component without paying for full bodies.",
       "how_it_shapes_the_loop": "map::expand escalates a card to ContextMode::Lite via skeleton::extract_rust_skeleton, adding one signature-level ProjectedDocument to the envelope instead of the whole file.",
-      "loop_objects_touched": ["ComponentCard", "ContextMode", "ProjectedDocument", "Node"],
-      "wiring": {"inputs_from": ["ContextMap card selection"], "outputs_to": ["ContextEnvelope", "reason stage"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping a card flips it to show function and type signatures as a scrollable skeleton on the node face.", "visual": "The card flips with a hinge animation; signature lines fade in ghosted, a 'Lite' chip glowing amber in the corner."},
+      "loop_objects_touched": [
+        "ComponentCard",
+        "ContextMode",
+        "ProjectedDocument",
+        "Node"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ContextMap card selection"
+        ],
+        "outputs_to": [
+          "ContextEnvelope",
+          "reason stage"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a card flips it to show function and type signatures as a scrollable skeleton on the node face.",
+        "visual": "The card flips with a hinge animation; signature lines fade in ghosted, a 'Lite' chip glowing amber in the corner."
+      },
       "mini_scenario": "The user taps the apply.rs card and reads ApplyRun, ApplyStatus, and commit_staged signatures to decide whether it can stage a merge, at a fraction of full-file tokens.",
       "pitfall": "Lite hides bodies — control-flow reasoning that depends on implementation must escalate the same node to Compact or Full first, or the reason stage hallucinates logic."
     },
@@ -52,9 +121,26 @@
       "pattern": "budget-fit-selection",
       "intent": "Choose the richest context tier that still fits the remaining token window without manual guessing.",
       "how_it_shapes_the_loop": "context_fit::TierMeasurer measures real Lite/Compact/Map projections (io_reads, measure) and fit_tier returns a FitOutcome, letting the control layer auto-downgrade the tier when the request would overflow the FitBudget.",
-      "loop_objects_touched": ["ContextMode", "ContextEnvelope", "ContextMap"],
-      "wiring": {"inputs_from": ["remaining Budget", "RequestedMode::Auto"], "outputs_to": ["ContextComposer (set_mode)", "ContextEnvelope"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the budget dial opens a fit slider that snaps to the highest tier whose measured tokens stay under the line.", "visual": "A gauge fills toward a red overflow line; the snapped tier chip pulses green when it lands under budget, amber if forced down a rung."},
+      "loop_objects_touched": [
+        "ContextMode",
+        "ContextEnvelope",
+        "ContextMap"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "remaining Budget",
+          "RequestedMode::Auto"
+        ],
+        "outputs_to": [
+          "ContextComposer (set_mode)",
+          "ContextEnvelope"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the budget dial opens a fit slider that snaps to the highest tier whose measured tokens stay under the line.",
+        "visual": "A gauge fills toward a red overflow line; the snapped tier chip pulses green when it lands under budget, amber if forced down a rung."
+      },
       "mini_scenario": "The user asks for Full but only 120k budget remains, so fit_tier snaps to Compact and reports the measured tokens it actually costs.",
       "pitfall": "Trust measured projections over declared fractions — TierMeasurer exists because fixed signature-fraction heuristics misestimate tiers by double-digit percentages."
     },
@@ -65,9 +151,27 @@
       "pattern": "seed-and-neighborhood",
       "intent": "Assemble exactly the context a task needs: the seed components plus their relevant neighbors, tagged by TaskKind.",
       "how_it_shapes_the_loop": "context_selector::select takes a TaskKind and walks Graph edges outward from seeds into a ContextSelection of SelectedFiles, so the perceive stage loads a coherent subgraph instead of an arbitrary file list.",
-      "loop_objects_touched": ["Graph", "Node", "Edge", "ProjectedDocument"],
-      "wiring": {"inputs_from": ["TaskKind (parse from task text)", "Graph edges"], "outputs_to": ["ContextComposer (included_nodes)", "ContextEnvelope"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Drawing a lasso ring around a seed node auto-selects it plus every node one edge away, highlighting the subgraph.", "visual": "The seed glows white; DependsOn neighbors light blue as edges trace outward like ripples; each SelectedFile shows its reason chip."},
+      "loop_objects_touched": [
+        "Graph",
+        "Node",
+        "Edge",
+        "ProjectedDocument"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "TaskKind (parse from task text)",
+          "Graph edges"
+        ],
+        "outputs_to": [
+          "ContextComposer (included_nodes)",
+          "ContextEnvelope"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing a lasso ring around a seed node auto-selects it plus every node one edge away, highlighting the subgraph.",
+        "visual": "The seed glows white; DependsOn neighbors light blue as edges trace outward like ripples; each SelectedFile shows its reason chip."
+      },
       "mini_scenario": "The user lassoes context.rs and the canvas lights context_fit, context_reduce, and map as its neighborhood, forming the refactor's working set.",
       "pitfall": "Neighborhood depth must be bounded — expanding transitively without a cap pulls the whole tree and defeats the point of task-scoping."
     },
@@ -78,9 +182,26 @@
       "pattern": "hashed-context-snapshot",
       "intent": "Freeze the exact context handed to the model so identical inputs reproduce identical reviews.",
       "how_it_shapes_the_loop": "envelope::build_envelope assembles mode, graph revision, included ids, and ProjectedDocuments into a ContextEnvelope and hashes it, giving the loop a stable content key that gates cache reuse and audit.",
-      "loop_objects_touched": ["ContextEnvelope", "ProjectedDocument", "ContextMode"],
-      "wiring": {"inputs_from": ["ContextComposer projection", "Graph revision"], "outputs_to": ["review protocol (evidence_from_document)", "cache key"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the canvas seals the current selection into an envelope tile stamped with its hash prefix.", "visual": "A wax-seal animation presses onto a folded-envelope node; the hash prefix appears in monospace on the seal."},
+      "loop_objects_touched": [
+        "ContextEnvelope",
+        "ProjectedDocument",
+        "ContextMode"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ContextComposer projection",
+          "Graph revision"
+        ],
+        "outputs_to": [
+          "review protocol (evidence_from_document)",
+          "cache key"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the canvas seals the current selection into an envelope tile stamped with its hash prefix.",
+        "visual": "A wax-seal animation presses onto a folded-envelope node; the hash prefix appears in monospace on the seal."
+      },
       "mini_scenario": "The user seals an envelope over the map+context selection; the next identical review hits cache instead of re-projecting 40 files.",
       "pitfall": "The hash must fold in graph revision, mode, ids, and content — omitting revision lets a stale envelope reuse a hash after the tree changed."
     },
@@ -91,9 +212,26 @@
       "pattern": "coupling-first-suggestion",
       "intent": "Find the architectural seam most worth improving without reading full source.",
       "how_it_shapes_the_loop": "pair_suggest::connected_pairs sorts ComponentPairs by cross-cluster edge weight, and pair_context feeds the reason stage both map cards so a merge/extract/decouple proposal is grounded in the pair's actual interface.",
-      "loop_objects_touched": ["ComponentPair", "Graph", "Edge", "ComponentCard"],
-      "wiring": {"inputs_from": ["clusters::clustered (ClusteredGraph)", "Graph edges"], "outputs_to": ["GroundedAssistant suggestion call"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking across the canvas cycles through pair candidates, each snapping two nodes together with their connecting edge highlighted.", "visual": "Paired nodes pull toward each other on a taut spring; the edge thickens and glows orange proportional to its weight."},
+      "loop_objects_touched": [
+        "ComponentPair",
+        "Graph",
+        "Edge",
+        "ComponentCard"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "clusters::clustered (ClusteredGraph)",
+          "Graph edges"
+        ],
+        "outputs_to": [
+          "GroundedAssistant suggestion call"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking across the canvas cycles through pair candidates, each snapping two nodes together with their connecting edge highlighted.",
+        "visual": "Paired nodes pull toward each other on a taut spring; the edge thickens and glows orange proportional to its weight."
+      },
       "mini_scenario": "The user flicks and the canvas snaps analysis::code_graph to evolve::graph — a heavy cross-cluster pair — and suggest_prompt drafts 'extract shared graph core'.",
       "pitfall": "Pair weight is edge count, not semantic importance — a hot pair may just be a utility everyone imports, so read the relations before proposing a merge."
     },
@@ -104,9 +242,25 @@
       "pattern": "preset-scoped-task",
       "intent": "Turn a vague 'improve X' into a contract-bearing task with invariants and a verify recipe.",
       "how_it_shapes_the_loop": "presets::preset loads a catalog Preset and render_prompt injects its task text, invariants, and context recipe into the run, constraining what the act stage may change and how success is proven.",
-      "loop_objects_touched": ["Preset", "ContextMode", "ContextEnvelope"],
-      "wiring": {"inputs_from": ["preset catalog (presets::presets)"], "outputs_to": ["ApplyRun task prompt", "verify gate"]},
-      "touch_interaction": {"gesture": "drag", "canvas_action": "Dragging a preset chip onto a component node binds the direction to that target and unfurls its invariant list.", "visual": "The preset chip lands with a clamp animation; invariant lines cascade below the node as a checklist ribbon."},
+      "loop_objects_touched": [
+        "Preset",
+        "ContextMode",
+        "ContextEnvelope"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "preset catalog (presets::presets)"
+        ],
+        "outputs_to": [
+          "ApplyRun task prompt",
+          "verify gate"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Dragging a preset chip onto a component node binds the direction to that target and unfurls its invariant list.",
+        "visual": "The preset chip lands with a clamp animation; invariant lines cascade below the node as a checklist ribbon."
+      },
       "mini_scenario": "The user drags a 'split-giant-files' preset onto server.rs, and its invariant 'zero behavior change, tests green per move' locks into the run prompt.",
       "pitfall": "Presets carry invariants for a reason — running the task while dropping its context recipe or verify command lets a change ship unproven."
     },
@@ -117,9 +271,24 @@
       "pattern": "lossless-context-reduce",
       "intent": "Fit full code into a smaller model's window without losing executable meaning.",
       "how_it_shapes_the_loop": "ContextMode::Compact routes nodes through context_reduce::reduce_source — strip_comments, strip_cfg_test_blocks, and dedup_context — shrinking the envelope while keeping statements and line numbering intact.",
-      "loop_objects_touched": ["ContextMode", "ProjectedDocument", "Node"],
-      "wiring": {"inputs_from": ["Full-tier Nodes"], "outputs_to": ["ContextEnvelope for small-model review"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "A two-finger inward pinch on a node visibly compresses its source, comment lines evaporating first, then cfg-test blocks folding away.", "visual": "Grey comment lines fade and the node shrinks vertically with a concertina squeeze; a 'Compact' badge with the reduction percent settles at the base."},
+      "loop_objects_touched": [
+        "ContextMode",
+        "ProjectedDocument",
+        "Node"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "Full-tier Nodes"
+        ],
+        "outputs_to": [
+          "ContextEnvelope for small-model review"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "A two-finger inward pinch on a node visibly compresses its source, comment lines evaporating first, then cfg-test blocks folding away.",
+        "visual": "Grey comment lines fade and the node shrinks vertically with a concertina squeeze; a 'Compact' badge with the reduction percent settles at the base."
+      },
       "mini_scenario": "The user pinches a Full node down to Compact so a 32k-window model can review it, keeping every statement but dropping doc noise and test-only code.",
       "pitfall": "Stripping must never renumber lines — if reduction shifts line offsets, later GroundingEvidence citations point at the wrong code."
     },
@@ -130,9 +299,26 @@
       "pattern": "shadow-stage-before-merge",
       "intent": "Execute the improvement task in isolation so the live checkout is never touched until verified.",
       "how_it_shapes_the_loop": "apply::stage_run spawns the agent task inside a shadow git worktree, registering an ApplyRun whose ApplyStatus moves Running to Staged only after the StagedDiff passes scope and compile gates.",
-      "loop_objects_touched": ["ApplyRun", "ApplyStatus", "StagedDiff"],
-      "wiring": {"inputs_from": ["Preset task", "ContextEnvelope"], "outputs_to": ["verify gate (verify_staged_diff)", "StagedDiff preview"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the act node spawns a translucent shadow copy of the workspace beside it where the run executes.", "visual": "A ghosted mirror workspace fades in; a spinner orbits it while Running, then it solidifies with a green 'Staged' banner."},
+      "loop_objects_touched": [
+        "ApplyRun",
+        "ApplyStatus",
+        "StagedDiff"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "Preset task",
+          "ContextEnvelope"
+        ],
+        "outputs_to": [
+          "verify gate (verify_staged_diff)",
+          "StagedDiff preview"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the act node spawns a translucent shadow copy of the workspace beside it where the run executes.",
+        "visual": "A ghosted mirror workspace fades in; a spinner orbits it while Running, then it solidifies with a green 'Staged' banner."
+      },
       "mini_scenario": "The user long-presses to stage the split-giant-files task; the shadow worktree compiles clean and flips to Staged with a StagedDiff of six files.",
       "pitfall": "Never merge from a drifted shadow — commit requires the StagedDiff digest to still match live HEAD's staged state or the fast-forward is refused."
     },
@@ -143,9 +329,25 @@
       "pattern": "scope-gate",
       "intent": "Refuse any staged change that touches files outside the permitted boundary.",
       "how_it_shapes_the_loop": "apply::verify_staged_diff inspects the StagedDiff file list and RunVerification evidence; out-of-scope paths flip ApplyStatus to Rejected with a typed RejectReason before the change is ever offered for merge.",
-      "loop_objects_touched": ["StagedDiff", "ApplyStatus", "ApplyRun"],
-      "wiring": {"inputs_from": ["ApplyRun.StagedDiff"], "outputs_to": ["Rejected state (RejectReason)", "review UI"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping the staged node's diff badge lists changed files; out-of-scope paths render struck through and the merge button greys out.", "visual": "In-scope files list green; a rogue path flashes red and the node border pulses red with a 'Rejected: scope' tag."},
+      "loop_objects_touched": [
+        "StagedDiff",
+        "ApplyStatus",
+        "ApplyRun"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ApplyRun.StagedDiff"
+        ],
+        "outputs_to": [
+          "Rejected state (RejectReason)",
+          "review UI"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping the staged node's diff badge lists changed files; out-of-scope paths render struck through and the merge button greys out.",
+        "visual": "In-scope files list green; a rogue path flashes red and the node border pulses red with a 'Rejected: scope' tag."
+      },
       "mini_scenario": "A staged run edited Cargo.toml alongside src changes; verify_staged_diff flags it Rejected so the config edit never merges silently.",
       "pitfall": "Check scope on the actual diff, not the task's declared intent — an agent can wander outside its stated files."
     },
@@ -156,9 +358,26 @@
       "pattern": "digest-gated-fast-forward",
       "intent": "Commit the exact reviewed bytes, refusing anything that changed since review.",
       "how_it_shapes_the_loop": "apply::commit_staged matches the run's StagedDiff digest against live HEAD and merges fast-forward-only, returning a MergeOutcome or a typed CommitError, so the control layer guarantees merged state equals reviewed state.",
-      "loop_objects_touched": ["StagedDiff", "ApplyStatus", "ApplyRun"],
-      "wiring": {"inputs_from": ["human approval", "StagedDiff digest"], "outputs_to": ["Succeeded state", "live checkout"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Drawing a line from the shadow node to the live workspace triggers the merge; the line only completes if digests match.", "visual": "The connection snaps taut and turns solid green on a match, or recoils with a red flash and a CommitError label on mismatch."},
+      "loop_objects_touched": [
+        "StagedDiff",
+        "ApplyStatus",
+        "ApplyRun"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "human approval",
+          "StagedDiff digest"
+        ],
+        "outputs_to": [
+          "Succeeded state",
+          "live checkout"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Drawing a line from the shadow node to the live workspace triggers the merge; the line only completes if digests match.",
+        "visual": "The connection snaps taut and turns solid green on a match, or recoils with a red flash and a CommitError label on mismatch."
+      },
       "mini_scenario": "The user draws the merge line; digests match, the shadow fast-forwards into live, and ApplyStatus reads Succeeded.",
       "pitfall": "If HEAD advanced after staging, the digest will not match and the merge must abort — forcing it would ship un-reviewed code."
     },
@@ -169,9 +388,25 @@
       "pattern": "preconditions-gate",
       "intent": "Confirm the workspace is safe to self-modify: builds, lints, tests, clean git, graph integrity.",
       "how_it_shapes_the_loop": "readiness::ReadinessEngine::evaluate runs the ReadinessGates (GateState Pass/Fail/Unknown with GateEvidence) into a ReadinessReport whose ready flag gates whether the loop may proceed to act.",
-      "loop_objects_touched": ["ReadinessGate", "ReadinessReport"],
-      "wiring": {"inputs_from": ["Graph", "git::GitEngine status", "workspace state"], "outputs_to": ["gate decision (proceed / block)"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "A two-finger spread over the readiness node fans out its gate tiles, each running and settling to Pass, Fail, or Unknown.", "visual": "Gate tiles spin, then flip green (Pass), red (Fail), or grey (Unknown); the master node turns green only when all pass."},
+      "loop_objects_touched": [
+        "ReadinessGate",
+        "ReadinessReport"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "Graph",
+          "git::GitEngine status",
+          "workspace state"
+        ],
+        "outputs_to": [
+          "gate decision (proceed / block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "A two-finger spread over the readiness node fans out its gate tiles, each running and settling to Pass, Fail, or Unknown.",
+        "visual": "Gate tiles spin, then flip green (Pass), red (Fail), or grey (Unknown); the master node turns green only when all pass."
+      },
       "mini_scenario": "The user spreads the readiness node; clippy fails on a warning, so the ReadinessReport reads not-ready and blocks the evolve run until fixed.",
       "pitfall": "Unknown is not Pass — treating an Unknown gate as green lets a change proceed without the evidence the gate was meant to provide."
     },
@@ -182,9 +417,25 @@
       "pattern": "multi-hop-recommendation",
       "intent": "Turn a single diagnostic into an ordered, verifiable path of actions rather than one vague suggestion.",
       "how_it_shapes_the_loop": "readiness::DeterministicRecommendation carries ordered RecommendationHops (action, target, verification), so the reason stage emits a checkable plan the act stage executes hop by hop — e.g. dead_code::find flags a symbol, hops stage its deletion with deletion::preview_deletion.",
-      "loop_objects_touched": ["ReadinessReport", "ReadinessGate"],
-      "wiring": {"inputs_from": ["gate diagnostics", "dead_code::DeadCodeAnalyzer"], "outputs_to": ["act stage", "review UI"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking down a recommendation node deals out its hops as a vertical stack of numbered action cards.", "visual": "Hop cards cascade like a dealt hand; each shows an action verb, a target chip, and a small verify magnifier icon."},
+      "loop_objects_touched": [
+        "ReadinessReport",
+        "ReadinessGate"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "gate diagnostics",
+          "dead_code::DeadCodeAnalyzer"
+        ],
+        "outputs_to": [
+          "act stage",
+          "review UI"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking down a recommendation node deals out its hops as a vertical stack of numbered action cards.",
+        "visual": "Hop cards cascade like a dealt hand; each shows an action verb, a target chip, and a small verify magnifier icon."
+      },
       "mini_scenario": "DeadCodeAnalyzer flags an unused helper; the recommendation deals hops 'inspect symbol', 'run tests', 'stage deletion', each with its own verification step.",
       "pitfall": "Hops carry their own verification for a reason — executing a later hop before its predecessor's verify passes skips the safety the ordering encodes."
     },
@@ -195,9 +446,25 @@
       "pattern": "trust-gate-before-model",
       "intent": "Stop prompt-injection or exfiltration payloads hidden in workspace evidence from reaching the model.",
       "how_it_shapes_the_loop": "assistant::gate_evidence_trust runs context_trust::scan_injection over each GroundingEvidence, producing TrustReports and a TrustGateSummary; a high-severity finding in non-trusted content returns ReviewProtocolError::TrustBlocked before any model call.",
-      "loop_objects_touched": ["GroundingEvidence", "TrustReport", "TrustGateSummary"],
-      "wiring": {"inputs_from": ["assembled GroundingEvidence"], "outputs_to": ["model review (if clean)", "TrustBlocked error (if not)"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-pressing the evidence bundle runs a scan sweep; flagged excerpts get a warning overlay and quarantine the bundle.", "visual": "A scan-line sweeps the bundle top to bottom; clean evidence glows green, a flagged line pulses red with a shield-break icon."},
+      "loop_objects_touched": [
+        "GroundingEvidence",
+        "TrustReport",
+        "TrustGateSummary"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "assembled GroundingEvidence"
+        ],
+        "outputs_to": [
+          "model review (if clean)",
+          "TrustBlocked error (if not)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-pressing the evidence bundle runs a scan sweep; flagged excerpts get a warning overlay and quarantine the bundle.",
+        "visual": "A scan-line sweeps the bundle top to bottom; clean evidence glows green, a flagged line pulses red with a shield-break icon."
+      },
       "mini_scenario": "Model-output evidence contains an 'ignore prior instructions' string; the trust gate scores it high-risk and returns TrustBlocked before the review call.",
       "pitfall": "Trusted first-party code is report-only and must not be blocked — over-blocking Workspace sources makes the gate useless; only non-trusted high-severity findings block."
     },
@@ -208,9 +475,25 @@
       "pattern": "grounded-citation",
       "intent": "Reject any review prose not backed by an evidence id pointing at exact workspace lines.",
       "how_it_shapes_the_loop": "assistant::validate_review_json checks each GroundedClaim's evidence_ids against the GroundingEvidence set and drops uncited items, so only line-grounded claims survive into the GroundedReview shown to the human.",
-      "loop_objects_touched": ["GroundingEvidence", "GroundedReview"],
-      "wiring": {"inputs_from": ["model JSON response", "GroundingEvidence set"], "outputs_to": ["review UI", "trust_state derivation"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tapping a claim card jumps the canvas to the exact cited lines, highlighting the excerpt on the source node.", "visual": "A citation thread animates from the claim to the source node; cited lines flash yellow, uncited claims render greyed and struck."},
+      "loop_objects_touched": [
+        "GroundingEvidence",
+        "GroundedReview"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "model JSON response",
+          "GroundingEvidence set"
+        ],
+        "outputs_to": [
+          "review UI",
+          "trust_state derivation"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tapping a claim card jumps the canvas to the exact cited lines, highlighting the excerpt on the source node.",
+        "visual": "A citation thread animates from the claim to the source node; cited lines flash yellow, uncited claims render greyed and struck."
+      },
       "mini_scenario": "The model claims a race condition; tapping the claim scrolls to the cited lock lines, while an uncited claim beside it is silently dropped from the review.",
       "pitfall": "An evidence_id must resolve inside the evidence set with a matching content hash — a stale hash means the cited lines changed and the claim is no longer grounded."
     },
@@ -221,9 +504,24 @@
       "pattern": "trust-state-derivation",
       "intent": "Label the review's reliability so the human knows whether every item is fully backed.",
       "how_it_shapes_the_loop": "GroundedReview computes trust_state as verified (citation-valid plus complete evidence and semantic check), structural (citation-valid only), or degraded, shaping how much the loop trusts the review before acting.",
-      "loop_objects_touched": ["GroundedReview", "GroundingEvidence"],
-      "wiring": {"inputs_from": ["validated claims + GroundedRecommendations"], "outputs_to": ["human decision", "act stage confidence"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tapping the review node reveals a trust ring around it colored by trust_state.", "visual": "The ring glows solid green for verified, amber for structural, and grey-dashed for degraded, pulsing gently."},
+      "loop_objects_touched": [
+        "GroundedReview",
+        "GroundingEvidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "validated claims + GroundedRecommendations"
+        ],
+        "outputs_to": [
+          "human decision",
+          "act stage confidence"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tapping the review node reveals a trust ring around it colored by trust_state.",
+        "visual": "The ring glows solid green for verified, amber for structural, and grey-dashed for degraded, pulsing gently."
+      },
       "mini_scenario": "A review comes back structural: every claim is cited but the semantic cross-check was skipped, so the user reads carefully before merging.",
       "pitfall": "Degraded still returns a review — per the repo's honest-status rule, never render structural or degraded as if the semantic checks had been performed."
     },
@@ -234,9 +532,23 @@
       "pattern": "repair-then-typed-failure",
       "intent": "Recover from a malformed model response without letting garbage or an empty review slip through.",
       "how_it_shapes_the_loop": "When validate_review_json rejects the output, the protocol appends a repair prompt and retries once; persistent failure surfaces a typed ReviewProtocolError (Invalid, Empty, Ungrounded, TrustBlocked) with telemetry instead of a silent success.",
-      "loop_objects_touched": ["GroundedReview"],
-      "wiring": {"inputs_from": ["model response"], "outputs_to": ["typed error telemetry", "review UI"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flicking a failed review node cycles it through a single repair-attempt animation before it settles into an error state.", "visual": "The node shakes, a repair gear spins once, then it either heals green or stamps the typed error label in red."},
+      "loop_objects_touched": [
+        "GroundedReview"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "model response"
+        ],
+        "outputs_to": [
+          "typed error telemetry",
+          "review UI"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flicking a failed review node cycles it through a single repair-attempt animation before it settles into an error state.",
+        "visual": "The node shakes, a repair gear spins once, then it either heals green or stamps the typed error label in red."
+      },
       "mini_scenario": "The model returns JSON with a trailing comma; the repair prompt fixes it on retry, and the review parses cleanly the second time.",
       "pitfall": "Retry exactly once — an unbounded repair loop burns budget and lets a stubbornly broken model stall the whole verify stage."
     },
@@ -247,9 +559,24 @@
       "pattern": "incremental-reanalyze",
       "intent": "Keep the Graph fresh after edits without re-scanning the entire tree.",
       "how_it_shapes_the_loop": "EvolutionLoop::run_once re-analyzes only changed nodes and returns a LoopResult (reanalyzed set, updated_nodes), so the control layer refreshes the perceive substrate cheaply each cycle and downstream tiers see current metrics.",
-      "loop_objects_touched": ["Graph", "Node"],
-      "wiring": {"inputs_from": ["git diff / changed files"], "outputs_to": ["refreshed Graph", "ContextMap rebuild (build_map)"]},
-      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "A two-finger rotate over the graph triggers a re-scan; only nodes with changes spin and update their metrics.", "visual": "Changed nodes rotate and re-color as quality metrics refresh; untouched nodes stay still and dim."},
+      "loop_objects_touched": [
+        "Graph",
+        "Node"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "git diff / changed files"
+        ],
+        "outputs_to": [
+          "refreshed Graph",
+          "ContextMap rebuild (build_map)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "A two-finger rotate over the graph triggers a re-scan; only nodes with changes spin and update their metrics.",
+        "visual": "Changed nodes rotate and re-color as quality metrics refresh; untouched nodes stay still and dim."
+      },
       "mini_scenario": "After a merge, the user rotates the graph; only the six touched files re-analyze and their token counts update, the rest untouched.",
       "pitfall": "Edges into changed nodes may also need refresh — reanalyzing a node's metrics but not its DependsOn edges leaves stale coupling data feeding pair_suggest."
     },
@@ -260,9 +587,24 @@
       "pattern": "orientation-not-evidence",
       "intent": "Give the review model a navigational map of the tree while keeping citations grounded only in real evidence.",
       "how_it_shapes_the_loop": "assistant::review_with_orientation prepends the map::orientation atlas (taxonomy plus component map) as non-citeable context, helping the reason stage navigate while validate_review_json still rejects any claim citing the orientation.",
-      "loop_objects_touched": ["ContextMap", "GroundedReview", "GroundingEvidence"],
-      "wiring": {"inputs_from": ["map::orientation (taxonomy outline)"], "outputs_to": ["model reasoning (navigation only)"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "Spreading the orientation panel overlays a semi-transparent map atlas the model can 'see' but never cite.", "visual": "The atlas floats above the canvas as a watermark layer with no citation anchors — rendered without the yellow tap-to-cite dots."},
+      "loop_objects_touched": [
+        "ContextMap",
+        "GroundedReview",
+        "GroundingEvidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "map::orientation (taxonomy outline)"
+        ],
+        "outputs_to": [
+          "model reasoning (navigation only)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spreading the orientation panel overlays a semi-transparent map atlas the model can 'see' but never cite.",
+        "visual": "The atlas floats above the canvas as a watermark layer with no citation anchors — rendered without the yellow tap-to-cite dots."
+      },
       "mini_scenario": "The model uses the orientation to learn that context_trust lives under evolve, but its actual finding cites real line-hashed GroundingEvidence, not the map.",
       "pitfall": "Orientation must stay non-citeable — if a claim is allowed to cite the map, the review is grounded in a summary rather than in verifiable source lines."
     }

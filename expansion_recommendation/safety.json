@@ -1,9 +1,27 @@
 {
   "component": "safety",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "verify",
   "summary": "The safety component is the hard verify/gate stage of the loop. Before any ToolCall leaves the reason stage and reaches act, checker::validation::check_tool_call validates the command/URL/path, PathValidator confines targets to the sandbox, PermissionStore decides whether a PermissionGrant waives confirmation, confirm detects DestructiveOperations, dry_run previews effects without executing, scanner finds leaked secrets and vulnerable dependencies, redact strips secrets from anything fed back to the model, process_env sanitizes spawned child environments, yolo offers a deliberate guard-relaxation with forbidden-path backstops, and audit records every decision as an AuditEvent. It can block, redact, preview, or wave through a ToolCall — reshaping loop control at the boundary between deciding and doing.",
-  "loop_objects": ["ToolCall", "SafetyChecker", "PathValidator", "PermissionGrant", "PermissionStore", "PermissionResult", "ToolMetadata", "RiskLevel", "ExecutionMode", "DestructiveOperation", "ConfirmResult", "DryRunPreview", "SecurityFinding", "AuditEvent", "AuditLogger", "PinnedDnsResolver", "YoloManager"],
+  "loop_objects": [
+    "ToolCall",
+    "SafetyChecker",
+    "PathValidator",
+    "PermissionGrant",
+    "PermissionStore",
+    "PermissionResult",
+    "ToolMetadata",
+    "RiskLevel",
+    "ExecutionMode",
+    "DestructiveOperation",
+    "ConfirmResult",
+    "DryRunPreview",
+    "SecurityFinding",
+    "AuditEvent",
+    "AuditLogger",
+    "PinnedDnsResolver",
+    "YoloManager"
+  ],
   "context_basis": "Recommendations formed with safety read in the context of the full engine (~600k budget framing), where it sits inline as the last gate before a tool executes and every decision lands in the append-only audit trail.",
   "examples": [
     {
@@ -13,9 +31,26 @@
       "pattern": "gate-before-act",
       "intent": "Ensure no ToolCall reaches the act stage without passing SafetyChecker validation.",
       "how_it_shapes_the_loop": "checker::validation::check_tool_call sits between reason and act; a failed check short-circuits the iteration back to reason instead of executing, and a SafetyBlock is audited.",
-      "loop_objects_touched": ["ToolCall", "SafetyChecker", "AuditEvent"],
-      "wiring": {"inputs_from": ["reason stage ToolCall", "tool_metadata RiskLevel"], "outputs_to": ["act stage", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge from the reasoner node into the safety gate node so every emitted ToolCall is routed through check_tool_call.", "visual": "The gate renders as a hexagon with a shield glyph; the inbound edge pulses amber while a check is in flight, green on pass, red on block."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "SafetyChecker",
+        "AuditEvent"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "reason stage ToolCall",
+          "tool_metadata RiskLevel"
+        ],
+        "outputs_to": [
+          "act stage",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw an edge from the reasoner node into the safety gate node so every emitted ToolCall is routed through check_tool_call.",
+        "visual": "The gate renders as a hexagon with a shield glyph; the inbound edge pulses amber while a check is in flight, green on pass, red on block."
+      },
       "mini_scenario": "The reasoner emits a shell ToolCall running rm -rf build; check_tool_call flags it, the gate raises a block, and the loop returns to reason for an alternative.",
       "pitfall": "Do not let any tool path bypass the gate; a single un-gated edge defeats the whole verify stage."
     },
@@ -26,9 +61,25 @@
       "pattern": "sandbox-boundary-check",
       "intent": "Prevent file ToolCalls from escaping the allowed directory set.",
       "how_it_shapes_the_loop": "PathValidator::validate plus is_path_in_allowed_list run per-path before act; an out-of-sandbox target blocks the transition before any filesystem mutation.",
-      "loop_objects_touched": ["ToolCall", "PathValidator"],
-      "wiring": {"inputs_from": ["file ToolCall target path", "PathValidator::new allowed roots"], "outputs_to": ["act stage file write", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the path node to open a radial menu pinning the allowed roots used by is_path_in_allowed_list.", "visual": "A dotted boundary ring animates around the node; inside paths pulse blue, escaping paths flash a red slash badge."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "PathValidator"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "file ToolCall target path",
+          "PathValidator::new allowed roots"
+        ],
+        "outputs_to": [
+          "act stage file write",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the path node to open a radial menu pinning the allowed roots used by is_path_in_allowed_list.",
+        "visual": "A dotted boundary ring animates around the node; inside paths pulse blue, escaping paths flash a red slash badge."
+      },
       "mini_scenario": "A write ToolCall targets a path outside the workspace; validate rejects it against the allowed list and the write never reaches disk.",
       "pitfall": "Build the validator with PathValidator::new from the real working dir; an empty allowed list either blocks everything or nothing, depending on the fallback."
     },
@@ -39,9 +90,25 @@
       "pattern": "resolve-then-validate",
       "intent": "Follow symlinks and lexical traversal so the real target is what gets checked.",
       "how_it_shapes_the_loop": "lexical_normalize_path collapses ../ segments and check_symlink_safety resolves links before act, so a path that looks inside the sandbox cannot launder an outside target.",
-      "loop_objects_touched": ["ToolCall", "PathValidator"],
-      "wiring": {"inputs_from": ["file ToolCall path", "filesystem symlink resolution"], "outputs_to": ["act stage write", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press a file node to trace its symlink chain rendered as a hop path ending at the resolved target.", "visual": "Symlink hops draw as dashed arrows; any hop that leaves the boundary ring flashes red and the parent node blocks."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "PathValidator"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "file ToolCall path",
+          "filesystem symlink resolution"
+        ],
+        "outputs_to": [
+          "act stage write",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press a file node to trace its symlink chain rendered as a hop path ending at the resolved target.",
+        "visual": "Symlink hops draw as dashed arrows; any hop that leaves the boundary ring flashes red and the parent node blocks."
+      },
       "mini_scenario": "A write targets logs/latest which symlinks to /etc; check_symlink_safety resolves the link and blocks the escaping write.",
       "pitfall": "Validate the resolved target, not the link path; a link inside the sandbox can still point outside it."
     },
@@ -52,9 +119,25 @@
       "pattern": "pre-authorized-fast-path",
       "intent": "Let pre-authorized ToolCalls run without pausing the loop for confirmation.",
       "how_it_shapes_the_loop": "PermissionStore::is_authorized matches an incoming ToolCall against stored grants; a match skips the human-in-the-loop pause and the control loop stays in continuous execution.",
-      "loop_objects_touched": ["ToolCall", "PermissionGrant", "PermissionStore"],
-      "wiring": {"inputs_from": ["PermissionStore grants (add, from_config)", "ToolCall name+resource"], "outputs_to": ["act stage without confirm prompt"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the permissions sub-node to list active grants; each chip shows its tool pattern and resource scope from with_resource.", "visual": "Matched grants render as green key badges; the fast-path edge glows steady green while confirmation edges dim."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "PermissionGrant",
+        "PermissionStore"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "PermissionStore grants (add, from_config)",
+          "ToolCall name+resource"
+        ],
+        "outputs_to": [
+          "act stage without confirm prompt"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the permissions sub-node to list active grants; each chip shows its tool pattern and resource scope from with_resource.",
+        "visual": "Matched grants render as green key badges; the fast-path edge glows steady green while confirmation edges dim."
+      },
       "mini_scenario": "A session grant for read_file matches an incoming read ToolCall, so is_authorized returns true and the loop executes without a prompt.",
       "pitfall": "Scope grants tightly with with_resource; an over-broad pattern silently waves through unintended ToolCalls."
     },
@@ -65,9 +148,24 @@
       "pattern": "time-boxed-authorization",
       "intent": "Auto-revoke permissions after a duration so the fast path narrows over the run.",
       "how_it_shapes_the_loop": "PermissionGrant::temporary creates a time-boxed grant; once is_expired flips true, is_authorized stops matching and the control loop re-inserts the confirmation pause.",
-      "loop_objects_touched": ["PermissionGrant", "PermissionStore", "ToolCall"],
-      "wiring": {"inputs_from": ["PermissionGrant::temporary duration"], "outputs_to": ["control stage confirm decision"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the permission chip to inspect its countdown; the chip shrinks as time-to-expiry drains.", "visual": "Temporary grants carry a draining ring timer; on expiry they gray out and drop from the active set."},
+      "loop_objects_touched": [
+        "PermissionGrant",
+        "PermissionStore",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "PermissionGrant::temporary duration"
+        ],
+        "outputs_to": [
+          "control stage confirm decision"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the permission chip to inspect its countdown; the chip shrinks as time-to-expiry drains.",
+        "visual": "Temporary grants carry a draining ring timer; on expiry they gray out and drop from the active set."
+      },
       "mini_scenario": "A temporary run_shell grant expires mid-session; the next shell ToolCall no longer matches and the loop re-prompts the operator.",
       "pitfall": "Re-check is_authorized on every ToolCall; grants expire between iterations, so caching an authorization decision leaks stale trust."
     },
@@ -78,9 +176,25 @@
       "pattern": "decompose-then-gate",
       "intent": "Validate every segment of a chained shell command independently.",
       "how_it_shapes_the_loop": "split_shell_commands breaks a compound command on &&, ;, and |, and check_shell_command gates each segment; one unsafe segment blocks the whole ToolCall.",
-      "loop_objects_touched": ["ToolCall", "SafetyChecker"],
-      "wiring": {"inputs_from": ["compound shell ToolCall", "normalize_shell_command"], "outputs_to": ["per-segment verify results", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap a shell node to expand its segments into a chain of mini gate chips, one per sub-command.", "visual": "Each segment chip lights green or red; a single red chip turns the parent node red and halts the edge to act."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "SafetyChecker"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "compound shell ToolCall",
+          "normalize_shell_command"
+        ],
+        "outputs_to": [
+          "per-segment verify results",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap a shell node to expand its segments into a chain of mini gate chips, one per sub-command.",
+        "visual": "Each segment chip lights green or red; a single red chip turns the parent node red and halts the edge to act."
+      },
       "mini_scenario": "git pull && rm -rf build is split; the first segment passes but the second is flagged, so the whole call is blocked.",
       "pitfall": "Check every segment; a benign prefix must not launder a dangerous suffix through the gate."
     },
@@ -91,9 +205,24 @@
       "pattern": "hidden-write-extraction",
       "intent": "Surface file writes smuggled through shell redirection or tee, not just the write tool.",
       "how_it_shapes_the_loop": "shell_tee_write_targets and shell_output_redirect_targets extract implicit write paths from the command string and feed them back through PathValidator before act.",
-      "loop_objects_touched": ["ToolCall", "SafetyChecker", "PathValidator"],
-      "wiring": {"inputs_from": ["shell ToolCall command string"], "outputs_to": ["PathValidator::validate per extracted path"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread on a shell node to fan out the extracted write targets as small file chips beside the command.", "visual": "Each extracted target renders as a file chip; out-of-sandbox targets glow red and veto the parent command."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "SafetyChecker",
+        "PathValidator"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "shell ToolCall command string"
+        ],
+        "outputs_to": [
+          "PathValidator::validate per extracted path"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread on a shell node to fan out the extracted write targets as small file chips beside the command.",
+        "visual": "Each extracted target renders as a file chip; out-of-sandbox targets glow red and veto the parent command."
+      },
       "mini_scenario": "echo data | tee ../../outside.conf looks like a read-only pipeline, but shell_tee_write_targets extracts the path and the sandbox check blocks it.",
       "pitfall": "Never gate only the command name; redirection and tee turn a 'safe' command into an arbitrary file write."
     },
@@ -104,9 +233,26 @@
       "pattern": "network-egress-guard",
       "intent": "Prevent tool HTTP calls from reaching private or internal addresses.",
       "how_it_shapes_the_loop": "PinnedDnsResolver resolves the host once and is_private_or_internal rejects private ranges before the act stage opens a socket, closing the check-then-connect rebind window.",
-      "loop_objects_touched": ["ToolCall", "PinnedDnsResolver", "SafetyChecker"],
-      "wiring": {"inputs_from": ["http ToolCall URL", "PinnedDnsResolver resolution"], "outputs_to": ["act network call", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the network guard to toggle localhost and private-range allowances.", "visual": "The guard renders a globe inside a firewall ring; a resolution to a private IP flashes a red block badge on the edge."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "PinnedDnsResolver",
+        "SafetyChecker"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "http ToolCall URL",
+          "PinnedDnsResolver resolution"
+        ],
+        "outputs_to": [
+          "act network call",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the network guard to toggle localhost and private-range allowances.",
+        "visual": "The guard renders a globe inside a firewall ring; a resolution to a private IP flashes a red block badge on the edge."
+      },
       "mini_scenario": "A fetch ToolCall resolves its host to 169.254.169.254; is_private_or_internal returns true and the gate blocks the cloud-metadata request.",
       "pitfall": "Connect to the pinned IP from PinnedDnsResolver, not a fresh lookup; re-resolving between check and connect invites DNS rebinding."
     },
@@ -117,9 +263,25 @@
       "pattern": "risk-tiered-routing",
       "intent": "Attach a risk tier to every ToolCall so the loop knows how loudly to gate it.",
       "how_it_shapes_the_loop": "classify_tool_metadata maps a tool name to ToolMetadata with a RiskLevel; the control loop uses that tier to decide between silent pass, confirm, and block.",
-      "loop_objects_touched": ["ToolCall", "ToolMetadata", "RiskLevel"],
-      "wiring": {"inputs_from": ["ToolCall name", "default_tool_metadata table"], "outputs_to": ["control confirm/auto branch"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a tool node to reveal its ToolMetadata card: RiskLevel badge, category, and read-only flag.", "visual": "Nodes tint by risk — green low, amber medium, red high — with higher tiers pulsing faster."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "ToolMetadata",
+        "RiskLevel"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ToolCall name",
+          "default_tool_metadata table"
+        ],
+        "outputs_to": [
+          "control confirm/auto branch"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a tool node to reveal its ToolMetadata card: RiskLevel badge, category, and read-only flag.",
+        "visual": "Nodes tint by risk — green low, amber medium, red high — with higher tiers pulsing faster."
+      },
       "mini_scenario": "A network fetch is classified medium risk; the loop routes it to the confirmation branch instead of running it silently.",
       "pitfall": "Keep default_tool_metadata current; an unclassified tool falls back to a default tier that may over-prompt or under-guard."
     },
@@ -130,9 +292,28 @@
       "pattern": "explicit-decision-object",
       "intent": "Make the allow/deny/confirm outcome an inspectable object, not a bare boolean.",
       "how_it_shapes_the_loop": "PermissionChecker::check returns a PermissionResult that the control loop branches on; normal_mode_needs_confirmation decides whether the current ExecutionMode pauses for a human.",
-      "loop_objects_touched": ["PermissionResult", "ToolMetadata", "ExecutionMode", "ToolCall"],
-      "wiring": {"inputs_from": ["PermissionChecker", "PermissionStore", "ExecutionMode"], "outputs_to": ["control confirm UI", "audit (log_tool_execution)"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a pending ToolCall to reveal its PermissionResult card with the decision and matched grant.", "visual": "Allowed cards glow green, denied red, needs-confirm amber with a waiting-spinner badge."},
+      "loop_objects_touched": [
+        "PermissionResult",
+        "ToolMetadata",
+        "ExecutionMode",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "PermissionChecker",
+          "PermissionStore",
+          "ExecutionMode"
+        ],
+        "outputs_to": [
+          "control confirm UI",
+          "audit (log_tool_execution)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a pending ToolCall to reveal its PermissionResult card with the decision and matched grant.",
+        "visual": "Allowed cards glow green, denied red, needs-confirm amber with a waiting-spinner badge."
+      },
       "mini_scenario": "A medium-risk ToolCall under normal mode gets a needs-confirmation PermissionResult; the loop pauses and the operator approves it.",
       "pitfall": "Branch on the PermissionResult, not on the risk tier alone; ExecutionMode changes what the same tier means."
     },
@@ -143,9 +324,27 @@
       "pattern": "destructive-intent-scan",
       "intent": "Recognize destructive shell and git operations and force a confirmation gate.",
       "how_it_shapes_the_loop": "detect_destructive_shell_command and detect_destructive_git_operation classify a ToolCall into a DestructiveOperation with a RiskLevel; requires_confirmation then holds the act transition until ConfirmResult arrives.",
-      "loop_objects_touched": ["DestructiveOperation", "RiskLevel", "ConfirmResult", "ToolCall"],
-      "wiring": {"inputs_from": ["shell/git ToolCall", "confirm patterns"], "outputs_to": ["confirmation prompt", "act stage on ConfirmResult"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a flagged node to see the DestructiveOperation description and its color-coded RiskLevel.", "visual": "Flagged nodes show a hazard stripe; the confirm edge pulses amber until a ConfirmResult lands, then snaps green or red."},
+      "loop_objects_touched": [
+        "DestructiveOperation",
+        "RiskLevel",
+        "ConfirmResult",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "shell/git ToolCall",
+          "confirm patterns"
+        ],
+        "outputs_to": [
+          "confirmation prompt",
+          "act stage on ConfirmResult"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a flagged node to see the DestructiveOperation description and its color-coded RiskLevel.",
+        "visual": "Flagged nodes show a hazard stripe; the confirm edge pulses amber until a ConfirmResult lands, then snaps green or red."
+      },
       "mini_scenario": "A git push --force ToolCall is caught by detect_destructive_git_operation; the loop pauses, the operator confirms, and the push proceeds.",
       "pitfall": "requires_confirmation must key off the detected operation, not the tool name — a plain-looking shell command can still be destructive."
     },
@@ -156,9 +355,26 @@
       "pattern": "simulate-before-commit",
       "intent": "Show what a ToolCall would do without executing it.",
       "how_it_shapes_the_loop": "preview_tool_call builds a DryRunPreview and display_preview renders it; the loop verifies intent on the preview and only then commits the real act.",
-      "loop_objects_touched": ["DryRunPreview", "ToolCall", "RiskLevel"],
-      "wiring": {"inputs_from": ["high-RiskLevel ToolCall", "DryRunConfig"], "outputs_to": ["preview panel", "confirm decision"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the gate to toggle dry-run; queued acts render as ghost previews via display_preview instead of running.", "visual": "Dry-run nodes render translucent with a dashed 'DRY' badge; no side-effect glow fires on their edges."},
+      "loop_objects_touched": [
+        "DryRunPreview",
+        "ToolCall",
+        "RiskLevel"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "high-RiskLevel ToolCall",
+          "DryRunConfig"
+        ],
+        "outputs_to": [
+          "preview panel",
+          "confirm decision"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the gate to toggle dry-run; queued acts render as ghost previews via display_preview instead of running.",
+        "visual": "Dry-run nodes render translucent with a dashed 'DRY' badge; no side-effect glow fires on their edges."
+      },
       "mini_scenario": "A batch of file edits is previewed with display_batch_preview; the operator reviews the diffs and approves, releasing the real writes.",
       "pitfall": "The preview must come from preview_tool_call's own simulation; a hand-written 'what I would do' string drifts from what the tool actually does."
     },
@@ -169,9 +385,25 @@
       "pattern": "content-scan-before-emit",
       "intent": "Block or flag ToolCalls whose content leaks credentials or carries dangerous code.",
       "how_it_shapes_the_loop": "scanner::scan_content runs the loaded patterns over args and output, producing findings that the gate uses to block, redact, or annotate before act or feedback.",
-      "loop_objects_touched": ["ToolCall", "SecurityFinding"],
-      "wiring": {"inputs_from": ["ToolCall content", "scanner patterns (add_pattern)"], "outputs_to": ["redact stage", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the scanner sub-node to expand the finding list with location, snippet, and severity.", "visual": "Findings stack as severity-colored bars; the node pulses while a scan_content pass is active."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "SecurityFinding"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ToolCall content",
+          "scanner patterns (add_pattern)"
+        ],
+        "outputs_to": [
+          "redact stage",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the scanner sub-node to expand the finding list with location, snippet, and severity.",
+        "visual": "Findings stack as severity-colored bars; the node pulses while a scan_content pass is active."
+      },
       "mini_scenario": "A commit ToolCall's diff contains an API key; scan_content emits a critical finding and the gate blocks the push.",
       "pitfall": "Scan both inbound args and outbound results; secrets leak just as easily through tool output fed back to the model."
     },
@@ -182,9 +414,23 @@
       "pattern": "severity-weighted-decision",
       "intent": "Decide block-versus-warn from aggregated severity, not raw finding count.",
       "how_it_shapes_the_loop": "scanner's score, risk_score, has_critical, and has_high aggregate findings into a threshold decision that branches the verify stage between block, warn, and pass.",
-      "loop_objects_touched": ["SecurityFinding", "RiskLevel"],
-      "wiring": {"inputs_from": ["scan_content findings"], "outputs_to": ["verify branch decision"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread to fan out findings sorted by score; drag a threshold slider to set the block cutoff.", "visual": "Findings arrange on a heat gradient; everything above the slider glows red as a blocker, the rest stay amber warnings."},
+      "loop_objects_touched": [
+        "SecurityFinding",
+        "RiskLevel"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "scan_content findings"
+        ],
+        "outputs_to": [
+          "verify branch decision"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread to fan out findings sorted by score; drag a threshold slider to set the block cutoff.",
+        "visual": "Findings arrange on a heat gradient; everything above the slider glows red as a blocker, the rest stay amber warnings."
+      },
       "mini_scenario": "Two low findings and one critical arrive; has_critical forces the block branch even though the count is small.",
       "pitfall": "Blocking on raw count invites noise; weight by severity score so many low findings never outweigh one critical."
     },
@@ -195,9 +441,26 @@
       "pattern": "dependency-advisory-gate",
       "intent": "Flag ToolCalls that add or use known-vulnerable dependencies.",
       "how_it_shapes_the_loop": "audit_dependency checks a dependency against recorded advisories and is_vulnerable produces a finding the verify stage surfaces before a build or install act proceeds.",
-      "loop_objects_touched": ["ToolCall", "SecurityFinding", "RiskLevel"],
-      "wiring": {"inputs_from": ["dependency-manifest ToolCall", "recorded vulnerabilities (add_vulnerability)"], "outputs_to": ["verify advisory", "audit (log_safety_block)"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the dependency node to list packages with a vulnerability badge, fixed version, and advisory URL.", "visual": "Vulnerable deps render with a red bug badge and CWE tag from with_cwe; clean deps stay muted."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "SecurityFinding",
+        "RiskLevel"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "dependency-manifest ToolCall",
+          "recorded vulnerabilities (add_vulnerability)"
+        ],
+        "outputs_to": [
+          "verify advisory",
+          "audit (log_safety_block)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the dependency node to list packages with a vulnerability badge, fixed version, and advisory URL.",
+        "visual": "Vulnerable deps render with a red bug badge and CWE tag from with_cwe; clean deps stay muted."
+      },
       "mini_scenario": "An add-dependency ToolCall pins a version flagged by is_vulnerable; the gate warns and shows with_fixed_version before the install runs.",
       "pitfall": "Match on name and version together; a fixed patch release of the same package must not inherit the older advisory."
     },
@@ -208,9 +471,26 @@
       "pattern": "redact-on-egress",
       "intent": "Strip credentials from tool output, JSON, and paths before they reach logs or the model.",
       "how_it_shapes_the_loop": "redact_secrets rewrites tool result content, redact_json cleans structured payloads, redact_path masks home-dir prefixes, and safe_log wraps printing — keeping the feedback edge into reason clean.",
-      "loop_objects_touched": ["ToolCall", "SecurityFinding", "AuditEvent"],
-      "wiring": {"inputs_from": ["tool result content", "scanner findings"], "outputs_to": ["perceive stage context", "audit log via safe_log"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge from the tool-output port through the redact node before it loops back to the reasoner.", "visual": "Redacted spans render as black bars in the output preview; the node carries a masking-tape icon."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "SecurityFinding",
+        "AuditEvent"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "tool result content",
+          "scanner findings"
+        ],
+        "outputs_to": [
+          "perceive stage context",
+          "audit log via safe_log"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw an edge from the tool-output port through the redact node before it loops back to the reasoner.",
+        "visual": "Redacted spans render as black bars in the output preview; the node carries a masking-tape icon."
+      },
       "mini_scenario": "A log-reading ToolCall surfaces a bearer token; redact_secrets replaces it before the output is appended to the conversation.",
       "pitfall": "Redact before output is appended to messages or checkpoints, not after; once persisted, the secret is already exposed."
     },
@@ -221,9 +501,23 @@
       "pattern": "env-scrub-before-spawn",
       "intent": "Strip sensitive variables from the environment handed to spawned child processes.",
       "how_it_shapes_the_loop": "process_env::sanitize_command_env filters the env at the moment the act stage spawns a child, preventing credential inheritance across the loop boundary.",
-      "loop_objects_touched": ["ToolCall"],
-      "wiring": {"inputs_from": ["shell ToolCall", "process env of the agent"], "outputs_to": ["spawned child process"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the shell node to inspect which env vars sanitize_command_env will strip for the next spawn.", "visual": "Denied vars render as struck-through chips on the node; a filter-funnel badge marks the scrub point."},
+      "loop_objects_touched": [
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "shell ToolCall",
+          "process env of the agent"
+        ],
+        "outputs_to": [
+          "spawned child process"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the shell node to inspect which env vars sanitize_command_env will strip for the next spawn.",
+        "visual": "Denied vars render as struck-through chips on the node; a filter-funnel badge marks the scrub point."
+      },
       "mini_scenario": "A shell ToolCall would inherit a cloud API key; sanitize_command_env strips it so the child process cannot read the credential.",
       "pitfall": "Scrub at spawn time for each ToolCall; caching a scrubbed env leaks variables added later in the session."
     },
@@ -234,9 +528,26 @@
       "pattern": "append-only-audit",
       "intent": "Persist a durable JSONL trail of tool executions and safety blocks for replay and forensics.",
       "how_it_shapes_the_loop": "AuditLogger::log_tool_execution and log_safety_block append an AuditEvent on every gated decision, giving the loop an observable history without altering control flow.",
-      "loop_objects_touched": ["AuditEvent", "AuditLogger", "ToolCall"],
-      "wiring": {"inputs_from": ["gate decision", "block reason"], "outputs_to": ["JSONL audit log", "observability"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick up on the audit node to scroll the append-only event stream in a side panel.", "visual": "A ticking log ribbon streams entries; execution rows are grey, safety-block rows carry a red tag."},
+      "loop_objects_touched": [
+        "AuditEvent",
+        "AuditLogger",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "gate decision",
+          "block reason"
+        ],
+        "outputs_to": [
+          "JSONL audit log",
+          "observability"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick up on the audit node to scroll the append-only event stream in a side panel.",
+        "visual": "A ticking log ribbon streams entries; execution rows are grey, safety-block rows carry a red tag."
+      },
       "mini_scenario": "log_safety_block records a blocked destructive command; the AuditEvent lands in the session JSONL for later review.",
       "pitfall": "Never mutate past AuditEvents; the log is append-only and its integrity is the basis for post-hoc trust."
     },
@@ -247,9 +558,23 @@
       "pattern": "session-lifecycle-audit",
       "intent": "Emit session-start and session-end events that bound the run's audit trail.",
       "how_it_shapes_the_loop": "log_session_start and log_session_end frame the whole loop lifecycle, giving replay tooling clean boundaries for each run.",
-      "loop_objects_touched": ["AuditEvent", "AuditLogger"],
-      "wiring": {"inputs_from": ["session lifecycle"], "outputs_to": ["JSONL audit log"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick down on the audit node to jump to the session-start marker; flick up for session-end.", "visual": "Start and end markers render as bold bookend bars anchoring the event ribbon."},
+      "loop_objects_touched": [
+        "AuditEvent",
+        "AuditLogger"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "session lifecycle"
+        ],
+        "outputs_to": [
+          "JSONL audit log"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick down on the audit node to jump to the session-start marker; flick up for session-end.",
+        "visual": "Start and end markers render as bold bookend bars anchoring the event ribbon."
+      },
       "mini_scenario": "The agent boots and log_session_start writes an opening AuditEvent; on shutdown log_session_end closes the trail for that run.",
       "pitfall": "Emit the end marker even on failure paths, or partial audit trails complicate forensic replay."
     },
@@ -260,9 +585,27 @@
       "pattern": "explicit-guard-bypass",
       "intent": "Let an operator run fully autonomous while hard backstops and auditing stay on.",
       "how_it_shapes_the_loop": "YoloManager::should_auto_approve collapses the confirmation pause for the run, but is_forbidden and is_protected_path still block the worst targets, record_operation keeps count, and audit_summary closes the books.",
-      "loop_objects_touched": ["YoloManager", "ExecutionMode", "ToolCall", "AuditEvent"],
-      "wiring": {"inputs_from": ["operator yolo enable", "YoloConfig::fully_autonomous"], "outputs_to": ["auto act", "audit (record_operation, audit_summary)"]},
-      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotate the mode dial on the gate node from Guarded to YOLO; a warning overlay requires a confirming tap before it commits.", "visual": "The gate turns high-contrast orange with a lightning badge; protected-path backstops stay lit red to show they remain armed."},
+      "loop_objects_touched": [
+        "YoloManager",
+        "ExecutionMode",
+        "ToolCall",
+        "AuditEvent"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "operator yolo enable",
+          "YoloConfig::fully_autonomous"
+        ],
+        "outputs_to": [
+          "auto act",
+          "audit (record_operation, audit_summary)"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotate the mode dial on the gate node from Guarded to YOLO; a warning overlay requires a confirming tap before it commits.",
+        "visual": "The gate turns high-contrast orange with a lightning badge; protected-path backstops stay lit red to show they remain armed."
+      },
       "mini_scenario": "An operator enables yolo for a sandboxed batch job; ToolCalls auto-approve, but an rm on a protected path is still refused by is_protected_path.",
       "pitfall": "Yolo removes confirmation, not auditing or the forbidden-path backstops; never let it also disable the sandbox or the log."
     }

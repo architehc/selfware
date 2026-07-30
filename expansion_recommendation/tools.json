@@ -1,9 +1,33 @@
 {
   "component": "tools",
-  "tier": "full",
+  "tier": "engine",
   "loop_stage": "act",
   "summary": "The tools component is the act stage of the loop: ToolRegistry holds every Tool (implementing name/description/schema/execute) as critical (always active) or deferred (discovered via ToolSearchTool), and the built-in tool families give the loop its hands — file editing (FileRead/FileWrite/FileEdit/PatchApply), command execution (ShellExec/PtySession), verification (CargoTest/CargoCheck/CargoClippy), search (GrepSearch/GlobFind/SymbolSearch), version control (GitStatus/GitDiff/GitCheckpoint), containers, browsers, vision, LSP, knowledge graph, and self-introspection. Every act transition on the loop is a registry.execute through this component; its search index, safety configs, and metadata decide which tools the reason stage even gets to see each turn.",
-  "loop_objects": ["Tool", "ToolRegistry", "ToolDefinition", "ToolSearchResult", "ToolCall", "ToolResult", "Evidence", "Budget", "Checkpoint", "Message", "FileEdit", "ShellExec", "GrepSearchResult", "TestSummary", "GitCheckpoint", "PtySession", "WorktreeEntry", "NetworkPolicy", "KnowledgeGraph", "TokenBudget", "ErrorGroup", "DynamicTool", "TaskType"],
+  "loop_objects": [
+    "Tool",
+    "ToolRegistry",
+    "ToolDefinition",
+    "ToolSearchResult",
+    "ToolCall",
+    "ToolResult",
+    "Evidence",
+    "Budget",
+    "Checkpoint",
+    "Message",
+    "FileEdit",
+    "ShellExec",
+    "GrepSearchResult",
+    "TestSummary",
+    "GitCheckpoint",
+    "PtySession",
+    "WorktreeEntry",
+    "NetworkPolicy",
+    "KnowledgeGraph",
+    "TokenBudget",
+    "ErrorGroup",
+    "DynamicTool",
+    "TaskType"
+  ],
   "context_basis": "Recommendations formed with src/tools/ read in the context of the full engine (~600k budget framing), grounded in the Tool trait, ToolRegistry register_critical/register_deferred/activate/critical_definitions, tool_search.rs, and the concrete tool modules (file, shell_exec, grep_search, cargo, git, container, pty_shell, vision, lsp_tools, knowledge, introspect, analyzer, hot_reload, task_focus, net_policy).",
   "examples": [
     {
@@ -13,9 +37,26 @@
       "pattern": "always-available-registration",
       "intent": "Guarantee core file and shell tools are callable from the first Executing turn without a discovery round-trip.",
       "how_it_shapes_the_loop": "ToolRegistry::register_critical activates a Tool immediately and includes it in critical_definitions, so the reason stage always sees file_read/file_write/shell_exec/grep_search in the per-turn tool list and the act stage can dispatch them directly.",
-      "loop_objects_touched": ["ToolRegistry", "Tool", "ToolDefinition"],
-      "wiring": {"inputs_from": ["ToolRegistry::new", "Tool::schema"], "outputs_to": ["critical_definitions", "LLM tool list"]},
-      "touch_interaction": {"gesture": "drag", "canvas_action": "Drag a tool node from the palette onto the always-on shelf pinned beside the act stage.", "visual": "Critical tools render solid with an anchor badge; they never dim or fold away when the shelf collapses."},
+      "loop_objects_touched": [
+        "ToolRegistry",
+        "Tool",
+        "ToolDefinition"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ToolRegistry::new",
+          "Tool::schema"
+        ],
+        "outputs_to": [
+          "critical_definitions",
+          "LLM tool list"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag a tool node from the palette onto the always-on shelf pinned beside the act stage.",
+        "visual": "Critical tools render solid with an anchor badge; they never dim or fold away when the shelf collapses."
+      },
       "mini_scenario": "On startup the registry pre-registers FileRead and ShellExec as critical; the first Executing turn calls file_read directly, no tool_search needed.",
       "pitfall": "Registering too many tools as critical bloats critical_definitions and burns context budget on every reason turn."
     },
@@ -26,9 +67,27 @@
       "pattern": "lazy-tool-expansion",
       "intent": "Keep rarely-used tools out of the prompt until the loop actually needs them.",
       "how_it_shapes_the_loop": "ToolRegistry::register_deferred adds a Tool without activating it; it is absent from critical_definitions until ToolSearchTool finds it and ToolRegistry::activate flips it on, shrinking per-turn context at the cost of one discovery turn.",
-      "loop_objects_touched": ["ToolRegistry", "ToolSearchResult", "ToolDefinition", "Budget"],
-      "wiring": {"inputs_from": ["register_deferred", "rebuild_search_index"], "outputs_to": ["tool_search index", "ToolRegistry::activate"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the tool_search hub to fan out deferred tools as ghosted nodes waiting to be summoned.", "visual": "Deferred nodes render translucent; on activate they snap to full opacity with a pop and join the act rail."},
+      "loop_objects_touched": [
+        "ToolRegistry",
+        "ToolSearchResult",
+        "ToolDefinition",
+        "Budget"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "register_deferred",
+          "rebuild_search_index"
+        ],
+        "outputs_to": [
+          "tool_search index",
+          "ToolRegistry::activate"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the tool_search hub to fan out deferred tools as ghosted nodes waiting to be summoned.",
+        "visual": "Deferred nodes render translucent; on activate they snap to full opacity with a pop and join the act rail."
+      },
       "mini_scenario": "The model calls tool_search('container'), the registry returns ContainerRun, and activate makes it callable on the next act turn.",
       "pitfall": "Marking a genuinely core tool deferred forces an extra tool_search turn — wasted budget every task that needs it."
     },
@@ -39,9 +98,26 @@
       "pattern": "discover-then-act",
       "intent": "Let the model find the right tool by intent instead of memorizing the full catalog.",
       "how_it_shapes_the_loop": "ToolSearchTool::execute queries the shared search index and returns ToolSearchResult entries (name, description, schema, category via categorize_tool); the model perceives the match and acts on the discovered tool next turn.",
-      "loop_objects_touched": ["ToolSearchResult", "ToolRegistry", "ToolCall"],
-      "wiring": {"inputs_from": ["LLM query", "ToolSearchable index"], "outputs_to": ["ToolSearchResult list", "ToolRegistry::activate"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the search node to open a query field; matching tools appear as candidate nodes you can drag onto the canvas.", "visual": "Candidates glow by relevance; the top match pulses brightest and its category tag colors the edge."},
+      "loop_objects_touched": [
+        "ToolSearchResult",
+        "ToolRegistry",
+        "ToolCall"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "LLM query",
+          "ToolSearchable index"
+        ],
+        "outputs_to": [
+          "ToolSearchResult list",
+          "ToolRegistry::activate"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the search node to open a query field; matching tools appear as candidate nodes you can drag onto the canvas.",
+        "visual": "Candidates glow by relevance; the top match pulses brightest and its category tag colors the edge."
+      },
       "mini_scenario": "A task needs container control; the model searches 'run container', gets ContainerRun, and calls it next turn.",
       "pitfall": "Returning too many low-relevance ToolSearchResults floods the context and dilutes the model's tool choice."
     },
@@ -52,9 +128,26 @@
       "pattern": "perceive-then-plan",
       "intent": "Ground an edit in actual file content before mutating anything.",
       "how_it_shapes_the_loop": "FileRead (and DirectoryTree for orientation) feeds the reason stage the current bytes; FileEdit/FileMultiEdit/PatchApply then mutate with old_string anchoring, so each act transition is evidence-backed rather than speculative.",
-      "loop_objects_touched": ["ToolCall", "ToolResult", "FileEdit", "Evidence"],
-      "wiring": {"inputs_from": ["reason stage plan"], "outputs_to": ["FileRead ToolResult", "FileEdit ToolCall"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge from the FileRead node's output port into the FileEdit node's input port to enforce read-before-write.", "visual": "The edge pulses green when fresh content flows; an edit attempted with no read edge flashes an amber 'unanchored' warning."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "ToolResult",
+        "FileEdit",
+        "Evidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "reason stage plan"
+        ],
+        "outputs_to": [
+          "FileRead ToolResult",
+          "FileEdit ToolCall"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw an edge from the FileRead node's output port into the FileEdit node's input port to enforce read-before-write.",
+        "visual": "The edge pulses green when fresh content flows; an edit attempted with no read edge flashes an amber 'unanchored' warning."
+      },
       "mini_scenario": "The loop reads config.rs, the model quotes the exact old_string from that ToolResult, and FileEdit applies cleanly on the first try.",
       "pitfall": "Editing from memory instead of a fresh FileRead result makes old_string matching fail and wastes a recovery turn."
     },
@@ -65,9 +158,26 @@
       "pattern": "gate-before-act",
       "intent": "Let the loop run arbitrary commands without letting any one command hang or blast the workspace.",
       "how_it_shapes_the_loop": "ShellExec wraps each command with timeout and safety checks (default_shell, init_safety_config on the file tools follows the same pattern), so the act stage is guarded: a hung command dies at the deadline and returns a typed error instead of stalling the driver.",
-      "loop_objects_touched": ["ShellExec", "ToolCall", "ToolResult"],
-      "wiring": {"inputs_from": ["CollectedToolCall", "safety config"], "outputs_to": ["bounded command execution", "error ToolResult"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the ShellExec node to open its gate panel showing timeout, working dir, and safety policy.", "visual": "A countdown ring shrinks around the node while the command runs; the ring flashes red one tick before the timeout kills it."},
+      "loop_objects_touched": [
+        "ShellExec",
+        "ToolCall",
+        "ToolResult"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "CollectedToolCall",
+          "safety config"
+        ],
+        "outputs_to": [
+          "bounded command execution",
+          "error ToolResult"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the ShellExec node to open its gate panel showing timeout, working dir, and safety policy.",
+        "visual": "A countdown ring shrinks around the node while the command runs; the ring flashes red one tick before the timeout kills it."
+      },
       "mini_scenario": "The model runs a build that deadlocks; ShellExec's timeout fires at 120s, returns an error ToolResult, and the loop recovers instead of hanging.",
       "pitfall": "An unbounded ShellExec turns one bad command into a frozen loop — never bypass the timeout for convenience."
     },
@@ -78,9 +188,26 @@
       "pattern": "cheap-perceive",
       "intent": "Locate symbols and call sites without loading whole files into context.",
       "how_it_shapes_the_loop": "GrepSearch::grep_search returns GrepMatch lines (path, line, snippet) packed into a GrepSearchResult; the reason stage gets precise coordinates for a few hundred tokens instead of reading entire files, protecting the budget for actual work.",
-      "loop_objects_touched": ["GrepSearchResult", "ToolResult", "Evidence", "Budget"],
-      "wiring": {"inputs_from": ["reason stage query"], "outputs_to": ["GrepMatch evidence", "targeted FileRead"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread over the GrepSearch node to fan its matches out as a scatter of file chips, each pinned to a line number.", "visual": "Match chips glow by hit density; tapping one jumps the canvas camera to that file's read node."},
+      "loop_objects_touched": [
+        "GrepSearchResult",
+        "ToolResult",
+        "Evidence",
+        "Budget"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "reason stage query"
+        ],
+        "outputs_to": [
+          "GrepMatch evidence",
+          "targeted FileRead"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread over the GrepSearch node to fan its matches out as a scatter of file chips, each pinned to a line number.",
+        "visual": "Match chips glow by hit density; tapping one jumps the canvas camera to that file's read node."
+      },
       "mini_scenario": "The model greps 'fn execute' across src/tools, gets 12 GrepMatch lines, and reads only the two files that matter.",
       "pitfall": "Grepping with an over-broad regex returns thousands of matches and truncates — the pagination info must be honored, not ignored."
     },
@@ -91,9 +218,25 @@
       "pattern": "act-then-verify",
       "intent": "Prove an edit compiles and passes before the loop claims completion.",
       "how_it_shapes_the_loop": "CargoTest parses cargo JSON messages into TestResult/TestSummary with FailureDetail entries; CargoCheck and CargoClippy surface CompilerError by Severity. The verify stage gets structured pass/fail evidence that decides Completed vs ErrorRecovery.",
-      "loop_objects_touched": ["TestSummary", "ToolResult", "Evidence"],
-      "wiring": {"inputs_from": ["FileEdit/PatchApply mutation"], "outputs_to": ["TestSummary evidence", "Completed or ErrorRecovery transition"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the CargoTest node to expand its TestSummary: green passed count, red failed list with FailureDetail chips.", "visual": "The node border seals green on all-pass; each failure renders a red chip that links back to the offending file node."},
+      "loop_objects_touched": [
+        "TestSummary",
+        "ToolResult",
+        "Evidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "FileEdit/PatchApply mutation"
+        ],
+        "outputs_to": [
+          "TestSummary evidence",
+          "Completed or ErrorRecovery transition"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the CargoTest node to expand its TestSummary: green passed count, red failed list with FailureDetail chips.",
+        "visual": "The node border seals green on all-pass; each failure renders a red chip that links back to the offending file node."
+      },
       "mini_scenario": "After FileEdit lands, CargoTest runs: 41 passed, 1 failed — the FailureDetail routes the loop back to act on the broken test.",
       "pitfall": "Trusting the edit without running CargoCheck/CargoTest lets the loop declare Completed on broken code — verify is not optional."
     },
@@ -104,9 +247,26 @@
       "pattern": "failures-into-plan",
       "intent": "Turn a wall of errors into a prioritized fix list instead of thrashing one at a time.",
       "how_it_shapes_the_loop": "ErrorAnalyzer::group_by_cause clusters errors into ErrorGroup buckets, prioritize and most_actionable rank them, and suggest_fix proposes next moves — the reason stage converts verify output into one coherent plan rather than N disconnected recovery attempts.",
-      "loop_objects_touched": ["ErrorGroup", "Evidence", "ToolResult"],
-      "wiring": {"inputs_from": ["CargoTest FailureDetail list", "CompilerError list"], "outputs_to": ["prioritized ErrorGroup plan", "next act turn"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the failure scatter to cluster errors into ErrorGroup buckets by root cause.", "visual": "Scattered red chips magnetize into labeled clusters; the most_actionable cluster lifts to the front with a 'fix first' badge."},
+      "loop_objects_touched": [
+        "ErrorGroup",
+        "Evidence",
+        "ToolResult"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "CargoTest FailureDetail list",
+          "CompilerError list"
+        ],
+        "outputs_to": [
+          "prioritized ErrorGroup plan",
+          "next act turn"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the failure scatter to cluster errors into ErrorGroup buckets by root cause.",
+        "visual": "Scattered red chips magnetize into labeled clusters; the most_actionable cluster lifts to the front with a 'fix first' badge."
+      },
       "mini_scenario": "Twelve clippy errors cluster into two ErrorGroups — one missing import, one lifetime — and the loop fixes the import once instead of six times.",
       "pitfall": "Treating each failure as independent re-derives the same root cause repeatedly; group first, then plan."
     },
@@ -117,9 +277,26 @@
       "pattern": "gate-before-act",
       "intent": "Create a rollback anchor before the loop mutates many files.",
       "how_it_shapes_the_loop": "GitCheckpoint snapshots the working tree before a batch of edits; GitStatus and GitDiff give the verify stage a readout of what actually changed, so a failed batch can roll back to the checkpoint instead of leaving half-applied state.",
-      "loop_objects_touched": ["GitCheckpoint", "Checkpoint", "ToolCall", "Evidence"],
-      "wiring": {"inputs_from": ["planned mutation batch"], "outputs_to": ["GitCheckpoint snapshot", "rollback target"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap a checkpoint marker to offer 'restore to here', routing the loop back to that snapshot.", "visual": "An anchor badge drops onto the timeline on save; it glows blue while armed as the active restore target."},
+      "loop_objects_touched": [
+        "GitCheckpoint",
+        "Checkpoint",
+        "ToolCall",
+        "Evidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "planned mutation batch"
+        ],
+        "outputs_to": [
+          "GitCheckpoint snapshot",
+          "rollback target"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap a checkpoint marker to offer 'restore to here', routing the loop back to that snapshot.",
+        "visual": "An anchor badge drops onto the timeline on save; it glows blue while armed as the active restore target."
+      },
       "mini_scenario": "Before a FileMultiEdit across eight files the loop runs GitCheckpoint; when three edits fail verify, it restores and retries with a smaller batch.",
       "pitfall": "Checkpointing after the mutation is useless — the snapshot must precede the first write in the batch."
     },
@@ -130,9 +307,25 @@
       "pattern": "sandboxed-fanout",
       "intent": "Let the loop try a risky refactor without touching the main working tree.",
       "how_it_shapes_the_loop": "EnterWorktreeTool creates an isolated WorktreeEntry and switches the loop's file operations into it; is_in_worktree/get_current_worktree scope later acts, and ExitWorktreeTool returns — the loop's blast radius shrinks to the worktree until results are verified.",
-      "loop_objects_touched": ["WorktreeEntry", "ToolResult", "Checkpoint"],
-      "wiring": {"inputs_from": ["risky plan step"], "outputs_to": ["scoped FileEdit/ShellExec acts", "ExitWorktreeTool merge-back decision"]},
-      "touch_interaction": {"gesture": "drag", "canvas_action": "Drag a plan-step node onto the worktree sandbox to re-scope all its downstream acts into the isolated tree.", "visual": "A dashed sandbox ring surrounds the worktree cluster; nodes inside tint violet and their edges stop at the ring boundary."},
+      "loop_objects_touched": [
+        "WorktreeEntry",
+        "ToolResult",
+        "Checkpoint"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "risky plan step"
+        ],
+        "outputs_to": [
+          "scoped FileEdit/ShellExec acts",
+          "ExitWorktreeTool merge-back decision"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "drag",
+        "canvas_action": "Drag a plan-step node onto the worktree sandbox to re-scope all its downstream acts into the isolated tree.",
+        "visual": "A dashed sandbox ring surrounds the worktree cluster; nodes inside tint violet and their edges stop at the ring boundary."
+      },
       "mini_scenario": "The loop enters a worktree, rewrites the parser, runs CargoTest green, then exits and applies the verified diff to main.",
       "pitfall": "Running file tools while is_in_worktree is false (thinking you're isolated) mutates the real tree — check the scope before acting."
     },
@@ -143,9 +336,25 @@
       "pattern": "stateful-act",
       "intent": "Handle tools that need a live session (debuggers, REPLs, ssh) instead of one-shot commands.",
       "how_it_shapes_the_loop": "PtySession keeps state across turns: send_command writes, read_output collects CommandOutput, is_alive guards reuse, close terminates. The loop's act stage becomes multi-turn conversational against one process instead of spawning a fresh shell per call.",
-      "loop_objects_touched": ["PtySession", "ToolCall", "ToolResult"],
-      "wiring": {"inputs_from": ["reason stage next command"], "outputs_to": ["PtySession CommandOutput", "next reason turn"]},
-      "touch_interaction": {"gesture": "long-press", "canvas_action": "Long-press the PtyShellTool node to open its live terminal card showing the session transcript.", "visual": "The node shows a breathing 'alive' dot while is_alive is true; output streams in as ticker text under the node."},
+      "loop_objects_touched": [
+        "PtySession",
+        "ToolCall",
+        "ToolResult"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "reason stage next command"
+        ],
+        "outputs_to": [
+          "PtySession CommandOutput",
+          "next reason turn"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "long-press",
+        "canvas_action": "Long-press the PtyShellTool node to open its live terminal card showing the session transcript.",
+        "visual": "The node shows a breathing 'alive' dot while is_alive is true; output streams in as ticker text under the node."
+      },
       "mini_scenario": "The loop starts a Python REPL in a PtySession, sends three expressions across three turns, reads outputs, and closes the session cleanly.",
       "pitfall": "Forgetting close leaks PTY processes; every opened session must have a matching close on the loop's exit path."
     },
@@ -156,9 +365,26 @@
       "pattern": "policy-scoped-act",
       "intent": "Stop web tools from hitting internal hosts or disallowed endpoints.",
       "how_it_shapes_the_loop": "NetworkPolicy::validate_url_target (with is_private_or_internal_ip / is_private_network_host) vets every HttpRequest and browser fetch before it executes, returning a denial instead of a connection — the act stage's network surface is policy-bound, not model-discretion-bound.",
-      "loop_objects_touched": ["NetworkPolicy", "ToolCall", "ToolResult"],
-      "wiring": {"inputs_from": ["HttpRequest/BrowserFetch ToolCall", "policy config"], "outputs_to": ["allowed request", "policy denial ToolResult"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap the net-policy collar around the browser/http nodes to see which destinations are inside the allowed ring.", "visual": "Allowed URLs glow inside a green ring; a request to a private IP snaps against a red boundary and bounces back."},
+      "loop_objects_touched": [
+        "NetworkPolicy",
+        "ToolCall",
+        "ToolResult"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "HttpRequest/BrowserFetch ToolCall",
+          "policy config"
+        ],
+        "outputs_to": [
+          "allowed request",
+          "policy denial ToolResult"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap the net-policy collar around the browser/http nodes to see which destinations are inside the allowed ring.",
+        "visual": "Allowed URLs glow inside a green ring; a request to a private IP snaps against a red boundary and bounces back."
+      },
       "mini_scenario": "The model tries to fetch http://169.254.169.254; validate_url_target flags it as internal and the loop gets a denial ToolResult instead of metadata.",
       "pitfall": "Validating the hostname but not its resolved IP lets DNS rebinding slip past the policy — check both."
     },
@@ -169,9 +395,26 @@
       "pattern": "visual-evidence",
       "intent": "Confirm a UI change actually rendered, not just that the code compiled.",
       "how_it_shapes_the_loop": "ScreenCapture grabs the framebuffer and VisionAnalyze (encode_image_file + a vision-capable LLM) interprets it; the verify stage gains pixel-level evidence that complements cargo test's text-level pass/fail.",
-      "loop_objects_touched": ["Evidence", "ToolResult", "Message"],
-      "wiring": {"inputs_from": ["UI-affecting mutation"], "outputs_to": ["ScreenCapture image", "VisionAnalyze verdict", "verify transition"]},
-      "touch_interaction": {"gesture": "spread", "canvas_action": "Spread over the ScreenCapture node to enlarge its screenshot into a full review card.", "visual": "The node grows an image thumbnail with a camera badge; VisionCompare overlays a before/after split slider when a prior capture exists."},
+      "loop_objects_touched": [
+        "Evidence",
+        "ToolResult",
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "UI-affecting mutation"
+        ],
+        "outputs_to": [
+          "ScreenCapture image",
+          "VisionAnalyze verdict",
+          "verify transition"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "spread",
+        "canvas_action": "Spread over the ScreenCapture node to enlarge its screenshot into a full review card.",
+        "visual": "The node grows an image thumbnail with a camera badge; VisionCompare overlays a before/after split slider when a prior capture exists."
+      },
       "mini_scenario": "After editing a TUI widget, the loop captures the screen and VisionAnalyze confirms the new status bar actually renders.",
       "pitfall": "Emitting raw base64 into the text log instead of the image slot bloats context and hides the picture from the vision model."
     },
@@ -182,9 +425,26 @@
       "pattern": "semantic-perceive",
       "intent": "Resolve definitions and references precisely where text search would over-match.",
       "how_it_shapes_the_loop": "create_lsp_tools wires an LspClientHandle into LspGotoDefinitionTool, LspFindReferencesTool, LspDocumentSymbolsTool and LspDiagnosticsTool; the loop perceives compiler-grade symbol truth and even live diagnostics, cutting the re-read churn that GrepSearch-only loops suffer.",
-      "loop_objects_touched": ["ToolCall", "ToolResult", "Evidence"],
-      "wiring": {"inputs_from": ["LspClientHandle", "reason stage symbol query"], "outputs_to": ["definition/reference Evidence", "targeted FileEdit"]},
-      "touch_interaction": {"gesture": "tap", "canvas_action": "Tap a symbol chip on the canvas to fire LspGotoDefinitionTool; the camera flies to the resolved definition node.", "visual": "A beam edge animates from the reference chip to the definition chip; LspDiagnosticsTool badges files with live error counts."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "ToolResult",
+        "Evidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "LspClientHandle",
+          "reason stage symbol query"
+        ],
+        "outputs_to": [
+          "definition/reference Evidence",
+          "targeted FileEdit"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "tap",
+        "canvas_action": "Tap a symbol chip on the canvas to fire LspGotoDefinitionTool; the camera flies to the resolved definition node.",
+        "visual": "A beam edge animates from the reference chip to the definition chip; LspDiagnosticsTool badges files with live error counts."
+      },
       "mini_scenario": "Instead of grepping 'render' and reading five false positives, the loop goto-definitions straight to the impl and edits it in one act.",
       "pitfall": "Spawning LspClientHandle sessions without shutdown leaks language-server processes; wire shutdown into the loop's teardown."
     },
@@ -195,9 +455,26 @@
       "pattern": "budget-scoped-fanout",
       "intent": "Read a large codebase within a token ceiling instead of blowing the context window.",
       "how_it_shapes_the_loop": "CodeIntrospect with TokenBudget (reserve/allocate/estimate_file/suggest_depth) plans how deep to parse each file; Depth downgrade kicks in when exhausted, and next_iteration paces multi-pass reads — the loop's perceive stage becomes budget-shaped rather than greedy.",
-      "loop_objects_touched": ["TokenBudget", "Budget", "Evidence"],
-      "wiring": {"inputs_from": ["introspection goal", "token ceiling"], "outputs_to": ["depth-limited ParsedFile evidence", "PlanBudget iterations"]},
-      "touch_interaction": {"gesture": "pinch", "canvas_action": "Pinch the introspect node to reveal a budget gauge; drag the gauge to set the token ceiling before the dive starts.", "visual": "The gauge fills as reserve/allocate consume budget; near exhaustion the node dims and Depth visibly downgrades file cards to brief."},
+      "loop_objects_touched": [
+        "TokenBudget",
+        "Budget",
+        "Evidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "introspection goal",
+          "token ceiling"
+        ],
+        "outputs_to": [
+          "depth-limited ParsedFile evidence",
+          "PlanBudget iterations"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "pinch",
+        "canvas_action": "Pinch the introspect node to reveal a budget gauge; drag the gauge to set the token ceiling before the dive starts.",
+        "visual": "The gauge fills as reserve/allocate consume budget; near exhaustion the node dims and Depth visibly downgrades file cards to brief."
+      },
       "mini_scenario": "Given 20k tokens, TokenBudget estimates 40 files, parses the hot eight at full depth, briefs the rest, and stops at the ceiling.",
       "pitfall": "Parsing everything at full depth exhausts the budget on low-value files — let suggest_depth triage first."
     },
@@ -208,9 +485,26 @@
       "pattern": "ranked-perceive",
       "intent": "Get the most relevant files first when the codebase is too big to read.",
       "how_it_shapes_the_loop": "CodeQueryEngine::build_index parses the tree once; search and rank_files return RankedResult entries scored by BM25 over extract_keywords, and find_related_symbols expands from a hit — the perceive stage gets an ordered shortlist instead of an unordered flood.",
-      "loop_objects_touched": ["Evidence", "TokenBudget", "ToolResult"],
-      "wiring": {"inputs_from": ["natural-language query", "parsed index"], "outputs_to": ["RankedResult shortlist", "targeted FileRead"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick through the ranked result stack; the top card is the next file the loop will read.", "visual": "Result cards stack by score with a relevance meter; higher scores sit brighter and closer to the camera."},
+      "loop_objects_touched": [
+        "Evidence",
+        "TokenBudget",
+        "ToolResult"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "natural-language query",
+          "parsed index"
+        ],
+        "outputs_to": [
+          "RankedResult shortlist",
+          "targeted FileRead"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick through the ranked result stack; the top card is the next file the loop will read.",
+        "visual": "Result cards stack by score with a relevance meter; higher scores sit brighter and closer to the camera."
+      },
       "mini_scenario": "Querying 'token budget enforcement' returns budget.rs ranked first; the loop reads it directly instead of scanning the module.",
       "pitfall": "Searching against a stale index misses new files — rebuild_index after big mutation batches."
     },
@@ -221,9 +515,26 @@
       "pattern": "learn-then-recall",
       "intent": "Turn one-off discoveries into durable, queryable facts for later turns and runs.",
       "how_it_shapes_the_loop": "KnowledgeAdd inserts a KnowledgeNode (typed by NodeType), KnowledgeRelate draws KnowledgeEdge relations, and KnowledgeQuery (find_by_type/find_by_name, edges_from/edges_to) recalls them — the loop's learn stage compounds instead of re-deriving the same facts every session.",
-      "loop_objects_touched": ["KnowledgeGraph", "Evidence", "Message"],
-      "wiring": {"inputs_from": ["verified discoveries", "ToolResult facts"], "outputs_to": ["KnowledgeNode/KnowledgeEdge store", "KnowledgeQuery recall"]},
-      "touch_interaction": {"gesture": "draw-connection", "canvas_action": "Draw an edge between two KnowledgeNode chips to assert a KnowledgeRelate relation.", "visual": "Nodes render as typed gems (file, symbol, decision); new edges spark and then settle into the graph's web."},
+      "loop_objects_touched": [
+        "KnowledgeGraph",
+        "Evidence",
+        "Message"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "verified discoveries",
+          "ToolResult facts"
+        ],
+        "outputs_to": [
+          "KnowledgeNode/KnowledgeEdge store",
+          "KnowledgeQuery recall"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "draw-connection",
+        "canvas_action": "Draw an edge between two KnowledgeNode chips to assert a KnowledgeRelate relation.",
+        "visual": "Nodes render as typed gems (file, symbol, decision); new edges spark and then settle into the graph's web."
+      },
       "mini_scenario": "After verifying that module X owns retry logic, the loop adds a node and relates it to the config module; a later run recalls it instantly.",
       "pitfall": "Adding unverified guesses pollutes the graph — only persist facts that survived the verify stage."
     },
@@ -234,9 +545,26 @@
       "pattern": "live-substrate",
       "intent": "Add or replace a tool implementation mid-run for experimentation.",
       "how_it_shapes_the_loop": "HotReloadManager::load/register builds a DynamicTool, get_tool/list_tools expose it, and reload swaps the implementation in place — the act stage's substrate is mutable, so tool fixes ship into a running loop instead of requiring a restart.",
-      "loop_objects_touched": ["DynamicTool", "ToolRegistry", "ToolDefinition"],
-      "wiring": {"inputs_from": ["tool source file", "HotReloadManager"], "outputs_to": ["ToolRegistry::register", "rebuilt search index"]},
-      "touch_interaction": {"gesture": "flick", "canvas_action": "Flick a tool node upward to reload it; the node briefly phases out and returns with a version badge bump.", "visual": "The node shimmers during reload; a green 'v+1' badge appears, or a red badge if load failed and the old impl kept serving."},
+      "loop_objects_touched": [
+        "DynamicTool",
+        "ToolRegistry",
+        "ToolDefinition"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "tool source file",
+          "HotReloadManager"
+        ],
+        "outputs_to": [
+          "ToolRegistry::register",
+          "rebuilt search index"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "flick",
+        "canvas_action": "Flick a tool node upward to reload it; the node briefly phases out and returns with a version badge bump.",
+        "visual": "The node shimmers during reload; a green 'v+1' badge appears, or a red badge if load failed and the old impl kept serving."
+      },
       "mini_scenario": "A developer edits a custom tool's source, flicks reload, and the loop's next act turn uses the fixed implementation.",
       "pitfall": "Reloading without re-registering in the ToolRegistry leaves the old schema in critical_definitions — sync both."
     },
@@ -247,9 +575,26 @@
       "pattern": "context-scoped-toolset",
       "intent": "Present the model the tools that matter for this task type, first.",
       "how_it_shapes_the_loop": "classify_task maps the prompt to a TaskType; primary_tools and secondary_tools plus reorder_tools reshuffle the definitions list, and preamble primes the model — the reason stage sees a task-shaped toolset, improving tool choice without adding a single token of tools.",
-      "loop_objects_touched": ["TaskType", "ToolDefinition", "Budget"],
-      "wiring": {"inputs_from": ["user prompt", "ToolRegistry definitions"], "outputs_to": ["reordered LLM tool list", "task preamble"]},
-      "touch_interaction": {"gesture": "two-finger-rotate", "canvas_action": "Rotate the tool shelf to re-sort nodes by task relevance; primary tools swing to the front of the rail.", "visual": "Primary tools slide forward with a bright underline; secondary tools recede but stay reachable; irrelevant tools dim."},
+      "loop_objects_touched": [
+        "TaskType",
+        "ToolDefinition",
+        "Budget"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "user prompt",
+          "ToolRegistry definitions"
+        ],
+        "outputs_to": [
+          "reordered LLM tool list",
+          "task preamble"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "two-finger-rotate",
+        "canvas_action": "Rotate the tool shelf to re-sort nodes by task relevance; primary tools swing to the front of the rail.",
+        "visual": "Primary tools slide forward with a bright underline; secondary tools recede but stay reachable; irrelevant tools dim."
+      },
       "mini_scenario": "A debugging prompt classifies as debug; cargo_test and grep_search jump to the front of the tool list and the model picks them immediately.",
       "pitfall": "Misclassification hides the actually-needed tool at the back — keep the full list reachable, only reorder."
     },
@@ -260,9 +605,26 @@
       "pattern": "clarify-before-act",
       "intent": "Resolve ambiguity with a single human answer rather than a speculative act batch.",
       "how_it_shapes_the_loop": "ClarificationTool's ask_user suspends the act stage, surfaces one question, and resumes with the answer as evidence; asked_count caps how often the loop may interrupt, so clarification stays a deliberate control move, not a crutch.",
-      "loop_objects_touched": ["ToolCall", "ToolResult", "Message", "Evidence"],
-      "wiring": {"inputs_from": ["ambiguous reason state"], "outputs_to": ["human answer Message", "resumed act stage"]},
-      "touch_interaction": {"gesture": "double-tap", "canvas_action": "Double-tap the clarify node to open the pending question card; answering resumes the loop along a highlighted edge.", "visual": "The loop dims behind a question card with a pulsing border; asked_count shows as remaining-interrupt pips on the node."},
+      "loop_objects_touched": [
+        "ToolCall",
+        "ToolResult",
+        "Message",
+        "Evidence"
+      ],
+      "wiring": {
+        "inputs_from": [
+          "ambiguous reason state"
+        ],
+        "outputs_to": [
+          "human answer Message",
+          "resumed act stage"
+        ]
+      },
+      "touch_interaction": {
+        "gesture": "double-tap",
+        "canvas_action": "Double-tap the clarify node to open the pending question card; answering resumes the loop along a highlighted edge.",
+        "visual": "The loop dims behind a question card with a pulsing border; asked_count shows as remaining-interrupt pips on the node."
+      },
       "mini_scenario": "Unsure whether 'update' means deps or docs, the loop asks once, gets 'docs', and executes the right act batch first try.",
       "pitfall": "Clarifying on every ambiguity burns asked_count and user patience — reserve it for forks that change the plan's shape."
     }
