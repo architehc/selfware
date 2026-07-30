@@ -146,11 +146,24 @@ fn test_normal_mode_read_only_tools_skip_confirmation() {
         "code_metrics",
         "list_worktrees",
         "knowledge_query",
-        "vision_analyze",
     ] {
         assert!(
             !normal_mode_needs_confirmation(tool, &[], &no_grants()),
             "read-only tool '{}' must not prompt in Normal mode",
+            tool
+        );
+    }
+}
+
+#[test]
+fn test_normal_mode_egress_tools_prompt() {
+    // vision/screen tools upload file bytes to the model endpoint — network
+    // egress, not read-only. They must confirm in Normal mode (review round 9:
+    // the mislabel let them exfiltrate without prompting).
+    for tool in ["vision_analyze", "vision_compare", "screen_capture"] {
+        assert!(
+            normal_mode_needs_confirmation(tool, &[], &no_grants()),
+            "egress tool '{}' must prompt in Normal mode",
             tool
         );
     }

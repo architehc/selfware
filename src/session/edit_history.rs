@@ -451,7 +451,8 @@ impl TimelineEntry {
 ///
 /// Using a cryptographic hash instead of `DefaultHasher` ensures consistent,
 /// deterministic results across Rust versions and platforms.
-fn compute_hash(content: &str) -> String {
+/// Hash file content for snapshot comparison (used by undo's drift check).
+pub fn compute_hash(content: &str) -> String {
     use sha2::{Digest, Sha256};
     hex::encode(Sha256::digest(content.as_bytes()))
 }

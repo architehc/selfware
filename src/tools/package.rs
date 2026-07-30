@@ -82,6 +82,7 @@ impl Tool for NpmInstall {
             .unwrap_or(false);
 
         let mut cmd = Command::new("npm");
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("install");
 
         if !packages.is_empty() {
@@ -193,6 +194,7 @@ impl Tool for NpmRun {
             .unwrap_or(300);
 
         let mut cmd = Command::new("npm");
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("run");
         cmd.arg(script);
 
@@ -365,6 +367,7 @@ impl Tool for PipInstall {
         let python = find_python().await;
 
         let mut cmd = Command::new(&python);
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.args(["-m", "pip", "install"]);
 
         if let Some(req_file) = requirements {
@@ -457,6 +460,7 @@ impl Tool for PipList {
         let python = find_python().await;
 
         let mut cmd = Command::new(&python);
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.args(["-m", "pip", "list", "--format=json"]);
 
         if outdated {
@@ -515,6 +519,7 @@ impl Tool for PipFreeze {
         let python = find_python().await;
 
         let mut cmd = Command::new(&python);
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.args(["-m", "pip", "freeze"]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -597,6 +602,7 @@ impl Tool for YarnInstall {
         let dev = args.get("dev").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let mut cmd = Command::new("yarn");
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
 
         if packages.is_empty() {
             cmd.arg("install");

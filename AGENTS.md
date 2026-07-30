@@ -3,6 +3,17 @@
 These rules bind any agent working in this repository. They exist because of
 specific observed failures; each rule names its failure mode.
 
+## 5. Sweep the bug class, not the file
+
+When a review finding is fixed, the fix commit is not done until the same
+mistake has been grepped for everywhere it could recur. Pattern: a finding in
+`cargo.rs` means check `git.rs`/`package.rs`/every other Command spawn; a
+hardened regex means check its sibling patterns; a trust gate means check
+every path that reaches the model, not just the one the review named.
+Failure mode it prevents: credential scrubbing landed in cargo.rs/git.rs but
+not package.rs; protected-path enforcement landed in the daemon but not in
+apply.
+
 ## 1. Stop-the-line: CI red means stop
 
 `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` must be green

@@ -190,7 +190,10 @@ pub fn verify_staged_diff(
         return Ok(Err(RejectReason::Empty));
     }
 
-    // Scope rule: every changed path must stay inside src/ or docs/.
+    // Scope rule: every changed path must stay inside src/ or docs/ — and must
+    // NOT be a protected path. src/ contains src/safety/ and src/evolution/,
+    // which the evolution protection list forbids an autonomous writer from
+    // touching; apply must honor the same boundary.
     for delta in diff.deltas() {
         let path = delta
             .new_file()
@@ -200,6 +203,14 @@ pub fn verify_staged_diff(
             .unwrap_or_default();
         if !(path.starts_with("src/") || path.starts_with("docs/")) {
             return Ok(Err(RejectReason::OutOfScope(path)));
+        }
+        if crate::evolution::PROTECTED_PATHS
+            .iter()
+            .any(|protected| path.starts_with(protected))
+        {
+            return Ok(Err(RejectReason::OutOfScope(format!(
+                "{path} (protected path)"
+            ))));
         }
     }
 

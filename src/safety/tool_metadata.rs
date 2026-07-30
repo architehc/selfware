@@ -408,11 +408,16 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
             ToolMetadata::custom(false, false, RiskLevel::High, false, false)
         }
 
-        // Screen capture
-        "screen_capture" => ToolMetadata::read_only(),
+        // Screen capture — reads the screen but SENDS the image to a remote
+        // model endpoint (network egress of potentially private content):
+        // not read-only in the confirmation sense.
+        "screen_capture" => ToolMetadata::custom(false, false, RiskLevel::Medium, true, false),
 
-        // Vision tools
-        "vision_analyze" | "vision_compare" => ToolMetadata::read_only(),
+        // Vision tools — upload file bytes to the model endpoint (egress);
+        // must confirm like any network tool.
+        "vision_analyze" | "vision_compare" => {
+            ToolMetadata::custom(false, false, RiskLevel::Medium, true, false)
+        }
 
         // LSP tools
         "lsp_goto" | "lsp_references" | "lsp_symbols" | "lsp_hover" => ToolMetadata::read_only(),
