@@ -154,10 +154,11 @@ pub fn expand(
     symbol: Option<&str>,
     full: bool,
 ) -> Option<String> {
-    let node = graph
-        .nodes
-        .iter()
-        .find(|n| n.layer == NodeLayer::Code && n.id == component)?;
+    // Expand is ON-DEMAND retrieval: any graph node with a path is eligible —
+    // Code nodes (product logic) and Auxiliary nodes (tooling, docs). Tooling
+    // modules are excluded from bulk tiers but must stay expandable
+    // (Bulk-vs-OnDemand separation; review round 11 #1).
+    let node = graph.nodes.iter().find(|n| n.id == component)?;
     let rel = node.path.as_deref()?;
     let src = std::fs::read_to_string(root.join(rel)).ok()?;
     if let Some(symbol) = symbol {
