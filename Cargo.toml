@@ -85,7 +85,7 @@ ctrlc = "3"
 # Vector Memory & RAG
 hnsw_rs = "0.3"  # Hierarchical Navigable Small World graphs (embedded vector search)
 bincode = { version = "2.0", features = ["serde"] }  # Fast binary serialization
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 keyring = "3.6"
 
 # Workflows
