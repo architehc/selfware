@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-07-29
+
+### Added
+- Expansion recommendation library: 29 modules × 20 grounded loop-modeling examples in the UI-consumption schema (`expansion_recommendation/`)
+- Persistent staged-apply banner (survives node navigation); `#view=` deep-link
+- Website PR with 4 real workspace screenshots
+
+### Fixed
+- package.rs credential hygiene (npm/python spawns sanitize env); apply rejects PROTECTED_PATHS and symlinks in staged diffs
+- vision/screen_capture reclassified network-egress (confirm in Normal mode)
+- `/undo`: hash-verify before restore + atomic writes
+- exit codes walk the full anyhow cause chain
+- short-term memory tokens counted in the usage budget
+- checklist seeding normalizes file-path ids → component ids
+- **expand works for Auxiliary (tooling) nodes** — Bulk-vs-OnDemand separation restored
+- Dedup merge wave: 30+ exact-duplicate function pairs consolidated (66 → 31 analyzer pairs)
+
 ## [0.6.6] - 2026-07-28
 
 ### Removed (mega dedup cleanup, −6,027 lines)
@@ -238,7 +255,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.6...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.6.7...HEAD
+[0.6.7]: https://github.com/architehc/selfware/compare/v0.6.6...v0.6.7
 [0.6.6]: https://github.com/architehc/selfware/compare/v0.6.5...v0.6.6
 [0.6.5]: https://github.com/architehc/selfware/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/architehc/selfware/compare/v0.6.3...v0.6.4
