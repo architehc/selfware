@@ -65,6 +65,7 @@ async fn main() -> Result<()> {
             ],
             strict_permissions: false,
             permissions: vec![],
+            trust_gate_tool_results: true,
         },
 
         // Agent behavior

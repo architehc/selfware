@@ -64,6 +64,7 @@ fn slow_model_config() -> Config {
             require_confirmation: vec![],
             strict_permissions: false,
             permissions: vec![],
+            trust_gate_tool_results: true,
         },
         agent: AgentConfig {
             max_iterations: 20, // Allow more iterations for complex tasks

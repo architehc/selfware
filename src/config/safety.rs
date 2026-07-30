@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::types::default_true;
+
 /// Safety guardrails: allowed/denied paths, protected branches, and confirmation rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyConfig {
@@ -23,6 +25,13 @@ pub struct SafetyConfig {
     /// Reduces confirmation prompts for trusted operations.
     #[serde(default)]
     pub permissions: Vec<crate::safety::permissions::PermissionGrant>,
+    /// Trust-gate tool results: scan tool output for prompt-injection
+    /// patterns before it enters the model's context and neutralize
+    /// high-severity findings in place (the loop cannot refuse a result, so
+    /// offending lines are replaced and flagged instead of dropped).
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub trust_gate_tool_results: bool,
 }
 
 impl Default for SafetyConfig {
@@ -34,6 +43,7 @@ impl Default for SafetyConfig {
             require_confirmation: default_require_confirmation(),
             strict_permissions: false,
             permissions: Vec::new(),
+            trust_gate_tool_results: true,
         }
     }
 }

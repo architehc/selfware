@@ -1977,7 +1977,14 @@ async fn test_push_result_xml_success() {
     let initial_len = agent.messages.len();
 
     agent
-        .push_tool_result_message(false, "call_1", "test_tool", true, r#"{"output":"hello"}"#)
+        .push_tool_result_message(
+            false,
+            "call_1",
+            "test_tool",
+            "{}",
+            true,
+            r#"{"output":"hello"}"#,
+        )
         .await;
 
     assert_eq!(agent.messages.len(), initial_len + 1);
@@ -1998,7 +2005,14 @@ async fn test_push_result_xml_failure() {
     let initial_len = agent.messages.len();
 
     agent
-        .push_tool_result_message(false, "call_1", "test_tool", false, "Something went wrong")
+        .push_tool_result_message(
+            false,
+            "call_1",
+            "test_tool",
+            "{}",
+            false,
+            "Something went wrong",
+        )
         .await;
 
     assert_eq!(agent.messages.len(), initial_len + 1);
@@ -2018,7 +2032,14 @@ async fn test_push_result_native_fc_success() {
     let initial_len = agent.messages.len();
 
     agent
-        .push_tool_result_message(true, "call_native_1", "test_tool", true, r#"{"data":"ok"}"#)
+        .push_tool_result_message(
+            true,
+            "call_native_1",
+            "test_tool",
+            "{}",
+            true,
+            r#"{"data":"ok"}"#,
+        )
         .await;
 
     assert_eq!(agent.messages.len(), initial_len + 1);
@@ -2042,6 +2063,7 @@ async fn test_push_result_native_fc_failure() {
             true,
             "call_native_2",
             "test_tool",
+            "{}",
             false,
             "Permission denied",
         )
@@ -2069,7 +2091,7 @@ async fn test_push_result_image_promotion_xml() {
 
     let result = r#"{"base64_png":"iVBORw0KGgo=","width":100,"height":100}"#;
     agent
-        .push_tool_result_message(false, "call_img", "screen_capture", true, result)
+        .push_tool_result_message(false, "call_img", "screen_capture", "{}", true, result)
         .await;
 
     assert_eq!(agent.messages.len(), initial_len + 1);
@@ -2093,7 +2115,14 @@ async fn test_push_result_image_promotion_native_fc() {
 
     let result = r#"{"base64_png":"abc123","note":"screenshot"}"#;
     agent
-        .push_tool_result_message(true, "call_img_native", "screen_capture", true, result)
+        .push_tool_result_message(
+            true,
+            "call_img_native",
+            "screen_capture",
+            "{}",
+            true,
+            result,
+        )
         .await;
 
     assert_eq!(agent.messages.len(), initial_len + 1);

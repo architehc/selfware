@@ -343,6 +343,7 @@ fn test_config_full_roundtrip() {
             require_confirmation: vec!["deploy".to_string()],
             strict_permissions: false,
             permissions: vec![],
+            trust_gate_tool_results: true,
         },
         agent: AgentConfig {
             max_iterations: 50,
@@ -2266,6 +2267,7 @@ fn test_safety_config_serialize_roundtrip() {
         require_confirmation: vec!["deploy".to_string()],
         strict_permissions: true,
         permissions: vec![],
+        trust_gate_tool_results: true,
     };
     let toml_str = toml::to_string(&config).unwrap();
     let parsed: SafetyConfig = toml::from_str(&toml_str).unwrap();

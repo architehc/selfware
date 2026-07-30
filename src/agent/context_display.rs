@@ -54,8 +54,13 @@ impl Agent {
             .map(|(w, _)| w as usize)
             .unwrap_or(80);
 
-        // Left side: mode + hint
-        let left = format!("[{}] ? for shortcuts", mode);
+        // Left side: mode + hint (+ trust-gate flag once it has sanitized anything)
+        let trust_flag = if self.trust_gate_findings > 0 {
+            format!(" trust:{}", self.trust_gate_findings)
+        } else {
+            String::new()
+        };
+        let left = format!("[{}] ? for shortcuts{}", mode, trust_flag);
         // Right side: bar + percentage + tokens + cost
         let right = format!(
             "{} {:.1}% ({:.1}k/{:.0}k) ${:.2} [{}]",
@@ -76,10 +81,17 @@ impl Agent {
             _ => format!("[{}]", mode).bright_cyan(),
         };
 
+        let trust_colored = if self.trust_gate_findings > 0 {
+            format!(" trust:{}", self.trust_gate_findings).bright_yellow()
+        } else {
+            "".into()
+        };
+
         println!(
-            " {} {}{}  {} {:.1}% ({:.1}k/{:.0}k) {} [{}]",
+            " {} {}{}{}  {} {:.1}% ({:.1}k/{:.0}k) {} [{}]",
             mode_colored,
             "? for shortcuts".dimmed(),
+            trust_colored,
             " ".repeat(padding),
             colored_bar,
             pct,

@@ -187,6 +187,12 @@ strict_permissions = false
 # Pre-authorized permission grants to reduce confirmation prompts
 # See examples below
 permissions = []
+
+# Scan tool output for prompt-injection patterns before it enters the
+# model's context; high-severity findings are neutralized in place (the
+# offending line is replaced and flagged — the result is never dropped).
+# Default: true
+trust_gate_tool_results = true
 ```
 
 ### Permission Grants

@@ -167,6 +167,7 @@ mod safety_config_tests {
             require_confirmation: vec!["git push".to_string()],
             strict_permissions: false,
             permissions: vec![],
+            trust_gate_tool_results: true,
         };
 
         let toml = toml::to_string(&config).unwrap();

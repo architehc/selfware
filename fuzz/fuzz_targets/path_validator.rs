@@ -12,6 +12,7 @@ fuzz_target!(|data: &[u8]| {
             protected_branches: vec!["main".to_string()],
             require_confirmation: vec![],
             strict_permissions: false,
+            trust_gate_tool_results: true,
         };
         let validator = PathValidator::new(&config, PathBuf::from("/tmp/sandbox"));
         let _ = validator.validate(path_str);

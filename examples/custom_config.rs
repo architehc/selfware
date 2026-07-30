@@ -69,6 +69,7 @@ fn build_custom_config() -> Config {
             ],
             strict_permissions: false,
             permissions: vec![],
+            trust_gate_tool_results: true,
         },
 
         // Agent behavior

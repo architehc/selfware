@@ -8,6 +8,7 @@ fn make_config(allowed: Vec<&str>, denied: Vec<&str>) -> SafetyConfig {
         require_confirmation: vec![],
         strict_permissions: false,
         permissions: vec![],
+        trust_gate_tool_results: true,
     }
 }
 

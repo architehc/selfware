@@ -33,6 +33,7 @@ pub fn test_config() -> Config {
             require_confirmation: vec![],
             strict_permissions: false,
             permissions: vec![],
+            trust_gate_tool_results: true,
         },
         agent: AgentConfig {
             max_iterations: 10, // Limit for tests

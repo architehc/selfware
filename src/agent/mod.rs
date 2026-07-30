@@ -583,6 +583,9 @@ pub struct Agent {
     /// When this exceeds a threshold the agent forces completion instead of
     /// looping until max_iterations.
     consecutive_suppressions: usize,
+    /// Total injection findings the trust gate has sanitized out of tool
+    /// results this session. Surfaced in the interactive status line when > 0.
+    trust_gate_findings: usize,
     /// Tracks consecutive steps that only used read-only or verification tools
     /// (file_read, directory_tree, grep_search, shell_exec cargo test/check, etc.)
     /// without any state-changing tool. When this exceeds a threshold, recovery
@@ -1229,6 +1232,7 @@ To call a tool, use this EXACT XML structure:
             rag_engine: None,
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
+            trust_gate_findings: 0,
             consecutive_read_only_steps: 0,
             seen_read_targets: std::collections::HashSet::new(),
             post_edit_observational_shell_count: 0,

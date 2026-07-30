@@ -13,9 +13,11 @@ use crate::hooks::HookContext;
 
 mod helpers;
 mod spill;
+mod trust_gate;
 
 pub(crate) use helpers::*;
 pub(crate) use spill::*;
+pub(crate) use trust_gate::*;
 
 impl Agent {
     /// Credit (or record the failure of) a verification tool call for the
@@ -84,8 +86,15 @@ impl Agent {
     ) {
         cli_println!("{} {}", "✗".bright_red(), error_msg);
         self.pending_failure_hint = Some(error_msg.to_string());
-        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, error_msg)
-            .await;
+        self.push_tool_result_message(
+            use_native_fc,
+            call_id,
+            tool_name,
+            args_str,
+            false,
+            error_msg,
+        )
+        .await;
         self.log_tool_call(tool_name, args_str, error_msg, false, start_time, false);
         self.remember_failed_tool(tool_name, error_msg);
         self.record_failed_tool_attempt(tool_name, args_str, failure_kind, error_msg);
@@ -410,7 +419,7 @@ impl Agent {
             path, read_count
         ));
         self.pending_failure_hint = Some(err.clone());
-        self.push_tool_result_message(use_native_fc, call_id, name, false, &err)
+        self.push_tool_result_message(use_native_fc, call_id, name, args_str, false, &err)
             .await;
         self.log_tool_call(name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(name, &err);
@@ -593,6 +602,7 @@ impl Agent {
                             use_native_fc,
                             call_id,
                             tool_name,
+                            args_str,
                             false,
                             &short,
                         )
@@ -654,6 +664,7 @@ impl Agent {
                         use_native_fc,
                         call_id,
                         tool_name,
+                        args_str,
                         false,
                         &escalation,
                     )
@@ -678,7 +689,7 @@ impl Agent {
             tool_name, failure.failure_kind
         );
         cli_println!("{} {}", "✗".bright_red(), err);
-        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &err)
+        self.push_tool_result_message(use_native_fc, call_id, tool_name, args_str, false, &err)
             .await;
         self.log_tool_call(tool_name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(tool_name, &err);
@@ -816,6 +827,7 @@ impl Agent {
                         use_native_fc,
                         &call_id,
                         &name_clone,
+                        &args_str_clone,
                         false,
                         &error_text,
                     )
@@ -859,6 +871,7 @@ impl Agent {
                     use_native_fc,
                     &call_id,
                     &name_clone,
+                    &args_str_clone,
                     false,
                     &error_text,
                 )
@@ -961,8 +974,15 @@ impl Agent {
                 if let Some(ref logger) = self.audit_logger {
                     logger.log_safety_block(&name, &error_msg);
                 }
-                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg)
-                    .await;
+                self.push_tool_result_message(
+                    use_native_fc,
+                    &call_id,
+                    &name,
+                    &args_str,
+                    false,
+                    &error_msg,
+                )
+                .await;
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                 self.remember_failed_tool(&name, &error_msg);
                 self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
@@ -980,6 +1000,7 @@ impl Agent {
                         use_native_fc,
                         &call_id,
                         &name,
+                        &args_str,
                         false,
                         &error_msg,
                     )
@@ -1043,8 +1064,15 @@ impl Agent {
             if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
                 let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
                 info!("{}", skip_msg);
-                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg)
-                    .await;
+                self.push_tool_result_message(
+                    use_native_fc,
+                    &call_id,
+                    &name,
+                    &args_str,
+                    false,
+                    &skip_msg,
+                )
+                .await;
                 continue;
             }
 
@@ -1256,6 +1284,7 @@ impl Agent {
                 vt.use_native_fc,
                 &vt.call_id,
                 &vt.name,
+                &vt.args_str,
                 success,
                 &result_str,
             )
@@ -1371,8 +1400,15 @@ impl Agent {
             if let Some(ref logger) = self.audit_logger {
                 logger.log_safety_block(&name, &error_msg);
             }
-            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg)
-                .await;
+            self.push_tool_result_message(
+                use_native_fc,
+                &call_id,
+                &name,
+                &args_str,
+                false,
+                &error_msg,
+            )
+            .await;
             self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
             self.remember_failed_tool(&name, &error_msg);
             let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -1452,8 +1488,15 @@ impl Agent {
         if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
             let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
             info!("{}", skip_msg);
-            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg)
-                .await;
+            self.push_tool_result_message(
+                use_native_fc,
+                &call_id,
+                &name,
+                &args_str,
+                false,
+                &skip_msg,
+            )
+            .await;
             return Ok(());
         }
 
@@ -1558,7 +1601,7 @@ impl Agent {
             }
         }
 
-        self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result)
+        self.push_tool_result_message(use_native_fc, &call_id, &name, &args_str, success, &result)
             .await;
         if !success {
             self.remember_failed_tool(&name, &result);
@@ -2055,7 +2098,7 @@ impl Agent {
             Err(e) => {
                 let err = format!("Invalid JSON arguments: {}", e);
                 cli_println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, name, false, &err)
+                self.push_tool_result_message(use_native_fc, call_id, name, args_str, false, &err)
                     .await;
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
                 self.log_tool_validation_failure_event(
@@ -2105,7 +2148,7 @@ impl Agent {
             Err(e) => {
                 let err = e.to_string();
                 cli_println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, name, false, &err)
+                self.push_tool_result_message(use_native_fc, call_id, name, args_str, false, &err)
                     .await;
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
                 self.log_tool_validation_failure_event(
@@ -2573,6 +2616,7 @@ impl Agent {
         use_native_fc: bool,
         call_id: &str,
         tool_name: &str,
+        args_str: &str,
         success: bool,
         result: &str,
     ) {
@@ -2622,6 +2666,27 @@ impl Agent {
         // command that echoes a secret (or a mis-run `cat .env`) would leak
         // credentials into context and every downstream log/exfil path.
         let result_to_store = crate::safety::redact::redact_secrets(&result_to_store).into_owned();
+
+        // Trust gate: scan untrusted tool output for prompt-injection
+        // patterns and neutralize high-severity findings in place (the loop
+        // cannot refuse a tool result, so the offending lines are replaced
+        // and flagged instead of the result being dropped).
+        let gate = trust_gate_tool_result(
+            tool_name,
+            args_str,
+            &result_to_store,
+            self.config.safety.trust_gate_tool_results,
+        );
+        if gate.sanitized > 0 {
+            self.trust_gate_findings += gate.sanitized;
+            warn!(
+                "trust gate sanitized {} finding(s) in '{}' tool output: {}",
+                gate.sanitized,
+                tool_name,
+                gate.kinds.join(", ")
+            );
+        }
+        let result_to_store = gate.content;
 
         if use_native_fc {
             let result_json = if success {
