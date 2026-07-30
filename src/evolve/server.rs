@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Query, Request, State},
+    extract::{Path as AxumPath, Query, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -267,7 +267,16 @@ impl EvolveServer {
                 post(evolve_pair_suggest_handler),
             )
             .route("/api/git/status", get(git_status_handler))
-            .route("/api/git/branch", post(git_branch_handler));
+            .route("/api/git/branch", post(git_branch_handler))
+            .route("/api/expansion/index", get(expansion_index_handler))
+            .route(
+                "/api/expansion/:component",
+                get(expansion_component_handler),
+            )
+            .route(
+                "/api/expansion/:component/:example_id",
+                get(expansion_example_handler),
+            );
         // Apply endpoints exist only with the self-improvement feature: apply
         // staging rides on shadow worktrees from `evolution::ast_tools`, so
         // without the feature the routes (and the whole apply module) are
@@ -2757,6 +2766,54 @@ async fn git_branch_handler(
         .create_branch(&body.name, &body.expected_head, body.confirm)
         .map_err(bad_action_error)?;
     Ok(Json(serde_json::to_value(result).map_err(internal_error)?))
+}
+
+/// The expansion catalog is a read-only public document tree (like the other
+/// GETs), read through from disk per request so catalog edits are live; see
+/// `evolve::expansion` for the degradation contract (empty index + typed
+/// 404s, never a 500 for a missing optional directory).
+async fn expansion_index_handler(
+    State(server): State<Arc<EvolveServer>>,
+) -> ApiResult<Json<Value>> {
+    let root = server.project_root.as_ref().clone();
+    let index = tokio::task::spawn_blocking(move || super::expansion::index(&root))
+        .await
+        .map_err(join_error)?;
+    Ok(Json(index))
+}
+
+async fn expansion_component_handler(
+    State(server): State<Arc<EvolveServer>>,
+    AxumPath(component): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let root = server.project_root.as_ref().clone();
+    let document =
+        tokio::task::spawn_blocking(move || super::expansion::component(&root, &component))
+            .await
+            .map_err(join_error)?;
+    document
+        .map(Json)
+        .ok_or_else(|| not_found("unknown_component"))
+}
+
+async fn expansion_example_handler(
+    State(server): State<Arc<EvolveServer>>,
+    AxumPath((component, example_id)): AxumPath<(String, String)>,
+) -> ApiResult<Json<Value>> {
+    let root = server.project_root.as_ref().clone();
+    let example = tokio::task::spawn_blocking(move || {
+        // Distinguish the two typed 404s: a missing catalog/component is
+        // unknown_component; a known component without the id is
+        // unknown_example.
+        if super::expansion::component(&root, &component).is_none() {
+            return Err(not_found("unknown_component"));
+        }
+        super::expansion::example(&root, &component, &example_id)
+            .ok_or_else(|| not_found("unknown_example"))
+    })
+    .await
+    .map_err(join_error)?;
+    example.map(Json)
 }
 
 /// DNS-rebinding guard: this server hands out a session token on

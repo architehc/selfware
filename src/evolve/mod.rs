@@ -22,6 +22,7 @@ pub mod dedup;
 pub mod deletion;
 pub mod diagnostics;
 pub mod envelope;
+pub mod expansion;
 pub mod fn_dedup;
 pub mod gate;
 pub mod git;
