@@ -338,7 +338,10 @@ impl RecordingProgressEmitter {
     }
 
     pub fn snapshot(&self) -> Vec<ProgressEvent> {
-        self.events.lock().unwrap().clone()
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
@@ -349,7 +352,10 @@ impl RecordingProgressEmitter {
 #[cfg(test)]
 impl ProgressEmitter for RecordingProgressEmitter {
     fn emit(&self, event: ProgressEvent) {
-        self.events.lock().unwrap().push(event);
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(event);
     }
 }
 

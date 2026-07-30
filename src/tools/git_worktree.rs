@@ -126,7 +126,9 @@ fn generate_worktree_name() -> String {
 
 /// Find the git repository root
 async fn find_git_root() -> Result<PathBuf> {
-    let output = tokio::process::Command::new("git")
+    let mut cmd = tokio::process::Command::new("git");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let output = cmd
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .await
@@ -310,6 +312,7 @@ impl Tool for EnterWorktreeTool {
 
         // Build git worktree add command
         let mut cmd = tokio::process::Command::new("git");
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
         cmd.arg("worktree").arg("add");
 
         if branch_arg.is_none() {
@@ -422,7 +425,9 @@ impl Tool for ExitWorktreeTool {
         let mut removed = false;
         if remove {
             if let Some(ref worktree_path) = removed_path {
-                let output = tokio::process::Command::new("git")
+                let mut cmd = tokio::process::Command::new("git");
+                crate::safety::process_env::sanitize_command_env(&mut cmd);
+                let output = cmd
                     .args(["worktree", "remove", &worktree_path.to_string_lossy()])
                     .output()
                     .await
@@ -479,7 +484,9 @@ impl Tool for ListWorktreesTool {
     }
 
     async fn execute(&self, _args: Value) -> Result<Value> {
-        let output = tokio::process::Command::new("git")
+        let mut cmd = tokio::process::Command::new("git");
+        crate::safety::process_env::sanitize_command_env(&mut cmd);
+        let output = cmd
             .args(["worktree", "list", "--porcelain"])
             .output()
             .await

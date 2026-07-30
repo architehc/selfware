@@ -10,7 +10,6 @@
 //! - Log rotation with configurable entry limits
 
 use metrics_exporter_prometheus::PrometheusBuilder;
-use regex::Regex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -130,31 +129,18 @@ pub fn sanitize_for_log(s: &str) -> String {
 }
 
 /// Compiled regex patterns for secret redaction.
-static SECRET_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-
-fn secret_patterns() -> &'static Vec<Regex> {
-    SECRET_PATTERNS.get_or_init(|| {
-        vec![
-            // API keys: sk-..., key-..., token-... followed by alphanumeric chars
-            Regex::new(r"(?i)(sk-|key-|token-)[A-Za-z0-9_\-]{8,}").expect("invalid secret regex"),
-            // Bearer tokens in Authorization headers
-            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9_\-\.]{8,}").expect("invalid bearer regex"),
-            // Passwords in connection strings: password=..., passwd=..., pwd=...
-            Regex::new(r"(?i)(password|passwd|pwd)\s*=\s*\S+").expect("invalid password regex"),
-        ]
-    })
-}
-
 /// Redact sensitive data patterns from a string before logging.
 ///
-/// Matches API keys (`sk-`, `key-`, `token-` prefixed), Bearer tokens,
-/// and passwords in connection strings, replacing them with `[REDACTED]`.
+/// Uses the canonical pattern suite in `safety::redact`, then collapses the
+/// typed markers back to the plain `[REDACTED]` this layer's callers and
+/// tests expect (the typed variants are for safety-check reporting).
 pub fn redact_secrets(input: &str) -> String {
-    let mut result = input.to_string();
-    for pattern in secret_patterns() {
-        result = pattern.replace_all(&result, "[REDACTED]").to_string();
-    }
-    result
+    let redacted = crate::safety::redact::redact_secrets(input).into_owned();
+    static TYPED_MARKER: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    TYPED_MARKER
+        .get_or_init(|| regex::Regex::new(r"\[REDACTED_[A-Z_]+\]").expect("marker regex"))
+        .replace_all(&redacted, "[REDACTED]")
+        .into_owned()
 }
 
 /// A [`tracing_subscriber::fmt::MakeWriter`] that redacts likely-secret

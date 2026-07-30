@@ -125,6 +125,7 @@ fn configure_playwright_command(cmd: &mut Command) {
 
 async fn playwright_runtime_available() -> bool {
     let mut cmd = Command::new("node");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
     configure_playwright_command(&mut cmd);
     cmd.args([
         "-e",
@@ -367,6 +368,7 @@ async fn fetch_with_chrome(
 
     let no_sandbox = std::env::var("SELFWARE_BROWSER_NO_SANDBOX").unwrap_or_default() == "1";
     let mut cmd = Command::new(chrome_path);
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
     cmd.args([
         "--headless",
         "--disable-gpu",
@@ -483,6 +485,7 @@ async fn fetch_with_playwright(
     );
 
     let mut cmd = Command::new("node");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
     configure_playwright_command(&mut cmd);
     cmd.arg("-e");
     cmd.arg(&script);
@@ -519,6 +522,7 @@ async fn fetch_with_curl(
     user_agent: Option<&str>,
 ) -> Result<Value> {
     let mut cmd = Command::new("curl");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
     cmd.args([
         "-s",
         "-L",
@@ -644,6 +648,7 @@ impl Tool for BrowserScreenshot {
                 let no_sandbox =
                     std::env::var("SELFWARE_BROWSER_NO_SANDBOX").unwrap_or_default() == "1";
                 let mut cmd = Command::new(&chrome_path);
+                crate::safety::process_env::sanitize_command_env(&mut cmd);
                 cmd.args([
                     "--headless",
                     "--disable-gpu",
@@ -729,6 +734,7 @@ impl Tool for BrowserScreenshot {
                 );
 
                 let mut cmd = Command::new("node");
+                crate::safety::process_env::sanitize_command_env(&mut cmd);
                 configure_playwright_command(&mut cmd);
                 cmd.arg("-e");
                 cmd.arg(&script);
@@ -834,6 +840,7 @@ impl Tool for BrowserPdf {
                 let no_sandbox =
                     std::env::var("SELFWARE_BROWSER_NO_SANDBOX").unwrap_or_default() == "1";
                 let mut cmd = Command::new(&chrome_path);
+                crate::safety::process_env::sanitize_command_env(&mut cmd);
                 cmd.args([
                     "--headless",
                     "--disable-gpu",
@@ -909,6 +916,7 @@ impl Tool for BrowserPdf {
                 );
 
                 let mut cmd = Command::new("node");
+                crate::safety::process_env::sanitize_command_env(&mut cmd);
                 configure_playwright_command(&mut cmd);
                 cmd.arg("-e");
                 cmd.arg(&script);
@@ -1046,6 +1054,7 @@ impl Tool for BrowserEval {
                 );
 
                 let mut cmd = Command::new("node");
+                crate::safety::process_env::sanitize_command_env(&mut cmd);
                 configure_playwright_command(&mut cmd);
                 cmd.arg("-e");
                 cmd.arg(&node_script);

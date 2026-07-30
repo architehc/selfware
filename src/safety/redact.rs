@@ -56,6 +56,11 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             compile_pattern("gitlab_token", r#"(glpat-[a-zA-Z0-9_\-]{20,})"#),
             // OpenAI/Anthropic API keys
             compile_pattern("openai_key", r#"(?:^|[^A-Za-z0-9])(sk-[a-zA-Z0-9_-]{20,})"#),
+            // Telemetry/log shapes: sk-, key-, token- prefixed secrets (any
+            // length ≥8 — the observability layer's log-redaction shapes)
+            compile_pattern("prefixed_secret", r#"(?i)(sk-|key-|token-)[A-Za-z0-9_\-]{8,}"#),
+            // Bearer tokens in Authorization headers
+            compile_pattern("bearer_token", r#"(?i)bearer\s+[A-Za-z0-9_\-\.]{8,}"#),
             // Google API keys
             compile_pattern("google_api_key", r#"(AIza[a-zA-Z0-9_\-]{35})"#),
             // Stripe API keys (secret, restricted, and publishable)
@@ -63,7 +68,9 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // Slack tokens (xoxb-, xoxp-, xoxs-, xoxa-, xoxr-)
             compile_pattern("slack_token", r#"(xox[bpsar]-[a-zA-Z0-9\-]+)"#),
             // Generic secret/password patterns
-            compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"']{8,})["']?"#),
+            // Value class excludes '[' so earlier patterns' own
+            // `name=[REDACTED]` replacements are never re-matched as secrets.
+            compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"'\[]{6,})["']?"#),
             // Private keys
             compile_pattern("private_key", r#"-----BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----"#),
             // Database connection strings
@@ -73,7 +80,7 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // JWT-like base64 tokens (eyJ prefix is base64 for {"): catch partial/header-only
             compile_pattern("jwt_partial", r#"eyJ[a-zA-Z0-9_/+\-]{30,}"#),
             // Generic tokens in env vars
-            compile_pattern("env_token", r#"(?i)([A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)[A-Z_]*)\s*[=:]\s*["']?([^\s"']{16,})["']?"#),
+            compile_pattern("env_token", r#"(?i)([A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)[A-Z_]*)\s*[=:]\s*["']?([^\s"'\[]{16,})["']?"#),
             // Generic high-entropy base64-encoded strings that look like API keys
             compile_pattern("base64_secret", r#"(?i)(?:key|token|secret|password|credential|auth)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{40,})["']?"#),
         ];

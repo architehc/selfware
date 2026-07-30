@@ -4003,7 +4003,9 @@ fn local_test_command(pattern: &str) -> Result<Vec<String>> {
 
 async fn run_local_tests(pattern: &str, format: &str) -> Result<()> {
     let args = local_test_command(pattern)?;
-    let output = tokio::process::Command::new("cargo")
+    let mut cmd = tokio::process::Command::new("cargo");
+    crate::safety::process_env::sanitize_command_env(&mut cmd);
+    let output = cmd
         .args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
