@@ -20,6 +20,20 @@ pub use mouse::MouseController;
 pub use screen::ScreenCapture;
 pub use window::WindowManager;
 
+/// Display-session variables that computer-control child processes
+/// (xdotool, wmctrl, xprop, osascript, …) legitimately need to reach the
+/// user's display server. Every `Command` spawned by this module passes
+/// this list to `sanitize_command_env_preserve` so the child gets a
+/// working session without inheriting credentials (`SELFWARE_API_KEY`,
+/// `AWS_*`, tokens). Never add credential-bearing names here.
+pub(crate) const SESSION_ENV_VARS: &[&str] = &[
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XAUTHORITY",
+    "SSH_AUTH_SOCK",
+];
+
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 

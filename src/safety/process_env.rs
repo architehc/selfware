@@ -17,12 +17,41 @@
 /// Call this immediately after constructing the `Command` and BEFORE adding
 /// any task-specific variables, so those additions survive the clear.
 pub fn sanitize_command_env(cmd: &mut tokio::process::Command) {
+    sanitize_command_env_preserve(cmd, &[]);
+}
+
+/// Like [`sanitize_command_env`], but additionally re-adds the named
+/// variables from the parent environment when present.
+///
+/// Use this for spawn sites whose child tools legitimately need session
+/// state to function — e.g. computer-control tools (xdotool, wmctrl, …)
+/// need `DISPLAY`/`WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`/`XAUTHORITY`/
+/// `SSH_AUTH_SOCK` to reach the user's display server. Never pass
+/// credential-bearing names (`SELFWARE_API_KEY`, `AWS_*`, tokens) here.
+pub fn sanitize_command_env_preserve(cmd: &mut tokio::process::Command, preserve: &[&str]) {
     cmd.env_clear();
-    for key in ["PATH", "HOME", "LANG"] {
-        if let Ok(value) = std::env::var(key) {
-            cmd.env(key, value);
-        }
+    for (key, value) in kept_env(preserve) {
+        cmd.env(key, value);
     }
+}
+
+/// [`sanitize_command_env_preserve`] for synchronous spawn sites built on
+/// `std::process::Command` (e.g. backend probes that cannot `.await`).
+pub fn sanitize_std_command_env_preserve(cmd: &mut std::process::Command, preserve: &[&str]) {
+    cmd.env_clear();
+    for (key, value) in kept_env(preserve) {
+        cmd.env(key, value);
+    }
+}
+
+/// The keep-list applied after `env_clear`: the minimal base plus any
+/// caller-preserved names, resolved from the parent environment.
+fn kept_env<'a>(preserve: &'a [&'a str]) -> Vec<(&'a str, std::ffi::OsString)> {
+    ["PATH", "HOME", "LANG"]
+        .into_iter()
+        .chain(preserve.iter().copied())
+        .filter_map(|key| std::env::var_os(key).map(|value| (key, value)))
+        .collect()
 }
 
 #[cfg(test)]

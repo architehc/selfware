@@ -148,7 +148,12 @@ impl ScreenCapture {
             .context("Failed to write temporary PowerShell script")?;
 
         let windows_script_path = Self::wsl_to_windows_path(script.path())?;
-        let output = Command::new("powershell.exe")
+        let mut cmd = Command::new("powershell.exe");
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            super::SESSION_ENV_VARS,
+        );
+        let output = cmd
             .args([
                 "-NoProfile",
                 "-ExecutionPolicy",
@@ -216,7 +221,12 @@ $stream.Dispose()
     }
 
     fn wsl_to_windows_path(path: &Path) -> Result<String> {
-        let output = Command::new("wslpath")
+        let mut cmd = Command::new("wslpath");
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            super::SESSION_ENV_VARS,
+        );
+        let output = cmd
             .args(["-w"])
             .arg(path)
             .output()
@@ -263,8 +273,12 @@ $stream.Dispose()
     }
 
     fn command_succeeds(command: &str, args: &[&str]) -> bool {
-        Command::new(command)
-            .args(args)
+        let mut cmd = Command::new(command);
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            super::SESSION_ENV_VARS,
+        );
+        cmd.args(args)
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false)

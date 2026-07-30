@@ -253,7 +253,9 @@ async fn run_powershell_sendkeys(sendkeys_sequence: &str) -> Result<()> {
         sendkeys_sequence.replace('\'', "''")
     );
 
-    let output = Command::new("powershell.exe")
+    let mut cmd = Command::new("powershell.exe");
+    crate::safety::process_env::sanitize_command_env_preserve(&mut cmd, super::SESSION_ENV_VARS);
+    let output = cmd
         .args(["-NoProfile", "-Command", &script])
         .output()
         .await
@@ -354,7 +356,12 @@ impl KeyboardController {
                     "tell application \"System Events\" to keystroke \"{}\"",
                     escaped
                 );
-                let output = tokio::process::Command::new("osascript")
+                let mut cmd = tokio::process::Command::new("osascript");
+                crate::safety::process_env::sanitize_command_env_preserve(
+                    &mut cmd,
+                    super::SESSION_ENV_VARS,
+                );
+                let output = cmd
                     .arg("-e")
                     .arg(&script)
                     .output()

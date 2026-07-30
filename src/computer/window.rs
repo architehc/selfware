@@ -21,6 +21,9 @@ use std::env;
 use tracing::warn;
 use tracing::{debug, info};
 
+use super::SESSION_ENV_VARS;
+use crate::safety::process_env::sanitize_command_env_preserve;
+
 #[cfg(target_os = "macos")]
 use anyhow::Context;
 #[cfg(target_os = "macos")]
@@ -154,8 +157,9 @@ impl WindowManager {
     }
 
     async fn check_tool_available(&self, tool: &str) -> bool {
-        tokio::process::Command::new("which")
-            .arg(tool)
+        let mut cmd = tokio::process::Command::new("which");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        cmd.arg(tool)
             .output()
             .await
             .map(|o| o.status.success())
@@ -320,8 +324,9 @@ impl WindowManager {
 
         #[cfg(target_os = "macos")]
         {
-            tokio::process::Command::new("open")
-                .arg("-a")
+            let mut cmd = tokio::process::Command::new("open");
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            cmd.arg("-a")
                 .arg(app_name)
                 .output()
                 .await
@@ -331,10 +336,9 @@ impl WindowManager {
         #[cfg(target_os = "linux")]
         {
             // Try to find the application in PATH
-            let which_output = tokio::process::Command::new("which")
-                .arg(app_name)
-                .output()
-                .await;
+            let mut cmd = tokio::process::Command::new("which");
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            let which_output = cmd.arg(app_name).output().await;
 
             let exists = matches!(which_output, Ok(ref o) if o.status.success());
 
@@ -342,8 +346,9 @@ impl WindowManager {
                 // Try common desktop file locations
                 let desktop_file = format!("/usr/share/applications/{}.desktop", app_name);
                 if tokio::fs::try_exists(&desktop_file).await.unwrap_or(false) {
-                    tokio::process::Command::new("gtk-launch")
-                        .arg(app_name)
+                    let mut cmd = tokio::process::Command::new("gtk-launch");
+                    sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+                    cmd.arg(app_name)
                         .spawn()
                         .map_err(|e| anyhow::anyhow!("Failed to launch '{}': {}", app_name, e))?;
                     return Ok(());
@@ -352,8 +357,9 @@ impl WindowManager {
                 anyhow::bail!("Application '{}' not found in PATH", app_name);
             }
 
-            tokio::process::Command::new(app_name)
-                .spawn()
+            let mut cmd = tokio::process::Command::new(app_name);
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            cmd.spawn()
                 .map_err(|e| anyhow::anyhow!("Failed to launch '{}': {}", app_name, e))?;
         }
 
@@ -397,7 +403,9 @@ impl WindowManager {
     #[cfg(target_os = "linux")]
     async fn list_windows_wmctrl(&self) -> Result<Vec<WindowInfo>> {
         // Try with geometry info first (-G flag)
-        let output = tokio::process::Command::new("wmctrl")
+        let mut cmd = tokio::process::Command::new("wmctrl");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd
             .args(["-l", "-G", "-p"])
             .output()
             .await
@@ -405,7 +413,9 @@ impl WindowManager {
 
         if !output.status.success() {
             // Try without -G flag for older wmctrl versions
-            let output_no_geom = tokio::process::Command::new("wmctrl")
+            let mut cmd = tokio::process::Command::new("wmctrl");
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            let output_no_geom = cmd
                 .args(["-l", "-p"])
                 .output()
                 .await
@@ -535,7 +545,9 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn get_window_class_xprop(&self, wid: u64) -> Result<String> {
-        let output = tokio::process::Command::new("xprop")
+        let mut cmd = tokio::process::Command::new("xprop");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd
             .args(["-id", &format!("0x{:x}", wid), "WM_CLASS"])
             .output()
             .await
@@ -568,7 +580,9 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn get_window_geometry_xdotool(&self, wid: u64) -> Result<(i32, i32, u32, u32)> {
-        let output = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd
             .args(["getwindowgeometry", &wid.to_string()])
             .output()
             .await
@@ -616,7 +630,9 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn list_windows_xdotool(&self) -> Result<Vec<WindowInfo>> {
-        let output = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd
             .args(["search", "--onlyvisible", "--name", ""])
             .output()
             .await
@@ -636,10 +652,9 @@ impl WindowManager {
                 Err(_) => continue,
             };
 
-            let name_output = tokio::process::Command::new("xdotool")
-                .args(["getwindowname", &wid.to_string()])
-                .output()
-                .await;
+            let mut cmd = tokio::process::Command::new("xdotool");
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            let name_output = cmd.args(["getwindowname", &wid.to_string()]).output().await;
 
             let title = match name_output {
                 Ok(out) if out.status.success() => {
@@ -685,7 +700,9 @@ impl WindowManager {
 
     #[cfg(target_os = "linux")]
     async fn get_active_window_id_xdotool(&self) -> Result<u64> {
-        let output = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd
             .arg("getactivewindow")
             .output()
             .await
@@ -706,7 +723,9 @@ impl WindowManager {
     async fn get_active_window_linux(&self) -> Result<WindowInfo> {
         let wid = self.get_active_window_id_xdotool().await?;
 
-        let name_output = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let name_output = cmd
             .args(["getwindowname", &wid.to_string()])
             .output()
             .await?;
@@ -747,10 +766,9 @@ impl WindowManager {
         let id_str = format!("0x{:x}", id.0);
 
         // Try wmctrl first
-        let wmctrl_result = tokio::process::Command::new("wmctrl")
-            .args(["-i", "-a", &id_str])
-            .output()
-            .await;
+        let mut cmd = tokio::process::Command::new("wmctrl");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let wmctrl_result = cmd.args(["-i", "-a", &id_str]).output().await;
 
         if let Ok(output) = &wmctrl_result {
             if output.status.success() {
@@ -765,7 +783,9 @@ impl WindowManager {
         }
 
         // Fall back to xdotool
-        match tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        match cmd
             .args(["windowactivate", &id.0.to_string()])
             .output()
             .await
@@ -787,7 +807,9 @@ impl WindowManager {
     #[cfg(target_os = "linux")]
     async fn resize_window_linux(&self, id: &WindowId, width: u32, height: u32) -> Result<()> {
         // Try wmctrl first (uses resize/move)
-        let result = tokio::process::Command::new("wmctrl")
+        let mut cmd = tokio::process::Command::new("wmctrl");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args([
                 "-i",
                 "-r",
@@ -806,7 +828,9 @@ impl WindowManager {
         }
 
         // Fall back to xdotool
-        let result = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args([
                 "windowsize",
                 &id.0.to_string(),
@@ -832,7 +856,9 @@ impl WindowManager {
     #[cfg(target_os = "linux")]
     async fn move_window_linux(&self, id: &WindowId, x: i32, y: i32) -> Result<()> {
         // Try wmctrl first
-        let result = tokio::process::Command::new("wmctrl")
+        let mut cmd = tokio::process::Command::new("wmctrl");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args([
                 "-i",
                 "-r",
@@ -851,7 +877,9 @@ impl WindowManager {
         }
 
         // Fall back to xdotool
-        let result = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args([
                 "windowmove",
                 &id.0.to_string(),
@@ -874,7 +902,9 @@ impl WindowManager {
     #[cfg(target_os = "linux")]
     async fn minimize_window_linux(&self, id: &WindowId) -> Result<()> {
         // xdotool is the best option for minimize
-        let result = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args(["windowminimize", &id.0.to_string()])
             .output()
             .await
@@ -885,7 +915,9 @@ impl WindowManager {
             Ok(())
         } else {
             // Try alternative: wmctrl with iconify
-            let result = tokio::process::Command::new("wmctrl")
+            let mut cmd = tokio::process::Command::new("wmctrl");
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            let result = cmd
                 .args(["-i", "-r", &format!("0x{:x}", id.0), "-b", "add,hidden"])
                 .output()
                 .await;
@@ -909,7 +941,9 @@ impl WindowManager {
     #[cfg(target_os = "linux")]
     async fn close_window_linux(&self, id: &WindowId) -> Result<()> {
         // Try wmctrl first (graceful close)
-        let result = tokio::process::Command::new("wmctrl")
+        let mut cmd = tokio::process::Command::new("wmctrl");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args(["-i", "-c", &format!("0x{:x}", id.0)])
             .output()
             .await;
@@ -923,7 +957,9 @@ impl WindowManager {
         }
 
         // Fall back to xdotool
-        let result = tokio::process::Command::new("xdotool")
+        let mut cmd = tokio::process::Command::new("xdotool");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let result = cmd
             .args(["windowclose", &id.0.to_string()])
             .output()
             .await
@@ -944,7 +980,9 @@ impl WindowManager {
     async fn list_windows_macos(&self) -> Result<Vec<WindowInfo>> {
         // Use osascript to list windows on macOS
         // First get visible processes
-        let output = tokio::process::Command::new("osascript")
+        let mut cmd = tokio::process::Command::new("osascript");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd
             .args(["-e", "tell application \"System Events\" to get name of every process whose visible is true"])
             .output()
             .await?;
@@ -969,7 +1007,9 @@ impl WindowManager {
             .collect();
 
         // Get the frontmost process
-        let frontmost_output = tokio::process::Command::new("osascript")
+        let mut cmd = tokio::process::Command::new("osascript");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let frontmost_output = cmd
             .args(["-e", "tell application \"System Events\" to get name of first process whose frontmost is true"])
             .output()
             .await;
@@ -993,7 +1033,9 @@ impl WindowManager {
             new_id_to_app.insert(window_id.clone(), app_name.to_string());
 
             // Get window info for each app
-            let window_output = tokio::process::Command::new("osascript")
+            let mut cmd = tokio::process::Command::new("osascript");
+            sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+            let window_output = cmd
                 .args([
                     "-e",
                     &format!(
@@ -1069,10 +1111,9 @@ end tell"#,
             app = escaped_app_name
         );
 
-        let output = tokio::process::Command::new("osascript")
-            .args(["-e", &focus_script])
-            .output()
-            .await?;
+        let mut cmd = tokio::process::Command::new("osascript");
+        sanitize_command_env_preserve(&mut cmd, SESSION_ENV_VARS);
+        let output = cmd.args(["-e", &focus_script]).output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

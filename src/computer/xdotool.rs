@@ -10,8 +10,12 @@ use anyhow::{bail, Context};
 
 /// Whether the `xdotool` binary is on PATH.
 pub(crate) fn xdotool_available() -> bool {
-    std::process::Command::new("which")
-        .arg("xdotool")
+    let mut cmd = std::process::Command::new("which");
+    crate::safety::process_env::sanitize_std_command_env_preserve(
+        &mut cmd,
+        super::SESSION_ENV_VARS,
+    );
+    cmd.arg("xdotool")
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -19,12 +23,17 @@ pub(crate) fn xdotool_available() -> bool {
 
 /// Whether we are running under WSL with a working `powershell.exe` interop.
 pub(crate) fn can_use_wsl_powershell() -> bool {
-    is_wsl_environment()
-        && std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", "Write-Output ok"])
+    is_wsl_environment() && {
+        let mut cmd = std::process::Command::new("powershell.exe");
+        crate::safety::process_env::sanitize_std_command_env_preserve(
+            &mut cmd,
+            super::SESSION_ENV_VARS,
+        );
+        cmd.args(["-NoProfile", "-Command", "Write-Output ok"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
 }
 
 fn is_wsl_environment() -> bool {
@@ -49,7 +58,9 @@ pub(crate) async fn run_xdotool(args: &[String]) -> Result<()> {
         );
     }
 
-    let output = Command::new("xdotool")
+    let mut cmd = Command::new("xdotool");
+    crate::safety::process_env::sanitize_command_env_preserve(&mut cmd, super::SESSION_ENV_VARS);
+    let output = cmd
         .args(args)
         .output()
         .await

@@ -307,7 +307,9 @@ fn ps_drag(from: Point, to: Point, button: &MouseButton) -> String {
 async fn run_powershell_script(script: &str) -> Result<()> {
     use tokio::process::Command;
 
-    let output = Command::new("powershell.exe")
+    let mut cmd = Command::new("powershell.exe");
+    crate::safety::process_env::sanitize_command_env_preserve(&mut cmd, super::SESSION_ENV_VARS);
+    let output = cmd
         .args(["-NoProfile", "-Command", script])
         .output()
         .await
