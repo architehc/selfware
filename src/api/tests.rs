@@ -4125,3 +4125,105 @@ fn test_retryable_status_excludes_4xx() {
         );
     }
 }
+
+// ============================================
+// Adaptive server-speed timeout tests
+// ============================================
+
+#[test]
+fn test_speed_tracker_empty_estimate_is_none() {
+    let tracker = super::client::ServerSpeedTracker::new();
+    assert!(tracker.estimate().is_none());
+}
+
+#[test]
+fn test_speed_tracker_first_sample_sets_estimate() {
+    let mut tracker = super::client::ServerSpeedTracker::new();
+    tracker.record(10.0);
+    assert_eq!(tracker.estimate(), Some(10.0));
+}
+
+#[test]
+fn test_speed_tracker_ema_blends_samples() {
+    let mut tracker = super::client::ServerSpeedTracker::new();
+    tracker.record(10.0);
+    tracker.record(20.0);
+    // alpha = 0.4: 10 + 0.4 * (20 - 10) = 14
+    let est = tracker.estimate().unwrap();
+    assert!((est - 14.0).abs() < 1e-9, "unexpected EMA: {est}");
+}
+
+#[test]
+fn test_speed_tracker_rejects_non_finite_and_non_positive() {
+    let mut tracker = super::client::ServerSpeedTracker::new();
+    tracker.record(f64::NAN);
+    tracker.record(0.0);
+    tracker.record(-5.0);
+    assert!(tracker.estimate().is_none());
+}
+
+#[test]
+fn test_adaptive_timeout_unmeasured_local_endpoint_assumes_slow_server() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    // local default 3 t/s: 2048 / 3 * 2.5 = 1706.67 -> 1707
+    assert_eq!(client.adaptive_response_timeout_secs(), 1707);
+}
+
+#[test]
+fn test_adaptive_timeout_unmeasured_remote_endpoint_uses_floor() {
+    let config = crate::config::Config {
+        endpoint: "https://api.example.com/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    // remote default 30 t/s: 2048 / 30 * 2.5 = 171 -> floor 600
+    assert_eq!(client.adaptive_response_timeout_secs(), 600);
+}
+
+#[test]
+fn test_adaptive_timeout_uses_measured_speed() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    client.speed_tracker.lock().unwrap().record(4.0);
+    // 2048 / 4 * 2.5 = 1280
+    assert_eq!(client.adaptive_response_timeout_secs(), 1280);
+}
+
+#[test]
+fn test_adaptive_timeout_respects_larger_step_timeout() {
+    let config = crate::config::Config {
+        endpoint: "https://api.example.com/v1".to_string(),
+        max_tokens: 1024,
+        agent: crate::config::AgentConfig {
+            step_timeout_secs: 900,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    // computed value is below 900 -> step timeout wins
+    assert_eq!(client.adaptive_response_timeout_secs(), 900);
+}
+
+#[test]
+fn test_adaptive_timeout_clamps_to_ceiling() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    client.speed_tracker.lock().unwrap().record(0.1);
+    // 8192 / 0.1 * 2.5 = 204800 -> clamp 7200
+    assert_eq!(client.adaptive_response_timeout_secs(), 7200);
+}

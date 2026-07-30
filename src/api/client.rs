@@ -148,6 +148,47 @@ pub struct ApiClient {
     /// budget and the run could bill long past expiry. Shared across clones
     /// so derived clients observe the same anchor.
     wall_budget_start: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// Rolling estimate of the endpoint's effective generation speed
+    /// (completion tokens / wall seconds of the whole call, EMA). Drives the
+    /// adaptive non-streaming response timeout so slow local CPU servers get
+    /// proportionally longer budgets than fast remote ones.
+    pub(crate) speed_tracker: Arc<std::sync::Mutex<ServerSpeedTracker>>,
+}
+
+/// EMA of observed effective generation speed (tokens/second) for an
+/// endpoint. "Effective" means completion tokens over the full call's wall
+/// time (queue + prefill + decode), which is deliberately conservative: it
+/// underestimates true decode speed and therefore lengthens timeouts.
+#[derive(Debug, Default)]
+pub(crate) struct ServerSpeedTracker {
+    ema_tps: Option<f64>,
+}
+
+impl ServerSpeedTracker {
+    /// Weight of each new sample in the moving average.
+    const EMA_ALPHA: f64 = 0.4;
+
+    pub(crate) fn new() -> Self {
+        Self { ema_tps: None }
+    }
+
+    /// Fold one observation into the average. Non-positive and non-finite
+    /// samples are rejected (a zero-token or failed call says nothing about
+    /// server speed).
+    pub(crate) fn record(&mut self, tps: f64) {
+        if !tps.is_finite() || tps <= 0.0 {
+            return;
+        }
+        self.ema_tps = Some(match self.ema_tps {
+            None => tps,
+            Some(ema) => ema + Self::EMA_ALPHA * (tps - ema),
+        });
+    }
+
+    /// Current speed estimate in tokens/second, if any sample was recorded.
+    pub(crate) fn estimate(&self) -> Option<f64> {
+        self.ema_tps
+    }
 }
 
 impl ApiClient {
@@ -199,7 +240,50 @@ impl ApiClient {
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
             progress_emitter: Arc::new(crate::agent::progress::NoopProgressEmitter),
             wall_budget_start: Arc::new(std::sync::Mutex::new(None)),
+            speed_tracker: Arc::new(std::sync::Mutex::new(ServerSpeedTracker::new())),
         })
+    }
+
+    /// Response timeout for the non-streaming chat path, adapted to the
+    /// endpoint's measured generation speed.
+    ///
+    /// The estimate is `max_tokens / effective_tps * SAFETY_FACTOR`, floored at
+    /// 600 s (or `agent.step_timeout_secs` if larger) and clamped to 7200 s.
+    /// Until a real measurement exists, local endpoints are presumed slow
+    /// (3 t/s — a CPU-bound local MoE) and remote endpoints fast (30 t/s), so
+    /// a first long review on a slow local server is not killed by a
+    /// remote-tuned budget. The estimate deliberately uses *effective* speed
+    /// (whole-call wall time), keeping the budget conservative.
+    pub(crate) fn adaptive_response_timeout_secs(&self) -> u64 {
+        /// Assumed effective speed before the first measurement lands.
+        const LOCAL_DEFAULT_TPS: f64 = 3.0;
+        const REMOTE_DEFAULT_TPS: f64 = 30.0;
+        /// Headroom over the naive estimate for prefill variance, queueing,
+        /// and bimodal slow phases.
+        const SAFETY_FACTOR: f64 = 2.5;
+        const FLOOR_SECS: u64 = 600;
+        const CEILING_SECS: u64 = 7200;
+
+        let measured = self
+            .speed_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .estimate();
+        let tps = measured.unwrap_or_else(|| {
+            if crate::config::is_local_endpoint(&self.config.endpoint) {
+                LOCAL_DEFAULT_TPS
+            } else {
+                REMOTE_DEFAULT_TPS
+            }
+        });
+        let estimated_secs = (self.config.max_tokens as f64 / tps) * SAFETY_FACTOR;
+        let timeout = self
+            .config
+            .agent
+            .step_timeout_secs
+            .max(FLOOR_SECS)
+            .max(estimated_secs.ceil() as u64);
+        timeout.min(CEILING_SECS)
     }
 
     /// Return a reference to the underlying [`Config`](crate::config::Config).
@@ -841,11 +925,13 @@ impl ApiClient {
 
             // Bound the request generously rather than at the tight step
             // timeout: non-streaming can't do per-chunk stall detection, and the
-            // "response wait" here effectively covers generation. A >=10-minute
-            // floor (or the step timeout if larger) lets slow-but-healthy models
-            // finish while still bounding a truly-dead connection. Raced against
-            // shutdown so Ctrl-C / SIGTERM interrupts promptly.
-            let mut response_timeout_secs = self.config.agent.step_timeout_secs.max(600);
+            // "response wait" here effectively covers generation. The budget
+            // adapts to the endpoint's measured effective speed (slow local
+            // CPU servers get proportionally longer), floored at >=10 minutes
+            // (or the step timeout if larger), clamped at 2 hours, and raced
+            // against shutdown so Ctrl-C / SIGTERM interrupts promptly.
+            let call_started = Instant::now();
+            let mut response_timeout_secs = self.adaptive_response_timeout_secs();
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit).
                 let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
@@ -951,6 +1037,18 @@ impl ApiClient {
                                 "API returned inconsistent token usage: {}. Using response anyway.",
                                 e
                             );
+                        }
+                        // Feed the observed effective speed back into the
+                        // adaptive timeout for the next request on this
+                        // endpoint.
+                        let elapsed_secs = call_started.elapsed().as_secs_f64();
+                        if elapsed_secs > 0.0 && chat_response.usage.completion_tokens > 0 {
+                            self.speed_tracker
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .record(
+                                    chat_response.usage.completion_tokens as f64 / elapsed_secs,
+                                );
                         }
                         return Ok(chat_response);
                     }

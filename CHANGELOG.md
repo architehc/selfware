@@ -7,35 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Adaptive server-speed response timeout** for non-streaming chat: `ApiClient` keeps an EMA of the endpoint's effective generation speed (completion tokens / whole-call wall time) and sizes the response budget as `max_tokens / tps × 2.5` (floor 600 s or `agent.step_timeout_secs` if larger, ceiling 7200 s). Unmeasured local endpoints assume a slow 3 t/s CPU server, remote 30 t/s; first measurement replaces the assumption. Stops long generations on slow local servers (e.g. a 2048-token grounded review at ~3 t/s ≈ 640 s) being truncated by the static 600 s floor.
+
+### Fixed
+- Two pre-existing `question_mark` clippy violations (`evolve/map.rs`, `evolve/module_graph.rs`) that left the `cargo clippy --all-targets -- -D warnings` gate red at HEAD (mechanical `?`-operator rewrites, semantics unchanged).
+
 ## [0.6.8-beta.1] - 2026-07-29
-
-### Added
-- **Trust-gated agent loop**: every tool result is scanned at ingestion via `context_trust` — high-severity injection patterns sanitized inline (never dropped), hidden unicode blocked, trusted Rust source report-only; `trust:N` status badge; `safety.trust_gate_tool_results` kill switch. Closes the original Rec 2 invariant on both paths.
-- Expansion catalog API: `GET /api/expansion/index|{component}|{component}/{example_id}` serving the 580-example library live; catalog validator (`scripts/validate_expansion.py`) + generated `index.json`
-- 4 workspace screenshots on the website (PR architehc/selfware.design#1)
-
-### Fixed
-- `expand` reaches Auxiliary (tooling) nodes again — Bulk-vs-OnDemand separation restored
-- package.rs credential hygiene; apply rejects protected paths + symlinks; `/undo` hash-verify + atomic writes; exit codes walk the cause chain; short-term memory budget accounting; staged-apply banner persists across navigation
-
-## [0.6.7] - 2026-07-29
-
-### Added
-- Expansion recommendation library: 29 modules × 20 grounded loop-modeling examples in the UI-consumption schema (`expansion_recommendation/`)
-- Persistent staged-apply banner (survives node navigation); `#view=` deep-link
-- Website PR with 4 real workspace screenshots
-
-### Fixed
-- package.rs credential hygiene (npm/python spawns sanitize env); apply rejects PROTECTED_PATHS and symlinks in staged diffs
-- vision/screen_capture reclassified network-egress (confirm in Normal mode)
-- `/undo`: hash-verify before restore + atomic writes
-- exit codes walk the full anyhow cause chain
-- short-term memory tokens counted in the usage budget
-- checklist seeding normalizes file-path ids → component ids
-- **expand works for Auxiliary (tooling) nodes** — Bulk-vs-OnDemand separation restored
-- Dedup merge wave: 30+ exact-duplicate function pairs consolidated (66 → 31 analyzer pairs)
-
-## [0.6.6] - 2026-07-28
 
 ### Removed (mega dedup cleanup, −6,027 lines)
 - **tokens.rs cost/budget/model-selection subsystem** (1,489 src + 1,620 test lines): zero production callers; surviving estimators moved to `token_count.rs`
