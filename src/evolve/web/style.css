@@ -2383,3 +2383,28 @@ textarea:focus-visible,
     border-top: 1px solid var(--border, #262626);
     padding-top: 7px;
 }
+
+/* Persistent staged-apply banner (touch screens: survives node navigation). */
+.staged-banner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px;
+    background: rgba(212, 163, 115, 0.08);
+    border-bottom: 1px solid rgba(212, 163, 115, 0.25);
+    font-family: var(--font-mono, monospace);
+    font-size: 12px;
+    color: var(--fg, #d8d0c0);
+}
+
+.staged-banner-text {
+    flex: 1;
+    color: var(--amber, #d4a373);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.staged-banner .command-button {
+    flex-shrink: 0;
+}

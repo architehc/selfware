@@ -349,11 +349,13 @@ impl HierarchicalMemory {
             }
         }
 
-        // Recalculate total usage
+        // Recalculate total usage — short-term tier tokens must count too,
+        // otherwise is_within_budget() under-reports on high loads.
         self.usage.total_used = self.usage.working_tokens
             + self.usage.episodic_tokens
             + self.usage.semantic_tokens
-            + self.usage.self_tokens;
+            + self.usage.self_tokens
+            + self.short_term.tokens_total().await;
 
         Ok(compressed)
     }

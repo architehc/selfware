@@ -27,6 +27,17 @@ impl ShortTermMemory {
         Self::new(config.short_term_capacity, index)
     }
 
+    /// Total tokens currently held in this tier — included in the memory
+    /// hierarchy's usage accounting (previously invisible to the budget).
+    pub async fn tokens_total(&self) -> usize {
+        self.entries
+            .read()
+            .await
+            .values()
+            .map(|e| crate::token_count::estimate_content_tokens(&e.content))
+            .sum()
+    }
+
     /// Store an entry
     pub async fn store(&self, mut entry: MemoryEntry) -> anyhow::Result<u64> {
         entry.tier = MemoryTier::ShortTerm;

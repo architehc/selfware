@@ -383,6 +383,10 @@ async function initialize() {
     if (inspectorMatch && $(`.inspector-tab[data-inspector="${inspectorMatch[1]}"]`)) {
         selectInspector(inspectorMatch[1]);
     }
+    const viewMatch = location.hash.match(/^#view=(\w+)$/);
+    if (viewMatch && $(`.view-tab[data-view="${viewMatch[1]}"]`)) {
+        selectView(viewMatch[1]);
+    }
 }
 
 function wireEvents() {
@@ -897,8 +901,19 @@ function seedComponentChecks() {
         state.componentChecked = new Set(state.context.includedIds || []);
         return;
     }
-    const cardIds = new Set((state.contextCards || []).map((card) => String(card.component || '')));
-    state.componentChecked = new Set([...state.contextSelection].filter((id) => cardIds.has(id)));
+    const cards = state.contextCards || [];
+    const cardIds = new Set(cards.map((card) => String(card.component || '')));
+    // Graph selections can be file-PATH ids (src/evolve/server.rs) while
+    // cards key by component id (crate::evolve::server) — normalize via the
+    // card path so selections don't silently drop out of the checklist.
+    const pathToComponent = new Map(
+        cards.map((card) => [String(card.path || ''), String(card.component || '')]),
+    );
+    state.componentChecked = new Set(
+        [...state.contextSelection]
+            .map((id) => (cardIds.has(id) ? id : pathToComponent.get(id)))
+            .filter(Boolean),
+    );
 }
 
 function renderComponentChecklist() {
@@ -2457,6 +2472,10 @@ function renderApplyRun(run, status) {
 
         result.className = 'inspector-result';
         result.replaceChildren(wrap);
+        // Persist the staged run GLOBALLY: navigating to another node replaces
+        // #node-result and would hide the preview + Apply button (touch UX).
+        state.activeStagedRun = { id: run.id, diff };
+        renderStagedBanner();
         setGlobalStatus('Apply run staged — review the diff', 'warning');
         appendOutput(`Apply run staged: ${run.id}`, {
             digest: diff.digest,
@@ -2468,17 +2487,23 @@ function renderApplyRun(run, status) {
         // Typed verification refusal (e.g. "diff_out_of_scope: build.rs",
         // "empty_diff") — verbatim, never dressed up as success.
         const reason = status.reason || 'unknown reason';
+        state.activeStagedRun = null;
+        renderStagedBanner();
         result.className = 'inspector-result pane-state error';
         result.textContent = `Apply run rejected: ${reason}`;
         setGlobalStatus('Apply run rejected', 'error');
         appendOutput(`Apply run rejected: ${run.id}`, reason);
         toast(`Apply run rejected: ${reason}`, 'error');
     } else if (status.name === 'succeeded') {
+        state.activeStagedRun = null;
+        renderStagedBanner();
         result.className = 'inspector-result pane-state';
         result.textContent = `Apply run ${run.id} was merged.`;
         setGlobalStatus('Apply run merged', 'success');
     } else {
         // failed / unknown: honest status with whatever exit evidence exists.
+        state.activeStagedRun = null;
+        renderStagedBanner();
         result.className = 'inspector-result pane-state error';
         const exit = run.exit_code === null || run.exit_code === undefined ? '' : ` (exit ${run.exit_code})`;
         result.textContent = `Apply run ${status.name}${exit}`;
@@ -2496,6 +2521,39 @@ function renderApplyRun(run, status) {
     refreshIcons();
 }
 
+// Persistent banner for the active staged apply run — survives node
+// navigation on touch screens (the per-node #node-result panel doesn't).
+function renderStagedBanner() {
+    let banner = $('#staged-banner');
+    if (!state.activeStagedRun) {
+        banner?.remove();
+        return;
+    }
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'staged-banner';
+        banner.className = 'staged-banner';
+        const header = document.querySelector('.app-header') || document.querySelector('header');
+        header?.after(banner);
+    }
+    const { id, diff } = state.activeStagedRun;
+    banner.replaceChildren();
+    const text = document.createElement('span');
+    text.className = 'staged-banner-text';
+    text.textContent = `⧉ Staged: ${formatCount(diff.files_changed)} files +${formatCount(diff.insertions)} −${formatCount(diff.deletions)} · nothing merged yet`;
+    const review = document.createElement('button');
+    review.className = 'command-button';
+    review.type = 'button';
+    review.textContent = 'Review';
+    review.addEventListener('click', () => selectInspector('node'));
+    const apply = document.createElement('button');
+    apply.className = 'command-button primary';
+    apply.type = 'button';
+    apply.textContent = 'Apply';
+    apply.addEventListener('click', () => commitApplyRun(id, diff.digest, apply));
+    banner.append(text, review, apply);
+}
+
 // The deliberate second step: merge the staged run by presenting its id plus
 // the exact digest of the diff that was reviewed.
 async function commitApplyRun(runId, digest, button) {
@@ -2510,6 +2568,8 @@ async function commitApplyRun(runId, digest, button) {
         const result = $('#node-result');
         result.className = 'inspector-result pane-state';
         result.textContent = `Merged ${formatCount(payload?.files_changed)} files · new HEAD ${head.slice(0, 12)}`;
+        state.activeStagedRun = null;
+        renderStagedBanner();
         setGlobalStatus('Staged run merged', 'success');
         toast(`Merged staged run · new HEAD ${head.slice(0, 12)}`, 'success');
         appendOutput(`Apply run merged: ${runId}`, payload);

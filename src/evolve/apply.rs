@@ -204,6 +204,11 @@ pub fn verify_staged_diff(
         if !(path.starts_with("src/") || path.starts_with("docs/")) {
             return Ok(Err(RejectReason::OutOfScope(path)));
         }
+        // Symlinks are boundary escape artists: a link inside src/ can point
+        // anywhere on disk, so staged links are rejected regardless of target.
+        if delta.new_file().mode() == git2::FileMode::Link {
+            return Ok(Err(RejectReason::OutOfScope(format!("{path} (symlink)"))));
+        }
         if crate::evolution::PROTECTED_PATHS
             .iter()
             .any(|protected| path.starts_with(protected))

@@ -410,13 +410,18 @@ pub fn get_exit_code(e: &anyhow::Error) -> u8 {
         return EXIT_CONFIRMATION_REQUIRED;
     }
 
-    if let Some(selfware_err) = e.downcast_ref::<SelfwareError>() {
-        return match selfware_err {
-            SelfwareError::Config(_) => EXIT_CONFIG_ERROR,
-            SelfwareError::Api(_) => EXIT_API_ERROR,
-            SelfwareError::Safety(_) => EXIT_SAFETY_ERROR,
-            _ => EXIT_ERROR,
-        };
+    // Walk the WHOLE cause chain, not just the top error: errors are commonly
+    // wrapped in anyhow::Context (e.g. "failed to load config" wrapping a
+    // SelfwareError::Safety), and downcast only matches the outermost layer.
+    for cause in e.chain() {
+        if let Some(selfware_err) = cause.downcast_ref::<SelfwareError>() {
+            return match selfware_err {
+                SelfwareError::Config(_) => EXIT_CONFIG_ERROR,
+                SelfwareError::Api(_) => EXIT_API_ERROR,
+                SelfwareError::Safety(_) => EXIT_SAFETY_ERROR,
+                _ => EXIT_ERROR,
+            };
+        }
     }
 
     // Direct enum unwraps fallback
