@@ -137,3 +137,6 @@ system_tests/swe_bench_pro/*.jsonl
 
 # deep-research run artifacts (reports live in Open WebUI / on disk)
 research/
+
+# autonomous self-improve loop workspace
+scratchpad/
