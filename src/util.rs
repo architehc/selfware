@@ -27,3 +27,44 @@ pub fn save_json_pretty<T: Serialize + ?Sized>(value: &T, path: &Path) -> Result
     std::fs::write(path, json)?;
     Ok(())
 }
+
+/// Copy text to the system clipboard using the first available platform tool
+/// (pbcopy, xclip, xsel, wl-copy). Async on tokio workers.
+pub async fn copy_to_clipboard(text: &str) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    const CANDIDATES: &[(&str, &[&str])] = &[
+        ("pbcopy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("wl-copy", &[]),
+    ];
+
+    let mut selected = None;
+    for (cmd, args) in CANDIDATES {
+        let available = tokio::process::Command::new("which")
+            .arg(cmd)
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if available {
+            selected = Some((*cmd, *args));
+            break;
+        }
+    }
+
+    let Some((cmd, args)) = selected else {
+        anyhow::bail!("No clipboard tool found (pbcopy, xclip, xsel, or wl-copy)");
+    };
+
+    let mut child = tokio::process::Command::new(cmd)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(text.as_bytes()).await?;
+    }
+    child.wait().await?;
+    Ok(())
+}

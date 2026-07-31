@@ -274,7 +274,6 @@ impl Agent {
 
     /// Copy all source files to clipboard
     pub(super) async fn copy_sources_to_clipboard(&self) -> Result<usize> {
-        use std::process::Stdio;
         use walkdir::WalkDir;
 
         let mut output = String::new();
@@ -318,51 +317,7 @@ impl Agent {
 
         let size = output.len();
 
-        // Try xclip first, then xsel, then wl-copy (Wayland)
-        let clipboard_cmd = if tokio::process::Command::new("which")
-            .arg("xclip")
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("xclip", vec!["-selection", "clipboard"]))
-        } else if tokio::process::Command::new("which")
-            .arg("xsel")
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("xsel", vec!["--clipboard", "--input"]))
-        } else if tokio::process::Command::new("which")
-            .arg("wl-copy")
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("wl-copy", vec![]))
-        } else {
-            None
-        };
-
-        if let Some((cmd, args)) = clipboard_cmd {
-            let mut child = tokio::process::Command::new(cmd)
-                .args(&args)
-                .stdin(Stdio::piped())
-                .spawn()?;
-
-            if let Some(stdin) = child.stdin.as_mut() {
-                use tokio::io::AsyncWriteExt;
-                stdin.write_all(output.as_bytes()).await?;
-            }
-            child.wait().await?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "No clipboard tool found (xclip, xsel, or wl-copy)"
-            ));
-        }
+        crate::util::copy_to_clipboard(&output).await?;
 
         Ok(size)
     }

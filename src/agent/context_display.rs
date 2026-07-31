@@ -2,6 +2,39 @@ use colored::*;
 
 use super::*;
 
+/// Output-token price per 1M tokens in USD for known models (OpenRouter
+/// rates from the 2026-07 capability matrix). Unknown models fall back to
+/// $3.00/1M (the old static estimate).
+fn price_per_1m(model: &str) -> f64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("kimi-k3") {
+        15.00
+    } else if m.contains("kimi-k2") {
+        2.40
+    } else if m.contains("glm-5") {
+        2.00
+    } else if m.contains("gpt-4o-mini") {
+        0.60
+    } else if m.contains("gemma-4") {
+        0.40
+    } else if m.contains("deepseek") && m.contains("flash") {
+        0.14
+    } else if m.contains("qwen3.6") {
+        2.40
+    } else if m.contains("minimax") {
+        1.40
+    } else if m.contains("laguna") {
+        0.50
+    } else {
+        3.00
+    }
+}
+
+/// Rough USD cost for `tokens` output tokens on the given model.
+pub fn estimated_cost_usd(model: &str, tokens: usize) -> f64 {
+    tokens as f64 / 1_000_000.0 * price_per_1m(model)
+}
+
 impl Agent {
     /// Print a Qwen Code-style status bar line before the prompt
     ///
@@ -30,8 +63,10 @@ impl Agent {
             bar.bright_green()
         };
 
-        // Get cost from actual API usage
-        let cost = tokens as f64 * 0.000003; // rough estimate
+        // Cost estimate from model-aware pricing (per 1M output tokens,
+        // OpenRouter rates as of the 2026-07 model matrix; falls back to a
+        // generic $3/M for unknown models).
+        let cost = estimated_cost_usd(&self.config.model, tokens);
 
         // Model name
         let model_name = &self.config.model;
