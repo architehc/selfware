@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Adaptive server-speed response timeout** for non-streaming chat: `ApiClient` keeps an EMA of the endpoint's effective generation speed (completion tokens / whole-call wall time) and sizes the response budget as `max_tokens / tps × 2.5` (floor 600 s or `agent.step_timeout_secs` if larger, ceiling 7200 s). Unmeasured local endpoints assume a slow 3 t/s CPU server, remote 30 t/s; first measurement replaces the assumption. Stops long generations on slow local servers (e.g. a 2048-token grounded review at ~3 t/s ≈ 640 s) being truncated by the static 600 s floor.
 
 ### Fixed
+- **Grounded review budget starvation for reasoning models**: `GroundedAssistant` now builds its client via `review_client_config`, raising `max_tokens` to at least `REVIEW_MIN_COMPLETION_TOKENS` (8192). Reasoning models split the budget between hidden reasoning and the JSON answer; at 2048 the answer came back empty or truncated — measured 8/14 rounds failing `model_output_invalid` against a local GLM-5.2, while a small direct repro produced valid schema JSON in ~1200 tokens. Review protocol errors now also include `finish_reason` so a starved budget (`"length"`) is distinguishable from prose misses (`"stop"`).
 - Two pre-existing `question_mark` clippy violations (`evolve/map.rs`, `evolve/module_graph.rs`) that left the `cargo clippy --all-targets -- -D warnings` gate red at HEAD (mechanical `?`-operator rewrites, semantics unchanged).
 
 ## [0.6.8-beta.1] - 2026-07-29

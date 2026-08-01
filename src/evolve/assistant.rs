@@ -333,10 +333,31 @@ pub struct GroundedAssistant {
     configured_model: String,
 }
 
+/// Minimum completion budget for grounded review calls.
+///
+/// Reasoning models (GLM-5.2, Qwen-Thinking, etc.) split the completion
+/// budget between hidden reasoning and the visible answer. A plain-chat
+/// budget of 2048 starves the JSON answer — measured against a local
+/// GLM-5.2 server: 8/14 grounded-review rounds failed with
+/// "model response did not contain JSON" (empty or truncated content),
+/// while a small direct repro needed ~1200 tokens. 8192 covers several
+/// thousand tokens of reasoning plus the full schema answer.
+pub const REVIEW_MIN_COMPLETION_TOKENS: usize = 8192;
+
+/// Config for the grounded assistant's API client: the caller's config with
+/// the completion budget raised to at least [`REVIEW_MIN_COMPLETION_TOKENS`]
+/// so reasoning models are not starved mid-answer. Public for contract tests.
+pub fn review_client_config(config: &Config) -> Config {
+    let mut review_config = config.clone();
+    review_config.max_tokens = review_config.max_tokens.max(REVIEW_MIN_COMPLETION_TOKENS);
+    review_config
+}
+
 impl GroundedAssistant {
     pub fn new(config: &Config) -> Result<Self> {
+        let review_config = review_client_config(config);
         Ok(Self {
-            client: ApiClient::new(config)?,
+            client: ApiClient::new(&review_config)?,
             configured_model: config.model.clone(),
         })
     }
@@ -477,9 +498,17 @@ impl GroundedAssistant {
                 Err(error) => {
                     if messages.len() > 2 {
                         // Already repaired once — report the typed failure with
-                        // telemetry from this last chat response.
+                        // telemetry from this last chat response. finish_reason
+                        // distinguishes a starved budget ("length") from prose
+                        // that simply missed the schema ("stop").
                         return Err(ReviewProtocolError::Invalid {
-                            detail: format!("{error:#}"),
+                            detail: format!(
+                                "{error:#} (finish_reason={:?})",
+                                response
+                                    .choices
+                                    .first()
+                                    .and_then(|choice| choice.finish_reason.as_deref())
+                            ),
                             model: response.model,
                             latency_ms: started.elapsed().as_millis(),
                             usage: total_usage,

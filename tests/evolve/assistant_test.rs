@@ -169,3 +169,26 @@ fn test_review_validation_rejects_non_json_model_output() {
 
     assert!(validate_review_json("No structured evidence is available.", &evidence).is_err());
 }
+
+#[test]
+fn test_review_client_config_floors_max_tokens_for_reasoning_models() {
+    let config = selfware::config::Config {
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let review_config = selfware::evolve::assistant::review_client_config(&config);
+    assert_eq!(
+        review_config.max_tokens,
+        selfware::evolve::assistant::REVIEW_MIN_COMPLETION_TOKENS
+    );
+}
+
+#[test]
+fn test_review_client_config_preserves_larger_max_tokens() {
+    let config = selfware::config::Config {
+        max_tokens: 16384,
+        ..Default::default()
+    };
+    let review_config = selfware::evolve::assistant::review_client_config(&config);
+    assert_eq!(review_config.max_tokens, 16384);
+}
