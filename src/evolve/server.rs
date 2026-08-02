@@ -1299,7 +1299,11 @@ async fn context_mode_handler(
     Json(body): Json<ContextModeRequest>,
 ) -> ApiResult<Json<Value>> {
     require_session(&headers, &server)?;
-    let _assistant_guard = server.assistant_lock.lock().await;
+    let _assistant_guard = server.assistant_lock.try_lock().map_err(|_| {
+        conflict(
+            "assistant is running a review; context mode changes are unavailable until it finishes",
+        )
+    })?;
     let requested = match body.mode.as_str() {
         "auto" => RequestedMode::Auto,
         "map" => RequestedMode::Fixed(ContextMode::Map),
@@ -1360,7 +1364,11 @@ async fn context_custom_handler(
     Json(body): Json<ContextCustomRequest>,
 ) -> ApiResult<Json<Value>> {
     require_session(&headers, &server)?;
-    let _assistant_guard = server.assistant_lock.lock().await;
+    let _assistant_guard = server.assistant_lock.try_lock().map_err(|_| {
+        conflict(
+            "assistant is running a review; context selection changes are unavailable until it finishes",
+        )
+    })?;
     let requested = if body.components.is_empty() {
         RequestedMode::Auto
     } else {
