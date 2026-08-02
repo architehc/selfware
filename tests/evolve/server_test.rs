@@ -432,6 +432,125 @@ async fn test_grounded_review_rejects_stale_document_hash_before_model_call() {
 }
 
 #[tokio::test]
+async fn test_grounded_review_requires_session() {
+    let server = EvolveServer::new(sample_graph());
+    let (status, json) = post_json_without_session(
+        &server,
+        "/api/assistant/review",
+        json!({
+            "path": "src/evolve/actions.rs",
+            "question": "Review this file",
+            "expected_hash": "irrelevant",
+            "mode": "full_extended",
+            "scope": "selected_document"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(json["error"].as_str().unwrap().contains("session token"));
+}
+
+#[tokio::test]
+async fn test_grounded_review_requires_expected_document_hash() {
+    let server = EvolveServer::new(sample_graph());
+    let (status, _) = post_json(
+        &server,
+        "/api/assistant/review",
+        json!({
+            "path": "src/evolve/actions.rs",
+            "question": "Review this file",
+            "mode": "full_extended",
+            "scope": "selected_document"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn test_review_status_unknown_job_id_returns_404() {
+    let server = EvolveServer::new(sample_graph());
+    let (status, json) =
+        get_json_auth(&server, "/api/assistant/review/status?id=no-such-job").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["error"], "unknown job id");
+}
+
+#[tokio::test]
+async fn test_review_status_requires_session() {
+    let server = EvolveServer::new(sample_graph());
+    let (status, json) = get_json(&server, "/api/assistant/review/status?id=no-such-job").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(json["error"].as_str().unwrap().contains("session token"));
+}
+
+/// A valid review POST must return 202 with a job id and register a Running
+/// job without waiting for the model. The endpoint points at a TCP listener
+/// that accepts and never responds, so the background review stays in-flight
+/// (the client's response timeout is minutes) and the Running state is
+/// deterministic; the spawned task is aborted when the test runtime ends.
+#[tokio::test]
+async fn test_grounded_review_returns_202_with_running_job() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join("src")).unwrap();
+    std::fs::write(
+        project.path().join("src/reviewed.rs"),
+        "pub fn answer() -> usize {\n    42\n}\n",
+    )
+    .unwrap();
+    let config = Config {
+        endpoint: format!("http://127.0.0.1:{port}"),
+        context_mode: "full_extended".to_string(),
+        ..Default::default()
+    };
+    let server = EvolveServer::with_config(
+        Graph {
+            nodes: vec![Node::code("crate::reviewed", "src/reviewed.rs")],
+            edges: vec![],
+        },
+        project.path(),
+        &config,
+    )
+    .unwrap();
+    let (status, document) = get_json(&server, "/api/ide/document?path=src/reviewed.rs").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body) = post_json(
+        &server,
+        "/api/assistant/review",
+        json!({
+            "path": "src/reviewed.rs",
+            "question": "Review this file",
+            "expected_hash": document["hash"],
+            "mode": "full_extended",
+            "scope": "selected_document"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let accepted: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(accepted["status"], "running");
+    let job_id = accepted["job_id"].as_str().unwrap();
+    assert_eq!(job_id.len(), 36);
+
+    let (status, job) = get_json_auth(
+        &server,
+        &format!("/api/assistant/review/status?id={job_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    assert_eq!(job["status"], "running");
+}
+
+#[tokio::test]
 async fn test_evidence_preview_requires_expected_document_hash() {
     let server = EvolveServer::new(sample_graph());
     let (status, _) = post_json(

@@ -3561,7 +3561,10 @@ async function runReview() {
     setGlobalStatus('Grounded review running', 'working');
 
     try {
-        const payload = await request('/api/assistant/review', {
+        // The POST only queues the review (202 + job id): the model call runs
+        // server-side for minutes on local models, longer than one fetch
+        // survives, so the outcome comes from polling the status route.
+        const accepted = await request('/api/assistant/review', {
             method: 'POST',
             body: {
                 path,
@@ -3572,6 +3575,22 @@ async function runReview() {
                 scope: $('#review-scope')?.value || 'selected_document',
             },
         });
+        const jobId = accepted?.job_id;
+        if (!jobId) throw new ApiError('Grounded review was not queued (no job id in the response)', 0, accepted);
+        let payload = null;
+        for (;;) {
+            await new Promise((resolve) => window.setTimeout(resolve, 9000));
+            if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
+            const job = await request(`/api/assistant/review/status?id=${encodeURIComponent(jobId)}`);
+            if (job?.status === 'done') {
+                payload = job.result;
+                break;
+            }
+            if (job?.status === 'failed') {
+                throw new ApiError(job.error || 'Grounded review failed', 0, job);
+            }
+            setGlobalStatus('Grounded review running', 'working');
+        }
         if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
         result.className = 'inspector-result';
         result.replaceChildren(renderStructured(payload));

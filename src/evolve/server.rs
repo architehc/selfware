@@ -73,6 +73,7 @@ pub struct EvolveServer {
     analysis_lock: Arc<AsyncMutex<()>>,
     assistant_lock: Arc<AsyncMutex<()>>,
     git_lock: Arc<AsyncMutex<()>>,
+    review_jobs: Arc<AsyncMutex<HashMap<String, ReviewJob>>>,
 }
 
 impl EvolveServer {
@@ -175,6 +176,7 @@ impl EvolveServer {
             analysis_lock: Arc::new(AsyncMutex::new(())),
             assistant_lock: Arc::new(AsyncMutex::new(())),
             git_lock: Arc::new(AsyncMutex::new(())),
+            review_jobs: Arc::new(AsyncMutex::new(HashMap::new())),
         };
         server.rebuild_envelope()?;
         Ok(server)
@@ -253,6 +255,10 @@ impl EvolveServer {
                 post(assistant_evidence_preview_handler),
             )
             .route("/api/assistant/review", post(assistant_review_handler))
+            .route(
+                "/api/assistant/review/status",
+                get(assistant_review_status_handler),
+            )
             .route("/api/assistant/task", post(assistant_task_handler))
             .route(
                 "/api/assistant/orientation",
@@ -1921,14 +1927,34 @@ async fn assistant_evidence_preview_handler(
     })))
 }
 
+/// A grounded review runs for minutes on local models — far longer than a
+/// browser fetch survives — so POST /api/assistant/review validates
+/// synchronously, spawns the model call as a background job, and returns 202
+/// immediately; the client polls GET /api/assistant/review/status?id=… for
+/// the terminal state.
+#[derive(Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+enum ReviewJobStatus {
+    Running,
+    Done { result: Value },
+    Failed { error: String },
+}
+
+struct ReviewJob {
+    status: ReviewJobStatus,
+    started: std::time::Instant,
+}
+
+/// Finished jobs are pruned on the next insert once they pass this age.
+const REVIEW_JOB_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 async fn assistant_review_handler(
     State(server): State<Arc<EvolveServer>>,
     headers: HeaderMap,
     Json(body): Json<AssistantReviewRequest>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<(StatusCode, Json<Value>)> {
     require_session(&headers, &server)?;
     let _workspace_guard = server.write_lock.lock().await;
-    let _assistant_guard = server.assistant_lock.lock().await;
     let context = server.context_summary().map_err(internal_error)?;
     validate_requested_mode(body.mode.as_deref(), &context)?;
     let selected = server
@@ -1952,41 +1978,126 @@ async fn assistant_review_handler(
         ));
     }
     revalidate_document_hash(&server, &body.path, &body.expected_hash)?;
-    let envelope_authoritative = selection.envelope_authoritative;
-    let review = server
+
+    // The honesty gate above stays synchronous (unchanged 4xx behavior). The
+    // model call itself outlives any single HTTP fetch, so it continues as a
+    // background job and the client polls the status route for the outcome.
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let started = std::time::Instant::now();
+    {
+        let mut jobs = server.review_jobs.lock().await;
+        jobs.retain(|_, job| job.started.elapsed() < REVIEW_JOB_TTL);
+        jobs.insert(
+            job_id.clone(),
+            ReviewJob {
+                status: ReviewJobStatus::Running,
+                started,
+            },
+        );
+    }
+    let worker = server.as_ref().clone();
+    let worker_job = job_id.clone();
+    tokio::spawn(async move {
+        let status = run_review_job(&worker, body, context, selection).await;
+        worker
+            .review_jobs
+            .lock()
+            .await
+            .insert(worker_job, ReviewJob { status, started });
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "running" })),
+    ))
+}
+
+/// The background half of `assistant_review_handler`: serializes on the
+/// assistant lock (acquired here so the POST never blocks on it), runs the
+/// review, and resolves to the job's terminal status. Failures keep the
+/// review's honesty contract: typed protocol errors carry their message text,
+/// anything else the full anyhow chain.
+async fn run_review_job(
+    server: &EvolveServer,
+    body: AssistantReviewRequest,
+    context: super::ContextSummary,
+    selection: EvidenceSelection,
+) -> ReviewJobStatus {
+    let _assistant_guard = server.assistant_lock.lock().await;
+    let review = match server
         .assistant
         .review(&body.question, selection.evidence, selection.complete)
         .await
-        .map_err(review_error)?;
+    {
+        Ok(review) => review,
+        Err(error) => {
+            return ReviewJobStatus::Failed {
+                error: match error.downcast_ref::<ReviewProtocolError>() {
+                    Some(protocol) => protocol.to_string(),
+                    None => format!("{error:#}"),
+                },
+            };
+        }
+    };
     // Only claim the envelope hash when the envelope actually backed the
     // evidence (revision gate passed); otherwise report null.
-    let content_hash = if envelope_authoritative {
-        envelope_content_hash(&server)?
+    let content_hash = if selection.envelope_authoritative {
+        match server.cached_envelope() {
+            Ok(Some(envelope)) => json!(envelope.content_hash),
+            Ok(None) => Value::Null,
+            Err(error) => {
+                return ReviewJobStatus::Failed {
+                    error: format!("{error:#}"),
+                };
+            }
+        }
     } else {
         Value::Null
     };
-    Ok(Json(json!({
-        "review": review,
-        "context": {
-            "requested_mode": body.mode,
-            "selected_document_hash": body.expected_hash,
-            "graph_revision": selection.graph_revision,
-            "content_hash": content_hash,
-            "indexed_mode": context.mode,
-            "indexed_tokens": context.estimated_tokens,
-            "included_nodes": context.included.len(),
-            "prompt_scope": body.scope.name(),
-            "candidate_files": selection.candidate_files,
-            "evidence_files": selection.evidence_files,
-            "omitted_files": selection.omitted_files,
-            "read_failures": selection.read_failures,
-            "partition_failures": selection.partition_failures,
-            "excluded_test_ranges": selection.excluded_test_ranges,
-            "excluded_test_lines": selection.excluded_test_lines,
-            "evidence_char_budget": server.evidence_char_budget,
-            "evidence_complete": selection.complete
-        }
-    })))
+    ReviewJobStatus::Done {
+        result: json!({
+            "review": review,
+            "context": {
+                "requested_mode": body.mode,
+                "selected_document_hash": body.expected_hash,
+                "graph_revision": selection.graph_revision,
+                "content_hash": content_hash,
+                "indexed_mode": context.mode,
+                "indexed_tokens": context.estimated_tokens,
+                "included_nodes": context.included.len(),
+                "prompt_scope": body.scope.name(),
+                "candidate_files": selection.candidate_files,
+                "evidence_files": selection.evidence_files,
+                "omitted_files": selection.omitted_files,
+                "read_failures": selection.read_failures,
+                "partition_failures": selection.partition_failures,
+                "excluded_test_ranges": selection.excluded_test_ranges,
+                "excluded_test_lines": selection.excluded_test_lines,
+                "evidence_char_budget": server.evidence_char_budget,
+                "evidence_complete": selection.complete
+            }
+        }),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReviewStatusQuery {
+    id: String,
+}
+
+async fn assistant_review_status_handler(
+    State(server): State<Arc<EvolveServer>>,
+    headers: HeaderMap,
+    Query(query): Query<ReviewStatusQuery>,
+) -> ApiResult<Json<ReviewJobStatus>> {
+    require_session(&headers, &server)?;
+    let status = server
+        .review_jobs
+        .lock()
+        .await
+        .get(&query.id)
+        .map(|job| job.status.clone())
+        .ok_or_else(|| not_found("unknown job id"))?;
+    Ok(Json(status))
 }
 
 #[derive(serde::Deserialize)]
