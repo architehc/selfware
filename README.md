@@ -789,6 +789,10 @@ Colored unified and side-by-side diffs with word-level highlighting before apply
 
 IDE integration via the Zed editor extension. It launches `selfware lsp` for navigation and exposes `/selfware-graph` for workspace graph exploration.
 
+### TQEC Lab
+
+An interactive, browser-based course on topological quantum error correction — 19 lessons as a prerequisite graph, with live lattice and decoder widgets. Run it with `cargo run --bin tqec_lab` and see [lab/README.md](lab/README.md).
+
 ---
 
 ## Evolution Engine — Recursive Self-Improvement

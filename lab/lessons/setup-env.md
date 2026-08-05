@@ -45,7 +45,7 @@ pip install tqec stim pymatching sinter matplotlib
 **You should see** a long download progress ending in a line like:
 
 ```
-Successfully installed contourpy-... tqec-0.2.0 stim-1.16.0 pymatching-2.4.0 sinter-1.16.0 matplotlib-3.11.1 ...
+Successfully installed contourpy-... tqec-0.2.0 stim-1.16.0 pymatching-2.4.0 sinter-1.15.0 matplotlib-3.11.1 ...
 ```
 
 The exact micro-versions will drift; the five names above are what matter.
@@ -80,7 +80,7 @@ for p in ['tqec', 'stim', 'pymatching', 'sinter', 'matplotlib']:
 tqec 0.2.0
 stim 1.16.0
 pymatching 2.4.0
-sinter 1.16.0
+sinter 1.15.0
 matplotlib 3.11.1
 ```
 
