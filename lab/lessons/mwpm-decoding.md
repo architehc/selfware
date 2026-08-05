@@ -46,7 +46,7 @@ So among all the stories that produce the same detection events, shorter chains 
 
 ## Blossom: the polynomial miracle
 
-A naive way to find the minimum matching is to list all matchings and weigh each. That way lies madness: the number of perfect matchings of n events is the double factorial (n−1)!!, which grows faster than exponentially. Four events have 3 matchings; six have 15; a hundred have about 10^158 — more than atoms in the observable universe. Brute force is dead on arrival for any real experiment, which streams thousands of events per second.
+A naive way to find the minimum matching is to list all matchings and weigh each. That way lies madness: the number of perfect matchings of n events is the double factorial (n−1)!!, which grows faster than exponentially. Four events have 3 matchings; six have 15; a hundred have about 10^78 — comparable to the number of atoms in the observable universe. Brute force is dead on arrival for any real experiment, which streams thousands of events per second.
 
 The rescue is one of the classics of computer science: Jack Edmonds' **blossom algorithm** (1965) finds the exact minimum-weight perfect matching in *polynomial* time — roughly O(n⁴) in its original form, improved over the decades to O(n³) and better. Polynomial, not factorial: a hundred events is a rounding error, and surface-code-specific versions do far better still, because below threshold the events cluster into small, independent local groups and the matching decomposes. (Later lessons meet the streaming, parallel descendants; the point here is that an *efficient exact algorithm exists*, and without it the whole architecture would be a paper fantasy.)
 
@@ -106,7 +106,7 @@ One honest disclaimer, true for every widget in this lab: this stepper finds the
 ## Key numbers
 
 - MWPM: pair all detection events (boundary as wildcard) to minimize total chain length ≈ maximize probability, since a length-l chain costs ~p^l.
-- Matchings of n events: (n−1)!! — 3 for 4 events, 15 for 6, ~10^158 for 100. Brute force impossible; Edmonds' **blossom algorithm** (1965) solves MWPM exactly in polynomial time.
+- Matchings of n events: (n−1)!! — 3 for 4 events, 15 for 6, ~10^78 for 100. Brute force impossible; Edmonds' **blossom algorithm** (1965) solves MWPM exactly in polynomial time.
 - Threshold is a stat-mech phase transition (DKLP 2001): perfect-measurement critical point **≈ 10.9%**; plain MWPM reaches **≈ 10.25%** — cheap decoding within ~0.5% of optimal.
 - Noisy-syndrome rigorous bound p ≥ 1.14%; circuit-level finite threshold for matching proved at p ≥ **7.4 × 10⁻⁴** (arXiv:1206.0800).
 - The widget: 4 defects, 3 candidates, weights 6, 6, 12 — minimum 6, a harmless tie broken by arrival order.

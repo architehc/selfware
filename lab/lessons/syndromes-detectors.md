@@ -49,11 +49,9 @@ round 4        .    .    D    .      <- lie ends: detector fires again
                         |
               (measurement error: a time-like chain)
                         |
-round 3        .    A    C    .      <- error lands; lie begins
-                 \
-                  (data error: a space-like chain)
-round 2        .    .    B    .
-                 /
+round 3        .    .    C    .      <- lie begins: detector fires
+round 2        .    A----B    .      <- error lands: detectors fire
+              (data error: a space-like chain)
 round 1        .    .    .    .
 ```
 
