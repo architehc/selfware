@@ -170,7 +170,12 @@ async fn main() {
     }
     let port: u16 = std::env::var("TQEC_LAB_PORT")
         .ok()
-        .and_then(|s| s.parse().ok())
+        .map(|s| {
+            s.parse().unwrap_or_else(|_| {
+                eprintln!("tqec-lab: warning: TQEC_LAB_PORT={s:?} is not a valid port, using 7837");
+                7837
+            })
+        })
         .unwrap_or(7837);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {

@@ -87,7 +87,7 @@ Two structural facts to notice. First, tiers 0–3 are a single chain: no branch
 
 ## Frequently asked questions
 
-**Can I skip ahead?** Not past locked nodes — the graph enforces prerequisites. If you already know the early material, the intended move is to read quickly and press *mark complete* honestly.
+**Can I skip ahead?** The map locks nodes visually until their prerequisites are done, but the lock is a guide, not a gate — any lesson is reachable directly by its link. If you already know the early material, the intended move is to read quickly and press *mark complete* honestly.
 
 **Does order matter within a tier?** Mostly the tier is a chain anyway (each node's prerequisite is the previous one). Where a tier branches — tier 4 splits into the cultivation and decoding strands before rejoining at *Experiments* — take either branch first; the join node waits for both.
 

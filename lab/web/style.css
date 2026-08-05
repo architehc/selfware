@@ -60,16 +60,9 @@ a { color: var(--accent); }
   cursor: pointer;
 }
 
-.node.locked { opacity: 0.4; cursor: default; }
+/* Locked nodes are dimmed by the opacity attribute on their <g> wrapper in
+   graph.js — do NOT add opacity here too, the two compound. */
 .node.done { border-color: var(--done); }
-
-.tier-label {
-  margin-top: 1.2rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-}
 
 /* --- lesson view --- */
 .lesson h1, .lesson h2, .lesson h3 { color: var(--text); }

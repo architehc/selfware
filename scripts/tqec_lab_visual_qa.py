@@ -10,7 +10,7 @@ Env:
   TQEC_LAB_URL       default http://127.0.0.1:7837
   TQEC_LAB_SHOTS     default /tmp/tqec_lab_shots
 Usage:
-  python3 scripts/tqec_lab_visual_qa.py                    # capture + validate all 5 views
+  python3 scripts/tqec_lab_visual_qa.py                    # capture + validate all 6 views
   python3 scripts/tqec_lab_visual_qa.py --view lattice     # one view
   python3 scripts/tqec_lab_visual_qa.py --view graph --no-capture
   python3 scripts/tqec_lab_visual_qa.py --view graph --shot path.png
@@ -44,6 +44,7 @@ VIEWS = {
     "lattice": "/#/lesson/surface-code",
     "decoder": "/#/lesson/mwpm-decoding",
     "surgery": "/#/lesson/lattice-surgery",
+    "anyons": "/#/lesson/stabilizers-anyons",
 }
 
 # Per-view expectations, from docs/superpowers/specs/2026-08-05-tqec-lab-visual-checklist.md.
@@ -66,6 +67,13 @@ EXPECT = {
     "surgery": "the 'lattice surgery' lesson with its interactive widget at the "
                "bottom: two d=3 lattice patches separated by a gap, with merge/split "
                "controls.",
+    "anyons": "the 'Stabilizers and anyons' lesson with its interactive lattice "
+              "widget at the bottom: an SVG d=3 rotated-code grid (dots for data "
+              "qubits, colored squares for checks), X error / Z error / erase mode "
+              "buttons, and a click counter. This capture is fresh — nothing has "
+              "been clicked, so no checks are fired and no e/m anyon labels are "
+              "visible yet; that is correct (anyon labels e/m appear on fired "
+              "checks only after clicking data qubits). Do not flag their absence.",
 }
 
 

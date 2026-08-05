@@ -29,7 +29,13 @@ async function fetchText(url) {
 
 async function route() {
   const view = document.getElementById("view");
-  const manifest = await fetchJSON("/curriculum.json");
+  let manifest;
+  try {
+    manifest = await fetchJSON("/curriculum.json");
+  } catch (e) {
+    view.innerHTML = `<p>failed to load curriculum: ${e.message}</p>`;
+    return;
+  }
   const done = Lab.progress.done;
   document.getElementById("progress-summary").textContent =
     `${done.size}/${manifest.nodes.length} lessons complete`;

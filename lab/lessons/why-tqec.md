@@ -48,7 +48,7 @@ There is one condition, and it is the most important number in the field: the **
 
 The protection is not free. A useful rule of thumb for the surface code is the **~1000:1 overhead**: one good logical qubit costs on the order of a thousand physical qubits, once you count the data qubits, the helper qubits that run the checks, and some room to operate.
 
-The tax is why "we built a 1000-qubit chip" headlines do not mean what you hope: a thousand physical qubits is roughly *one* serious logical qubit. A 2012 end-to-end estimate for factoring a 2000-bit number (the application that would break today's encryption) came out at about a **billion** physical qubits — with roughly 94% of the machine devoted to **magic state factories**, dedicated districts that manufacture the special resource states powering the hardest gates. Cleverer layouts (lattice surgery, better factories) have since cut comparable estimates to the few-million range. The trend line is the point: overhead is an *engineering* quantity, and engineering drives it down.
+The tax is why "we built a 1000-qubit chip" headlines do not mean what you hope: a thousand physical qubits is roughly *one* serious logical qubit. A 2012 end-to-end estimate for factoring a 2000-bit number (the application that would break today's encryption) came out at about a **billion** physical qubits — with roughly 94% of the machine devoted to **magic state factories**, dedicated districts that manufacture the special resource states powering the hardest gates. Cleverer layouts (lattice surgery, better factories) have since cut comparable estimates by orders of magnitude. The trend line is the point: overhead is an *engineering* quantity, and engineering drives it down.
 
 ## The quantum operating system
 

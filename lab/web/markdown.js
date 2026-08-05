@@ -6,7 +6,13 @@ function renderMarkdown(src) {
       .replace(/`([^`]+)`/g, "<code>$1</code>")
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, text, href) => {
+        const safe = href.replace(/"/g, "&quot;");
+        // Internal #/lesson/... links must navigate in the same tab; only
+        // external links get a new tab + noopener.
+        const ext = safe.startsWith("#") ? "" : ' target="_blank" rel="noopener"';
+        return `<a href="${safe}"${ext}>${text}</a>`;
+      });
   const lines = src.split("\n");
   let html = "", i = 0, inList = false;
   const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };

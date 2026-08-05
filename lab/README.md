@@ -60,18 +60,23 @@ scripts/tqec_lab_visual_qa.py   Headless visual QA (see below)
 
 Lessons unlock when all their prereqs are marked complete in the browser.
 
+Markdown subset note: the renderer (`lab/web/markdown.js`) supports headings,
+`- ` bullet lists, blockquotes, code fences, and inline `code`/`*em*`/`**bold**`/links.
+Numbered lists (`1. `) are **not** supported — write `- ` lists instead.
+
 ## Visual QA
 
-`scripts/tqec_lab_visual_qa.py` captures headless-Chrome screenshots of the five
+`scripts/tqec_lab_visual_qa.py` captures headless-Chrome screenshots of the six
 representative views (graph map, plain lesson, lattice widget, decoder widget,
-lattice-surgery lesson) and sends each to a vision model (Kimi K3 via OpenRouter)
-with a per-view checklist of what should be on screen.
+lattice-surgery lesson, stabilizers/anyons lesson) and sends each to a vision
+model (Kimi K3 via OpenRouter) with a per-view checklist of what should be on
+screen.
 
 ```bash
 # server must be running first
 cargo run --bin tqec_lab &
 
-# all 5 views
+# all 6 views
 python3 scripts/tqec_lab_visual_qa.py
 
 # a single view
@@ -87,7 +92,11 @@ between captures.
 ## Tests
 
 ```bash
-cargo test --bin tqec_lab          # manifest validation + HTTP routes
-node lab/web/widgets/lattice.test.js
-node lab/web/widgets/decoder.test.js
+cargo test --bin tqec_lab          # manifest validation, mime_for mapping, resolve path safety
+node lab/web/widgets/lattice.test.js   # lattice model: faces, firing parity
+node lab/web/widgets/decoder.test.js   # decoder model: scenarios, matching steps
 ```
+
+The Rust tests are pure unit tests (no HTTP routes are exercised — the server
+is covered end-to-end by `scripts/tqec_lab_visual_qa.py`, the visual QA script
+described above, which captures six live views from the running server).

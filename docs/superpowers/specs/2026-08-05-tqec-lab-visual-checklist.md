@@ -36,10 +36,22 @@ Server: `cargo run --bin tqec_lab` (or `./target/debug/tqec_lab`), default
 | lattice | `/#/lesson/surface-code` | Lesson body plus lattice widget: d=3 rotated-code SVG grid with data qubits and stabilizer faces, X/Z/erase mode buttons, click counter/readout |
 | decoder | `/#/lesson/mwpm-decoding` | Lesson body plus decoder widget: SVG grid with 4 defects (scenario A), step button, matching edges drawn after stepping |
 | surgery | `/#/lesson/lattice-surgery` | Lesson body plus lattice-surgery widget rendering (merge/split controls, lattice SVG), no blank panels |
+| anyons | `/#/lesson/stabilizers-anyons` | Lesson body plus lattice widget (anyons preset): d=3 grid, X/Z/erase buttons, counter; anyon labels e/m appear on fired checks after clicking data qubits (a fresh capture shows none fired — not a defect) |
 
 ## K3 verdicts
 
 Run log (latest full pass at top):
+
+### 2026-08-05 — all 6 views PASS (final review wave, new `anyons` view)
+
+| View | Verdict | Notes from K3 |
+|---|---|---|
+| graph | PASS | 19 nodes, 6 tiers, only `why-tqec` unlocked, edges clean; first attempt's answer was truncated by the 8000-token cap before the verdict line (all checks ✅), re-validated with `--no-capture` → explicit PASS |
+| lesson | PASS | Markdown rendered, mark-complete/back-to-map present, no widget as expected |
+| lattice | PASS | d=3 grid, X/Z/erase buttons, "0 data-qubit errors, 0 checks fired" counter |
+| decoder | PASS | 4 numbered defect markers (scenario A), Step/Reset buttons, "3 candidate matchings" readout |
+| surgery | PASS | Two d=3 patches with gap, Merge patches/Split + X/Z/erase controls |
+| anyons | PASS | New view. Lesson body renders; lattice widget (anyons preset) shows d=3 grid, X/Z/erase buttons, counter. Fresh capture: 0 fired checks, no e/m labels — expected (labels appear only after clicking data qubits) |
 
 ### 2026-08-05 — all 5 views PASS
 
