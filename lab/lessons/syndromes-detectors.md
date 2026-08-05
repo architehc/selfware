@@ -1,0 +1,1 @@
+# syndromes-detectors (stub)

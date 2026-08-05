@@ -1,0 +1,28 @@
+{
+  "nodes": [
+    { "id": "why-tqec", "title": "Why TQEC? The NISQ wall", "tier": 0, "prereqs": [], "lesson": "why-tqec.md", "widget": null, "papers": [] },
+    { "id": "roadmap", "title": "How this lab works (0 to hero map)", "tier": 0, "prereqs": ["why-tqec"], "lesson": "roadmap.md", "widget": null, "papers": [] },
+
+    { "id": "surface-code", "title": "The surface code as a chessboard", "tier": 1, "prereqs": ["roadmap"], "lesson": "surface-code.md", "widget": "lattice", "papers": ["quant-ph/9811052"] },
+    { "id": "stabilizers-anyons", "title": "Stabilizers and anyons", "tier": 1, "prereqs": ["surface-code"], "lesson": "stabilizers-anyons.md", "widget": "lattice", "papers": ["quant-ph/9811052", "quant-ph/0110143"] },
+    { "id": "boundaries-distance", "title": "Boundaries, distance, logical operators", "tier": 1, "prereqs": ["stabilizers-anyons"], "lesson": "boundaries-distance.md", "widget": "lattice", "papers": ["quant-ph/9811052"] },
+
+    { "id": "syndromes-detectors", "title": "Syndromes, detectors, and the time dimension", "tier": 2, "prereqs": ["boundaries-distance"], "lesson": "syndromes-detectors.md", "widget": null, "papers": ["quant-ph/0110143"] },
+    { "id": "mwpm-decoding", "title": "Minimum-weight perfect matching", "tier": 2, "prereqs": ["syndromes-detectors"], "lesson": "mwpm-decoding.md", "widget": "decoder", "papers": ["quant-ph/0110143", "1009.3686"] },
+    { "id": "weighted-correlated", "title": "Weighted and correlated decoding", "tier": 2, "prereqs": ["mwpm-decoding"], "lesson": "weighted-correlated.md", "widget": "decoder", "papers": ["1009.3686", "1110.5133", "1310.0863", "1307.1740"] },
+
+    { "id": "lattice-surgery", "title": "Lattice surgery: merge and split", "tier": 3, "prereqs": ["weighted-correlated"], "lesson": "lattice-surgery.md", "widget": "lattice", "papers": ["1111.4022", "1808.06709", "1905.08916"] },
+    { "id": "spacetime-blockgraphs", "title": "Space-time plumbing and blockgraphs", "tier": 3, "prereqs": ["lattice-surgery"], "lesson": "spacetime-blockgraphs.md", "widget": null, "papers": ["1208.0928", "1209.0510", "1210.4626"] },
+    { "id": "compilation-pipeline", "title": "The compilation pipeline", "tier": 3, "prereqs": ["spacetime-blockgraphs"], "lesson": "compilation-pipeline.md", "widget": null, "papers": [] },
+
+    { "id": "magic-states", "title": "Magic states and distillation", "tier": 4, "prereqs": ["compilation-pipeline"], "lesson": "magic-states.md", "widget": null, "papers": ["1208.0928", "1812.01238"] },
+    { "id": "cultivation", "title": "Magic state cultivation", "tier": 4, "prereqs": ["magic-states"], "lesson": "cultivation.md", "widget": null, "papers": [] },
+    { "id": "realtime-decoding", "title": "Real-time decoding and the latency race", "tier": 4, "prereqs": ["magic-states"], "lesson": "realtime-decoding.md", "widget": null, "papers": ["2408.13687", "1307.1740"] },
+    { "id": "experiments", "title": "Experiments: threshold to below-threshold", "tier": 4, "prereqs": ["realtime-decoding", "cultivation"], "lesson": "experiments.md", "widget": null, "papers": ["1402.4848", "2207.06431", "2408.13687"] },
+
+    { "id": "setup-env", "title": "Hands-on 0: environment setup", "tier": 5, "prereqs": ["experiments"], "lesson": "setup-env.md", "widget": null, "papers": [] },
+    { "id": "hands-on-tqec", "title": "Hands-on 1: tqec — blockgraph to logical error rate", "tier": 5, "prereqs": ["setup-env"], "lesson": "hands-on-tqec.md", "widget": null, "papers": [] },
+    { "id": "hands-on-topols", "title": "Hands-on 2: TopoLS — circuit to pipe diagram", "tier": 5, "prereqs": ["hands-on-tqec"], "lesson": "hands-on-topols.md", "widget": null, "papers": ["2601.23109"] },
+    { "id": "hands-on-clifft", "title": "Hands-on 3: Clifft — simulating cultivation", "tier": 5, "prereqs": ["hands-on-tqec"], "lesson": "hands-on-clifft.md", "widget": null, "papers": ["2604.27058"] }
+  ]
+}
