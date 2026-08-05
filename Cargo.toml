@@ -262,6 +262,10 @@ name = "codegraph"
 path = "src/bin/codegraph.rs"
 
 [[bin]]
+name = "tqec_lab"
+path = "src/bin/tqec_lab.rs"
+
+[[bin]]
 name = "visual_polish_test"
 path = "system_tests/visual_polish_loop.rs"
 required-features = ["system-tests"]
