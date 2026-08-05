@@ -1,3 +1,11 @@
+use axum::{
+    body::Body,
+    extract::{Path as AxumPath, State},
+    http::StatusCode,
+    response::Response,
+    routing::get,
+    Router,
+};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -79,8 +87,105 @@ pub fn validate_manifest(m: &Manifest, lab_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    println!("tqec-lab scaffold");
+pub fn mime_for(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("md") => "text/markdown; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        _ => "application/octet-stream",
+    }
+}
+
+pub fn resolve(lab_dir: &Path, url_path: &str) -> Option<PathBuf> {
+    let rel = url_path.trim_start_matches('/');
+    let rel = if rel.is_empty() {
+        "web/index.html".to_string()
+    } else {
+        rel.to_string()
+    };
+    let mut p = lab_dir.to_path_buf();
+    for comp in Path::new(&rel).components() {
+        match comp {
+            std::path::Component::Normal(c) => p.push(c),
+            _ => return None, // rejects "..", root, prefix
+        }
+    }
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+async fn serve_file(State(lab): State<PathBuf>, AxumPath(path): AxumPath<String>) -> Response {
+    match resolve(&lab, &path).and_then(|p| std::fs::read(&p).ok().map(|b| (p, b))) {
+        Some((p, bytes)) => Response::builder()
+            .header("content-type", mime_for(p.to_str().unwrap_or("")))
+            .body(Body::from(bytes))
+            .unwrap(),
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::from("not found"))
+            .unwrap(),
+    }
+}
+
+pub fn build_router(lab: PathBuf) -> Router {
+    Router::new()
+        .route(
+            "/",
+            get(|| async { axum::response::Redirect::temporary("/web/index.html") }),
+        )
+        .route("/*path", get(serve_file))
+        .with_state(lab)
+}
+
+#[tokio::main]
+async fn main() {
+    let lab = lab_dir();
+    let manifest_text = match std::fs::read_to_string(lab.join("curriculum.json")) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "tqec-lab: cannot read {}: {e}",
+                lab.join("curriculum.json").display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let manifest: Manifest = match serde_json::from_str(&manifest_text) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("tqec-lab: curriculum.json is malformed: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = validate_manifest(&manifest, &lab) {
+        eprintln!("tqec-lab: invalid curriculum: {e}");
+        std::process::exit(1);
+    }
+    let port: u16 = std::env::var("TQEC_LAB_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(7837);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("tqec-lab: cannot bind {addr}: {e} (set TQEC_LAB_PORT to change port)");
+            std::process::exit(1);
+        }
+    };
+    println!("tqec-lab: {} nodes validated", manifest.nodes.len());
+    println!("tqec-lab: open http://127.0.0.1:{port}/");
+    if let Err(e) = axum::serve(listener, build_router(lab)).await {
+        eprintln!("tqec-lab: server error: {e}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +254,33 @@ mod tests {
         };
         let err = validate_manifest(&m, &dir).unwrap_err();
         assert!(err.contains("missing lesson"), "got: {err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mime_mapping() {
+        assert_eq!(mime_for("web/app.js"), "text/javascript; charset=utf-8");
+        assert_eq!(mime_for("curriculum.json"), "application/json");
+        assert_eq!(mime_for("lessons/a.md"), "text/markdown; charset=utf-8");
+        assert_eq!(mime_for("web/index.html"), "text/html; charset=utf-8");
+        assert_eq!(mime_for("x.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn resolve_rejects_traversal() {
+        let dir = Path::new("/tmp/whatever");
+        assert!(resolve(dir, "/../Cargo.toml").is_none());
+        assert!(resolve(dir, "/lessons/../../etc/passwd").is_none());
+    }
+
+    #[test]
+    fn resolve_maps_root_to_index() {
+        let dir = std::env::temp_dir().join("tqec_lab_test_resolve");
+        std::fs::create_dir_all(dir.join("web")).unwrap();
+        std::fs::write(dir.join("web/index.html"), "<html></html>").unwrap();
+        assert_eq!(resolve(&dir, "/"), Some(dir.join("web/index.html")));
+        assert_eq!(resolve(&dir, ""), Some(dir.join("web/index.html")));
+        assert!(resolve(&dir, "/missing.js").is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 }
