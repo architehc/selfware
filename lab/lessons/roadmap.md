@@ -18,7 +18,7 @@ Each node on the map is in one of three states, shown by how it is drawn:
 - **Unlocked**: full color, clickable. All of its prerequisites are done. Click it to open the lesson.
 - **Done**: green, with a check mark in the corner. You finished it.
 
-At the bottom of every lesson there is a **mark complete** button. Pressing it flips the node to done, saves your progress, and takes you back to the map — usually unlocking the next row. If you press it by accident, the button becomes *completed ✓*; your progress is yours to manage.
+At the bottom of every lesson there is a **mark complete** button. Pressing it flips the node to done and saves your progress — usually unlocking the next row — but you stay on the lesson; the button simply becomes *completed ✓*. The **back to map** link next to it is what returns you to the graph.
 
 ## Where progress is stored
 
@@ -61,10 +61,10 @@ Every lesson page has the same skeleton, so it is worth learning once:
 
 - The **title** matches the box you clicked on the map.
 - The **prose** is the lesson itself, with a *Try it* section whenever a widget is present.
-- The **widget box** sits at the bottom of the lesson content, above the footer, on lessons that have one.
 - The **Key numbers** box is the lesson compressed to its load-bearing facts — the part worth revisiting later.
 - The **Source papers** footer lists the arXiv papers the lesson condenses, when there are any.
 - The **mark complete** button records your progress, and the **back to map** link returns you to the graph.
+- The **widget box** comes last of all, appended at the very bottom of the page, below the button row, on lessons that have one.
 
 The progress summary at the top of the map page (for example "3/19 lessons complete") always tells you how far along the whole graph you are.
 
