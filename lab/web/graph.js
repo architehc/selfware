@@ -57,6 +57,10 @@ function renderGraph(view, manifest) {
     const check = done
       ? `<text x="${x + NODE_W / 2 - 10}" y="${y - NODE_H / 2 + 14}" text-anchor="middle" fill="hsl(145, 70%, 60%)" font-size="14" font-weight="bold">✓</text>`
       : "";
+    // Opaque backdrop behind every card: locked nodes are drawn inside an
+    // opacity group, so without this the prereq edges would show through
+    // their translucent fills (K3 visual QA flagged lines crossing cards).
+    svg += `<rect x="${x - NODE_W / 2}" y="${y - NODE_H / 2}" width="${NODE_W}" height="${NODE_H}" rx="10" fill="#12141a"/>`;
     const inner = `<g class="${cls}" style="--tier-color: hsl(${hue}, 70%, 60%)">
       <rect x="${x - NODE_W / 2}" y="${y - NODE_H / 2}" width="${NODE_W}" height="${NODE_H}" rx="10"
         fill="${fill}" stroke="${stroke}" stroke-width="2"/>
