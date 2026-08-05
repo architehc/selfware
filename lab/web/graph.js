@@ -44,17 +44,24 @@ function renderGraph(view, manifest) {
     const { x, y, tier } = pos.get(n.id);
     const done = Lab.progress.done.has(n.id);
     const unlocked = Lab.isUnlocked(n, manifest);
-    const cls = `node ${done ? "done" : ""} ${unlocked ? "" : "locked"}`;
+    const cls = ["node", done ? "done" : null, unlocked ? null : "locked"].filter(Boolean).join(" ");
     const hue = tier * 45;
     const lines = titleLines(n.title);
     const text = lines.length === 1
       ? `<text x="${x}" y="${y + 4}" text-anchor="middle" fill="#eee" font-size="13">${lines[0]}</text>`
       : `<text x="${x}" y="${y - 6}" text-anchor="middle" fill="#eee" font-size="13">${lines[0]}</text>
       <text x="${x}" y="${y + 10}" text-anchor="middle" fill="#eee" font-size="13">${lines[1]}</text>`;
+    // Done nodes: green completion fill/stroke (inline, so CSS can't do it) plus a ✓ badge.
+    const fill = done ? "hsl(145, 45%, 22%)" : `hsl(${hue}, 45%, 22%)`;
+    const stroke = done ? "hsl(145, 70%, 60%)" : `hsl(${hue}, 70%, 60%)`;
+    const check = done
+      ? `<text x="${x + NODE_W / 2 - 10}" y="${y - NODE_H / 2 + 14}" text-anchor="middle" fill="hsl(145, 70%, 60%)" font-size="14" font-weight="bold">✓</text>`
+      : "";
     const inner = `<g class="${cls}" style="--tier-color: hsl(${hue}, 70%, 60%)">
       <rect x="${x - NODE_W / 2}" y="${y - NODE_H / 2}" width="${NODE_W}" height="${NODE_H}" rx="10"
-        fill="hsl(${hue}, 45%, 22%)" stroke="hsl(${hue}, 70%, 60%)" stroke-width="2"/>
+        fill="${fill}" stroke="${stroke}" stroke-width="2"/>
       ${text}
+      ${check}
     </g>`;
     svg += unlocked
       ? `<a href="#/lesson/${n.id}">${inner}</a>`
