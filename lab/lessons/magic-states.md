@@ -40,13 +40,13 @@ The workhorse protocol for |T⟩ is **15-to-1**, based on the Reed–Muller code
 
 Notice what is *not* expensive here: time. The checking circuit's multi-target CNOTs execute in the same cycles as one CNOT in the surface code, so a 15-to-1 round costs at most about eight CNOT-times. The cost is **space** — the qubits for fifteen inputs, their ancillas, and the checking machinery.
 
-The smaller 7-to-1 protocol for |Y⟩ states is worth a glance for calibration: seven inputs, output error 7p³, success probability 1 − 7p — and two rounds of it (49 inputs total) already reach ~10⁻¹⁵ at p ~ 1%. The 15-to-1 became the standard |T⟩ workhorse because its checks map cleanly onto surface-code plumbing, not because the ratio is magic. Both protocols share the template: entangle against a logical ancilla block, consume the noisy states in gates, verify the code's checks, keep or discard.
+The smaller 7-to-1 protocol for |Y⟩ states is worth a glance for calibration: seven inputs, output error 7p³, success probability 1 − 7p — and two rounds of it (49 inputs total) already reach ~10⁻¹⁵ at p ~ 1%. The 15-to-1 became the standard |T⟩ workhorse in part because its checks map cleanly onto surface-code plumbing, not because the ratio is magic. Both protocols share the template: entangle against a logical ancilla block, consume the noisy states in gates, verify the code's checks, keep or discard.
 
 One sentence on why this whole approach beat the alternatives. Older concatenated-code schemes pay a volume growing like 1000^L with the number of levels L; topological codes pay a polynomial in the factory size. Distillation on a topological substrate was never the cheapest imaginable scheme — it was the cheapest scheme compatible with the only code family that scaled. That is the soil the factory economy grew from.
 
 ## Recursion: distilling the distilled
 
-One round not clean enough? Distill the outputs again. Two levels of 15-to-1 give error 35(35p³)³ — at p = 10⁻³ that is roughly 10⁻¹⁵, below the trillion-gate target. The bridge-compression analysis ([arXiv:1209.0510](https://arxiv.org/abs/1209.0510)) compressed a 15-to-1 circuit to a space-time volume of 192 d³-units and concluded you will *never need more than two levels*: at p = 0.01 the two-level map already reaches ~10⁻¹².
+One round not clean enough? Distill the outputs again. Two levels of 15-to-1 compose the suppression: error 35(35p³)³. Fed from injected states at p_I = 5 x 10⁻³, level 1 lands near 4 x 10⁻⁶ and level 2 near 3 x 10⁻¹⁵ — below the trillion-gate target. The bridge-compression analysis ([arXiv:1209.0510](https://arxiv.org/abs/1209.0510)) compressed a 15-to-1 circuit to a space-time volume of 192 d³-units and concluded you will *never need more than two levels*: at p = 0.01 the two-level map already reaches ~10⁻¹².
 
 The worked example from the 2012 paper (Shor-2000, physical error 10⁻³) shows the shape of a real factory:
 
@@ -112,7 +112,7 @@ This asymmetry tells you where research leverage lives. Shrink the algorithm's l
 - Clifford circuits alone are classically simulable (Gottesman–Knill) — the **T gate** / |T⟩ magic state is the standard non-Clifford supplement that makes the gate set universal.
 - **Injection is dirty by construction**: it starts from one unprotected physical qubit, with typical injected-state error ~10⁻³–10⁻² — versus the ~10⁻¹³ per-gate error serious algorithms demand.
 - **15-to-1 distillation**: 15 noisy |T⟩ in, 1 clean |T⟩ out; output error **35p³** (cubic suppression), success probability **1 − 15p** (~1 in 6 runs rejected at p ~ 1%).
-- Two levels: 35(35p³)³ ~ 10⁻¹⁵ at p = 10⁻³ — enough for trillion-gate algorithms; early levels run at lower code distance to balance the error budget.
+- Two levels: 35(35p³)³; from injection at p_I = 5 x 10⁻³ that is level 1 ~ 4 x 10⁻⁶, level 2 ~ 3 x 10⁻¹⁵ — enough for trillion-gate algorithms; early levels run at lower code distance to balance the error budget.
 - Factories are **~90–94% of the machine** (94% in arXiv:1208.0928's Shor-2000 accounting; ~90% in the leaner arXiv:1812.01238 designs). The data patches are the rounding error.
 
 ## Next
