@@ -1,0 +1,121 @@
+/* lab/web/style.css — tqec-lab dark theme (no dependencies) */
+
+:root {
+  --bg: #12141a;
+  --panel: #1c1f28;
+  --text: #d8dce6;
+  --muted: #8a90a0;
+  --accent: #7aa2f7;
+  --done: #4caf7d;
+  --border: #2c3140;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  line-height: 1.55;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+
+header .brand {
+  color: var(--accent);
+  font-weight: 700;
+  text-decoration: none;
+  font-size: 1.1rem;
+}
+
+#progress-summary { color: var(--muted); font-size: 0.9rem; }
+
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 3rem;
+}
+
+a { color: var(--accent); }
+
+/* --- curriculum graph nodes (tier hue = hsl(tier * 45, 70%, 60%),
+       graph.js sets --tier-color per node) --- */
+.node {
+  display: inline-block;
+  margin: 0.3rem;
+  padding: 0.5rem 0.8rem;
+  background: var(--panel);
+  border: 2px solid var(--tier-color, var(--border));
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.node.locked { opacity: 0.4; cursor: default; }
+.node.done { border-color: var(--done); }
+
+.tier-label {
+  margin-top: 1.2rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+}
+
+/* --- lesson view --- */
+.lesson h1, .lesson h2, .lesson h3 { color: var(--text); }
+.lesson blockquote {
+  margin: 0.5rem 0;
+  padding: 0.2rem 1rem;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+}
+.lesson footer { margin-top: 2rem; color: var(--muted); }
+
+pre, code {
+  background: #0d0f14;
+  border-radius: 4px;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+code { padding: 0.1em 0.35em; }
+
+pre {
+  padding: 0.8rem 1rem;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+}
+
+pre code { padding: 0; }
+
+.widget-box {
+  width: 100%;
+  margin: 1rem 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+button {
+  padding: 0.45rem 1rem;
+  margin-right: 0.8rem;
+  background: var(--accent);
+  color: #10121a;
+  border: 0;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.1); }
