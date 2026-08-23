@@ -36,7 +36,10 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 [agent]
 max_iterations = 100
-step_timeout_secs = 600
+# Fara on CPU (GLM owns the GPUs): one agent step is a 3-6k-token prompt at
+# ~12 t/s prefill plus reasoning-on generation ≈ 6-12 min. 600s killed every
+# collector step (measured 2026-08-22: 3/3 sub-queries failed).
+step_timeout_secs = 1800
 # XML tool calling — works uniformly across llama.cpp and sglang backends.
 native_function_calling = false
 
