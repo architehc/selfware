@@ -57,7 +57,7 @@ req = urllib.request.Request(
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": int(sys.argv[2]), "temperature": 0.3,
     }).encode(), headers=headers)
-with urllib.request.urlopen(req, timeout=1200) as r:
+with urllib.request.urlopen(req, timeout=3600) as r:
     msg = json.load(r)["choices"][0]["message"]
 # Reasoning models may burn the whole budget thinking, leaving content null.
 content = msg.get("content") or ""
