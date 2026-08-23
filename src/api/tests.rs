@@ -2503,6 +2503,31 @@ fn test_merge_extra_body_rejects_reserved_keys_for_profile_chat_request() {
 }
 
 #[test]
+fn test_merge_extra_body_allows_reasoning_effort_keys() {
+    // Hosted reasoning models (GLM 5.3 via OpenRouter) need reasoning_effort /
+    // reasoning to bound hidden reasoning spend; without them the whole
+    // completion budget burns before the answer (measured: 16k tokens, zero
+    // answer content, finish_reason=length).
+    let mut body = serde_json::json!({
+        "model": "z-ai/glm-5.3",
+        "messages": [],
+        "stream": false
+    });
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("low"));
+    extra.insert(
+        "reasoning".to_string(),
+        serde_json::json!({ "max_tokens": 4096 }),
+    );
+
+    merge_extra_body(&mut body, Some(&extra), "reasoning effort")
+        .expect("reasoning effort keys must be allowed in extra_body");
+
+    assert_eq!(body["reasoning_effort"], "low");
+    assert_eq!(body["reasoning"]["max_tokens"], 4096);
+}
+
+#[test]
 fn test_merge_extra_body_rejects_non_allowlisted_keys() {
     let mut body = serde_json::json!({
         "model": "test",

@@ -162,6 +162,14 @@ const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
     "models",
     "route",
     "transforms",
+    // Reasoning-effort control (OpenRouter `reasoning_effort` / `reasoning`):
+    // steers how much the model thinks, not output content — same class as
+    // best_of/provider above. Needed so hosted reasoning models (GLM 5.3)
+    // don't burn the whole completion budget on hidden reasoning before the
+    // answer (measured 2026-08-23: unbounded reasoning exhausted 16k tokens
+    // with finish_reason=length and zero answer content).
+    "reasoning_effort",
+    "reasoning",
 ];
 
 pub(crate) fn merge_extra_body(
