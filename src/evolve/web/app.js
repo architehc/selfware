@@ -4095,6 +4095,7 @@ async function runAnalysis(kind, trigger) {
     selectBottomView('output');
     appendOutput(label, 'Started');
 
+    let outcomeState = null;
     try {
         const payload = await request('/api/analysis/run', { method: 'POST', body: { kind } });
         const staleReason = staleness(workspaceSnapshot);
@@ -4108,12 +4109,14 @@ async function runAnalysis(kind, trigger) {
         renderProblems();
         appendOutput(label, payload);
         const outcome = explicitOutcome(payload);
+        outcomeState = outcome;
         if (state.problems.length > 0) selectBottomView('problems');
         setGlobalStatus(
             outcome === true ? `${label} passed` : outcome === false ? `${label} failed` : `${label} response received`,
             outcome === false ? 'error' : outcome === true ? 'success' : 'neutral',
         );
     } catch (error) {
+        outcomeState = false;
         state.problems = [{ severity: 'error', message: formatError(error), path: '', line: null, column: null, source: label }];
         renderProblems();
         appendOutput(`${label} failed`, formatError(error));
@@ -4126,6 +4129,13 @@ async function runAnalysis(kind, trigger) {
             button.setAttribute('aria-busy', 'false');
             button.disabled = false;
         });
+        if (trigger) {
+            const badge = document.createElement('span');
+            badge.className = 'tool-badge ' + (outcomeState === true ? 'ok' : outcomeState === false ? 'fail' : 'neutral');
+            badge.textContent = outcomeState === true ? '✓' : outcomeState === false ? '✗' : '•';
+            trigger.appendChild(badge);
+            setTimeout(() => badge.remove(), 8000);
+        }
         updateDocumentStatus();
     }
 }

@@ -432,6 +432,11 @@ textarea:focus-visible,
     animation: spin 0.85s linear infinite;
 }
 
+.tool-badge { margin-left: 6px; font-size: 12px; }
+.tool-badge.ok { color: var(--accent, #3fb950); }
+.tool-badge.fail { color: var(--danger, #f85149); }
+.tool-badge.neutral { color: var(--muted, #8b949e); }
+
 .tool-button svg,
 .icon-button svg,
 .command-button svg,
