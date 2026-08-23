@@ -1092,7 +1092,9 @@ async function loadContext() {
         loadContextSizes();
         return payload;
     } catch (error) {
-        $('#context-metrics').textContent = `Context unavailable: ${formatError(error)}`;
+        const metrics = $('#context-metrics');
+        metrics.textContent = `Context unavailable: ${formatError(error)}`;
+        metrics.title = '';
         appendOutput('Context request failed', formatError(error));
         throw error;
     }
@@ -3327,7 +3329,7 @@ function renderGraph(data) {
         const boundsW = Math.max(x1 - x0, 1), boundsH = Math.max(y1 - y0, 1);
         const canvasBox = canvas.getBoundingClientRect();
         if (!canvasBox.width || !canvasBox.height) return;
-        const scale = Math.min(canvasBox.width / boundsW, canvasBox.height / boundsH, 1) * 0.85;
+        const scale = Math.max(Math.min(canvasBox.width / boundsW, canvasBox.height / boundsH, 1) * 0.85, 0.15);
         const tx = (canvasBox.width - scale * (x0 + x1)) / 2;
         const ty = (canvasBox.height - scale * (y0 + y1)) / 2;
         const transform = window.d3.zoomIdentity.translate(tx, ty).scale(scale);
