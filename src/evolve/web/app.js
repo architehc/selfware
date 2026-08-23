@@ -276,6 +276,10 @@ function appendOutput(label, payload) {
     state.output.push(`[${timestamp}] ${label}\n${outputText(payload)}`);
     const log = $('#output-log');
     if (log) log.textContent = state.output.join('\n\n');
+    const app = $('#app');
+    if (app.classList.contains('bottom-collapsed')) {
+        selectBottomView('output');
+    }
 }
 
 function clearOutput() {
@@ -456,6 +460,10 @@ function wireEvents() {
 
     $('#clear-output')?.addEventListener('click', clearOutput);
     $('#toggle-bottom')?.addEventListener('click', toggleBottomPanel);
+    let bottomCollapsed = true;
+    try { bottomCollapsed = localStorage.getItem('selfware.bottomCollapsed') !== '0'; } catch {}
+    if (bottomCollapsed) $('#app').classList.add('bottom-collapsed');
+    updateBottomToggleIcon();
 
     $('#graph-zoom-in')?.addEventListener('click', () => graphZoom(1.3));
     $('#graph-zoom-out')?.addEventListener('click', () => graphZoom(0.77));
@@ -1809,7 +1817,10 @@ function selectBottomView(name) {
 }
 
 function toggleBottomPanel() {
-    $('#app').classList.toggle('bottom-collapsed');
+    const app = $('#app');
+    app.classList.toggle('bottom-collapsed');
+    const collapsed = app.classList.contains('bottom-collapsed');
+    try { localStorage.setItem('selfware.bottomCollapsed', collapsed ? '1' : '0'); } catch {}
     updateBottomToggleIcon();
 }
 
