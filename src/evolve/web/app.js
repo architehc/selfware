@@ -531,6 +531,28 @@ function wireEvents() {
         }
     });
 
+    document.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
+            event.preventDefault();
+            openQuickOpen();
+        } else if (event.key === 'Escape' && !$('#quick-open').classList.contains('hidden')) {
+            closeQuickOpen();
+        }
+    });
+    $('#quick-open-input').addEventListener('input', (event) => renderQuickOpen(event.target.value));
+    $('#quick-open-input').addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            if (!quickOpenMatches.length) return;
+            event.preventDefault();
+            const delta = event.key === 'ArrowDown' ? 1 : -1;
+            quickOpenActiveIndex = Math.min(Math.max(quickOpenActiveIndex + delta, 0), quickOpenMatches.length - 1);
+            renderQuickOpenList();
+        } else if (event.key === 'Enter' && quickOpenMatches[quickOpenActiveIndex]) {
+            openFile(quickOpenMatches[quickOpenActiveIndex].path);
+            closeQuickOpen();
+        }
+    });
+
     window.addEventListener('beforeunload', (event) => {
         if (![...state.openDocuments.values()].some((documentState) => documentState.dirty)) return;
         event.preventDefault();
@@ -1456,6 +1478,70 @@ function updateFallbackCursorStatus() {
     const lastNewline = before.lastIndexOf('\n');
     const column = offset - lastNewline;
     $('#cursor-status').textContent = `Ln ${line}, Col ${column}`;
+}
+
+let quickOpenMatches = [];
+let quickOpenActiveIndex = 0;
+
+function openQuickOpen() {
+    const overlay = $('#quick-open');
+    overlay.classList.remove('hidden');
+    const input = $('#quick-open-input');
+    input.value = '';
+    renderQuickOpen('');
+    input.focus();
+}
+
+function closeQuickOpen() {
+    $('#quick-open').classList.add('hidden');
+}
+
+function renderQuickOpen(query) {
+    const q = query.trim().toLowerCase();
+    const matched = state.files
+        .filter((entry) => !entry.isDirectory && (!q || entry.path.toLowerCase().includes(q)));
+    if (q) {
+        // Rank matches: basename hits first, then earliest match position, then shortest
+        // path. Decorate with the original index so ties keep API order (stable sort).
+        quickOpenMatches = matched
+            .map((entry, index) => ({
+                entry,
+                index,
+                key: [
+                    basename(entry.path).toLowerCase().includes(q) ? 0 : 1,
+                    entry.path.toLowerCase().indexOf(q),
+                    entry.path.length,
+                ],
+            }))
+            .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2] || a.index - b.index)
+            .map((decorated) => decorated.entry)
+            .slice(0, 12);
+    } else {
+        // Empty query keeps API order.
+        quickOpenMatches = matched.slice(0, 12);
+    }
+    quickOpenActiveIndex = 0;
+    renderQuickOpenList();
+}
+
+function renderQuickOpenList() {
+    const list = $('#quick-open-list');
+    list.replaceChildren();
+    if (!quickOpenMatches.length) {
+        const empty = document.createElement('div');
+        empty.className = 'quick-open-empty';
+        empty.textContent = 'no files';
+        list.appendChild(empty);
+        return;
+    }
+    quickOpenMatches.forEach((entry, index) => {
+        const row = document.createElement('div');
+        row.className = 'quick-open-row' + (index === quickOpenActiveIndex ? ' active' : '');
+        row.setAttribute('role', 'option');
+        row.textContent = entry.path;
+        row.addEventListener('click', () => { openFile(entry.path); closeQuickOpen(); });
+        list.appendChild(row);
+    });
 }
 
 function renderDocumentTabs() {

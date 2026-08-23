@@ -352,6 +352,11 @@
             </aside>
         </main>
 
+        <div id="quick-open" class="quick-open hidden" role="dialog" aria-label="Quick open file">
+            <input id="quick-open-input" type="text" placeholder="Type a file path…" autocomplete="off" spellcheck="false">
+            <div id="quick-open-list" class="quick-open-list" role="listbox"></div>
+        </div>
+
         <section id="bottom-panel" class="bottom-panel" aria-label="Problems and output">
             <div class="bottom-tabs" role="tablist" aria-label="Diagnostics">
                 <button class="bottom-tab active" type="button" role="tab" aria-selected="true" data-bottom-view="problems">
