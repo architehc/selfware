@@ -3229,7 +3229,7 @@ function renderGraph(data) {
     const canvas = $('#graph-canvas');
     if (!window.d3) throw new Error('D3 did not load.');
     state.graphRuntime?.simulation?.stop();
-    canvas.querySelector('svg')?.remove();
+    canvas.querySelectorAll("svg[role='img']").forEach((stale) => stale.remove());
 
     const width = Math.max(canvas.clientWidth, 640);
     const height = Math.max(canvas.clientHeight, 420);
@@ -3253,7 +3253,10 @@ function renderGraph(data) {
         .attr('role', 'img')
         .attr('aria-label', `Code graph with ${nodes.length} nodes and ${links.length} edges`);
     const viewport = svg.append('g');
-    const zoom = window.d3.zoom().scaleExtent([0.15, 4]).on('zoom', (event) => viewport.attr('transform', event.transform));
+    const zoom = window.d3.zoom().scaleExtent([0.15, 4]).on('zoom', (event) => {
+        viewport.attr('transform', event.transform);
+        labels.classed('hidden-label', event.transform.k < 0.6);
+    });
     svg.call(zoom);
 
     const edge = viewport.append('g').selectAll('line')
@@ -3304,6 +3307,23 @@ function renderGraph(data) {
         groupCenters[g] = { x: width / 2 + Math.cos(angle) * 200, y: height / 2 + Math.sin(angle) * 200 };
     });
 
+    let didFit = false;
+    const fitGraph = () => {
+        const nodesNow = simulation.nodes();
+        if (!nodesNow.length) return;
+        const xs = nodesNow.map((n) => n.x), ys = nodesNow.map((n) => n.y);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+        const boundsW = Math.max(x1 - x0, 1), boundsH = Math.max(y1 - y0, 1);
+        const canvasBox = canvas.getBoundingClientRect();
+        if (!canvasBox.width || !canvasBox.height) return;
+        const scale = Math.min(canvasBox.width / boundsW, canvasBox.height / boundsH, 1) * 0.85;
+        const tx = (canvasBox.width - scale * (x0 + x1)) / 2;
+        const ty = (canvasBox.height - scale * (y0 + y1)) / 2;
+        const transform = window.d3.zoomIdentity.translate(tx, ty).scale(scale);
+        if (state.graphRuntime) state.graphRuntime.fitTransform = transform;
+        svg.call(zoom.transform, transform);
+    };
+
     const simulation = window.d3.forceSimulation(nodes)
         .force('link', window.d3.forceLink(links).id((item) => item.id).distance(78).strength(0.35))
         .force('charge', window.d3.forceManyBody().strength(-170))
@@ -3316,6 +3336,11 @@ function renderGraph(data) {
                 .attr('x2', (item) => item.target.x).attr('y2', (item) => item.target.y);
             node.attr('cx', (item) => item.x).attr('cy', (item) => item.y);
             labels.attr('x', (item) => item.x + 10).attr('y', (item) => item.y + 4);
+        })
+        .on('end', () => {
+            if (didFit) return;
+            didFit = true;
+            fitGraph();
         });
 
     node.call(window.d3.drag()
@@ -3345,6 +3370,7 @@ function renderGraph(data) {
         height,
         nodeSelection: node,
         labelSelection: labels,
+        fitTransform: null,
     };
     highlightGraphSearch($('#graph-search')?.value || '');
     renderGraphLegend();
@@ -3514,7 +3540,8 @@ function graphZoom(factor) {
 function resetGraphView() {
     const runtime = state.graphRuntime;
     if (!runtime) return;
-    runtime.svg.transition().duration(220).call(runtime.zoom.transform, window.d3.zoomIdentity);
+    const target = runtime.fitTransform || window.d3.zoomIdentity;
+    runtime.svg.transition().duration(220).call(runtime.zoom.transform, target);
 }
 
 function renderStructured(value, depth = 0, budget = { count: 0, limit: 500 }) {

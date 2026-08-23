@@ -887,6 +887,10 @@ textarea:focus-visible,
     stroke-width: 4px;
 }
 
+.hidden-label {
+    display: none;
+}
+
 .graph-edge {
     stroke: var(--edge);
     stroke-opacity: 0.55;
