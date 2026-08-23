@@ -701,51 +701,44 @@ function renderContext(previous = null) {
 
     const metrics = $('#context-metrics');
     if (!metrics) return;
-    metrics.replaceChildren();
 
     if (state.context.files === null && state.context.tokens === null) {
         metrics.textContent = state.context.mode ? `${contextLabel(state.context.mode)} context` : 'Context unavailable';
+        metrics.title = '';
         return;
     }
 
-    const base = document.createElement('span');
     const contextLimit = Number(state.workspace?.context_length);
     const selectedTokens = Number(state.context.tokens);
     const hasLimit = Number.isFinite(contextLimit) && contextLimit > 0 && Number.isFinite(selectedTokens);
-    base.textContent = hasLimit
+
+    // Full stats line (previously the visible text) now lives in the tooltip.
+    const fullParts = [hasLimit
         ? `${formatCount(state.context.files)} files · ${formatCount(selectedTokens)} / ${formatCount(contextLimit)} tokens`
-        : `${formatCount(state.context.files)} files · ${formatCount(state.context.tokens)} tokens`;
-    metrics.appendChild(base);
+        : `${formatCount(state.context.files)} files · ${formatCount(state.context.tokens)} tokens`];
 
     if (hasLimit && selectedTokens > contextLimit) {
-        const overflow = document.createElement('span');
-        overflow.className = 'capacity-overflow';
-        overflow.textContent = ` · +${formatCount(selectedTokens - contextLimit)} over window`;
-        metrics.appendChild(overflow);
-        metrics.title = 'Active context is indexed, but it cannot fit in one configured model request.';
-    } else {
-        metrics.title = '';
+        fullParts.push(`+${formatCount(selectedTokens - contextLimit)} over window`);
+        fullParts.push('Active context is indexed, but it cannot fit in one configured model request.');
     }
     if (state.context.mixedFiles > 0) {
-        const mixed = document.createElement('span');
-        mixed.className = 'partition-warning';
-        mixed.textContent = ` · ${formatCount(state.context.mixedFiles)} files contain inline test-only bodies`;
-        metrics.appendChild(mixed);
-        metrics.title = [metrics.title, `${formatCount(state.context.inlineTestLines)} inline test lines are excluded from Full active-context evidence.`]
-            .filter(Boolean)
-            .join(' ');
+        fullParts.push(`${formatCount(state.context.mixedFiles)} files contain inline test-only bodies`);
+        fullParts.push(`${formatCount(state.context.inlineTestLines)} inline test lines are excluded from Full active-context evidence.`);
     }
-
     if (previous) {
         const fileDelta = Number(state.context.files) - Number(previous.files);
         const tokenDelta = Number(state.context.tokens) - Number(previous.tokens);
         if (Number.isFinite(fileDelta) && Number.isFinite(tokenDelta) && (fileDelta !== 0 || tokenDelta !== 0)) {
-            const delta = document.createElement('span');
-            delta.className = fileDelta > 0 || tokenDelta > 0 ? 'delta-positive' : 'delta-negative';
-            delta.textContent = ` (${fileDelta >= 0 ? '+' : ''}${formatCount(fileDelta)} files, ${tokenDelta >= 0 ? '+' : ''}${formatCount(tokenDelta)} tokens)`;
-            metrics.appendChild(delta);
+            fullParts.push(`(${fileDelta >= 0 ? '+' : ''}${formatCount(fileDelta)} files, ${tokenDelta >= 0 ? '+' : ''}${formatCount(tokenDelta)} tokens)`);
         }
     }
+
+    const full = fullParts.join(' · ');
+    const compact = hasLimit
+        ? `${formatTokensCompact(selectedTokens)} / ${formatTokensCompact(contextLimit)} tok · ${contextLabel(state.context.mode)}`
+        : `${formatTokensCompact(selectedTokens)} tok · ${contextLabel(state.context.mode)}`;
+    metrics.textContent = compact;
+    metrics.title = full;
 
     renderContextInspector();
     if (state.contextCards) renderComponentChecklist();
@@ -1098,6 +1091,12 @@ async function loadContext() {
         appendOutput('Context request failed', formatError(error));
         throw error;
     }
+}
+
+// One-decimal compact token count for the #context-metrics line: 23.3K, 65.5K.
+function formatTokensCompact(n) {
+    if (n == null) return '—';
+    return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 }
 
 // Compact token count for the picker labels: 0, 12.3K, 1.8M.
