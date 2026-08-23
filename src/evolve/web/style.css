@@ -1031,6 +1031,30 @@ textarea:focus-visible,
     border-bottom-color: var(--accent);
 }
 
+.inspector-picker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.pane-heading-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--muted, #8b949e);
+    letter-spacing: 0.04em;
+}
+
+#inspector-select {
+    background: var(--surface-raised, #242424);
+    color: var(--text, #ededed);
+    border: 1px solid var(--border, #383838);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font: inherit;
+}
+
 .inspector-view {
     flex: 1 1 auto;
     min-height: 0;

@@ -382,9 +382,9 @@ async function initialize() {
         setGlobalStatus(`${failures.length} workspace request${failures.length === 1 ? '' : 's'} failed`, 'error');
     }
 
-    // Deep-link: open a specific inspector tab, e.g. index.html#inspector=context
+    // Deep-link: open a specific inspector view, e.g. index.html#inspector=context
     const inspectorMatch = location.hash.match(/^#inspector=(\w+)$/);
-    if (inspectorMatch && $(`.inspector-tab[data-inspector="${inspectorMatch[1]}"]`)) {
+    if (inspectorMatch && $(`#inspector-select option[value="${inspectorMatch[1]}"]`)) {
         selectInspector(inspectorMatch[1]);
     }
     const viewMatch = location.hash.match(/^#view=(\w+)$/);
@@ -418,8 +418,8 @@ function wireEvents() {
     $('#component-apply')?.addEventListener('click', () => applyComponentContext([...state.componentChecked]));
     $('#component-clear')?.addEventListener('click', () => applyComponentContext([]));
 
-    $$('.inspector-tab[data-inspector]').forEach((button) => {
-        button.addEventListener('click', () => selectInspector(button.dataset.inspector));
+    $('#inspector-select')?.addEventListener('change', (event) => {
+        selectInspector(event.target.value);
     });
 
     $$('.bottom-tab[data-bottom-view]').forEach((button) => {
@@ -1781,11 +1781,8 @@ function methodRow(path, method, kindLabel = 'method') {
 
 function selectInspector(name) {
     state.activeInspector = name;
-    $$('.inspector-tab[data-inspector]').forEach((button) => {
-        const active = button.dataset.inspector === name;
-        button.classList.toggle('active', active);
-        button.setAttribute('aria-selected', String(active));
-    });
+    const picker = $('#inspector-select');
+    if (picker && picker.value !== name) picker.value = name;
     $$('.inspector-view').forEach((panel) => {
         const active = panel.id === `inspector-${name}`;
         panel.classList.toggle('active', active);

@@ -186,20 +186,20 @@
                     <strong id="selection-name">No selection</strong>
                     <span id="selection-path"></span>
                 </div>
-                <div class="inspector-tabs" role="tablist" aria-label="Inspector views">
-                    <span class="inspector-group-label">Inspect</span>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="node">Node</button>
-                    <button class="inspector-tab active" type="button" role="tab" aria-selected="true" data-inspector="ast">AST</button>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="summary">Summary</button>
-                    <span class="inspector-group-label">Review</span>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="grounding">Grounding</button>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="recommendations">Advice</button>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="orientation">Orientation</button>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="pairs">Pairs</button>
-                    <span class="inspector-group-label">Status</span>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="readiness">Readiness</button>
-                    <button class="inspector-tab" type="button" role="tab" aria-selected="false" data-inspector="context">Context</button>
-                </div>
+                <label class="inspector-picker">
+                    <span class="pane-heading-label">Inspector view</span>
+                    <select id="inspector-select" aria-label="Inspector view">
+                        <option value="node">Node</option>
+                        <option value="ast" selected>AST (advanced)</option>
+                        <option value="summary">Summary</option>
+                        <option value="grounding">Grounding</option>
+                        <option value="recommendations">Advice</option>
+                        <option value="orientation">Orientation</option>
+                        <option value="pairs">Pairs</option>
+                        <option value="readiness">Readiness</option>
+                        <option value="context">Context</option>
+                    </select>
+                </label>
 
                 <section id="inspector-summary" class="inspector-view hidden" role="tabpanel">
                     <div id="summary-state" class="pane-state">Select a source file to view its structural summary.</div>
