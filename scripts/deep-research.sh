@@ -83,7 +83,7 @@ while IFS= read -r sub; do
   i=$((i+1))
   notes="$RUN_DIR/$(printf '%02d' "$i")-notes.md"
   echo "-- sub-query $i: $sub"
-  timeout 1500 ./target/release/selfware run -m yolo -c "$RESEARCH_CONFIG" \
+  timeout 3600 ./target/release/selfware run -m yolo -c "$RESEARCH_CONFIG" \
     "Web research task: '$sub'. Recipe, follow it exactly: (1) browser_fetch https://html.duckduckgo.com/html/?q=<url-encoded query>. (2) From those results pick the 2 most promising URLs and browser_fetch each — hard limit of 3 browser_fetch calls total for the whole task, no page_control. (3) file_write concise findings with source URLs to $notes. Finish immediately after the file is written." \
     || echo "(sub-query $i agent failed)" >> "$notes"
 done <<< "$PLAN"
