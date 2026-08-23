@@ -605,6 +605,8 @@ textarea:focus-visible,
     to { transform: rotate(360deg); }
 }
 
+.explorer-filter { width: 100%; box-sizing: border-box; padding: 6px 8px; margin: 4px 0; background: var(--bg, #0d1117); color: var(--text, #e6edf3); border: 1px solid var(--border, #30363d); border-radius: 6px; font: inherit; font-size: 12px; }
+
 .file-tree {
     flex: 1 1 auto;
     min-height: 0;

@@ -88,6 +88,7 @@ const state = {
     files: [],
     fileIndex: new Map(),
     expandedFolders: new Set(['src']),
+    explorerFilter: '',
     openDocuments: new Map(),
     activePath: null,
     editor: null,
@@ -428,6 +429,10 @@ function wireEvents() {
 
     $('#save-action')?.addEventListener('click', saveActiveDocument);
     $('#refresh-files')?.addEventListener('click', () => loadFiles(true));
+    $('#explorer-filter')?.addEventListener('input', (event) => {
+        state.explorerFilter = event.target.value.trim().toLowerCase();
+        renderFileTree();
+    });
     $$('[data-analysis-kind]').forEach((button) => {
         button.addEventListener('click', () => runAnalysis(button.dataset.analysisKind, button));
     });
@@ -1241,7 +1246,14 @@ function buildFileTree(entries) {
 function renderFileTree() {
     const container = $('#file-tree');
     container.replaceChildren();
-    const root = buildFileTree(state.files);
+    let files = state.files;
+    const filter = (state.explorerFilter || '').toLowerCase();
+    if (filter) {
+        files = files.filter((entry) =>
+            entry.isDirectory || entry.path.toLowerCase().includes(filter)
+        );
+    }
+    const root = buildFileTree(files);
 
     const sortedChildren = (node) => [...node.children.values()].sort((left, right) => {
         if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
@@ -1255,7 +1267,7 @@ function renderFileTree() {
 
         if (node.isDirectory) {
             const openForActive = state.activePath?.startsWith(`${node.path}/`);
-            const expanded = state.expandedFolders.has(node.path) || openForActive;
+            const expanded = Boolean(state.explorerFilter) || state.expandedFolders.has(node.path) || openForActive;
             const label = document.createElement('button');
             label.type = 'button';
             label.className = 'tree-folder-label';
