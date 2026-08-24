@@ -95,7 +95,10 @@ fn clean_evidence_passes_with_zero_findings() {
     ];
     let summary = gate_evidence_trust(&ev).unwrap();
     assert_eq!(summary.sources_scanned, 2);
-    assert_eq!(summary.worst_risk_score, 0);
+    // Fail-closed provenance floor (2026-08-23 hardening): the semi-trusted
+    // README (markup) carries the 8-point floor even with zero findings, so
+    // worst_risk is the floor, not 0. The trusted lib.rs stays at 0.
+    assert_eq!(summary.worst_risk_score, 8);
 }
 
 #[test]

@@ -97,6 +97,16 @@ pub(crate) fn trust_gate_tool_result(
 
     // Trusted first-party code is report-only; everything else sanitizes
     // high-severity findings. hidden_unicode sanitizes everywhere.
+    //
+    // Accepted residual risk (2026-08-23 hardening pass): `trusted_code` keys
+    // off the extension-derived classification alone, so a hostile `.rs` file
+    // read through a tool stays report-only (its high-severity findings are
+    // surfaced, not rewritten). Tightening this needs verified-origin
+    // plumbing (is this path actually workspace-first-party?) rather than the
+    // extension check; until then the carve-out keeps the agent able to read
+    // its own safety modules without self-sanitizing. The report path no
+    // longer downgrades severity for untrusted rust_source, so the signal
+    // is always visible.
     let trusted_code = classification == "rust_source";
     let mut lines_to_replace: BTreeSet<usize> = BTreeSet::new();
     let mut kinds: Vec<String> = Vec::new();

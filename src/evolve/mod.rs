@@ -59,7 +59,8 @@ pub use context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasur
 pub use context_reduce::{dedup_context, reduce_source, strip_cfg_test_blocks, strip_comments};
 pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use context_trust::{
-    analyze_source, scan_injection, InjectionFinding, SourceKind, TrustLevel, TrustReport,
+    analyze_source, scan_injection, GateDecision, InjectionFinding, SourceKind, TrustLevel,
+    TrustReport,
 };
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};

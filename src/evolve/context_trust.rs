@@ -8,7 +8,14 @@
 //! those patterns, so a human (and the assistant flow) can see *what* is in
 //! context, *where it came from*, and *whether it looks poisoned* before it is
 //! ever sent.
+//!
+//! The regex/character rules below are a heuristic layer, not a proof of
+//! safety: determined attackers can always find phrasings the rules miss.
+//! That is why provenance is fail-closed — content from non-trusted origins
+//! never reports "clean" — and why [`TrustReport::gate`] gives callers a
+//! machine-checkable decision instead of a display string.
 
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -63,6 +70,20 @@ pub struct InjectionFinding {
     pub explanation: String,
 }
 
+/// Machine-checkable inclusion decision derived from a trust report. This is
+/// the field callers should gate on; `verdict` is display-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateDecision {
+    /// No findings on trusted provenance.
+    Allow,
+    /// Findings on trusted provenance, or any non-trusted content (which is
+    /// never auto-allowed, even with zero findings).
+    Review,
+    /// High-severity findings on non-trusted provenance.
+    Quarantine,
+}
+
 /// A full trust assessment of one context source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrustReport {
@@ -70,25 +91,26 @@ pub struct TrustReport {
     pub source_kind: SourceKind,
     pub classification: String,
     pub trust_level: String,
-    /// 0 (clean) .. 100 (highly suspicious).
+    /// 0 (clean) .. 100 (highly suspicious). Non-trusted provenance has a
+    /// floor above zero: evading the heuristic rules does not read as clean.
     pub risk_score: u32,
     pub findings: Vec<InjectionFinding>,
-    /// Short human verdict.
+    /// Short human verdict (display-only — gate on `gate`).
     pub verdict: String,
+    pub gate: GateDecision,
 }
 
 /// Derive a trust level from provenance and content classification. Workspace
-/// Rust source is trusted; data/vendored files are only semi-trusted (they can be
-/// tampered and should never carry instructions); anything external or
-/// model-generated is untrusted.
+/// Rust source and tests are trusted; config/data/vendored files are only
+/// semi-trusted (they are attacker-editable data and must never carry full
+/// trust); anything external or model-generated is untrusted.
 pub fn trust_level(source: SourceKind, classification: &str) -> TrustLevel {
     match source {
         SourceKind::External | SourceKind::ModelOutput => TrustLevel::Untrusted,
         SourceKind::ToolOutput | SourceKind::Memory => TrustLevel::SemiTrusted,
         SourceKind::User => TrustLevel::Trusted,
         SourceKind::Workspace => match classification {
-            "rust_source" | "test" | "config" => TrustLevel::Trusted,
-            "data" | "vendored" | "markup" | "script" => TrustLevel::SemiTrusted,
+            "rust_source" | "test" => TrustLevel::Trusted,
             _ => TrustLevel::SemiTrusted,
         },
     }
@@ -119,7 +141,10 @@ fn rules() -> &'static [Rule] {
             Rule {
                 kind: "role_switch",
                 severity: "high",
-                re: r("(?im)^\\s*(system|assistant|developer)\\s*:|(?i)you\\s+are\\s+now\\s+|(?i)new\\s+(instructions|role|task|persona)\\s*:|(?i)pretend\\s+(you\\s+are|to\\s+be)"),
+                // Plain "system:" plus markdown-header ("# System:") and
+                // quote ("> assistant:") forms; "you are now" plus the
+                // contraction forms "you're now" / "youre now".
+                re: r("(?im)^\\s*(?:[#>]+\\s*){0,2}(system|assistant|developer)\\s*[>:]|(?i)you(?:\\s+are\\s+|(?:'|’)?re\\s+)now\\b|(?i)new\\s+(instructions|role|task|persona)\\s*:|(?i)pretend\\s+(you\\s+are|to\\s+be)"),
                 explanation: "Injects a fake role or redefines the assistant's identity/task.",
                 data_only: false,
             },
@@ -148,11 +173,10 @@ fn rules() -> &'static [Rule] {
     })
 }
 
-/// Characters that don't render but can smuggle instructions past a human reader.
+/// Characters that don't render but can smuggle instructions past a human
+/// reader — flagged wherever they appear.
 fn hidden_char_name(c: char) -> Option<&'static str> {
     match c {
-        // U+200D (ZWJ) is deliberately excluded: it is a legitimate part of emoji
-        // sequences (e.g. 🧑‍🎄) and flagging it produces constant false positives.
         '\u{200B}' | '\u{200C}' | '\u{2060}' | '\u{FEFF}' => Some("zero-width character"),
         '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => Some("bidirectional override"),
         '\u{00AD}' => Some("soft hyphen"),
@@ -163,59 +187,188 @@ fn hidden_char_name(c: char) -> Option<&'static str> {
         // TAG characters (plane 14): invisible ASCII-encoded glyphs used to
         // smuggle instructions past both humans and naive string filters.
         '\u{E0000}'..='\u{E007F}' => Some("TAG character"),
+        // Invisible space-like fillers with no legitimate use in source text.
+        '\u{180E}' => Some("Mongolian vowel separator (invisible)"),
+        '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}' => Some("Hangul filler (invisible)"),
         _ => None,
     }
 }
 
-/// Scan content for injection / pollution patterns. `is_code` relaxes the
-/// instruction-shaped rules (expected in prose) but keeps the data-file rules.
-pub fn scan_injection(content: &str, classification: &str) -> Vec<InjectionFinding> {
+/// Invisible characters that are only suspicious *adjacent to ASCII words*.
+/// ZWJ and variation selectors are legitimate inside emoji sequences
+/// (🧑‍🎄, ❤️), but between ASCII letters they split keywords
+/// ("ign<ZWJ>ore") to evade both the rule regexes and human review.
+fn word_internal_hidden_name(c: char) -> Option<&'static str> {
+    match c {
+        '\u{200D}' => Some("zero-width joiner inside a word"),
+        '\u{FE00}'..='\u{FE0F}' => Some("variation selector inside text"),
+        _ => None,
+    }
+}
+
+/// True for characters treated as logical line separators during scanning:
+/// beyond \n (handled by `str::lines`), U+0085 (NEL), U+2028 and U+2029 break
+/// lines visually, so a payload hidden behind them must start a new scanned
+/// line (with the correct line number) instead of slipping past per-line rules.
+fn is_line_separator(c: char) -> bool {
+    matches!(c, '\n' | '\u{0085}' | '\u{2028}' | '\u{2029}')
+}
+
+/// Split content into logical lines for scanning. The separator is retained
+/// at the end of each segment (split_inclusive) so the hidden-character scan
+/// still sees and flags the separator characters themselves.
+///
+/// Note: when C1/unicode separators are present, these line numbers can
+/// diverge from `str::lines` numbering — detection is the security property;
+/// the divergence only affects which physical line a sanitizer rewrites.
+fn logical_lines(content: &str) -> impl Iterator<Item = &str> {
+    content.split_inclusive(is_line_separator)
+}
+
+/// Fold a line for rule matching: zero-width/format characters vanish (so
+/// keywords split by them rejoin), full-width Latin collapses to ASCII, curly
+/// quotes straighten, and common Cyrillic/Greek/other lookalike homoglyphs
+/// map to their ASCII twin. Excerpts and hidden-char reporting always use the
+/// original text; the fold exists only so the rules see what a human reader
+/// (and the model) effectively sees.
+fn fold_for_scan(line: &str) -> String {
+    line.chars()
+        .filter_map(|c| match c {
+            // Zero-width and format characters: removed so "ign<ZWJ>ore"
+            // matches the "ignore" rule family.
+            '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{00AD}' => None,
+            // Full-width ASCII and ideographic space.
+            '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0),
+            '\u{3000}' => Some(' '),
+            // Curly quotes.
+            '\u{2018}' | '\u{2019}' => Some('\''),
+            '\u{201C}' | '\u{201D}' => Some('"'),
+            // Latin lookalike oddities.
+            '\u{0130}' => Some('I'), // İ (Turkish dotted capital I)
+            '\u{0131}' => Some('i'), // ı (dotless i)
+            '\u{017F}' => Some('s'), // ſ (long s)
+            '\u{212A}' => Some('K'), // K (Kelvin sign)
+            // Cyrillic uppercase homoglyphs.
+            '\u{0405}' => Some('S'),
+            '\u{0406}' => Some('I'),
+            '\u{0408}' => Some('J'),
+            '\u{0410}' => Some('A'),
+            '\u{0412}' => Some('B'),
+            '\u{0415}' => Some('E'),
+            '\u{041A}' => Some('K'),
+            '\u{041C}' => Some('M'),
+            '\u{041D}' => Some('H'),
+            '\u{041E}' => Some('O'),
+            '\u{0420}' => Some('P'),
+            '\u{0421}' => Some('C'),
+            '\u{0422}' => Some('T'),
+            '\u{0425}' => Some('X'),
+            '\u{04BA}' => Some('H'),
+            // Cyrillic lowercase homoglyphs.
+            '\u{0430}' => Some('a'),
+            '\u{0435}' => Some('e'),
+            '\u{043A}' => Some('k'),
+            '\u{043C}' => Some('m'),
+            '\u{043D}' => Some('h'),
+            '\u{043E}' => Some('o'),
+            '\u{043F}' => Some('n'),
+            '\u{0440}' => Some('p'),
+            '\u{0441}' => Some('c'),
+            '\u{0443}' => Some('y'),
+            '\u{0445}' => Some('x'),
+            '\u{0455}' => Some('s'),
+            '\u{0456}' => Some('i'),
+            '\u{0458}' => Some('j'),
+            '\u{04BB}' => Some('h'),
+            // Greek homoglyphs.
+            '\u{0391}' => Some('A'),
+            '\u{0392}' => Some('B'),
+            '\u{0395}' => Some('E'),
+            '\u{0396}' => Some('Z'),
+            '\u{0397}' => Some('H'),
+            '\u{0399}' => Some('I'),
+            '\u{039A}' => Some('K'),
+            '\u{039C}' => Some('M'),
+            '\u{039D}' => Some('N'),
+            '\u{039F}' => Some('O'),
+            '\u{03A1}' => Some('P'),
+            '\u{03A4}' => Some('T'),
+            '\u{03A5}' => Some('Y'),
+            '\u{03A7}' => Some('X'),
+            '\u{03B1}' => Some('a'),
+            '\u{03B5}' => Some('e'),
+            '\u{03B9}' => Some('i'),
+            '\u{03BA}' => Some('k'),
+            '\u{03BD}' => Some('v'),
+            '\u{03BF}' => Some('o'),
+            '\u{03C1}' => Some('p'),
+            '\u{03C5}' => Some('u'),
+            '\u{03C7}' => Some('x'),
+            // Armenian homoglyph.
+            '\u{0585}' => Some('o'),
+            _ => Some(c),
+        })
+        .collect()
+}
+
+/// Scan content for injection / pollution patterns. `trust` ties severity to
+/// provenance: the informational downgrade for first-party code (which
+/// legitimately discusses these patterns) applies only when the provenance is
+/// actually trusted — untrusted content merely *labelled* `rust_source` keeps
+/// full severity, closing the classification-spoofing path.
+pub fn scan_injection(
+    content: &str,
+    classification: &str,
+    trust: TrustLevel,
+) -> Vec<InjectionFinding> {
     let is_data_like = matches!(classification, "data" | "config" | "vendored");
+    let relax_rules =
+        matches!(classification, "rust_source" | "test") && trust == TrustLevel::Trusted;
     let mut findings = Vec::new();
 
-    for (idx, line) in content.lines().enumerate() {
+    let lines: Vec<&str> = logical_lines(content).collect();
+    for (idx, line) in lines.iter().enumerate() {
         let line_no = idx + 1;
 
-        // Hidden / bidi unicode anywhere is suspicious.
-        for c in line.chars() {
-            if let Some(name) = hidden_char_name(c) {
-                findings.push(InjectionFinding {
-                    kind: "hidden_unicode".to_string(),
-                    severity: "high".to_string(),
-                    line: line_no,
-                    excerpt: excerpt(line),
-                    explanation: format!(
-                        "Contains a {name} (U+{:04X}) that can hide text from a human reviewer.",
-                        c as u32
-                    ),
-                });
-                break;
+        // Hidden / bidi unicode anywhere is suspicious; joiners and variation
+        // selectors are suspicious next to ASCII text (emoji-tolerant). Every
+        // distinct hidden char on the line is reported once.
+        let chars: Vec<char> = line.chars().collect();
+        let mut seen: BTreeSet<char> = BTreeSet::new();
+        for (i, &c) in chars.iter().enumerate() {
+            let name = hidden_char_name(c).or_else(|| {
+                let ascii_neighbor = (i > 0 && chars[i - 1].is_ascii_alphanumeric())
+                    || (i + 1 < chars.len() && chars[i + 1].is_ascii_alphanumeric());
+                if ascii_neighbor {
+                    word_internal_hidden_name(c)
+                } else {
+                    None
+                }
+            });
+            if let Some(name) = name {
+                if seen.insert(c) {
+                    findings.push(InjectionFinding {
+                        kind: "hidden_unicode".to_string(),
+                        severity: "high".to_string(),
+                        line: line_no,
+                        excerpt: excerpt(line),
+                        explanation: format!(
+                            "Contains a {name} (U+{:04X}) that can hide text from a human reviewer.",
+                            c as u32
+                        ),
+                    });
+                }
             }
         }
 
-        // Long base64/hex blobs can smuggle encoded payloads.
-        if let Some(m) = longest_encoded_run(line) {
-            if m >= 200 {
-                findings.push(InjectionFinding {
-                    kind: "encoded_blob".to_string(),
-                    severity: "low".to_string(),
-                    line: line_no,
-                    excerpt: excerpt(line),
-                    explanation: format!("A {m}-char encoded run may conceal a payload; verify it is legitimate data."),
-                });
-            }
-        }
-
-        // First-party code legitimately discusses these patterns (safety modules,
-        // parsers, tests, doc comments). There the same match is informational,
-        // not an alarm — downgrade to low. On data/untrusted content it stays hot.
-        let is_code = matches!(classification, "rust_source" | "test");
+        // Rule regexes run on the folded line; excerpts keep the original.
+        let folded = fold_for_scan(line);
         for rule in rules() {
             if rule.data_only && !is_data_like {
                 continue;
             }
-            if rule.re.is_match(line) {
-                let severity = if is_code { "low" } else { rule.severity };
+            if rule.re.is_match(&folded) {
+                let severity = if relax_rules { "low" } else { rule.severity };
                 findings.push(InjectionFinding {
                     kind: rule.kind.to_string(),
                     severity: severity.to_string(),
@@ -226,6 +379,28 @@ pub fn scan_injection(content: &str, classification: &str) -> Vec<InjectionFindi
             }
         }
     }
+
+    // Long base64/base64url/hex blobs can smuggle encoded payloads. Runs are
+    // measured over the whole content with line-wrap continuation, so a blob
+    // split across lines (or padded with base64url - / _ delimiters) cannot
+    // reset the length check. Severity is low only for trusted provenance.
+    for (start_line, run_len) in encoded_runs(content, 200) {
+        findings.push(InjectionFinding {
+            kind: "encoded_blob".to_string(),
+            severity: if trust == TrustLevel::Trusted {
+                "low"
+            } else {
+                "medium"
+            }
+            .to_string(),
+            line: start_line,
+            excerpt: excerpt(lines.get(start_line - 1).copied().unwrap_or("")),
+            explanation: format!(
+                "A {run_len}-char encoded run may conceal a payload; verify it is legitimate data."
+            ),
+        });
+    }
+
     findings
 }
 
@@ -237,9 +412,10 @@ pub fn analyze_source(
     content: &str,
 ) -> TrustReport {
     let trust = trust_level(source, classification);
-    let findings = scan_injection(content, classification);
+    let findings = scan_injection(content, classification, trust);
     let risk = risk_score(&findings, trust);
-    let verdict = verdict_for(risk, &findings);
+    let verdict = verdict_for(risk, &findings, trust);
+    let gate = gate_decision(&findings, trust);
     TrustReport {
         source_id: source_id.to_string(),
         source_kind: source,
@@ -248,6 +424,7 @@ pub fn analyze_source(
         risk_score: risk,
         findings,
         verdict,
+        gate,
     }
 }
 
@@ -266,12 +443,22 @@ fn risk_score(findings: &[InjectionFinding], trust: TrustLevel) -> u32 {
         TrustLevel::SemiTrusted => base + base / 4,
         TrustLevel::Trusted => base,
     };
-    scaled.min(100)
+    // Fail-closed floor: non-trusted provenance is never risk-free. Content
+    // that simply evades the heuristic rules must not read as "clean".
+    let floored = match trust {
+        TrustLevel::Untrusted => scaled.max(15),
+        TrustLevel::SemiTrusted => scaled.max(8),
+        TrustLevel::Trusted => scaled,
+    };
+    floored.min(100)
 }
 
-fn verdict_for(risk: u32, findings: &[InjectionFinding]) -> String {
+fn verdict_for(risk: u32, findings: &[InjectionFinding], trust: TrustLevel) -> String {
     if findings.is_empty() {
-        return "clean — no injection or pollution patterns found".to_string();
+        return match trust {
+            TrustLevel::Trusted => "clean — no injection or pollution patterns found".to_string(),
+            _ => "unverified — no patterns found, but provenance is not fully trusted".to_string(),
+        };
     }
     let has_high = findings.iter().any(|f| f.severity == "high");
     match (risk, has_high) {
@@ -280,6 +467,21 @@ fn verdict_for(risk: u32, findings: &[InjectionFinding]) -> String {
         }
         (_, true) => "review — high-severity pattern present; confirm before including".to_string(),
         _ => "caution — low-severity signals; likely benign but traceable".to_string(),
+    }
+}
+
+/// The machine-checkable half of the verdict, mirroring the block policy the
+/// callers already apply: high-severity findings on non-trusted provenance
+/// quarantine; trusted-provenance findings and any non-trusted content need
+/// review; only clean trusted content is allowed through.
+fn gate_decision(findings: &[InjectionFinding], trust: TrustLevel) -> GateDecision {
+    let has_high = findings.iter().any(|f| f.severity == "high");
+    if has_high && trust != TrustLevel::Trusted {
+        GateDecision::Quarantine
+    } else if !findings.is_empty() || trust != TrustLevel::Trusted {
+        GateDecision::Review
+    } else {
+        GateDecision::Allow
     }
 }
 
@@ -292,19 +494,38 @@ fn excerpt(line: &str) -> String {
     }
 }
 
-/// Length of the longest run of base64/hex-ish characters in a line.
-fn longest_encoded_run(line: &str) -> Option<usize> {
-    let mut best = 0usize;
-    let mut cur = 0usize;
-    for c in line.chars() {
-        if c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' {
-            cur += 1;
-            best = best.max(cur);
+/// Encoded runs (base64/base64url/hex-ish) of at least `min` characters,
+/// returned as `(start_line, length)`. Line separators continue a run —
+/// wrapped blobs are one logical run — and `\r` is transparent.
+fn encoded_runs(content: &str, min: usize) -> Vec<(usize, usize)> {
+    let is_encoded_char =
+        |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '_');
+    let mut runs = Vec::new();
+    let mut run_len = 0usize;
+    let mut start_line = 1usize;
+    let mut line = 1usize;
+    for c in content.chars() {
+        if is_encoded_char(c) {
+            if run_len == 0 {
+                start_line = line;
+            }
+            run_len += 1;
+        } else if c == '\r' {
+            // Transparent: neither breaks the run nor counts a line.
+        } else if is_line_separator(c) {
+            line += 1;
+            // The run continues: base64 is conventionally wrapped at ~76 cols.
         } else {
-            cur = 0;
+            if run_len >= min {
+                runs.push((start_line, run_len));
+            }
+            run_len = 0;
         }
     }
-    (best > 0).then_some(best)
+    if run_len >= min {
+        runs.push((start_line, run_len));
+    }
+    runs
 }
 
 #[cfg(test)]
