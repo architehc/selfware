@@ -142,6 +142,17 @@ impl Agent {
         });
         let guard_count = self.progress_guard_fire_count();
 
+        // Hard-abort BEFORE the per-call rejection bookkeeping: an error
+        // return must not leave tool results recorded for calls that were
+        // never adjudicated.
+        if guard_count >= 3 && self.mutating_tool_call_count() == 0 {
+            anyhow::bail!(
+                "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
+                guard_count,
+                self.consecutive_read_only_steps
+            );
+        }
+
         for (name, args_str, tool_call_id) in tool_calls {
             let start_time = std::time::Instant::now();
             let (call_id, use_native_fc, _) =
@@ -156,14 +167,6 @@ impl Agent {
                 &error_msg,
             )
             .await;
-        }
-
-        if guard_count >= 3 && self.mutating_tool_call_count() == 0 {
-            anyhow::bail!(
-                "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
-                guard_count,
-                self.consecutive_read_only_steps
-            );
         }
 
         if self.config.agent.read_loop_policy == crate::config::ReadLoopPolicy::ForceMutation {
@@ -240,7 +243,10 @@ impl Agent {
         if self.task_state_notes.back() == Some(&note) {
             return;
         }
-        if self.task_state_notes.len() == TASK_STATE_NOTE_LIMIT {
+        // `>=` (not `==`): any state that ever exceeds the limit — a pusher
+        // without this check, or a lowered limit — self-corrects here instead
+        // of growing unbounded.
+        while self.task_state_notes.len() >= TASK_STATE_NOTE_LIMIT {
             self.task_state_notes.pop_front();
         }
         self.task_state_notes.push_back(note);
@@ -356,6 +362,19 @@ impl Agent {
         self.recent_failed_tool_attempts.clear();
         self.escalated_edit_args_hashes.clear();
         self.consecutive_suppressions = 0;
+    }
+
+    /// Record an escalated edit-args hash, FIFO-bounded at
+    /// ESCALATED_EDIT_ARGS_WINDOW_SIZE so a model varying old_str/new_str on
+    /// each retry cannot grow the cache without bound.
+    pub(super) fn record_escalated_edit(&mut self, hash: u64) {
+        if self.escalated_edit_args_hashes.contains(&hash) {
+            return;
+        }
+        self.escalated_edit_args_hashes.push_back(hash);
+        while self.escalated_edit_args_hashes.len() > ESCALATED_EDIT_ARGS_WINDOW_SIZE {
+            self.escalated_edit_args_hashes.pop_front();
+        }
     }
 
     /// Clear recorded failed attempts for a single tool name.
@@ -511,16 +530,14 @@ impl Agent {
                 if unchanged_count > 0 {
                     self.push_task_state_note(format!(
                         "Reread unchanged file `{}` ({}x consecutive unchanged reads)",
-                        path_str,
-                        unchanged_count + 1
+                        path_str, unchanged_count
                     ));
                 }
 
                 if unchanged_count >= 1 {
                     self.pending_failure_hint = Some(format!(
                         "You have reread unchanged file `{}` {} times in this task. Unless something outside the agent changed it, use the content already in context or make the edit now instead of reading it again.",
-                        path_str,
-                        unchanged_count + 1
+                        path_str, unchanged_count
                     ));
                 }
             }
@@ -562,13 +579,16 @@ impl Agent {
         };
 
         // For file_read failures, check if the file exists now — it may have
-        // been created by file_write since the last failed attempt.
+        // been created by file_write since the last failed attempt. Only a
+        // confirmed-absent file stays suppressed: a stat error (permissions,
+        // transient I/O) must not masquerade as "does not exist".
         if tool_name == "file_read" {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    if tokio::fs::try_exists(path).await.unwrap_or(false) {
+                    let exists = tokio::fs::try_exists(path).await;
+                    if !file_read_retry_stays_suppressed(&exists) {
                         info!(
-                            "file_read('{}') was previously suppressed but file now exists — allowing retry",
+                            "file_read('{}') was previously suppressed but file is now readable — allowing retry",
                             path
                         );
                         self.recent_failed_tool_attempts
@@ -618,7 +638,7 @@ impl Agent {
                         self.consecutive_suppressions += 1;
                         return true;
                     }
-                    self.escalated_edit_args_hashes.insert(args_hash);
+                    self.record_escalated_edit(args_hash);
 
                     let edit_fail_count = self
                         .recent_failed_tool_attempts
@@ -633,20 +653,36 @@ impl Agent {
                         path, edit_fail_count
                     );
 
-                    // Force-read the file so the model sees current content
-                    let read_result = if tokio::fs::try_exists(path).await.unwrap_or(false) {
-                        match tokio::fs::read_to_string(path).await {
-                            Ok(content) => {
-                                let lines = content.lines().count();
+                    // Force-read the file so the model sees current content.
+                    // Read directly (no try_exists pre-check) so a stat error
+                    // can't masquerade as a missing file; cap the injection at
+                    // ESCALATION_CONTENT_CHAR_BUDGET so large targets can't
+                    // bloat the message history without bound.
+                    let read_result = match tokio::fs::read_to_string(path).await {
+                        Ok(content) => {
+                            let lines = content.lines().count();
+                            if content.chars().count() > ESCALATION_CONTENT_CHAR_BUDGET {
+                                let kept = truncate_chars(&content, ESCALATION_CONTENT_CHAR_BUDGET);
+                                let kept_lines = kept.lines().count();
+                                format!(
+                                    "Current content of {} ({} lines, truncated to the first {} — over the {}-char escalation budget):\n{}",
+                                    path,
+                                    lines,
+                                    kept_lines,
+                                    ESCALATION_CONTENT_CHAR_BUDGET,
+                                    kept
+                                )
+                            } else {
                                 format!(
                                     "Current content of {} ({} lines):\n{}",
                                     path, lines, content
                                 )
                             }
-                            Err(e) => format!("Could not read {}: {}", path, e),
                         }
-                    } else {
-                        format!("File {} does not exist. Use file_write to create it.", path)
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            format!("File {} does not exist. Use file_write to create it.", path)
+                        }
+                        Err(e) => format!("Could not read {}: {}", path, e),
                     };
 
                     let escalation = format!(

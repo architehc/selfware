@@ -2487,3 +2487,202 @@ fn trust_gate_disabled_is_passthrough() {
     );
     assert_eq!(out.sanitized, 0);
 }
+
+// --- Correctness batch (GLM 5.3 evolution review of tool_dispatch, 2026-08-23) ---
+
+#[tokio::test]
+async fn task_state_notes_eviction_self_corrects_when_over_limit() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Simulate any path that left the deque over the limit (a pusher without
+    // the check, or a lowered limit): the eviction guard must self-correct
+    // instead of stopping to fire (== only evicts at exactly the limit).
+    for i in 0..(crate::agent::TASK_STATE_NOTE_LIMIT + 2) {
+        agent.task_state_notes.push_back(format!("note {i}"));
+    }
+    agent.push_task_state_note("fresh".to_string());
+
+    assert!(
+        agent.task_state_notes.len() <= crate::agent::TASK_STATE_NOTE_LIMIT,
+        "over-limit deque must self-correct: len={}",
+        agent.task_state_notes.len()
+    );
+    assert_eq!(
+        agent.task_state_notes.back().map(String::as_str),
+        Some("fresh")
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn reread_hint_reports_actual_reread_count() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    let cargo_toml_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
+
+    let read = || {
+        (
+            "file_read".to_string(),
+            serde_json::json!({"path": cargo_toml_path}).to_string(),
+            None,
+        )
+    };
+    agent
+        .execute_tool_batch(vec![read(), read()])
+        .await
+        .unwrap();
+
+    // One reread happened (the second read saw unchanged content): messages
+    // must report 1, not the read total of 2.
+    let note = agent
+        .task_state_notes
+        .iter()
+        .find(|n| n.contains("Reread unchanged file"))
+        .expect("reread note present")
+        .clone();
+    assert!(
+        note.contains("1x consecutive unchanged reads"),
+        "note must count rereads, not reads: {note}"
+    );
+    let hint = agent.pending_failure_hint.clone().unwrap_or_default();
+    assert!(
+        hint.contains(" 1 times"),
+        "hint must count rereads, not reads: {hint}"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn escalated_edit_args_window_is_bounded() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let cap = crate::agent::ESCALATED_EDIT_ARGS_WINDOW_SIZE as u64;
+    for i in 0..(cap + 10) {
+        agent.record_escalated_edit(i);
+    }
+    assert_eq!(
+        agent.escalated_edit_args_hashes.len(),
+        cap as usize,
+        "escalation cache must stay bounded"
+    );
+    // FIFO eviction: the oldest entries are gone, the newest survive.
+    assert!(!agent.escalated_edit_args_hashes.contains(&0));
+    assert!(agent.escalated_edit_args_hashes.contains(&(cap + 9)));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn edit_escalation_truncates_large_file_content() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.rs");
+    let big: String = (0..5000).map(|i| format!("// line {i}\n")).collect();
+    std::fs::write(&path, &big).unwrap();
+
+    let args = serde_json::json!({"path": path, "old_str": "missing", "new_str": "x"}).to_string();
+    agent.record_failed_tool_attempt("file_edit", &args, "edit", "old_str not found");
+
+    let suppressed = agent
+        .suppress_repeated_failed_tool_retry(
+            "file_edit",
+            &args,
+            "call-1",
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
+    assert!(suppressed, "repeat file_edit failure should escalate");
+
+    let injected: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        injected.contains("truncated"),
+        "large file injection must carry an explicit truncation marker"
+    );
+    assert!(
+        injected.len() < big.len(),
+        "injection must not embed the whole file ({} vs {} chars)",
+        injected.len(),
+        big.len()
+    );
+    server.stop().await;
+}
+
+#[test]
+fn stat_errors_are_not_treated_as_missing_file() {
+    // Only a confirmed-absent file keeps the retry suppressed; I/O errors
+    // (permissions, transient faults) must let the retry run so the real
+    // error surfaces instead of masquerading as "file does not exist".
+    assert!(file_read_retry_stays_suppressed(&Ok(false)));
+    assert!(!file_read_retry_stays_suppressed(&Ok(true)));
+    assert!(!file_read_retry_stays_suppressed(&Err(
+        std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied")
+    )));
+}
+
+#[tokio::test]
+async fn progress_guard_bail_leaves_no_partial_rejections() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context =
+        "Fix the failing tests, make code changes, and keep going until everything is green."
+            .to_string();
+
+    // First two guard fires: rejections are recorded, no bail.
+    agent.consecutive_read_only_steps = 19;
+    agent
+        .execute_tool_batch(vec![(
+            "shell_exec".to_string(),
+            r#"{"command":"cargo test"}"#.to_string(),
+            None,
+        )])
+        .await
+        .unwrap();
+    agent.consecutive_read_only_steps = 14;
+    agent
+        .execute_tool_batch(vec![(
+            "shell_exec".to_string(),
+            r#"{"command":"git status"}"#.to_string(),
+            None,
+        )])
+        .await
+        .unwrap();
+
+    // Third fire bails (READ_LOOP_NO_EDIT). The bail must happen BEFORE the
+    // per-call rejection bookkeeping, so an error return never leaves tool
+    // results recorded for calls that were never adjudicated.
+    agent.consecutive_read_only_steps = 15;
+    let err = agent
+        .execute_tool_batch(vec![(
+            "shell_exec".to_string(),
+            r#"{"command":"git status"}"#.to_string(),
+            None,
+        )])
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("READ_LOOP_NO_EDIT"));
+
+    let guard_rejections = agent
+        .messages
+        .iter()
+        .filter(|m| m.content.text_all().contains("PROGRESS GUARD:"))
+        .count();
+    assert_eq!(
+        guard_rejections, 2,
+        "only the two non-bailing fires may record rejections"
+    );
+    server.stop().await;
+}

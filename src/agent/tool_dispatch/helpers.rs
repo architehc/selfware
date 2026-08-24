@@ -1,6 +1,7 @@
 use std::hash::{Hash, Hasher};
 
 use serde_json::Value;
+use tracing::warn;
 
 use crate::agent::Agent;
 
@@ -99,6 +100,24 @@ pub(crate) fn hash_tool_args(args_str: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canonicalize_tool_args(args_str).hash(&mut hasher);
     hasher.finish()
+}
+
+/// Char budget for file content injected into the escalation directive when
+/// file_edit keeps failing. The whole file used to be embedded verbatim,
+/// bloating the message history without bound on large targets.
+pub(crate) const ESCALATION_CONTENT_CHAR_BUDGET: usize = 24_000;
+
+/// Only a confirmed-absent file keeps a failed file_read retry suppressed.
+/// Stat errors (permissions, transient I/O) allow the retry so the real
+/// error surfaces instead of masquerading as "file does not exist".
+pub(crate) fn file_read_retry_stays_suppressed(exists: &std::io::Result<bool>) -> bool {
+    match exists {
+        Ok(exists) => !exists,
+        Err(e) => {
+            warn!("file_read retry-suppression: stat failed ({e}); allowing retry to surface the real error");
+            false
+        }
+    }
 }
 
 pub(crate) fn extract_backticked_tool_names(text: &str) -> Vec<String> {

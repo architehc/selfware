@@ -428,6 +428,10 @@ impl FileTracker {
 }
 
 const TASK_STATE_NOTE_LIMIT: usize = 16;
+/// Bound on the escalation cache (FIFO window) so a model varying
+/// old_str/new_str on each retry cannot grow it without bound — mirrors the
+/// FAILED_TOOL_ATTEMPT_WINDOW_SIZE pattern for recent failed attempts.
+pub(crate) const ESCALATED_EDIT_ARGS_WINDOW_SIZE: usize = 64;
 
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
@@ -514,7 +518,7 @@ pub struct Agent {
     /// args-hashes of file_edit calls already escalated to file_write. Prevents
     /// re-reading and re-injecting the whole target file on every repeat of the
     /// same failing edit (EDIT-RETRY-REINJECT context bloat).
-    escalated_edit_args_hashes: std::collections::HashSet<u64>,
+    escalated_edit_args_hashes: VecDeque<u64>,
     /// Hook registry for event-driven automation
     hook_registry: HookRegistry,
     /// Plan mode: propose tool calls without executing them
@@ -1203,7 +1207,7 @@ To call a tool, use this EXACT XML structure:
             recent_tool_calls: VecDeque::new(),
             recent_tool_batches: VecDeque::new(),
             recent_failed_tool_attempts: VecDeque::new(),
-            escalated_edit_args_hashes: std::collections::HashSet::new(),
+            escalated_edit_args_hashes: VecDeque::new(),
             hook_registry,
             plan_mode,
             plan_mode_manager: plan_mode::PlanModeManager::new(),

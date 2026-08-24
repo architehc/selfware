@@ -4301,10 +4301,12 @@ async fn test_chat_retries_once_with_bounded_reasoning_on_budget_exhaustion() {
     let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
 
     let ok_body = r#"{"id":"c-ok","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"recovered answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}"#;
-    let server = reasoning_mock_server!(listener, bodies.clone(), vec![EXHAUSTED_BODY, ok_body]);
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY, ok_body]);
 
-    let mut config = crate::config::Config::default();
-    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
     let client = ApiClient::new(&config).unwrap();
 
     let result = client
@@ -4313,15 +4315,16 @@ async fn test_chat_retries_once_with_bounded_reasoning_on_budget_exhaustion() {
         .expect("bounded-reasoning retry should recover");
     assert_eq!(result.choices[0].message.content, "recovered answer");
 
-    let seen = bodies.lock().unwrap();
-    assert_eq!(seen.len(), 2, "exactly one bounded-reasoning retry");
-    assert!(!seen[0].contains("reasoning_effort"));
+    let (count, first, second) = {
+        let seen = bodies.lock().unwrap();
+        (seen.len(), seen[0].clone(), seen[1].clone())
+    };
+    assert_eq!(count, 2, "exactly one bounded-reasoning retry");
+    assert!(!first.contains("reasoning_effort"));
     assert!(
-        seen[1].contains("\"reasoning_effort\":\"low\""),
-        "retry must pin reasoning_effort=low: {}",
-        seen[1]
+        second.contains("\"reasoning_effort\":\"low\""),
+        "retry must pin reasoning_effort=low: {second}"
     );
-    drop(seen);
     let _ = server.await;
 }
 
@@ -4334,14 +4337,12 @@ async fn test_chat_typed_error_when_reasoning_retry_also_exhausts() {
     let addr = listener.local_addr().unwrap();
     let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let server = reasoning_mock_server!(
-        listener,
-        bodies.clone(),
-        vec![EXHAUSTED_BODY, EXHAUSTED_BODY]
-    );
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY, EXHAUSTED_BODY]);
 
-    let mut config = crate::config::Config::default();
-    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
     let client = ApiClient::new(&config).unwrap();
 
     let err = client
@@ -4375,10 +4376,12 @@ async fn test_chat_length_with_answer_content_does_not_retry() {
     // finish_reason=length but the answer IS present (truncated prose) — a
     // legitimate partial answer, not reasoning starvation: pass it through.
     let partial = r#"{"id":"c-p","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"partial answer text"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":100,"total_tokens":105}}"#;
-    let server = reasoning_mock_server!(listener, bodies.clone(), vec![partial]);
+    let server = reasoning_mock_server!(listener, bodies.clone(), [partial]);
 
-    let mut config = crate::config::Config::default();
-    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
     let client = ApiClient::new(&config).unwrap();
 
     let result = client
@@ -4403,18 +4406,20 @@ async fn test_chat_no_reasoning_retry_when_user_pinned_effort() {
     let addr = listener.local_addr().unwrap();
     let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
 
-    let server = reasoning_mock_server!(listener, bodies.clone(), vec![EXHAUSTED_BODY]);
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY]);
 
-    let mut config = crate::config::Config::default();
-    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
     // The user already pinned a reasoning effort — the client must not
     // second-guess it, only report the typed exhaustion.
-    config.extra_body = Some(
-        serde_json::json!({"reasoning_effort": "medium"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        extra_body: Some(
+            serde_json::json!({"reasoning_effort": "medium"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        ..Default::default()
+    };
     let client = ApiClient::new(&config).unwrap();
 
     let err = client
