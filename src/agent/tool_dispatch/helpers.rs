@@ -120,6 +120,44 @@ pub(crate) fn file_read_retry_stays_suppressed(exists: &std::io::Result<bool>) -
     }
 }
 
+/// Consecutive failed install attempts before the dependency firewall blocks
+/// further installs and forces a strategy pivot.
+pub(crate) const DEPENDENCY_SPIRAL_LIMIT: usize = 3;
+
+/// True for dependency-installation shell commands (`pip install`, `apt-get
+/// install`, `npm install`, `cargo add`, `go get`, …). Token-exact: `pip list`
+/// and `apt list --installed` are diagnostics, not installs. The dependency
+/// firewall counts consecutive failures of these commands.
+pub(crate) fn is_dependency_install_command(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has_installer = tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "pip"
+                | "pip3"
+                | "pipx"
+                | "uv"
+                | "npm"
+                | "pnpm"
+                | "yarn"
+                | "apt"
+                | "apt-get"
+                | "conda"
+                | "gem"
+                | "cargo"
+                | "go"
+        )
+    });
+    let has_verb = tokens
+        .iter()
+        .any(|t| matches!(*t, "install" | "add" | "get"));
+    has_installer && has_verb
+}
+
 pub(crate) fn extract_backticked_tool_names(text: &str) -> Vec<String> {
     let mut tools = Vec::new();
     let mut rest = text;

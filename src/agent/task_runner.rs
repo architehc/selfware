@@ -90,6 +90,7 @@ impl Agent {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;
         self.input_census_suspicious.clear();
+        self.failed_install_streak = 0;
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();

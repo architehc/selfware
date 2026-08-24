@@ -384,6 +384,71 @@ impl Agent {
             .retain(|existing| existing.tool_name != tool_name);
     }
 
+    /// Dependency-firewall accounting: count consecutive install failures.
+    /// Resets only on a successful install — interleaved successful
+    /// diagnostics are part of the spiral pattern, not progress out of it.
+    pub(super) fn note_shell_outcome(&mut self, command: &str, success: bool) {
+        if !is_dependency_install_command(command) {
+            return;
+        }
+        if success {
+            self.failed_install_streak = 0;
+        } else {
+            self.failed_install_streak += 1;
+        }
+    }
+
+    /// Block an install command when the install streak has hit the limit —
+    /// the environment is not yielding, so the model must pivot (stdlib-only,
+    /// vendored, different tool) instead of retrying the same ladder forever.
+    /// Returns true when the call was rejected.
+    pub(super) async fn maybe_block_dependency_spiral(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        if !matches!(tool_name, "shell_exec" | "pty_shell") {
+            return false;
+        }
+        if self.failed_install_streak < DEPENDENCY_SPIRAL_LIMIT {
+            return false;
+        }
+        let Some(command) = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from))
+        else {
+            return false;
+        };
+        if !is_dependency_install_command(&command) {
+            return false;
+        }
+
+        let directive = format!(
+            "DEPENDENCY FIREWALL: {} consecutive install attempts have failed (latest: `{command}`). \
+             The environment is not yielding — do NOT retry installation. Pivot now: \
+             (a) use a stdlib-only approach, (b) vendor a minimal implementation, \
+             (c) use a different tool that is already installed, or (d) state exactly which \
+             package+version is missing and continue the task assuming it. The streak resets \
+             only on a successful install.",
+            self.failed_install_streak
+        );
+        self.push_tool_result_message(
+            use_native_fc,
+            call_id,
+            tool_name,
+            args_str,
+            false,
+            &directive,
+        )
+        .await;
+        self.log_tool_call(tool_name, args_str, &directive, false, start_time, false);
+        self.consecutive_suppressions += 1;
+        true
+    }
+
     pub(super) async fn maybe_block_redundant_reread(
         &mut self,
         name: &str,
@@ -985,6 +1050,24 @@ impl Agent {
                 continue;
             }
 
+            if self
+                .maybe_block_dependency_spiral(
+                    &name,
+                    &args_str,
+                    &call_id,
+                    use_native_fc,
+                    start_time,
+                )
+                .await
+            {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
             if let Some(error_msg) = self.current_task_tool_policy_violation(&name) {
                 self.reject_tool_call_before_execution(
                     &name,
@@ -1272,6 +1355,13 @@ impl Agent {
                 self.record_failed_tool_attempt(&vt.name, &vt.args_str, "execution", &result_str);
             }
 
+            // Dependency-firewall accounting (loop 9).
+            if matches!(vt.name.as_str(), "shell_exec" | "pty_shell") {
+                if let Some(cmd) = vt.args.get("command").and_then(|c| c.as_str()) {
+                    self.note_shell_outcome(cmd, success);
+                }
+            }
+
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
 
@@ -1399,6 +1489,18 @@ impl Agent {
                 use_native_fc,
                 start_time,
             )
+            .await
+        {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if self
+            .maybe_block_dependency_spiral(&name, &args_str, &call_id, use_native_fc, start_time)
             .await
         {
             self.emit_event(AgentEvent::ToolCompleted {
@@ -1599,6 +1701,13 @@ impl Agent {
             self.clear_failed_tool_attempts();
         } else {
             self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
+        }
+
+        // Dependency-firewall accounting (loop 9).
+        if matches!(name.as_str(), "shell_exec" | "pty_shell") {
+            if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                self.note_shell_outcome(cmd, success);
+            }
         }
 
         self.track_task_state_after_tool(&name, &args, &result, success)

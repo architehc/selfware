@@ -2686,3 +2686,117 @@ async fn progress_guard_bail_leaves_no_partial_rejections() {
     );
     server.stop().await;
 }
+
+// --- Dependency firewall (TB 3.0 failure class: data-anonymization burned 84
+// steps fighting `import yaml` to a 3600s timeout — twice). Three consecutive
+// failed installs mean the environment won't yield; the harness forces a pivot
+// instead of letting the model flail. (Loop 9, three-model consult.) ---
+
+#[test]
+fn dependency_install_command_detection() {
+    assert!(is_dependency_install_command("pip install pyyaml"));
+    assert!(is_dependency_install_command(
+        "python3 -m pip install --user pandas"
+    ));
+    assert!(is_dependency_install_command("apt-get install -y libxcb1"));
+    assert!(is_dependency_install_command("sudo apt install curl"));
+    assert!(is_dependency_install_command("npm install"));
+    assert!(is_dependency_install_command("uv pip install faker"));
+    assert!(is_dependency_install_command("cargo add serde"));
+    assert!(!is_dependency_install_command("pip list"));
+    assert!(!is_dependency_install_command("pip show pandas"));
+    assert!(!is_dependency_install_command("python3 script.py"));
+    assert!(!is_dependency_install_command("cargo build"));
+    assert!(!is_dependency_install_command("cargo test"));
+    assert!(!is_dependency_install_command("npm test"));
+}
+
+#[tokio::test]
+async fn install_streak_counts_failures_and_resets_on_install_success() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    agent.note_shell_outcome("pip install pyyaml", false);
+    agent.note_shell_outcome("pip install pyyaml", false);
+    // Interleaved successful non-install commands do NOT reset the streak
+    // (the spiral pattern includes working diagnostic reads).
+    agent.note_shell_outcome("python3 -c 'import sys'", true);
+    agent.note_shell_outcome("apt-get install python3-yaml", false);
+    assert_eq!(agent.failed_install_streak, 3);
+    agent.note_shell_outcome("pip install pyyaml", true);
+    assert_eq!(agent.failed_install_streak, 0);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn dependency_firewall_blocks_install_at_streak_limit() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.failed_install_streak = 3;
+
+    let args = serde_json::json!({"command": "pip install pyyaml"}).to_string();
+    let blocked = agent
+        .maybe_block_dependency_spiral(
+            "shell_exec",
+            &args,
+            "call-fw-1",
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
+    assert!(blocked, "the fourth consecutive failed install is blocked");
+    let injected: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(injected.contains("DEPENDENCY FIREWALL"), "{injected}");
+    assert!(
+        injected.contains("stdlib"),
+        "the pivot menu must be concrete"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn dependency_firewall_ignores_non_install_and_small_streaks() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Streak at the limit, but the command is not an install: runs normally.
+    agent.failed_install_streak = 5;
+    let args = serde_json::json!({"command": "python3 -c 'import sys'"}).to_string();
+    assert!(
+        !agent
+            .maybe_block_dependency_spiral(
+                "shell_exec",
+                &args,
+                "call-fw-2",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "non-install commands are never blocked"
+    );
+
+    // Install command below the limit: runs normally.
+    agent.failed_install_streak = 2;
+    let args = serde_json::json!({"command": "pip install pyyaml"}).to_string();
+    assert!(
+        !agent
+            .maybe_block_dependency_spiral(
+                "shell_exec",
+                &args,
+                "call-fw-3",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "installs below the streak limit run normally"
+    );
+    server.stop().await;
+}

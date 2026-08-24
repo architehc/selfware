@@ -569,6 +569,11 @@ pub struct Agent {
     /// Completion-time leak-check latch (census suspicious identifiers vs
     /// changed files). Fires at most once per task.
     leak_check_done: std::sync::atomic::AtomicBool,
+    /// Consecutive dependency-install failures since the last successful
+    /// install (dependency firewall). Interleaved successful non-install
+    /// commands deliberately do NOT reset it — the spiral pattern includes
+    /// working diagnostic reads.
+    failed_install_streak: usize,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
@@ -1238,6 +1243,7 @@ To call a tool, use this EXACT XML structure:
             input_census_note: None,
             input_census_suspicious: Vec::new(),
             leak_check_done: std::sync::atomic::AtomicBool::new(false),
+            failed_install_streak: 0,
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor,
