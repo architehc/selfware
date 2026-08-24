@@ -1332,24 +1332,33 @@ impl Agent {
             .map(|c| c.message.content.text_all())
             .unwrap_or_default();
         match parse_requirements_audit(&text) {
-            RequirementsAudit::AllAddressed => None,
+            RequirementsAudit::AllAddressed => {
+                info!("requirements audit verdict: ALL ADDRESSED");
+                None
+            }
             RequirementsAudit::Unparseable => {
                 warn!("requirements audit response unparseable — advisory gate stays open");
                 None
             }
-            RequirementsAudit::Unaddressed(items) => Some(format!(
-                "ADVERSARIAL REVIEW — completion blocked (this fires once per task). \
+            RequirementsAudit::Unaddressed(items) => {
+                info!(
+                    "requirements audit verdict: UNADDRESSED ({} items) — blocking completion once",
+                    items.len()
+                );
+                Some(format!(
+                    "ADVERSARIAL REVIEW — completion blocked (this fires once per task). \
                  A hostile read of your work found these plausible hidden-verifier failures:\n{}\n\
                  For each item: investigate and fix it if valid (make the change and verify), \
                  or state precisely why the attack does not apply. Hidden verifiers grade \
                  requirements the instruction only implies — unused census fields and \
                  unconventional outputs are the usual misses.",
-                items
-                    .iter()
-                    .map(|i| format!("- {i}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )),
+                    items
+                        .iter()
+                        .map(|i| format!("- {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ))
+            }
         }
     }
 
