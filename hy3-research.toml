@@ -1,0 +1,53 @@
+# Deep-research mode — Hy3-NVFP4 (CPU-only, sglang :30010) as the strategist
+# for planning/synthesis consults; Fara1.5-27B (llama.cpp :8090, GPU0, vision)
+# drives the agent loop as the fast browser/collector.
+#
+# Usage: selfware run -c hy3-research.toml "<research task>"
+#        (run from /home/rig/selfware so ./research/ collects the notes)
+#        scripts/deep-research.sh honors STRATEGIST_MODEL/STRATEGIST_ENDPOINT
+#        if you point those here (see [models.strategist] below).
+
+endpoint = "http://127.0.0.1:8090/v1"
+model = "Fara1.5-27B"
+max_tokens = 2048
+context_length = 32768
+
+[models.strategist]
+# Hy3-NVFP4-W4A16, CPU-only. 262K context — the upgrade vs GLM's 4096 in
+# fara-research.toml: whole sub-query note sets fit in one synthesis pass.
+endpoint = "http://127.0.0.1:30010/v1"
+model = "/home/rig/models/Hy3-NVFP4-W4A16"
+max_tokens = 4096
+context_length = 65536
+modalities = ["text"]
+native_function_calling = false
+
+[models.fara]
+endpoint = "http://127.0.0.1:8090/v1"
+model = "Fara1.5-27B"
+max_tokens = 2048
+context_length = 32768
+modalities = ["text", "vision"]
+native_function_calling = false
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 100
+step_timeout_secs = 1800
+# XML tool calling — works uniformly across llama.cpp and sglang backends.
+native_function_calling = false
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000

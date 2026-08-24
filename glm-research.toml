@@ -1,0 +1,48 @@
+# Deep-research mode — ALL-GLM: the same GLM-5.2 (:30000) is the strategist
+# AND drives the agent loop as the browser/collector.
+#
+# Why: Fara on CPU is prefill-bound (~25 min per agent-scale call measured
+# 2026-08-23) — unusable as a collector. GLM's staged prefill is ~5-10x faster
+# and it's already resident. Tradeoff: GLM shares one request slot with the
+# soak loop, so runs interleave with review rounds.
+#
+# Usage: RESEARCH_CONFIG=glm-research.toml scripts/deep-research.sh "<task>"
+#        (run from /home/rig/selfware so ./research/ collects the notes)
+
+endpoint = "http://127.0.0.1:30000/v1"
+model = "/home/rig/models/glm-5.2-awq-int4"
+max_tokens = 4096
+context_length = 65536
+
+[models.strategist]
+endpoint = "http://127.0.0.1:30000/v1"
+model = "/home/rig/models/glm-5.2-awq-int4"
+max_tokens = 2048
+context_length = 65536
+modalities = ["text"]
+native_function_calling = false
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 100
+# GLM decode is fast (~8 t/s) but prompt processing of the agent system
+# prompt is staged; one step can take a couple of minutes under loop
+# contention. 1800s matches the measured slow path with margin.
+step_timeout_secs = 1800
+# XML tool calling — works uniformly across llama.cpp and sglang backends.
+native_function_calling = false
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
