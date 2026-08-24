@@ -84,6 +84,8 @@ impl Agent {
         self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
         self.total_no_action_prompts = 0;
+        self.requirements_audit_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();

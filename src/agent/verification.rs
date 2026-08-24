@@ -1210,7 +1210,106 @@ impl Agent {
             }
         }
 
+        // Requirements audit (once per task, substantial mutation tasks only):
+        // before accepting completion, one bounded model call must account for
+        // every explicit requirement and referenced data field. Advisory
+        // fail-open — call errors and unparseable answers never block.
+        if let Some(directive) = self.maybe_requirements_audit(is_read_only).await {
+            return Some(directive);
+        }
+
         None
+    }
+
+    /// Whether the completion-time requirements audit applies to this task and
+    /// has not fired yet. Once-per-task, mutation tasks with a substantial
+    /// instruction only — read-only tasks and plain chat are exempt (their
+    /// deliverable is prose, and the audit would add a model call for nothing).
+    /// The latch is set BEFORE the audit call so no retry path can re-fire it.
+    pub(super) async fn maybe_requirements_audit(&self, is_read_only: bool) -> Option<String> {
+        if is_read_only
+            || self
+                .requirements_audit_done
+                .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
+        let instruction = self.completion_gate_task();
+        if instruction.chars().count() < REQUIREMENTS_AUDIT_MIN_INSTRUCTION_CHARS {
+            return None;
+        }
+        self.requirements_audit_done
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.requirements_audit(instruction).await
+    }
+
+    /// One bounded model call auditing requirement coverage: the model lists
+    /// every explicit requirement (and referenced data file/field) from the
+    /// instruction and marks each RESOLVED or UNADDRESSED against the agent's
+    /// final summary. UNADDRESSED items block completion once with a directive
+    /// naming them. Advisory fail-open: call errors and unparseable responses
+    /// are logged and completion proceeds (the audit must never livelock a run).
+    async fn requirements_audit(&self, instruction: &str) -> Option<String> {
+        let summary = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .map(|m| m.content.text_all())
+            .unwrap_or_default();
+        let files_changed: Vec<String> = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .filter(|tc| matches!(tc.tool_name.as_str(), "file_edit" | "file_write"))
+                    .filter_map(|tc| {
+                        serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                            .ok()
+                            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let messages = build_requirements_audit_prompt(instruction, &summary, &files_changed);
+        let response = match self
+            .client
+            .chat(messages, None, crate::api::ThinkingMode::Disabled)
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!("requirements audit call failed ({e}) — advisory gate stays open");
+                return None;
+            }
+        };
+        let text = response
+            .choices
+            .first()
+            .map(|c| c.message.content.text_all())
+            .unwrap_or_default();
+        match parse_requirements_audit(&text) {
+            RequirementsAudit::AllAddressed => None,
+            RequirementsAudit::Unparseable => {
+                warn!("requirements audit response unparseable — advisory gate stays open");
+                None
+            }
+            RequirementsAudit::Unaddressed(items) => Some(format!(
+                "REQUIREMENTS AUDIT — completion blocked (this fires once per task). \
+                 The audit found requirements with no corresponding change:\n{}\n\
+                 For each item: make the change and verify it, or state precisely why it \
+                 does not apply to this task. Hidden verifiers check requirements the \
+                 instruction only implies — unused data fields and unaddressed clauses are \
+                 the usual misses.",
+                items
+                    .iter()
+                    .map(|i| format!("- {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )),
+        }
     }
 
     /// Detect when the agent only edited test files without modifying source code.
@@ -1647,6 +1746,76 @@ impl Agent {
             result_str.to_string()
         }
     }
+}
+
+/// Minimum instruction length (chars) for the completion-time requirements
+/// audit. Shorter tasks are trivial enough that a model call adds nothing.
+const REQUIREMENTS_AUDIT_MIN_INSTRUCTION_CHARS: usize = 200;
+
+/// Parsed outcome of the completion-time requirements audit.
+#[derive(Debug)]
+pub(crate) enum RequirementsAudit {
+    AllAddressed,
+    Unaddressed(Vec<String>),
+    Unparseable,
+}
+
+/// Parse the audit response: bullet lines carry per-requirement verdicts and a
+/// final `AUDIT:` line carries the overall verdict. The verdict line is
+/// authoritative; bullets are collected for the blocking directive.
+pub(crate) fn parse_requirements_audit(response: &str) -> RequirementsAudit {
+    let mut items = Vec::new();
+    let mut verdict: Option<bool> = None; // Some(true) = all addressed
+    for line in response.lines() {
+        let t = line.trim().trim_start_matches('*').trim();
+        let upper = t.to_uppercase();
+        if upper.starts_with("AUDIT:") {
+            if upper.contains("ALL ADDRESSED") {
+                verdict = Some(true);
+            } else if upper.contains("UNADDRESSED") {
+                verdict = Some(false);
+            }
+        } else if upper.starts_with("- UNADDRESSED") || upper.starts_with("UNADDRESSED:") {
+            items.push(t.trim_start_matches("- ").trim().to_string());
+        }
+    }
+    match verdict {
+        Some(true) => RequirementsAudit::AllAddressed,
+        Some(false) => RequirementsAudit::Unaddressed(items),
+        None => RequirementsAudit::Unparseable,
+    }
+}
+
+/// Build the bounded audit request. The instruction is truncated at 8k chars —
+/// the audit must stay cheap (one small call per task).
+fn build_requirements_audit_prompt(
+    instruction: &str,
+    summary: &str,
+    files_changed: &[String],
+) -> Vec<Message> {
+    let instruction = crate::agent::tool_dispatch::truncate_chars(instruction, 8_000);
+    let summary = crate::agent::tool_dispatch::truncate_chars(summary, 4_000);
+    let files = if files_changed.is_empty() {
+        "(none)".to_string()
+    } else {
+        files_changed.join(", ")
+    };
+    vec![
+        Message::system(
+            "You are auditing whether an autonomous coding agent actually addressed every \
+             requirement of its task. Read the task instruction and the agent's final summary. \
+             List every explicit requirement in the instruction, and every data file or field \
+             the instruction references. For each, one line:\n\
+             - RESOLVED: <requirement> — <what the agent changed>\n\
+             - UNADDRESSED: <requirement> — <what is missing>\n\
+             Be strict: a requirement the summary never mentions is UNADDRESSED; a data field \
+             the instruction names but the summary never uses is UNADDRESSED. End with a final \
+             verdict line exactly `AUDIT: ALL ADDRESSED` or `AUDIT: UNADDRESSED <n>`.",
+        ),
+        Message::user(format!(
+            "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}"
+        )),
+    ]
 }
 
 #[cfg(test)]

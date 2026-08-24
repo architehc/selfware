@@ -556,6 +556,9 @@ pub struct Agent {
     total_no_action_prompts: usize,
     /// Hash of the most recent no-action assistant content used for loop detection.
     last_no_action_prompt_hash: Option<u64>,
+    /// Completion-time requirements audit latch: the audit fires at most once
+    /// per task. Atomic because the completion gate holds `&self`.
+    requirements_audit_done: std::sync::atomic::AtomicBool,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
@@ -1221,6 +1224,7 @@ To call a tool, use this EXACT XML structure:
             consecutive_stale_verification: 0,
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
+            requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor,
