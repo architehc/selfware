@@ -1276,12 +1276,15 @@ impl Agent {
         self.requirements_audit(instruction).await
     }
 
-    /// One bounded model call auditing requirement coverage: the model lists
-    /// every explicit requirement (and referenced data file/field) from the
-    /// instruction and marks each RESOLVED or UNADDRESSED against the agent's
-    /// final summary. UNADDRESSED items block completion once with a directive
-    /// naming them. Advisory fail-open: call errors and unparseable responses
-    /// are logged and completion proceeds (the audit must never livelock a run).
+    /// One bounded model call auditing requirement coverage with a hostile
+    /// test-designer persona (the consult's verdict: a model grading its own
+    /// RESOLVED checklist rationalizes; a model asked to attack finds gaps).
+    /// The attacker receives the instruction, the deterministic input census,
+    /// the agent's final summary, and the changed files — a fresh context, not
+    /// a turn in the solving trajectory. UNADDRESSED items block completion
+    /// once with a directive naming them. Advisory fail-open: call errors and
+    /// unparseable responses are logged and completion proceeds (the audit
+    /// must never livelock a run).
     async fn requirements_audit(&self, instruction: &str) -> Option<String> {
         let summary = self
             .messages
@@ -1335,12 +1338,12 @@ impl Agent {
                 None
             }
             RequirementsAudit::Unaddressed(items) => Some(format!(
-                "REQUIREMENTS AUDIT — completion blocked (this fires once per task). \
-                 The audit found requirements with no corresponding change:\n{}\n\
-                 For each item: make the change and verify it, or state precisely why it \
-                 does not apply to this task. Hidden verifiers check requirements the \
-                 instruction only implies — unused data fields and unaddressed clauses are \
-                 the usual misses.",
+                "ADVERSARIAL REVIEW — completion blocked (this fires once per task). \
+                 A hostile read of your work found these plausible hidden-verifier failures:\n{}\n\
+                 For each item: investigate and fix it if valid (make the change and verify), \
+                 or state precisely why the attack does not apply. Hidden verifiers grade \
+                 requirements the instruction only implies — unused census fields and \
+                 unconventional outputs are the usual misses.",
                 items
                     .iter()
                     .map(|i| format!("- {i}"))
@@ -1850,15 +1853,18 @@ fn build_requirements_audit_prompt(
         .unwrap_or_default();
     vec![
         Message::system(
-            "You are auditing whether an autonomous coding agent actually addressed every \
-             requirement of its task. Read the task instruction and the agent's final summary. \
-             List every explicit requirement in the instruction, and every data file or field \
-             the instruction references. For each, one line:\n\
-             - RESOLVED: <requirement> — <what the agent changed>\n\
-             - UNADDRESSED: <requirement> — <what is missing>\n\
-             Be strict: a requirement the summary never mentions is UNADDRESSED; a data field \
-             the instruction names but the summary never uses is UNADDRESSED. End with a final \
-             verdict line exactly `AUDIT: ALL ADDRESSED` or `AUDIT: UNADDRESSED <n>`.",
+            "You are a hostile test designer reviewing an autonomous coding agent's work. \
+             You did NOT write this code and owe it nothing — a model asked to confirm its own \
+             checklist rationalizes; your job is to attack. Find the ways a hidden verifier \
+             would still fail this submission. Prioritize:\n\
+             - fields/keys present in the input census but absent from the agent's output or summary\n\
+             - leaks of input-side sensitive identifiers (private/secret/internal naming) into outputs\n\
+             - implicit conventions: exact filenames, rounding rules, units, sort orders, trailing details\n\
+             - edge cases the instruction implies but the summary never mentions\n\
+             For each plausible failure, one line, with the evidence that grounds it:\n\
+             - UNADDRESSED: <what fails> — <evidence from instruction/census/files>\n\
+             End with a final verdict line exactly `AUDIT: ALL ADDRESSED` (nothing a hidden test \
+             would plausibly check is unhandled) or `AUDIT: UNADDRESSED <n>`.",
         ),
         Message::user(format!(
             "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}"
