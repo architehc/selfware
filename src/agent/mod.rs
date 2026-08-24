@@ -101,6 +101,7 @@ pub mod context_map;
 pub mod evolution_events;
 mod execution;
 pub mod failure_mode;
+pub mod input_census;
 mod interactive;
 pub mod last_tool;
 mod learning;
@@ -559,6 +560,15 @@ pub struct Agent {
     /// Completion-time requirements audit latch: the audit fires at most once
     /// per task. Atomic because the completion gate holds `&self`.
     requirements_audit_done: std::sync::atomic::AtomicBool,
+    /// Rendered input census for the current task (loop 7), captured at task
+    /// start and reused by the requirements audit prompt.
+    input_census_note: Option<String>,
+    /// Suspicious identifiers from the census, reused by the completion-time
+    /// leak check against files changed this run.
+    input_census_suspicious: Vec<String>,
+    /// Completion-time leak-check latch (census suspicious identifiers vs
+    /// changed files). Fires at most once per task.
+    leak_check_done: std::sync::atomic::AtomicBool,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
@@ -1225,6 +1235,9 @@ To call a tool, use this EXACT XML structure:
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
+            input_census_note: None,
+            input_census_suspicious: Vec::new(),
+            leak_check_done: std::sync::atomic::AtomicBool::new(false),
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor,

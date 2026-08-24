@@ -1210,6 +1210,39 @@ impl Agent {
             }
         }
 
+        // Leak check (deterministic, once per task): census-discovered
+        // sensitive identifiers must not appear in files changed this run —
+        // the sourcemap private-* failure class, caught with zero model calls.
+        if !is_read_only
+            && !self
+                .leak_check_done
+                .load(std::sync::atomic::Ordering::Relaxed)
+            && !self.input_census_suspicious.is_empty()
+        {
+            self.leak_check_done
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(paths) = self.diff_paths_for_completion_gate().await {
+                let root = super::current_project_root();
+                let outputs: Vec<std::path::PathBuf> = paths.iter().map(|p| root.join(p)).collect();
+                let hits = super::input_census::leak_check_identifiers(
+                    &self.input_census_suspicious,
+                    &outputs,
+                );
+                if !hits.is_empty() {
+                    return Some(format!(
+                        "LEAK CHECK — completion blocked (fires once per task). Output artifacts \
+                         contain input-side sensitive identifiers:\n{}\n\
+                         Remove each leak (or state precisely why the identifier is safe to \
+                         publish), then complete.",
+                        hits.iter()
+                            .map(|h| format!("- {h}"))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ));
+                }
+            }
+        }
+
         // Requirements audit (once per task, substantial mutation tasks only):
         // before accepting completion, one bounded model call must account for
         // every explicit requirement and referenced data field. Advisory
@@ -1273,7 +1306,12 @@ impl Agent {
             })
             .unwrap_or_default();
 
-        let messages = build_requirements_audit_prompt(instruction, &summary, &files_changed);
+        let messages = build_requirements_audit_prompt(
+            instruction,
+            &summary,
+            &files_changed,
+            self.input_census_note.as_deref(),
+        );
         let response = match self
             .client
             .chat(messages, None, crate::api::ThinkingMode::Disabled)
@@ -1792,6 +1830,7 @@ fn build_requirements_audit_prompt(
     instruction: &str,
     summary: &str,
     files_changed: &[String],
+    census: Option<&str>,
 ) -> Vec<Message> {
     let instruction = crate::agent::tool_dispatch::truncate_chars(instruction, 8_000);
     let summary = crate::agent::tool_dispatch::truncate_chars(summary, 4_000);
@@ -1800,6 +1839,15 @@ fn build_requirements_audit_prompt(
     } else {
         files_changed.join(", ")
     };
+    let census_block = census
+        .map(|c| {
+            format!(
+                "\n\nEnvironment input census (deterministic, extracted by the harness — grade \
+             against this, not the instruction alone):\n{c}\n\nEvery census field must appear \
+             above as RESOLVED (consumed) or be explicitly WAIVED with a reason."
+            )
+        })
+        .unwrap_or_default();
     vec![
         Message::system(
             "You are auditing whether an autonomous coding agent actually addressed every \
@@ -1813,7 +1861,7 @@ fn build_requirements_audit_prompt(
              verdict line exactly `AUDIT: ALL ADDRESSED` or `AUDIT: UNADDRESSED <n>`.",
         ),
         Message::user(format!(
-            "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}"
+            "Task instruction:\n{instruction}\n\nAgent's final summary:\n{summary}\n\nFiles changed: {files}{census_block}"
         )),
     ]
 }

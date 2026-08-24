@@ -86,6 +86,10 @@ impl Agent {
         self.total_no_action_prompts = 0;
         self.requirements_audit_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.leak_check_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.input_census_note = None;
+        self.input_census_suspicious.clear();
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
@@ -256,6 +260,20 @@ impl Agent {
         let msg = Message::user(task);
         self.memory.add_message(&msg);
         self.messages.push(msg);
+
+        // Input census (loop 7): the environment's data contract, enumerated
+        // deterministically at task start. The hidden verifier grades the full
+        // contract — the instruction text is a subset (measured: the cargo and
+        // bun TB 3.0 misses were fields the instruction never names).
+        let census = super::input_census::census_task_inputs(&super::current_project_root());
+        self.input_census_suspicious = census.suspicious_identifiers.clone();
+        self.input_census_note = census.render();
+        if let Some(note) = &self.input_census_note {
+            let note_msg = Message::user(format!(
+                "<selfware_system_directive>\n{note}\nAccount for every field above: consume it or consciously waive it. Fields the instruction never mentions still count.\n</selfware_system_directive>"
+            ));
+            self.messages.push(note_msg);
+        }
 
         self.run_execution_loop(&task_description, LoopMode::NewTask)
             .await
