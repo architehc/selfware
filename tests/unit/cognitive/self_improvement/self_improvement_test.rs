@@ -750,3 +750,142 @@ fn load_migrates_legacy_permissions() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// --- Honesty batch (GLM 5.3 evolution review of self_improvement, 2026-08-23) ---
+
+#[test]
+fn evolved_pattern_is_unverified_candidate_not_fabricated_evidence() {
+    let mut optimizer = PromptOptimizer::new();
+    let result = optimizer.evolve_prompt("system_prompt", "You are a coding agent.");
+
+    // The tournament ranks by structural priors only — nothing is executed —
+    // so the winner must be registered as an unverified candidate with zero
+    // observed usage, NOT as a learned pattern with fabricated quality and
+    // success_rate copied from the predicted score.
+    let candidates: Vec<_> = optimizer
+        .patterns
+        .values()
+        .filter(|p| p.id.starts_with("evo-system_prompt-"))
+        .collect();
+    assert_eq!(candidates.len(), 1, "winner candidate is registered once");
+    let pattern = candidates[0];
+    assert_eq!(
+        pattern.usage_count, 0,
+        "no executions happened — usage_count must be 0, got {}",
+        pattern.usage_count
+    );
+    assert_eq!(
+        pattern.success_rate, 0.0,
+        "success_rate must be unknown (0), not the predicted prior"
+    );
+    assert_eq!(
+        pattern.avg_quality, 0.0,
+        "avg_quality must be unknown (0), not the predicted prior"
+    );
+
+    // And it must NOT be recommendable until real observations arrive
+    // (best_patterns_for requires usage_count >= 5).
+    assert!(
+        optimizer.best_patterns_for("system_prompt").is_empty(),
+        "an unverified candidate must not be recommended"
+    );
+    assert!(!result.variants.is_empty());
+}
+
+#[test]
+fn pattern_update_counts_successes_exactly() {
+    let mut p = PromptPattern::new("p", "t");
+    p.update(Outcome::Success, 0.9);
+    p.update(Outcome::Failure, 0.2);
+    p.update(Outcome::Success, 0.8);
+    assert_eq!(p.usage_count, 3);
+    assert_eq!(
+        p.successful_uses, 2,
+        "exact counter, not a rate*count reconstruction with round() drift"
+    );
+    assert!((p.success_rate - 2.0 / 3.0).abs() < 1e-6);
+    assert!((p.avg_quality - (0.9 + 0.2 + 0.8) / 3.0).abs() < 1e-4);
+}
+
+#[test]
+fn suggest_improvements_does_not_claim_task_scoped_rate() {
+    let mut optimizer = PromptOptimizer::new();
+    let mut pattern = PromptPattern::new("p1", "Step by step: {action}");
+    pattern.effective_for = vec!["code".to_string()];
+    for _ in 0..6 {
+        pattern.update(Outcome::Success, 0.9);
+    }
+    optimizer.register_pattern(pattern);
+
+    let suggestions = optimizer.suggest_improvements("please do the thing you must", "code");
+    let desc = &suggestions
+        .iter()
+        .find(|s| matches!(s.suggestion_type, SuggestionType::UsePattern))
+        .expect("pattern suggestion present")
+        .description;
+    assert!(
+        !desc.contains("for this task type"),
+        "success_rate is the pattern's GLOBAL rate — the wording must not claim task scoping: {desc}"
+    );
+    assert!(
+        desc.contains("recorded uses"),
+        "honest wording names the observation count: {desc}"
+    );
+}
+
+fn letter_salt(mut n: usize) -> String {
+    let mut s = String::new();
+    loop {
+        s.insert(0, (b'a' + (n % 26) as u8) as char);
+        n /= 26;
+        if n == 0 {
+            break;
+        }
+    }
+    s
+}
+
+#[test]
+fn common_errors_map_is_bounded() {
+    let mut learner = ToolSelectionLearner::new();
+    for i in 0..600 {
+        let mut rec =
+            ToolUsageRecord::new("file_read".to_string(), "ctx".to_string(), Outcome::Failure);
+        // Alphabetic salt survives digit normalization, giving distinct keys.
+        rec.error = Some(format!("error alpha {} beta", letter_salt(i)));
+        learner.record(rec);
+    }
+    let stats = learner.get_tool_stats("file_read").expect("stats exist");
+    assert!(
+        stats.common_errors.len() <= 256,
+        "common_errors must stay bounded, got {}",
+        stats.common_errors.len()
+    );
+}
+
+#[test]
+fn first_observation_shrinks_toward_prior() {
+    let mut learner = ToolSelectionLearner::new();
+    // Proven tool: a long track record of successes in this context.
+    for _ in 0..20 {
+        learner.record(ToolUsageRecord::new(
+            "proven".to_string(),
+            "fix the bug".to_string(),
+            Outcome::Success,
+        ));
+    }
+    // New tool: a single lucky success in the same context.
+    learner.record(ToolUsageRecord::new(
+        "lucky".to_string(),
+        "fix the bug".to_string(),
+        Outcome::Success,
+    ));
+
+    let best = learner.best_tools_for("fix the bug");
+    let proven = best.iter().find(|(t, _)| t == "proven").unwrap().1;
+    let lucky = best.iter().find(|(t, _)| t == "lucky").unwrap().1;
+    assert!(
+        lucky < proven,
+        "one-shot success ({lucky}) must not outrank a proven record ({proven})"
+    );
+}
