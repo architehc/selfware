@@ -260,3 +260,94 @@ fn suppressed_tags_covers_all_local_model_formats() {
         );
     }
 }
+
+// --- Runaway monologue cutoff ---
+// TB 3.0 failure mode (cli-2ph-simplex, 2026-08-24): the agent burned a 2500s
+// task timeout inside two giant no-tool responses (~1,059 log lines of
+// analysis in the first alone) and never wrote a line of code. A mutation
+// task's response that streams past the analysis budget with no tool call in
+// flight must be cut so the no-action escalation fires on schedule.
+
+#[test]
+fn runaway_monologue_requires_all_three_conditions() {
+    let over = MONOLOGUE_CHAR_BUDGET + 1;
+    // All three: over budget, no tool call in flight, mutation task.
+    assert!(is_runaway_monologue(over, false, true));
+    // Under budget: fine.
+    assert!(!is_runaway_monologue(MONOLOGUE_CHAR_BUDGET, false, true));
+    // Tool call in flight (native or XML markup in content): don't cut —
+    // a long file_write argument is legitimate content, not a monologue.
+    assert!(!is_runaway_monologue(over, true, true));
+    // Read-only task: long prose IS the deliverable — never cut.
+    assert!(!is_runaway_monologue(over, false, false));
+}
+
+#[tokio::test]
+async fn runaway_monologue_is_cut_on_mutation_task() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let big = "analysis text without any tool call. ".repeat(2000); // ~70k chars
+    let server = MockLlmServer::builder().with_response(big).build().await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context =
+        "Implement the two-phase simplex solver in /app/simplex.py".to_string();
+
+    let (content, _reasoning, tools) = agent
+        .chat_streaming(
+            vec![Message::user("implement it now")],
+            None,
+            ThinkingMode::Enabled,
+            None,
+        )
+        .await
+        .expect("stream completes");
+
+    assert!(
+        content.contains("response truncated"),
+        "runaway monologue must carry the cut marker, got: {}",
+        &content[..content.len().min(200)]
+    );
+    assert!(
+        tools.as_ref().map(|t| t.is_empty()).unwrap_or(true),
+        "no tool calls in this response"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn long_answer_is_not_cut_on_read_only_task() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let big = "thorough explanation paragraph. ".repeat(2000); // ~64k chars
+    let server = MockLlmServer::builder().with_response(big).build().await;
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Explain how this repository handles retries".to_string();
+
+    let (content, _reasoning, _tools) = agent
+        .chat_streaming(
+            vec![Message::user("explain in detail")],
+            None,
+            ThinkingMode::Enabled,
+            None,
+        )
+        .await
+        .expect("stream completes");
+
+    assert!(
+        !content.contains("response truncated"),
+        "read-only deliverables are never cut"
+    );
+    assert_eq!(
+        content.len(),
+        2000 * "thorough explanation paragraph. ".len()
+    );
+    server.stop().await;
+}
