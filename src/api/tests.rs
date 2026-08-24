@@ -4252,3 +4252,182 @@ fn test_adaptive_timeout_clamps_to_ceiling() {
     // 8192 / 0.1 * 2.5 = 204800 -> clamp 7200
     assert_eq!(client.adaptive_response_timeout_secs(), 7200);
 }
+
+// --- Reasoning-budget exhaustion (GLM 5.3 evolution review, 2026-08-23) ---
+//
+// Measured failure mode with hosted reasoning models: the whole completion
+// budget burns on hidden reasoning, returning finish_reason=length with an
+// empty answer. The client must (a) retry once with bounded reasoning when
+// the user has not pinned reasoning keys, and (b) otherwise fail with a
+// typed error instead of a "successful" empty answer.
+
+/// Mock server helper: accepts `responses.len()` connections, records each
+/// request body, replies with the matching JSON body.
+macro_rules! reasoning_mock_server {
+    ($listener:expr, $bodies:expr, $responses:expr) => {{
+        // Bind outside the async move so only the cloned Arc is captured.
+        let bodies = $bodies;
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for resp_body in $responses {
+                let (mut socket, _) = $listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 65536];
+                let n = socket.read(&mut buf).await.unwrap();
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                drop(socket);
+            }
+        })
+    }};
+}
+
+const EXHAUSTED_BODY: &str = r#"{"id":"c-x","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"long hidden reasoning trace"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":100,"total_tokens":105}}"#;
+
+#[tokio::test]
+async fn test_chat_retries_once_with_bounded_reasoning_on_budget_exhaustion() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let ok_body = r#"{"id":"c-ok","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"recovered answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), vec![EXHAUSTED_BODY, ok_body]);
+
+    let mut config = crate::config::Config::default();
+    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("bounded-reasoning retry should recover");
+    assert_eq!(result.choices[0].message.content, "recovered answer");
+
+    let seen = bodies.lock().unwrap();
+    assert_eq!(seen.len(), 2, "exactly one bounded-reasoning retry");
+    assert!(!seen[0].contains("reasoning_effort"));
+    assert!(
+        seen[1].contains("\"reasoning_effort\":\"low\""),
+        "retry must pin reasoning_effort=low: {}",
+        seen[1]
+    );
+    drop(seen);
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_typed_error_when_reasoning_retry_also_exhausts() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let server = reasoning_mock_server!(
+        listener,
+        bodies.clone(),
+        vec![EXHAUSTED_BODY, EXHAUSTED_BODY]
+    );
+
+    let mut config = crate::config::Config::default();
+    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let client = ApiClient::new(&config).unwrap();
+
+    let err = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect_err("double exhaustion must fail");
+    match err.downcast_ref::<crate::errors::ApiError>() {
+        Some(crate::errors::ApiError::ReasoningBudgetExhausted { .. }) => {}
+        other => panic!(
+            "expected ApiError::ReasoningBudgetExhausted, got {:?}",
+            other
+        ),
+    }
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        2,
+        "one retry, then typed error"
+    );
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_length_with_answer_content_does_not_retry() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // finish_reason=length but the answer IS present (truncated prose) — a
+    // legitimate partial answer, not reasoning starvation: pass it through.
+    let partial = r#"{"id":"c-p","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"partial answer text"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":100,"total_tokens":105}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), vec![partial]);
+
+    let mut config = crate::config::Config::default();
+    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("partial answer passes through");
+    assert_eq!(result.choices[0].message.content, "partial answer text");
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        1,
+        "no retry without starvation"
+    );
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_no_reasoning_retry_when_user_pinned_effort() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let server = reasoning_mock_server!(listener, bodies.clone(), vec![EXHAUSTED_BODY]);
+
+    let mut config = crate::config::Config::default();
+    config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    // The user already pinned a reasoning effort — the client must not
+    // second-guess it, only report the typed exhaustion.
+    config.extra_body = Some(
+        serde_json::json!({"reasoning_effort": "medium"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let client = ApiClient::new(&config).unwrap();
+
+    let err = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect_err("pinned reasoning still exhausts -> typed error");
+    match err.downcast_ref::<crate::errors::ApiError>() {
+        Some(crate::errors::ApiError::ReasoningBudgetExhausted { .. }) => {}
+        other => panic!(
+            "expected ApiError::ReasoningBudgetExhausted, got {:?}",
+            other
+        ),
+    }
+    assert_eq!(bodies.lock().unwrap().len(), 1, "no retry when user pinned");
+    let _ = server.await;
+}

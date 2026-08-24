@@ -136,6 +136,14 @@ pub enum ApiError {
     #[error("Context overflow: {0}")]
     ContextOverflow(String),
 
+    /// The completion budget was consumed entirely by hidden reasoning:
+    /// `finish_reason=length` with an empty answer and a non-empty reasoning
+    /// trace. Measured with hosted GLM 5.3 (2026-08-23): unbounded reasoning
+    /// ate a 16k budget and returned zero answer content. Recovery: lower
+    /// reasoning effort or raise max_tokens.
+    #[error("completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning chars, empty answer, finish_reason=length) — lower reasoning effort or raise max_tokens")]
+    ReasoningBudgetExhausted { reasoning_chars: usize },
+
     #[error("Invalid token usage from API: {0}")]
     InvalidUsage(String),
 }

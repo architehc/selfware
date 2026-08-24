@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Adaptive server-speed response timeout** for non-streaming chat: `ApiClient` keeps an EMA of the endpoint's effective generation speed (completion tokens / whole-call wall time) and sizes the response budget as `max_tokens / tps × 2.5` (floor 600 s or `agent.step_timeout_secs` if larger, ceiling 7200 s). Unmeasured local endpoints assume a slow 3 t/s CPU server, remote 30 t/s; first measurement replaces the assumption. Stops long generations on slow local servers (e.g. a 2048-token grounded review at ~3 t/s ≈ 640 s) being truncated by the static 600 s floor.
+- **Reasoning-budget exhaustion recovery** for non-streaming chat: when a completion returns `finish_reason=length` with empty answer content and a non-empty reasoning trace (the hosted GLM 5.3 failure mode measured 2026-08-23 — a 16k budget burned entirely on hidden reasoning), the client retries once with `reasoning_effort="low"` (skipped when the user pinned reasoning keys in `extra_body`) and otherwise fails with a typed `ApiError::ReasoningBudgetExhausted` instead of returning a "successful" empty answer.
 - **Machine-checkable `GateDecision` on trust reports** (`allow` / `review` / `quarantine`): mirrors the block policy callers already apply (high-severity findings on non-trusted provenance quarantine; only clean trusted content is allowed through). `TrustReport.verdict` is now documented display-only.
 
 ### Changed

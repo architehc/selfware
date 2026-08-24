@@ -350,6 +350,16 @@ impl ApiClient {
         )
     }
 
+    /// True when the user's `extra_body` already pins reasoning behavior
+    /// (`reasoning_effort` / `reasoning`) — the bounded-reasoning retry must
+    /// not override an explicit choice.
+    fn user_pinned_reasoning(&self) -> bool {
+        self.config
+            .extra_body
+            .as_ref()
+            .is_some_and(|m| m.contains_key("reasoning_effort") || m.contains_key("reasoning"))
+    }
+
     pub async fn completion(
         &self,
         prompt: &str,
@@ -474,7 +484,30 @@ impl ApiClient {
             });
 
         let started = std::time::Instant::now();
-        let resp = self.send_with_retry(&body).await?;
+        let mut body = body;
+        let mut resp = self.send_with_retry(&body).await?;
+
+        // Reasoning-budget exhaustion (measured with hosted GLM 5.3): the
+        // whole completion budget burns on hidden reasoning, returning
+        // finish_reason=length with an empty answer — a "successful" empty
+        // response that callers then have to untangle. Retry once with
+        // bounded reasoning (unless the user pinned reasoning keys — the
+        // client must not second-guess an explicit choice), else fail typed.
+        if reasoning_budget_exhausted(&resp).is_some() {
+            if self.user_pinned_reasoning() {
+                let reasoning_chars = reasoning_budget_exhausted(&resp).unwrap_or(0);
+                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+            }
+            warn!(
+                "completion budget exhausted by hidden reasoning (finish_reason=length, \
+                 empty answer); retrying once with reasoning_effort=low"
+            );
+            body["reasoning_effort"] = serde_json::json!("low");
+            resp = self.send_with_retry(&body).await?;
+            if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
+                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+            }
+        }
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.clone());
@@ -1213,6 +1246,27 @@ impl LlmClient for ApiClient {
 ///
 /// This is a synchronous helper so it can be called from the bench-harness
 /// runner (which runs inside `spawn_blocking`).
+/// Detect the reasoning-budget exhaustion failure mode: `finish_reason ==
+/// "length"`, empty answer content, and a non-empty reasoning trace. Returns
+/// the reasoning length in chars when exhausted. Models without a reasoning
+/// field can never trip this — a plain truncated answer passes through.
+fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
+    let choice = resp.choices.first()?;
+    if choice.finish_reason.as_deref() != Some("length") {
+        return None;
+    }
+    if !choice.message.content.text().trim().is_empty() {
+        return None;
+    }
+    let reasoning = choice
+        .reasoning_content
+        .as_deref()
+        .or(choice.message.reasoning_content.as_deref())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())?;
+    Some(reasoning.len())
+}
+
 pub fn detect_backend(endpoint: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
