@@ -948,4 +948,30 @@ mod requirements_audit_tests {
         );
         server.stop().await;
     }
+
+    #[test]
+    fn audit_verdict_has_a_visible_marker_label() {
+        // Loop 11 observability: the verdict used to log at info! — invisible
+        // in `run` mode, which shows warn only — so a benchmark log could not
+        // show whether the audit fired, passed, or was unparseable. Every
+        // verdict now gets a one-line `[audit] verdict: ...` marker; stdout
+        // capture is impractical here, so the emitted string is asserted via
+        // the label the printer is called with.
+        let all = parse_requirements_audit("AUDIT: ALL ADDRESSED");
+        assert_eq!(all.marker_label(), "ALL ADDRESSED");
+
+        let un = parse_requirements_audit(
+            "- UNADDRESSED: one thing\n- UNADDRESSED: another\nAUDIT: UNADDRESSED 2",
+        );
+        assert_eq!(un.marker_label(), "UNADDRESSED(2)");
+
+        let bad = parse_requirements_audit("no verdict here at all");
+        assert_eq!(bad.marker_label(), "unparseable");
+
+        // The marker line itself (printed by crate::output::audit_verdict).
+        assert_eq!(
+            crate::output::audit_verdict_line(&un.marker_label()),
+            "[audit] verdict: UNADDRESSED(2)"
+        );
+    }
 }

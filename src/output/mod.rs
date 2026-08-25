@@ -836,6 +836,52 @@ pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
     io::stdout().flush().ok();
 }
 
+/// Format the one-line marker shown when the completion gate blocks a
+/// completion attempt. Pure so tests can assert the emitted content: gate
+/// rejections otherwise travel only as pushed user messages, invisible in
+/// `run` logs (TB 3.0 loop 11: a benchmark log gave no evidence the gate or
+/// the adversarial audit ever fired). Multiline directives are flattened and
+/// capped — never print full directive bodies.
+pub(crate) fn gate_blocked_line(reason: &str) -> String {
+    let flat = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview: String = flat.chars().take(120).collect();
+    let truncated = if flat.chars().count() > 120 {
+        "…"
+    } else {
+        ""
+    };
+    format!("[gate] completion blocked: {preview}{truncated}")
+}
+
+/// Print a single visible line when the completion gate blocks completion.
+/// Same mode-gating as the other run-mode intervention markers.
+pub(crate) fn gate_blocked(reason: &str) {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!("{}", gate_blocked_line(reason).bright_yellow());
+    io::stdout().flush().ok();
+}
+
+/// Format the one-line marker shown when the requirements audit returns a
+/// verdict. `verdict` is `RequirementsAudit::marker_label` — `ALL ADDRESSED`,
+/// `UNADDRESSED(n)`, or `unparseable`.
+pub(crate) fn audit_verdict_line(verdict: &str) -> String {
+    format!("[audit] verdict: {verdict}")
+}
+
+/// Print the requirements-audit verdict as a single visible line. The verdict
+/// used to log at info!/warn! only, which `run` mode does not show.
+pub(crate) fn audit_verdict(verdict: &str) {
+    if is_tui_active() || is_compact() || is_quiet() || is_json_mode() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    println!("{}", audit_verdict_line(verdict).bright_yellow());
+    io::stdout().flush().ok();
+}
+
 /// Print final answer
 pub(crate) fn final_answer(content: &str) {
     if should_suppress_output() {
