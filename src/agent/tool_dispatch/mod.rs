@@ -35,9 +35,15 @@ impl Agent {
         success: bool,
         result_str: &str,
     ) {
-        if success && tool_call_is_verification(name, args_str) && self.mutation_sequence > 0 {
-            self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-            self.last_failed_verification_summary = None;
+        if success && tool_call_is_verification(name, args_str) {
+            // Loop 12: a passing verification breaks any repeated-probe
+            // streak — probes interleaved with green checks are iteration,
+            // not a stall.
+            self.probe_command_counts.clear();
+            if self.mutation_sequence > 0 {
+                self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+                self.last_failed_verification_summary = None;
+            }
         } else if !success && tool_call_is_verification(name, args_str) {
             let preview: String = result_str.chars().take(300).collect();
             self.last_failed_verification_summary = Some(format!("{} failed: {}", name, preview));
@@ -434,6 +440,87 @@ impl Agent {
              package+version is missing and continue the task assuming it. The streak resets \
              only on a successful install.",
             self.failed_install_streak
+        );
+        self.push_tool_result_message(
+            use_native_fc,
+            call_id,
+            tool_name,
+            args_str,
+            false,
+            &directive,
+        )
+        .await;
+        self.log_tool_call(tool_name, args_str, &directive, false, start_time, false);
+        self.consecutive_suppressions += 1;
+        true
+    }
+
+    /// Repeated-probe pivot (loop 12): the same normalized shell command
+    /// (digits/whitespace collapsed) more than REPEATED_PROBE_LIMIT times with
+    /// no intervening successful verification means the probe is exhausted —
+    /// block the next identical call ONCE with a change-strategy directive.
+    /// The latch caps this at one fire per task; counting itself is fail-open
+    /// (non-shell tools, unparseable args, and an over-cap tracking map all
+    /// pass through). Returns true when the call was rejected.
+    pub(super) async fn maybe_block_repeated_probe(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        if !matches!(tool_name, "shell_exec" | "pty_shell") {
+            return false;
+        }
+        if self
+            .probe_pivot_done
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        let Some(command) = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from))
+        else {
+            return false;
+        };
+
+        let normalized = normalize_probe_command(&command);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        normalized.hash(&mut hasher);
+        let probe_hash = hasher.finish();
+        let count = match self.probe_command_counts.get_mut(&probe_hash) {
+            Some(count) => {
+                *count += 1;
+                *count
+            }
+            None => {
+                if self.probe_command_counts.len() >= TRACKED_PROBE_COMMAND_LIMIT {
+                    // Fail-open: too many distinct commands to track — never block.
+                    return false;
+                }
+                self.probe_command_counts.insert(probe_hash, 1);
+                1
+            }
+        };
+        if count <= REPEATED_PROBE_LIMIT {
+            return false;
+        }
+
+        // Latch BEFORE the bookkeeping so no retry path can re-fire it.
+        self.probe_pivot_done
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let preview = truncate_chars(&command, TOOL_CONFIRM_ARGS_PREVIEW_CHARS);
+        let directive = format!(
+            "<selfware_system_directive>\n\
+             REPEATED PROBE PIVOT: the same command (digits/whitespace normalized) has now run \
+             {count} times with no successful verification in between (latest: `{preview}`). \
+             The approach is exhausted — rerunning it will not produce a different result. \
+             Change strategy NOW: (a) gather the missing information with a materially \
+             different command or tool, or (b) stop probing and write the final artifact now \
+             from what you already know, then run the real verification command once.\n\
+             </selfware_system_directive>"
         );
         self.push_tool_result_message(
             use_native_fc,
@@ -1068,6 +1155,18 @@ impl Agent {
                 continue;
             }
 
+            if self
+                .maybe_block_repeated_probe(&name, &args_str, &call_id, use_native_fc, start_time)
+                .await
+            {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
             if let Some(error_msg) = self.current_task_tool_policy_violation(&name) {
                 self.reject_tool_call_before_execution(
                     &name,
@@ -1501,6 +1600,18 @@ impl Agent {
 
         if self
             .maybe_block_dependency_spiral(&name, &args_str, &call_id, use_native_fc, start_time)
+            .await
+        {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if self
+            .maybe_block_repeated_probe(&name, &args_str, &call_id, use_native_fc, start_time)
             .await
         {
             self.emit_event(AgentEvent::ToolCompleted {
