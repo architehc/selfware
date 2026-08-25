@@ -124,6 +124,50 @@ pub(crate) fn file_read_retry_stays_suppressed(exists: &std::io::Result<bool>) -
 /// further installs and forces a strategy pivot.
 pub(crate) const DEPENDENCY_SPIRAL_LIMIT: usize = 3;
 
+/// Identical normalized shell commands allowed before the repeated-probe
+/// pivot blocks the next one (loop 12). The (LIMIT+1)th — 6th — identical
+/// probe is blocked once with a change-strategy directive.
+pub(crate) const REPEATED_PROBE_LIMIT: usize = 5;
+
+/// Bound on distinct normalized probe commands tracked per task (loop 12).
+/// Past the cap, new commands are simply not tracked (fail-open).
+pub(crate) const TRACKED_PROBE_COMMAND_LIMIT: usize = 64;
+
+/// Normalize a shell command for repeated-probe detection (loop 12):
+/// lowercase, collapse whitespace runs to a single space, and collapse each
+/// digit run to a single `#`. Heredoc probe variants that differ only in
+/// embedded numbers or indentation (`python3 - <<'PYEOF' ... print(1)` vs
+/// `print(2)`) hash to the same command — the established normalization
+/// approach of `normalize_no_action_content`, plus digit collapsing.
+pub(crate) fn normalize_probe_command(command: &str) -> String {
+    let mut out = String::with_capacity(command.len());
+    let mut last_was_space = true; // trims leading whitespace
+    let mut last_was_digit = false;
+    for ch in command.chars().flat_map(|c| c.to_lowercase()) {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                out.push(' ');
+            }
+            last_was_space = true;
+            last_was_digit = false;
+        } else if ch.is_ascii_digit() {
+            if !last_was_digit {
+                out.push('#');
+            }
+            last_was_digit = true;
+            last_was_space = false;
+        } else {
+            out.push(ch);
+            last_was_space = false;
+            last_was_digit = false;
+        }
+    }
+    if out.ends_with(' ') {
+        out.pop();
+    }
+    out
+}
+
 /// True for dependency-installation shell commands (`pip install`, `apt-get
 /// install`, `npm install`, `cargo add`, `go get`, …). Token-exact: `pip list`
 /// and `apt list --installed` are diagnostics, not installs. The dependency

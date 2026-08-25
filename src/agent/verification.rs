@@ -1006,6 +1006,49 @@ impl Agent {
             .unwrap_or(false)
     }
 
+    /// Loop-12 verification deadline: once the run passes
+    /// VERIFICATION_DEADLINE_PCT of `agent.max_iterations` without any
+    /// successful verification command on record, inject a one-time directive
+    /// to stop exploring and produce the minimal working version now. Fires at
+    /// most once per task (latch reset in run_task); fail-open — it only ever
+    /// adds a message, never blocks or errors.
+    pub(super) fn maybe_inject_verification_deadline_directive(&mut self) {
+        /// Fraction of the iteration budget past which a run with no passing
+        /// verification must converge on a minimal working deliverable.
+        const VERIFICATION_DEADLINE_PCT: usize = 60;
+        if self
+            .verification_deadline_directive_done
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let max_iterations = self.config.agent.max_iterations;
+        if max_iterations == 0 {
+            return;
+        }
+        let iteration = self.loop_control.current_iteration();
+        if iteration * 100 < max_iterations * VERIFICATION_DEADLINE_PCT {
+            return;
+        }
+        if self.has_successful_verification_tool_call() {
+            return;
+        }
+        self.verification_deadline_directive_done
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        info!(
+            "Verification deadline directive injected at iteration {}/{} — no successful verification yet",
+            iteration, max_iterations
+        );
+        self.messages.push(Message::user(format!(
+            "<selfware_system_directive>\n\
+             VERIFICATION DEADLINE: {iteration} of {max_iterations} iterations are used and no \
+             verification command has passed yet — most of the budget is gone. Stop exploring \
+             and stop re-running probes. Produce the minimal working version of the deliverable \
+             NOW, then run the project's verification command once to confirm it works.\n\
+             </selfware_system_directive>"
+        )));
+    }
+
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) async fn check_completion_gate(&self) -> Option<String> {

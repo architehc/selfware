@@ -2800,3 +2800,335 @@ async fn dependency_firewall_ignores_non_install_and_small_streaks() {
     );
     server.stop().await;
 }
+
+// --- Phase budgets: verification-deadline directive + repeated-probe pivot
+// (TB 3.0 failure class: data-anonymization burned 84/89 steps on 67 python
+// probe heredocs (`python3 - <<'PYEOF'` variants, `python3 verify_tmp.py`
+// repeats) with ZERO installs and ZERO recognized verification — timeout at
+// 3600s with 0 verifier tests passing. Nothing noticed "same probe command N
+// times, no passing verification, most of the budget gone". Loop 12.) ---
+
+#[test]
+fn probe_command_normalization_collapses_digits_and_whitespace() {
+    // Heredoc probes that differ only in embedded numbers / indentation are
+    // the same command for loop detection.
+    assert_eq!(
+        normalize_probe_command("python3 - <<'PYEOF'\nprint(len(rows), 1)\nPYEOF"),
+        normalize_probe_command("python3 - <<'PYEOF'\n  print(len(rows), 2)\nPYEOF")
+    );
+    assert_eq!(
+        normalize_probe_command("python3 verify_tmp1.py"),
+        normalize_probe_command("python3   verify_tmp999.py")
+    );
+    // Case-insensitive, mirroring normalize_no_action_content.
+    assert_eq!(
+        normalize_probe_command("Git   Status"),
+        normalize_probe_command("git status")
+    );
+    // Distinct commands stay distinct.
+    assert_ne!(
+        normalize_probe_command("python3 verify_tmp.py"),
+        normalize_probe_command("python3 other_probe.py")
+    );
+}
+
+#[tokio::test]
+async fn verification_deadline_fires_once_at_sixty_percent_without_verification() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    // mock_agent_config: max_iterations = 50 → the 60% deadline is iteration 30.
+
+    // Before 60%: no directive.
+    agent.loop_control.restore_progress(29, 29);
+    agent.maybe_inject_verification_deadline_directive();
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|m| m.content.text_all().contains("VERIFICATION DEADLINE")),
+        "no directive before 60% of the iteration budget"
+    );
+
+    // At 60% with no successful verification on record: fire once.
+    agent.loop_control.restore_progress(30, 30);
+    agent.maybe_inject_verification_deadline_directive();
+    let fired = agent
+        .messages
+        .iter()
+        .filter(|m| m.content.text_all().contains("VERIFICATION DEADLINE"))
+        .count();
+    assert_eq!(
+        fired, 1,
+        "the deadline directive fires at 60% without a passing verification"
+    );
+
+    // Latch: later iterations do not re-fire.
+    agent.loop_control.restore_progress(45, 45);
+    agent.maybe_inject_verification_deadline_directive();
+    let fired = agent
+        .messages
+        .iter()
+        .filter(|m| m.content.text_all().contains("VERIFICATION DEADLINE"))
+        .count();
+    assert_eq!(
+        fired, 1,
+        "the deadline directive fires at most once per task"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn verification_deadline_stays_silent_after_successful_verification() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // A passing verification command is on record for this task.
+    let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+        "task-1".to_string(),
+        "fix the divide-by-zero bug in calc.py".to_string(),
+    );
+    checkpoint.log_tool_call(crate::checkpoint::ToolCallLog {
+        timestamp: chrono::Utc::now(),
+        tool_name: "shell_exec".to_string(),
+        arguments: serde_json::json!({"command": "python3 test_calc.py"}).to_string(),
+        result: Some("ok".to_string()),
+        success: true,
+        duration_ms: Some(50),
+    });
+    agent.current_checkpoint = Some(checkpoint);
+
+    agent.loop_control.restore_progress(45, 45);
+    agent.maybe_inject_verification_deadline_directive();
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|m| m.content.text_all().contains("VERIFICATION DEADLINE")),
+        "a passing verification silences the deadline directive"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn probe_pivot_blocks_sixth_identical_probe_and_fires_once() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let args = serde_json::json!({"command": "python3 verify_tmp.py"}).to_string();
+    for i in 1..=5 {
+        let blocked = agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                &args,
+                &format!("call-probe-{i}"),
+                false,
+                std::time::Instant::now(),
+            )
+            .await;
+        assert!(!blocked, "probe #{i} of 5 still runs");
+    }
+    assert!(
+        agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                &args,
+                "call-probe-6",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "the 6th identical probe is blocked with the pivot directive"
+    );
+    let injected: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(injected.contains("REPEATED PROBE PIVOT"), "{injected}");
+    assert!(
+        injected.contains("write the final artifact"),
+        "the pivot menu must be concrete: {injected}"
+    );
+
+    // The latch caps the pivot at one fire per task — a 7th repeat is NOT
+    // blocked again (fail-open after the single directive).
+    assert!(
+        !agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                &args,
+                "call-probe-7",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "the probe pivot fires at most once per task"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn probe_pivot_counts_digit_and_whitespace_variants_as_same_command() {
+    // The measured loop ran `python3 - <<'PYEOF'` heredoc variants that
+    // differed only in embedded numbers and indentation.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let variants = [
+        "python3 - <<'PYEOF'\nimport csv\nprint(len(rows), 1)\nPYEOF",
+        "python3 - <<'PYEOF'\nimport csv\nprint(len(rows), 2)\nPYEOF",
+        "python3 - <<'PYEOF'\n  import csv\n  print(len(rows), 3)\nPYEOF",
+        "python3 - <<'PYEOF'\nimport csv\nprint(len(rows), 4)\nPYEOF",
+        "python3 - <<'PYEOF'\nimport csv\nprint(len(rows), 5)\nPYEOF",
+    ];
+    for (i, command) in variants.iter().enumerate() {
+        let args = serde_json::json!({"command": command}).to_string();
+        let blocked = agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                &args,
+                &format!("call-heredoc-{i}"),
+                false,
+                std::time::Instant::now(),
+            )
+            .await;
+        assert!(!blocked, "heredoc variant #{} still runs", i + 1);
+    }
+    let args = serde_json::json!({"command": "python3 - <<'PYEOF'\nimport csv\nprint(len(rows), 6)\nPYEOF"}).to_string();
+    assert!(
+        agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                &args,
+                "call-heredoc-6",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "the 6th digit-variant of the same probe is blocked"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn probe_pivot_resets_on_successful_verification() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let args = serde_json::json!({"command": "python3 verify_tmp.py"}).to_string();
+    for i in 1..=5 {
+        assert!(
+            !agent
+                .maybe_block_repeated_probe(
+                    "shell_exec",
+                    &args,
+                    &format!("call-v-{i}"),
+                    false,
+                    std::time::Instant::now(),
+                )
+                .await,
+            "probe #{i} before the verification still runs"
+        );
+    }
+    // A passing verification between the repeats restarts the streak —
+    // probes interleaved with green checks are iteration, not a stall.
+    agent.note_verification_outcome(
+        "shell_exec",
+        &serde_json::json!({"command": "python3 test_calc.py"}).to_string(),
+        true,
+        "ok",
+    );
+    for i in 6..=10 {
+        assert!(
+            !agent
+                .maybe_block_repeated_probe(
+                    "shell_exec",
+                    &args,
+                    &format!("call-v-{i}"),
+                    false,
+                    std::time::Instant::now(),
+                )
+                .await,
+            "probe #{i} after the passing verification still runs"
+        );
+    }
+    assert!(
+        agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                &args,
+                "call-v-11",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "the 6th identical probe after the verification is blocked"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn probe_pivot_ignores_non_shell_tools_and_distinct_commands() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // Non-shell tools are never counted or blocked.
+    let args = serde_json::json!({"path": "src/main.rs"}).to_string();
+    for i in 0..8 {
+        assert!(
+            !agent
+                .maybe_block_repeated_probe(
+                    "file_read",
+                    &args,
+                    &format!("call-r-{i}"),
+                    false,
+                    std::time::Instant::now(),
+                )
+                .await,
+            "non-shell tools are out of scope for the probe pivot"
+        );
+    }
+
+    // Distinct commands have independent counters — five different probes
+    // once each do not trip the limit. (Letters, not digits: digit runs
+    // collapse to the same normalized command.)
+    for i in 0..5u8 {
+        let args =
+            serde_json::json!({"command": format!("python3 probe_{}.py", (b'a' + i) as char)})
+                .to_string();
+        assert!(
+            !agent
+                .maybe_block_repeated_probe(
+                    "shell_exec",
+                    &args,
+                    &format!("call-d-{i}"),
+                    false,
+                    std::time::Instant::now(),
+                )
+                .await,
+            "distinct commands are tracked independently"
+        );
+    }
+
+    // Unparseable args fail open.
+    assert!(
+        !agent
+            .maybe_block_repeated_probe(
+                "shell_exec",
+                "not json",
+                "call-bad",
+                false,
+                std::time::Instant::now(),
+            )
+            .await,
+        "unparseable args are never blocked"
+    );
+    server.stop().await;
+}

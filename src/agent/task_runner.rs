@@ -91,6 +91,11 @@ impl Agent {
         self.input_census_note = None;
         self.input_census_suspicious.clear();
         self.failed_install_streak = 0;
+        self.verification_deadline_directive_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.probe_pivot_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.probe_command_counts.clear();
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
@@ -772,6 +777,9 @@ impl Agent {
                 }
                 last_warned_band = band;
             }
+            // Loop 12: one-time verification-deadline directive — at 60% of the
+            // iteration budget with no passing verification, converge NOW.
+            self.maybe_inject_verification_deadline_directive();
             self.trim_message_history();
 
             // Surface the current step in the live TUI status bar so a

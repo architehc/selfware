@@ -574,6 +574,18 @@ pub struct Agent {
     /// commands deliberately do NOT reset it — the spiral pattern includes
     /// working diagnostic reads.
     failed_install_streak: usize,
+    /// Verification-deadline directive latch (loop 12): fires at most once
+    /// per task, when 60% of the iteration budget is gone with no passing
+    /// verification. Atomic to match the other per-task directive latches.
+    verification_deadline_directive_done: std::sync::atomic::AtomicBool,
+    /// Repeated-probe pivot latch (loop 12): the pivot directive fires at
+    /// most once per task regardless of how many distinct probe loops occur.
+    probe_pivot_done: std::sync::atomic::AtomicBool,
+    /// Counts of identical normalized shell commands (hash of the
+    /// digits/whitespace-collapsed form) since the last successful
+    /// verification. Bounded at TRACKED_PROBE_COMMAND_LIMIT entries; cleared
+    /// by any successful verification call.
+    probe_command_counts: std::collections::HashMap<u64, usize>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
@@ -1244,6 +1256,9 @@ To call a tool, use this EXACT XML structure:
             input_census_suspicious: Vec::new(),
             leak_check_done: std::sync::atomic::AtomicBool::new(false),
             failed_install_streak: 0,
+            verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
+            probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
+            probe_command_counts: std::collections::HashMap::new(),
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor,
