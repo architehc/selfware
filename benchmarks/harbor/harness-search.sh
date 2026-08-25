@@ -75,13 +75,18 @@ evaluate() {
   local id="$1" cfg="$2"
   local includes=()
   for t in $SEARCH_TASKS; do includes+=(-i "$t"); done
+  # Concurrency = task count (NOT the array length, which counts the -i flags
+  # too — that bug ran n=16 and collapsed env builds under load).
+  local n_tasks=0
+  for _ in $SEARCH_TASKS; do n_tasks=$((n_tasks + 1)); done
+  local n_conc=$(( n_tasks < 4 ? n_tasks : 4 ))
   local before after
   before=$(ls /home/rig/harbor-agents/jobs/ 2>/dev/null)
   sg docker -c "cd /home/rig/harbor-agents && \
     SELFWARE_HARBOR_CONFIG='$cfg' PYTHONPATH=/home/rig/harbor-agents \
     SELFWARE_API_KEY='$SELFWARE_API_KEY' \
     '$HARBOR_BIN' run -d terminal-bench/terminal-bench@latest \
-      --agent selfware_agent:SelfwareAgent -k 1 -n ${#includes[@]} --env docker \
+      --agent selfware_agent:SelfwareAgent -k 1 -n $n_conc --env docker \
       ${includes[*]@Q} -q" || echo "harbor evaluation of $id failed"
   after=$(ls /home/rig/harbor-agents/jobs/ 2>/dev/null)
   comm -13 <(echo "$before") <(echo "$after") | head -1 | sed 's|^|/home/rig/harbor-agents/jobs/|'
