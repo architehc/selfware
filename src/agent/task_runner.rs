@@ -96,6 +96,12 @@ impl Agent {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.commit_mode_85_fired
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.audit_findings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.audit_rejected_attempts
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         self.verification_deadline_directive_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.probe_pivot_done

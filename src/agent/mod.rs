@@ -583,6 +583,11 @@ pub struct Agent {
     /// 65%, FINAL STRETCH at 85% of max_wall_secs, each once per task.
     commit_mode_65_fired: std::sync::atomic::AtomicBool,
     commit_mode_85_fired: std::sync::atomic::AtomicBool,
+    /// Audit finding ledger (loop 13a): adversarial-audit findings persist
+    /// until closed with evidence; the LLM auditor fires at most once per task.
+    audit_findings: std::sync::Mutex<Vec<verification::AuditFinding>>,
+    /// Completion rejections caused by open ledger findings.
+    audit_rejected_attempts: std::sync::atomic::AtomicUsize,
     /// Verification-deadline directive latch (loop 12): fires at most once
     /// per task, when 60% of the iteration budget is gone with no passing
     /// verification. Atomic to match the other per-task directive latches.
@@ -1268,6 +1273,8 @@ To call a tool, use this EXACT XML structure:
             best_snapshot: best_snapshot::AgentSnapshot::default(),
             commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),
             commit_mode_85_fired: std::sync::atomic::AtomicBool::new(false),
+            audit_findings: std::sync::Mutex::new(Vec::new()),
+            audit_rejected_attempts: std::sync::atomic::AtomicUsize::new(0),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),

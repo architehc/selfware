@@ -1288,6 +1288,14 @@ impl Agent {
             }
         }
 
+        // Audit ledger (deterministic, every completion attempt): findings
+        // recorded by the adversarial audit block until closed with evidence.
+        if !is_read_only {
+            if let Some(msg) = self.check_audit_ledger() {
+                return Some(msg);
+            }
+        }
+
         // Requirements audit (once per task, substantial mutation tasks only):
         // before accepting completion, one bounded model call must account for
         // every explicit requirement and referenced data field. Advisory
@@ -1319,6 +1327,74 @@ impl Agent {
         self.requirements_audit_done
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.requirements_audit(instruction).await
+    }
+
+    /// Deterministic re-check of the audit ledger on every completion attempt
+    /// (loop 13a — replaces the once-only latch that let cargo-flight-dispatch
+    /// complete with 11 findings unaddressed). The LLM auditor fires at most
+    /// once per task; findings then block completion until each is closed by
+    /// `RESOLVED <id>` with valid post-finding edit evidence or `WONTFIX <id>`
+    /// with a reason. No model call happens here.
+    pub(super) fn check_audit_ledger(&self) -> Option<String> {
+        let mut findings = self
+            .audit_findings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !findings.iter().any(|f| f.status == FindingStatus::Open) {
+            return None;
+        }
+
+        let response = self.last_assistant_response.clone();
+        for finding in findings.iter_mut() {
+            if finding.status != FindingStatus::Open {
+                continue;
+            }
+            if let Some(reason) = closure_marker(&response, &finding.id, "WONTFIX") {
+                if reason.len() > finding.id.len() + 10 {
+                    finding.status = FindingStatus::Wontfix;
+                    info!("audit finding {} closed as WONTFIX: {}", finding.id, reason);
+                    continue;
+                }
+            }
+            if let Some(evidence) = closure_marker(&response, &finding.id, "RESOLVED") {
+                if evidence_is_valid(
+                    &evidence,
+                    finding.created_call_count,
+                    self.current_checkpoint.as_ref(),
+                ) {
+                    finding.status = FindingStatus::Resolved;
+                    info!(
+                        "audit finding {} resolved with post-finding evidence",
+                        finding.id
+                    );
+                }
+                // Invalid evidence (bogus or pre-finding) leaves it OPEN.
+            }
+        }
+
+        let open: Vec<_> = findings
+            .iter()
+            .filter(|f| f.status == FindingStatus::Open)
+            .cloned()
+            .collect();
+        if open.is_empty() {
+            return None;
+        }
+        let attempts = self
+            .audit_rejected_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        Some(format!(
+            "AUDIT LEDGER — completion blocked (rejection {attempts}). {} finding(s) still OPEN:\n{}\n\
+             Close each with `RESOLVED <id>: <what you changed, naming the file>` AFTER making and \
+             verifying the change (the evidence must cite a real post-finding edit), or \
+             `WONTFIX <id>: <reason>` if the finding is bogus. Open findings do not expire.",
+            open.len(),
+            open.iter()
+                .map(|f| format!("- {}: {}", f.id, f.text))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ))
     }
 
     /// One bounded model call auditing requirement coverage with a hostile
@@ -1391,19 +1467,42 @@ impl Agent {
             }
             RequirementsAudit::Unaddressed(items) => {
                 info!(
-                    "requirements audit verdict: UNADDRESSED ({} items) — blocking completion once",
+                    "requirements audit verdict: UNADDRESSED ({} items) — findings recorded in the ledger",
                     items.len()
                 );
+                let created = self
+                    .current_checkpoint
+                    .as_ref()
+                    .map(|cp| cp.tool_calls.len())
+                    .unwrap_or(0);
+                {
+                    let mut findings = self
+                        .audit_findings
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    *findings = items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, text)| AuditFinding {
+                            id: format!("F{}", i + 1),
+                            text: text.clone(),
+                            status: FindingStatus::Open,
+                            created_call_count: created,
+                        })
+                        .collect();
+                }
                 Some(format!(
-                    "ADVERSARIAL REVIEW — completion blocked (this fires once per task). \
-                 A hostile read of your work found these plausible hidden-verifier failures:\n{}\n\
-                 For each item: investigate and fix it if valid (make the change and verify), \
-                 or state precisely why the attack does not apply. Hidden verifiers grade \
-                 requirements the instruction only implies — unused census fields and \
-                 unconventional outputs are the usual misses.",
+                    "ADVERSARIAL REVIEW — completion blocked. {} finding(s) recorded; they do not \
+                     expire.\n{}\n\
+                     Close each with `RESOLVED <id>: <what you changed, naming the file>` AFTER \
+                     making and verifying the change (the evidence must cite a real post-finding \
+                     edit), or `WONTFIX <id>: <reason>` if the finding is bogus. Hidden verifiers \
+                     grade requirements the instruction only implies.",
+                    items.len(),
                     items
                         .iter()
-                        .map(|i| format!("- {i}"))
+                        .enumerate()
+                        .map(|(i, item)| format!("- F{}: {}", i + 1, item))
                         .collect::<Vec<_>>()
                         .join("\n")
                 ))
@@ -1850,6 +1949,58 @@ impl Agent {
 /// Minimum instruction length (chars) for the completion-time requirements
 /// audit. Shorter tasks are trivial enough that a model call adds nothing.
 const REQUIREMENTS_AUDIT_MIN_INSTRUCTION_CHARS: usize = 200;
+
+/// Status of a recorded audit finding (loop 13a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FindingStatus {
+    Open,
+    Resolved,
+    Wontfix,
+}
+
+/// One adversarial-audit finding, persisted in the ledger until closed.
+/// Closure is deterministic evidence — no LLM re-audit (panel consensus).
+#[derive(Debug, Clone)]
+pub(crate) struct AuditFinding {
+    pub id: String,
+    pub text: String,
+    pub status: FindingStatus,
+    /// Checkpoint tool-call count when the finding was created; closure
+    /// evidence must reference a write/edit logged AFTER this index.
+    pub created_call_count: usize,
+}
+
+/// Extract a `RESOLVED <id>` / `WONTFIX <id>` closure line from a response.
+fn closure_marker(response: &str, id: &str, verb: &str) -> Option<String> {
+    let needle = format!("{verb} {id}");
+    response
+        .lines()
+        .map(str::trim)
+        .find(|line| line.to_uppercase().starts_with(&needle))
+        .map(str::to_string)
+}
+
+/// Evidence is valid when it names a path that a successful post-finding
+/// write/edit actually touched. Deliberately shallow — it stops brush-past
+/// ("RESOLVED: I fixed it") without pretending to judge semantics.
+fn evidence_is_valid(
+    evidence: &str,
+    created_call_count: usize,
+    checkpoint: Option<&crate::checkpoint::TaskCheckpoint>,
+) -> bool {
+    let Some(cp) = checkpoint else { return false };
+    cp.tool_calls
+        .iter()
+        .skip(created_call_count.min(cp.tool_calls.len()))
+        .any(|tc| {
+            tc.success
+                && matches!(tc.tool_name.as_str(), "file_edit" | "file_write")
+                && serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                    .is_some_and(|path| !path.is_empty() && evidence.contains(&path))
+        })
+}
 
 /// Parsed outcome of the completion-time requirements audit.
 #[derive(Debug)]
