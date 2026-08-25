@@ -18,7 +18,7 @@ set -euo pipefail
 
 ITERATIONS="${1:-5}"
 ARCHIVE="${HARNESS_ARCHIVE:-/home/rig/harbor-agents/archive}"
-SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-bench/bun-sourcemap-leak terminal-bench/cli-2ph-simplex terminal-bench/data-anonymization terminal-bench/ctr-optimization terminal-bench/distributed-dedup terminal-bench/embedding-drift-monitor terminal-bench/exam-pdf-eval}"
+SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-bench/bun-sourcemap-leak terminal-bench/cli-2ph-simplex terminal-bench/data-anonymization terminal-bench/ctr-optimization terminal-bench/distributed-dedup terminal-bench/embedding-drift-monitor terminal-bench/cumulative-layout-shift}"
 SEED_CONFIG="${SEED_CONFIG:-/home/rig/selfware/benchmarks/harbor/selfware-harbor-medium.toml}"
 HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/bin/harbor}"
 SELFWARE="/home/rig/selfware/target/release/selfware"
@@ -84,6 +84,7 @@ evaluate() {
   before=$(ls /home/rig/harbor-agents/jobs/ 2>/dev/null)
   sg docker -c "cd /home/rig/harbor-agents && \
     SELFWARE_HARBOR_CONFIG='$cfg' PYTHONPATH=/home/rig/harbor-agents \
+    SELFWARE_BINARY='${SELFWARE_BINARY:-/home/rig/harbor-agents/dist/selfware-bullseye}' \
     SELFWARE_API_KEY='$SELFWARE_API_KEY' \
     '$HARBOR_BIN' run -d terminal-bench/terminal-bench@latest \
       --agent selfware_agent:SelfwareAgent -k 1 -n $n_conc --env docker \
