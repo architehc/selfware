@@ -3449,3 +3449,105 @@ async fn read_line_pausing_esc_unpauses_even_on_error() {
         "esc_pause_ack must always be cleared, even if read_line fails"
     );
 }
+
+// --- Rejected-completion loop detection (TB 3.0 failure, 2026-08-24):
+// cli-2ph-simplex at temp 0 spun 10 identical "final answer" turns to the
+// 2500s timeout. Root cause: the mutation-task completion gate REJECTED each
+// attempt but dropped the reason silently (no message pushed, no loop-detector
+// signal), so the model's context never changed and temp-0 determinism made
+// every next response byte-identical. ---
+
+#[tokio::test]
+async fn rejected_completion_pushes_directive_and_feeds_loop_detection() {
+    use crate::testing::mock_api::MockResponse;
+
+    let answer = "The solver is complete and handles every requirement listed. All work is done."
+        .to_string();
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Text(answer))
+        .build()
+        .await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement the two-phase simplex solver in /app/simplex.py with pivot logging, unboundedness detection, exact two-decimal objective output, and verification against the sample LPs in /app/data before finishing.".to_string();
+
+    // Turn 1: the gate rejects a no-tool "final answer" (nothing written).
+    let _ = agent.execute_step_internal(false).await;
+    let injected: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        injected.contains("<selfware_system_directive>"),
+        "a rejected completion must push the gate's reason — silent rejection \
+         loops byte-identical at temp 0. Messages so far: {}",
+        &injected[..injected.len().min(400)]
+    );
+    assert!(
+        agent.consecutive_no_action_prompts >= 1,
+        "a rejected completion must count as a no-action turn (streak={})",
+        agent.consecutive_no_action_prompts
+    );
+
+    // Identical repeats must ESCALATE the streak, never reset it.
+    let _ = agent.execute_step_internal(false).await;
+    let _ = agent.execute_step_internal(false).await;
+    assert!(
+        agent.consecutive_no_action_prompts >= 3,
+        "identical rejected completions must escalate (streak={})",
+        agent.consecutive_no_action_prompts
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn identical_code_bearing_completion_pinned_past_gate_aborts_early() {
+    use crate::testing::mock_api::MockResponse;
+
+    // The cli-2ph-simplex failure shape: long code-bearing "final answers"
+    // skip the no-action mutation rule (unwritten-code exemption) and the
+    // length-based prose exemption, then pin at the identical-response
+    // threshold forever — the FAKE_COMPLETE_LOOP abort one section below is
+    // never reached. At temp 0 every repeat is byte-identical.
+    let answer = format!(
+        "Here is the complete implementation with every requirement handled.\n\n```python\n{}```\nAll checks pass.",
+        "x = compute(x)\n".repeat(8)
+    );
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Text(answer))
+        .build()
+        .await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement the two-phase simplex solver in /app/simplex.py with pivot logging, unboundedness detection, exact two-decimal objective output, and verification against the sample LPs in /app/data before finishing.".to_string();
+
+    let mut aborted = false;
+    for _ in 0..12 {
+        match agent.execute_step_internal(false).await {
+            Err(e) => {
+                // Either early-abort marker is correct: the point is that the
+                // run terminates instead of spinning to the task timeout.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("FAKE_COMPLETE_LOOP") || msg.contains("NONTERM_PROSE_NO_TOOL"),
+                    "wrong abort reason: {msg}"
+                );
+                aborted = true;
+                break;
+            }
+            Ok(true) => panic!("must not complete with zero edits"),
+            Ok(false) => {}
+        }
+    }
+    assert!(
+        aborted,
+        "pinned identical completions on a zero-edit mutation task must abort early, not spin to the timeout"
+    );
+    server.stop().await;
+}

@@ -871,6 +871,14 @@ impl Agent {
                         self.consecutive_no_action_prompts
                     );
                     self.consecutive_no_action_prompts = 5;
+                    // Lifetime stall accounting: the pin at 5 returns below and
+                    // never reaches the FAKE_COMPLETE_LOOP machinery — measured on
+                    // TB 3.0 cli-2ph-simplex (temp 0): 10 identical 3-minute turns
+                    // to the task timeout. Pinned identical completions on a
+                    // zero-edit mutation task must abort early.
+                    self.note_mutation_zero_edit_stall(
+                        "identical completion pinned past the completion gate",
+                    )?;
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
                          You keep repeating the same response, but the task is NOT complete. \
