@@ -18,7 +18,7 @@ set -euo pipefail
 
 ITERATIONS="${1:-5}"
 ARCHIVE="${HARNESS_ARCHIVE:-/home/rig/harbor-agents/archive}"
-SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-bench/bun-sourcemap-leak terminal-bench/cli-2ph-simplex terminal-bench/data-anonymization}"
+SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-bench/bun-sourcemap-leak terminal-bench/cli-2ph-simplex terminal-bench/data-anonymization terminal-bench/ctr-optimization terminal-bench/distributed-dedup terminal-bench/embedding-drift-monitor terminal-bench/exam-pdf-eval}"
 SEED_CONFIG="${SEED_CONFIG:-/home/rig/selfware/benchmarks/harbor/selfware-harbor-medium.toml}"
 HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/bin/harbor}"
 SELFWARE="/home/rig/selfware/target/release/selfware"
@@ -34,6 +34,10 @@ next_id() {
 record_candidate() {
   # $1=id  $2=parent_id  $3=config path  $4=harbor job dir
   local id="$1" parent="$2" cfg="$3" jobdir="$4"
+  if [ -z "$jobdir" ] || [ ! -d "$jobdir" ]; then
+    echo "ERROR: no job dir for $id — evaluation did not produce trials; refusing to record" >&2
+    return 1
+  fi
   python3 - "$ARCHIVE" "$id" "$parent" "$cfg" "$jobdir" <<'PYEOF'
 import json, sys, pathlib, hashlib
 archive, cid, parent, cfg, jobdir = sys.argv[1:6]
@@ -65,18 +69,22 @@ PYEOF
 }
 
 evaluate() {
-  # $1=id  $2=config -> prints the harbor job dir on stdout (last line)
+  # $1=id  $2=config -> prints the harbor job dir on stdout (last line).
+  # Harbor needs the docker group: wrap in `sg docker -c`. Job dir is detected
+  # by diffing the jobs/ listing, so a harbor failure can never return a stale dir.
   local id="$1" cfg="$2"
   local includes=()
   for t in $SEARCH_TASKS; do includes+=(-i "$t"); done
-  (
-    cd /home/rig/harbor-agents
-    SELFWARE_HARBOR_CONFIG="$cfg" PYTHONPATH=/home/rig/harbor-agents \
-      "$HARBOR_BIN" run -d terminal-bench/terminal-bench@latest \
-      --agent selfware_agent:SelfwareAgent -k 1 -n "${#includes[@]}" --env docker \
-      "${includes[@]}" -q
-  )
-  ls -td /home/rig/harbor-agents/jobs/*/ | head -1
+  local before after
+  before=$(ls /home/rig/harbor-agents/jobs/ 2>/dev/null)
+  sg docker -c "cd /home/rig/harbor-agents && \
+    SELFWARE_HARBOR_CONFIG='$cfg' PYTHONPATH=/home/rig/harbor-agents \
+    SELFWARE_API_KEY='$SELFWARE_API_KEY' \
+    '$HARBOR_BIN' run -d terminal-bench/terminal-bench@latest \
+      --agent selfware_agent:SelfwareAgent -k 1 -n ${#includes[@]} --env docker \
+      ${includes[*]@Q} -q" || echo "harbor evaluation of $id failed"
+  after=$(ls /home/rig/harbor-agents/jobs/ 2>/dev/null)
+  comm -13 <(echo "$before") <(echo "$after") | head -1 | sed 's|^|/home/rig/harbor-agents/jobs/|'
 }
 
 # --- iteration 0: seed the archive with the current profile ---
@@ -104,14 +112,31 @@ print(best['id'])")
   echo "=== iteration $i: proposer on top of $parent_id -> $cid ==="
   (
     cd "$work"
-    "$SELFWARE" run -m yolo -c /home/rig/selfware/selfware.toml \
-      "You are the harness proposer. Read the skill at /home/rig/selfware/benchmarks/harbor/proposer-skill.md and follow it exactly. The archive is at $ARCHIVE. The parent candidate is $parent_id (config: $parent_cfg). Write proposal.diff and proposal.md here." \
-      || echo "proposer failed — keeping parent config unchanged"
+    timeout 900 "$SELFWARE" run -m yolo -c /home/rig/selfware/benchmarks/harbor/proposer.toml \
+      "You are the harness proposer. Read the skill at /home/rig/selfware/benchmarks/harbor/proposer-skill.md and follow it exactly. The archive is at $ARCHIVE. The parent candidate is $parent_id (config: $parent_cfg). Write proposal.diff and proposal.md here. IMPORTANT: only write those two files — never run patch, never edit config.toml yourself; the harness applies your diff." \
+      || echo "proposer failed/timed out — keeping parent config unchanged"
   )
 
   if [ -s "$work/proposal.diff" ]; then
-    (cd "$work" && patch -p0 config.toml < proposal.diff) || {
-      echo "proposal.diff failed to apply — candidate $cid keeps parent config"
+    (cd "$work" && patch -p0 --fuzz=3 config.toml < proposal.diff) || {
+      echo "patch failed; trying tolerant apply"
+      python3 - "$work" <<'PYEOF'
+import pathlib, sys
+work = pathlib.Path(sys.argv[1])
+cfg = work / "config.toml"
+diff = (work / "proposal.diff").read_text()
+text = cfg.read_text()
+removed = [l[1:] for l in diff.splitlines() if l.startswith("-") and not l.startswith("---")]
+added = [l[1:] for l in diff.splitlines() if l.startswith("+") and not l.startswith("+++")]
+if len(removed) == len(added):
+    for old, new in zip(removed, added):
+        if old in text:
+            text = text.replace(old, new, 1)
+    cfg.write_text(text)
+    print("tolerant apply done")
+else:
+    print("tolerant apply skipped (unbalanced diff)")
+PYEOF
     }
   else
     echo "no proposal.diff — candidate $cid keeps parent config"
