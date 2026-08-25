@@ -2284,3 +2284,15 @@ fn test_warn_unknown_keys_nested_typo_does_not_panic() {
         "#,
     );
 }
+
+#[test]
+fn agent_section_known_keys_include_none_defaulted_options() {
+    // max_wall_secs is Option<u64> = None at default; a default() serialization
+    // drops None fields, so the known-keys check false-flagged the valid key
+    // (found by the harness proposer reading TB 3.0 run traces).
+    let keys = super::known_section_keys("agent").expect("agent section known");
+    assert!(
+        keys.contains("max_wall_secs"),
+        "Option fields must count as known keys"
+    );
+}

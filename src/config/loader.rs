@@ -95,35 +95,84 @@ fn config_is_checkout_local(config_path: &std::path::Path) -> bool {
     config_path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"))
 }
 
-/// Known sub-keys of a fixed config section, derived by serializing the
-/// section's default struct — the list therefore cannot drift from the
-/// schema the way a hand-maintained list would. Returns `None` for sections
+/// Known sub-keys of a fixed config section, derived from the section struct's
+/// serde field list — the list therefore cannot drift from the schema the way
+/// a hand-maintained list would (and unlike a default() serialization, it
+/// keeps None-defaulted options). Returns `None` for sections
 /// whose keys are dynamic (`models`, `extra_body`, `mcp`, `hooks`, `qa`) or
 /// unrecognized; those get no nested-key check. None of the section structs
 /// uses `skip_serializing_if` or `flatten`, so every schema key appears in
 /// the serialized form.
-fn known_section_keys(section: &str) -> Option<std::collections::HashSet<String>> {
-    let value = match section {
-        "agent" => toml::Value::try_from(super::agent::AgentConfig::default()).ok()?,
-        "safety" => toml::Value::try_from(super::safety::SafetyConfig::default()).ok()?,
-        "yolo" => toml::Value::try_from(super::types::YoloFileConfig::default()).ok()?,
-        "ui" => toml::Value::try_from(super::types::UiConfig::default()).ok()?,
-        "continuous_work" => {
-            toml::Value::try_from(super::types::ContinuousWorkConfig::default()).ok()?
+/// Field names of a `Deserialize` struct, including `None`-defaulted options.
+/// The previous approach serialized `Section::default()` and read its keys —
+/// but TOML has no None representation, so every `Option` field vanished from
+/// the "known keys" set and valid keys like `agent.max_wall_secs` got flagged
+/// as unknown (found by the harness proposer reading TB 3.0 run traces).
+/// This records the names from serde's own field list, so renamed fields and
+/// options are always correct.
+fn struct_field_names<T>() -> std::collections::HashSet<String>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    use serde::de::{Deserializer, Error, Visitor};
+    use std::cell::Cell;
+
+    struct Collector(Cell<Option<&'static [&'static str]>>);
+
+    impl<'de> Deserializer<'de> for &Collector {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Self::Error> {
+            Err(Self::Error::custom("field collector"))
         }
-        "retry" => toml::Value::try_from(super::types::RetrySettings::default()).ok()?,
-        "resources" => toml::Value::try_from(super::resources::ResourcesConfig::default()).ok()?,
-        "concurrency" => toml::Value::try_from(super::types::ConcurrencyConfig::default()).ok()?,
-        "evolution" => toml::Value::try_from(super::types::EvolutionTomlConfig::default()).ok()?,
-        "cache" => toml::Value::try_from(crate::session::cache::LlmCacheConfig::default()).ok()?,
-        "debug" => toml::Value::try_from(super::debug::DebugConfig::default()).ok()?,
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            self.0.set(Some(fields));
+            Err(Self::Error::custom("collected"))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+
+    let collector = Collector(Cell::new(None));
+    let _ = T::deserialize(&collector);
+    collector
+        .0
+        .take()
+        .unwrap_or_default()
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// The set of sub-keys a known fixed section defines, or None for sections
+/// whose keys are dynamic (`models`, `extra_body`, `mcp`, `hooks`, `qa`) or
+/// unrecognized; those get no nested-key check.
+fn known_section_keys(section: &str) -> Option<std::collections::HashSet<String>> {
+    let names = match section {
+        "agent" => struct_field_names::<super::agent::AgentConfig>(),
+        "safety" => struct_field_names::<super::safety::SafetyConfig>(),
+        "yolo" => struct_field_names::<super::types::YoloFileConfig>(),
+        "ui" => struct_field_names::<super::types::UiConfig>(),
+        "continuous_work" => struct_field_names::<super::types::ContinuousWorkConfig>(),
+        "retry" => struct_field_names::<super::types::RetrySettings>(),
+        "resources" => struct_field_names::<super::resources::ResourcesConfig>(),
+        "concurrency" => struct_field_names::<super::types::ConcurrencyConfig>(),
+        "evolution" => struct_field_names::<super::types::EvolutionTomlConfig>(),
+        "cache" => struct_field_names::<crate::session::cache::LlmCacheConfig>(),
+        "debug" => struct_field_names::<super::debug::DebugConfig>(),
         _ => return None,
     };
-    value.as_table().map(|t| {
-        t.keys()
-            .cloned()
-            .collect::<std::collections::HashSet<String>>()
-    })
+    Some(names)
 }
 
 /// If the value for `key` originated from an untrusted, checkout-local

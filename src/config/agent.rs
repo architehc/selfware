@@ -96,18 +96,15 @@ pub struct AgentConfig {
     pub post_edit_test_command: Option<String>,
 
     /// Hard limit: stop when total prompt+completion tokens exceed this.
-    /// CLI-only; not persisted in config files.
-    #[serde(skip)]
+    #[serde(default)]
     pub max_budget_tokens: Option<usize>,
 
     /// Hard limit: stop after this many wall-clock seconds.
-    /// CLI-only; not persisted in config files.
-    #[serde(skip)]
+    #[serde(default)]
     pub max_wall_secs: Option<u64>,
 
     /// Hard limit: stop when accumulated provider-reported USD cost exceeds this.
-    /// CLI-only; not persisted in config files.
-    #[serde(skip)]
+    #[serde(default)]
     pub max_cost_usd: Option<f64>,
 }
 
