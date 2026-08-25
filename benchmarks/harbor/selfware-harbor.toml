@@ -1,0 +1,41 @@
+# Selfware Harbor profile — unattended benchmark runs inside task containers.
+# Hosted GLM 5.3 via OpenRouter; key arrives as SELFWARE_API_KEY env at run
+# time (never in this file — it is uploaded into containers world-readable).
+
+endpoint = "https://openrouter.ai/api/v1"
+model = "z-ai/glm-5.3"
+# Temp 0 for benchmark reproducibility — temp 1.0 default made
+# single-run before/after comparisons meaningless (measured: cargo verifier
+# pass count swung 25/27 -> 19/27 between identical-config runs).
+temperature = 0.0
+max_tokens = 16384
+context_length = 262144
+
+[extra_body]
+# Same lesson as the evolve profile: unbounded reasoning consumed the whole
+# completion budget twice with zero answer tokens on hosted GLM 5.3.
+reasoning_effort = "low"
+
+[safety]
+# Task containers work in /app; the adapter cds there before launch.
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+
+[agent]
+# Terminal-Bench tasks are long-horizon (agent timeout 3600s): generous
+# iteration cap, wall budget leaves ~10 min of teardown headroom.
+max_iterations = 400
+step_timeout_secs = 600
+max_wall_secs = 3300
+# GLM 5.3 on OpenRouter supports native tool calling (the TB 3.0 leaderboard
+# ran it through Claude Code, a native-tool harness).
+native_function_calling = true
+
+[continuous_work]
+enabled = false
+auto_recovery = false
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000

@@ -140,3 +140,4 @@ research/
 
 # autonomous self-improve loop workspace
 scratchpad/
+.worktrees/
