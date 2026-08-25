@@ -1333,7 +1333,11 @@ impl Agent {
             .first()
             .map(|c| c.message.content.text_all())
             .unwrap_or_default();
-        match parse_requirements_audit(&text) {
+        let audit = parse_requirements_audit(&text);
+        // Visible one-line verdict: the info!/warn! logs below never reach a
+        // `run`-mode user, so without this marker the audit is unverifiable.
+        crate::output::audit_verdict(&audit.marker_label());
+        match audit {
             RequirementsAudit::AllAddressed => {
                 info!("requirements audit verdict: ALL ADDRESSED");
                 None
@@ -1810,6 +1814,20 @@ pub(crate) enum RequirementsAudit {
     AllAddressed,
     Unaddressed(Vec<String>),
     Unparseable,
+}
+
+impl RequirementsAudit {
+    /// Short label for the visible `[audit] verdict:` marker (loop 11). The
+    /// verdicts used to log at info! only — invisible in `run` mode, which
+    /// shows warn — so a benchmark log could not show whether the audit
+    /// fired, passed, or was unparseable.
+    pub(crate) fn marker_label(&self) -> String {
+        match self {
+            RequirementsAudit::AllAddressed => "ALL ADDRESSED".to_string(),
+            RequirementsAudit::Unaddressed(items) => format!("UNADDRESSED({})", items.len()),
+            RequirementsAudit::Unparseable => "unparseable".to_string(),
+        }
+    }
 }
 
 /// Parse the audit response: bullet lines carry per-requirement verdicts and a

@@ -960,6 +960,10 @@ impl Agent {
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate().await {
                 info!("Completion gate rejected: {}", gate_msg);
+                // Visible one-line marker: the rejection is pushed as a user
+                // message and the info! log is suppressed in run mode, so
+                // without this a benchmark log cannot show the gate fired.
+                output::gate_blocked(&gate_msg);
                 // Early hard-stop for the fake-complete loop: on a mutation-required
                 // task with zero mutating calls, the model alternating {final answer →
                 // gate rejection → read-only tool} resets every consecutive counter and

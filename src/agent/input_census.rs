@@ -28,6 +28,11 @@ const SKIP_DIRS: &[&str] = &[
 ];
 /// Naming conventions that mark content which must not leak into outputs.
 const SUSPICIOUS_WORDS: &[&str] = &["private", "secret", "internal"];
+/// Bound on the suspicious-identifier list: values under a suspicious key can
+/// be arbitrarily many, but the census stays a small context note.
+const SUSPICIOUS_MAX_IDENTIFIERS: usize = 50;
+/// A value longer than this is a blob, not an identifier.
+const SUSPICIOUS_VALUE_MAX_CHARS: usize = 200;
 
 /// The environment's data contract, extracted deterministically.
 pub(crate) struct InputCensus {
@@ -153,6 +158,52 @@ fn push_unique(list: &mut Vec<String>, item: String) {
     }
 }
 
+/// Collect string values declared under a suspicious key (and the stems of
+/// path-like values) as suspicious identifiers in their own right.
+fn extract_suspicious_values(value: &serde_json::Value, suspicious: &mut Vec<String>) {
+    if suspicious.len() >= SUSPICIOUS_MAX_IDENTIFIERS {
+        return;
+    }
+    match value {
+        serde_json::Value::String(s) => push_suspicious_value(s, suspicious),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                extract_suspicious_values(item, suspicious);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                extract_suspicious_values(v, suspicious);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn push_suspicious_value(raw: &str, suspicious: &mut Vec<String>) {
+    let value = raw.trim();
+    if suspicious.len() >= SUSPICIOUS_MAX_IDENTIFIERS
+        || value.is_empty()
+        || value.chars().count() > SUSPICIOUS_VALUE_MAX_CHARS
+    {
+        return;
+    }
+    push_unique(suspicious, value.to_string());
+    // A path value leaks into artifacts as a bare module name (a sourcemap's
+    // `sources` carries "../src/server/handler.ts") — the stem is what an
+    // exact-substring leak check reliably matches.
+    if value.contains('/') || value.contains('\\') {
+        if let Some(stem) = Path::new(value)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+        {
+            if suspicious.len() < SUSPICIOUS_MAX_IDENTIFIERS {
+                push_unique(suspicious, stem);
+            }
+        }
+    }
+}
+
 /// Recursively collect `a.b` / `a[].b` key paths from a JSON-shaped value,
 /// and bare key names that carry suspicious naming.
 fn extract_value_keys(
@@ -177,6 +228,14 @@ fn extract_value_keys(
                 let lower = k.to_lowercase();
                 if SUSPICIOUS_WORDS.iter().any(|w| lower.contains(w)) {
                     push_unique(suspicious, k.clone());
+                    // Values under a suspicious key are the sensitive
+                    // identifiers themselves (`privateSources: ["src/server/
+                    // handler.ts"]`). Their file stems carry no suspicious
+                    // word, so the basename rule never collects them — the
+                    // bun-sourcemap-leak census listed "secret,
+                    // privateSources" and the leak check stayed blind to the
+                    // declared private module names (TB 3.0, 2026-08-24).
+                    extract_suspicious_values(v, suspicious);
                 }
                 extract_value_keys(rel, v, &path, out, suspicious);
             }

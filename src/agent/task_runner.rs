@@ -1123,6 +1123,9 @@ impl Agent {
                                         "Synthesis answer rejected by completion gate: {}",
                                         gate_msg
                                     );
+                                    // Same visibility gap as the normal path:
+                                    // the rejection only reaches the model.
+                                    output::gate_blocked(&gate_msg);
                                     self.messages.push(Message::user(format!(
                                         "<selfware_system_directive>\n{}\n</selfware_system_directive>",
                                         gate_msg
