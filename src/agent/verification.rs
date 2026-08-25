@@ -1438,6 +1438,17 @@ impl Agent {
             .audit_rejected_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
+        // Terminal state (measured on validation v4: 4/4 runs timed out
+        // churning against uncloseable findings — a best-effort submission
+        // beats a timeout, especially with best-snapshot restore live).
+        // After the 3rd rejection the ledger warns loudly and steps aside.
+        if attempts >= 3 {
+            warn!(
+                "audit ledger: {} finding(s) still OPEN after {attempts} rejections — stepping aside for a best-effort completion",
+                open.len()
+            );
+            return None;
+        }
         Some(format!(
             "AUDIT LEDGER — completion blocked (rejection {attempts}). {} finding(s) still OPEN:\n{}\n\
              Close each with `RESOLVED <id>: <what you changed, naming the file>` AFTER making and \
