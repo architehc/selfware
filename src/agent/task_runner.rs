@@ -91,6 +91,7 @@ impl Agent {
         self.input_census_note = None;
         self.input_census_suspicious.clear();
         self.failed_install_streak = 0;
+        self.best_snapshot.clear();
         self.verification_deadline_directive_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.probe_pivot_done
@@ -655,6 +656,18 @@ impl Agent {
                 if self.is_cancelled() {
                     if let Err(ce) = self.save_checkpoint(task_description) {
                         warn!("Failed to save cancelled checkpoint: {}", ce);
+                    }
+                } else if self.best_snapshot.has_snapshot() {
+                    // Submit the best state, not the last state (six-model
+                    // consult, Opus 5: a task 80% green at minute 30 submits
+                    // a broken edit at minute 60 without this).
+                    let paths = self.written_paths();
+                    match self.best_snapshot.restore_written(&paths) {
+                        Ok(()) => info!(
+                            "restored best snapshot ({} files) after failed run",
+                            paths.len()
+                        ),
+                        Err(e2) => warn!("best snapshot restore failed: {e2}"),
                     }
                 }
                 self.emit_terminal_event_once(AgentEvent::Error {

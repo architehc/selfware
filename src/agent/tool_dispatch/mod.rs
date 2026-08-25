@@ -390,6 +390,49 @@ impl Agent {
             .retain(|existing| existing.tool_name != tool_name);
     }
 
+    /// Paths the agent wrote/edited this task (from checkpoint tool calls).
+    pub(super) fn written_paths(&self) -> Vec<std::path::PathBuf> {
+        self.current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .filter(|tc| matches!(tc.tool_name.as_str(), "file_edit" | "file_write"))
+                    .filter_map(|tc| {
+                        serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("path")
+                                    .and_then(|p| p.as_str())
+                                    .map(std::path::PathBuf::from)
+                            })
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Best-snapshot capture: a green verification marks the current written
+    /// state as the best known (submit best state, not last state).
+    pub(super) fn note_green_verification(&mut self, name: &str, args_str: &str, success: bool) {
+        if !success || !super::tool_dispatch::tool_call_is_verification(name, args_str) {
+            return;
+        }
+        let paths = self.written_paths();
+        if paths.is_empty() {
+            return;
+        }
+        match self.best_snapshot.snapshot_written(&paths) {
+            Ok(()) => info!(
+                "best snapshot updated after green verification ({} files)",
+                paths.len()
+            ),
+            Err(e) => warn!("best snapshot capture failed: {e}"),
+        }
+    }
+
     /// Dependency-firewall accounting: count consecutive install failures.
     /// Resets only on a successful install — interleaved successful
     /// diagnostics are part of the spiral pattern, not progress out of it.
@@ -1460,6 +1503,8 @@ impl Agent {
                     self.note_shell_outcome(cmd, success);
                 }
             }
+            // Best-snapshot capture on green verification.
+            self.note_green_verification(&vt.name, &vt.args_str, success);
 
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
@@ -1820,6 +1865,9 @@ impl Agent {
                 self.note_shell_outcome(cmd, success);
             }
         }
+
+        // Best-snapshot capture on green verification.
+        self.note_green_verification(&name, &args_str, success);
 
         self.track_task_state_after_tool(&name, &args, &result, success)
             .await;

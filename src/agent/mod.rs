@@ -91,6 +91,7 @@ macro_rules! cli_prompt {
 }
 
 mod assistant_response;
+pub mod best_snapshot;
 mod checkpointing;
 pub mod compression;
 pub mod context;
@@ -574,6 +575,10 @@ pub struct Agent {
     /// commands deliberately do NOT reset it — the spiral pattern includes
     /// working diagnostic reads.
     failed_install_streak: usize,
+    /// Last-green workspace snapshot (best-snapshot restore): updated whenever
+    /// the model's own verification passes, restored when the run fails so a
+    /// broken end state never gets submitted over a working one.
+    best_snapshot: best_snapshot::AgentSnapshot,
     /// Verification-deadline directive latch (loop 12): fires at most once
     /// per task, when 60% of the iteration budget is gone with no passing
     /// verification. Atomic to match the other per-task directive latches.
@@ -1256,6 +1261,7 @@ To call a tool, use this EXACT XML structure:
             input_census_suspicious: Vec::new(),
             leak_check_done: std::sync::atomic::AtomicBool::new(false),
             failed_install_streak: 0,
+            best_snapshot: best_snapshot::AgentSnapshot::default(),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),
