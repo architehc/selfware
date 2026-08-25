@@ -91,6 +91,10 @@ impl Agent {
         self.input_census_note = None;
         self.input_census_suspicious.clear();
         self.failed_install_streak = 0;
+        self.last_workspace_fingerprint = None;
+        self.stagnation_streak = 0;
+        self.stagnation_warned
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.best_snapshot.clear();
         self.commit_mode_65_fired
             .store(false, std::sync::atomic::Ordering::Relaxed);

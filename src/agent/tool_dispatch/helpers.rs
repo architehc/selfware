@@ -124,6 +124,51 @@ pub(crate) fn file_read_retry_stays_suppressed(exists: &std::io::Result<bool>) -
 /// further installs and forces a strategy pivot.
 pub(crate) const DEPENDENCY_SPIRAL_LIMIT: usize = 3;
 
+/// Cheap workspace fingerprint for the stagnation detector: fold
+/// (path, mtime-secs, size) over a bounded walk. Stat-only — no content
+/// reads. Returns None on walk errors (fail-open: caller treats as changed).
+pub(crate) fn workspace_fingerprint(root: &std::path::Path) -> Option<u64> {
+    const SKIP: &[&str] = &[
+        ".git",
+        "target",
+        "node_modules",
+        "dist",
+        "build",
+        ".venv",
+        "__pycache__",
+    ];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut seen = 0usize;
+    for entry in walkdir::WalkDir::new(root)
+        .max_depth(4)
+        .into_iter()
+        .filter_entry(|e| {
+            !(e.file_type().is_dir()
+                && e.depth() > 0
+                && SKIP.contains(&e.file_name().to_string_lossy().as_ref()))
+        })
+        .filter_map(|e| e.ok())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if seen >= 2000 {
+            break;
+        }
+        seen += 1;
+        entry.path().to_string_lossy().hash(&mut hasher);
+        let meta = entry.metadata().ok()?;
+        meta.len().hash(&mut hasher);
+        if let Ok(t) = meta.modified() {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                .hash(&mut hasher);
+        }
+    }
+    Some(hasher.finish())
+}
+
 /// Identical normalized shell commands allowed before the repeated-probe
 /// pivot blocks the next one (loop 12). The (LIMIT+1)th — 6th — identical
 /// probe is blocked once with a change-strategy directive.

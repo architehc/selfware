@@ -591,6 +591,13 @@ pub struct Agent {
     /// Output-key contract latch (anti-hedge advisory): fires at most once
     /// per task, and only when a violation is found.
     output_key_check_done: std::sync::atomic::AtomicBool,
+    /// Last computed workspace fingerprint (stagnation detector).
+    last_workspace_fingerprint: Option<u64>,
+    /// Consecutive tool calls with an unchanged fingerprint and no green
+    /// verification. Warns at 10, aborts at 20 (mutation tasks only).
+    stagnation_streak: usize,
+    /// The 10-call stall directive fires once per task.
+    stagnation_warned: std::sync::atomic::AtomicBool,
     /// Verification-deadline directive latch (loop 12): fires at most once
     /// per task, when 60% of the iteration budget is gone with no passing
     /// verification. Atomic to match the other per-task directive latches.
@@ -1279,6 +1286,9 @@ To call a tool, use this EXACT XML structure:
             audit_findings: std::sync::Mutex::new(Vec::new()),
             audit_rejected_attempts: std::sync::atomic::AtomicUsize::new(0),
             output_key_check_done: std::sync::atomic::AtomicBool::new(false),
+            last_workspace_fingerprint: None,
+            stagnation_streak: 0,
+            stagnation_warned: std::sync::atomic::AtomicBool::new(false),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),

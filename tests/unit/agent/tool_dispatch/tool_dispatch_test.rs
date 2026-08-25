@@ -3132,3 +3132,114 @@ async fn probe_pivot_ignores_non_shell_tools_and_distinct_commands() {
     );
     server.stop().await;
 }
+
+// --- Workspace stagnation detector (loop 13d; panel consensus DeepSeek/Opus):
+// data-anonymization spent 67 shell calls probing without the workspace ever
+// moving toward the deliverable. A cheap (path, mtime, size) fingerprint
+// catches it; warn at 10 unchanged calls, abort at 20. ---
+
+#[tokio::test]
+async fn stagnation_warns_once_at_10_and_aborts_at_20() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement the anonymizer in /app/anon.py".to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("input.csv"), "a,b\n1,2\n").unwrap();
+
+    let args = r#"{"command":"python3 -c 'print(1)'"}"#;
+    // Baseline call, then 9 unchanged calls: streak 9, no directive yet.
+    agent
+        .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+        .unwrap();
+    for _ in 0..9 {
+        agent
+            .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+            .unwrap();
+    }
+    assert_eq!(agent.stagnation_streak, 9);
+    let before = agent.messages.len();
+
+    // 11th call: streak 10 — the directive fires exactly once.
+    agent
+        .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+        .unwrap();
+    let body: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("STALL"), "{body}");
+    agent
+        .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+        .unwrap();
+    let body2: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(body.matches("STALL").count(), 1, "warns once");
+    let _ = (before, body2);
+
+    // Push to 20: abort with WORKSPACE_STAGNATION.
+    let mut aborted = false;
+    for _ in 0..10 {
+        if agent
+            .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+            .is_err()
+        {
+            aborted = true;
+            break;
+        }
+    }
+    assert!(aborted, "streak 20 must abort");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn stagnation_resets_on_workspace_change_and_verification() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement the anonymizer in /app/anon.py".to_string();
+
+    let dir = tempfile::tempdir().unwrap();
+    let args = r#"{"command":"python3 -c 'print(1)'"}"#;
+    agent
+        .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+        .unwrap();
+    for _ in 0..4 {
+        agent
+            .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+            .unwrap();
+    }
+    assert_eq!(agent.stagnation_streak, 4);
+
+    // A workspace change resets the streak.
+    std::fs::write(dir.path().join("anon.py"), "print('x')\n").unwrap();
+    agent
+        .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+        .unwrap();
+    assert_eq!(agent.stagnation_streak, 0);
+
+    // A successful verification also resets even with no change.
+    for _ in 0..3 {
+        agent
+            .note_workspace_state_with_root(dir.path(), "shell_exec", args, false)
+            .unwrap();
+    }
+    assert!(agent.stagnation_streak > 0);
+    agent
+        .note_workspace_state_with_root(
+            dir.path(),
+            "shell_exec",
+            r#"{"command":"python3 -m pytest"}"#,
+            true,
+        )
+        .unwrap();
+    assert_eq!(agent.stagnation_streak, 0, "green verification resets");
+    server.stop().await;
+}

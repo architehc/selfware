@@ -414,6 +414,70 @@ impl Agent {
             .unwrap_or_default()
     }
 
+    /// Stagnation accounting (loop 13d): count consecutive tool calls that
+    /// leave the workspace fingerprint unchanged and aren't a green
+    /// verification. Warn once at 10, abort at 20 — a run whose workspace
+    /// never moves is not converging (data-anonymization: 67 probes, 3600s).
+    /// Mutation tasks only; fingerprint errors fail open (counted as changed).
+    pub(super) fn note_workspace_state_with_root(
+        &mut self,
+        root: &std::path::Path,
+        tool_name: &str,
+        args_str: &str,
+        success: bool,
+    ) -> Result<()> {
+        if !self.current_task_requires_mutation() {
+            return Ok(());
+        }
+        let fingerprint = workspace_fingerprint(root);
+        let green_verification =
+            success && super::tool_dispatch::tool_call_is_verification(tool_name, args_str);
+        match (fingerprint, self.last_workspace_fingerprint) {
+            (Some(now), Some(prev)) if now == prev && !green_verification => {
+                self.stagnation_streak += 1;
+            }
+            _ => {
+                self.stagnation_streak = 0;
+            }
+        }
+        if fingerprint.is_some() {
+            self.last_workspace_fingerprint = fingerprint;
+        }
+
+        if self.stagnation_streak == 10
+            && !self
+                .stagnation_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 STALL: 10 consecutive tool calls produced no workspace change and no passing \
+                 verification. Your next action must change the deliverable or run the \
+                 verification command.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
+        if self.stagnation_streak >= 20 {
+            anyhow::bail!(
+                "WORKSPACE_STAGNATION: 20 consecutive tool calls with no workspace change and no \
+                 passing verification — the run is not converging"
+            );
+        }
+        Ok(())
+    }
+
+    /// Stagnation accounting at the agent's project root.
+    pub(super) fn note_workspace_state(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        success: bool,
+    ) -> Result<()> {
+        let root = super::current_project_root();
+        self.note_workspace_state_with_root(&root, tool_name, args_str, success)
+    }
+
     /// Best-snapshot capture: a green verification marks the current written
     /// state as the best known (submit best state, not last state).
     pub(super) fn note_green_verification(&mut self, name: &str, args_str: &str, success: bool) {
@@ -1505,6 +1569,8 @@ impl Agent {
             }
             // Best-snapshot capture on green verification.
             self.note_green_verification(&vt.name, &vt.args_str, success);
+            // Stagnation accounting (loop 13d).
+            self.note_workspace_state(&vt.name, &vt.args_str, success)?;
 
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
@@ -1868,6 +1934,9 @@ impl Agent {
 
         // Best-snapshot capture on green verification.
         self.note_green_verification(&name, &args_str, success);
+
+        // Stagnation accounting (loop 13d).
+        self.note_workspace_state(&name, &args_str, success)?;
 
         self.track_task_state_after_tool(&name, &args, &result, success)
             .await;
