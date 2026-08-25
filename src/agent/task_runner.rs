@@ -92,6 +92,10 @@ impl Agent {
         self.input_census_suspicious.clear();
         self.failed_install_streak = 0;
         self.best_snapshot.clear();
+        self.commit_mode_65_fired
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.commit_mode_85_fired
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.verification_deadline_directive_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.probe_pivot_done
@@ -637,6 +641,43 @@ impl Agent {
     /// final answer, unlock input. Previously most success exits emitted no
     /// terminal event (leaving the stream dangling) and the one that did sent
     /// failure-mode evidence instead of the answer.
+    /// Wall-clock commit-mode bands (six-model consult, Opus 5 deadline
+    /// policy): at 65% of `agent.max_wall_secs` push COMMIT MODE once, at 85%
+    /// FINAL STRETCH once — the run must ship something before the hard stop.
+    /// No-op when no wall budget is configured. Latches reset in run_task.
+    pub(super) fn maybe_inject_commit_mode_directive(&mut self) {
+        let Some(max_wall) = self.config.agent.max_wall_secs else {
+            return;
+        };
+        let elapsed = self.task_start_time.elapsed().as_secs();
+        let pct = elapsed.saturating_mul(100) / max_wall.max(1);
+        if pct >= 85
+            && !self
+                .commit_mode_85_fired
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.messages.push(Message::user(
+                "<selfware_system_directive>\n\
+                 FINAL STRETCH: 85% of the wall-clock budget is gone. Complete with the best \
+                 working state you have NOW — do not start new approaches.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        } else if pct >= 65
+            && !self
+                .commit_mode_65_fired
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.messages.push(Message::user(
+                "<selfware_system_directive>\n\
+                 COMMIT MODE: 65% of the wall-clock budget is used. Stop exploring; produce the \
+                 minimal working deliverable now, verify once, then refine only if time remains.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
+    }
+
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         let result = self.run_execution_loop_inner(task_description, mode).await;
         match &result {
@@ -793,6 +834,8 @@ impl Agent {
             // Loop 12: one-time verification-deadline directive — at 60% of the
             // iteration budget with no passing verification, converge NOW.
             self.maybe_inject_verification_deadline_directive();
+            // Wall-clock commit-mode bands (65% / 85%), each once per task.
+            self.maybe_inject_commit_mode_directive();
             self.trim_message_history();
 
             // Surface the current step in the live TUI status bar so a

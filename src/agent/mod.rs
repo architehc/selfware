@@ -579,6 +579,10 @@ pub struct Agent {
     /// the model's own verification passes, restored when the run fails so a
     /// broken end state never gets submitted over a working one.
     best_snapshot: best_snapshot::AgentSnapshot,
+    /// Wall-clock commit-mode latches (Opus 5 deadline policy): COMMIT MODE at
+    /// 65%, FINAL STRETCH at 85% of max_wall_secs, each once per task.
+    commit_mode_65_fired: std::sync::atomic::AtomicBool,
+    commit_mode_85_fired: std::sync::atomic::AtomicBool,
     /// Verification-deadline directive latch (loop 12): fires at most once
     /// per task, when 60% of the iteration budget is gone with no passing
     /// verification. Atomic to match the other per-task directive latches.
@@ -1262,6 +1266,8 @@ To call a tool, use this EXACT XML structure:
             leak_check_done: std::sync::atomic::AtomicBool::new(false),
             failed_install_streak: 0,
             best_snapshot: best_snapshot::AgentSnapshot::default(),
+            commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),
+            commit_mode_85_fired: std::sync::atomic::AtomicBool::new(false),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),

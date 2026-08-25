@@ -1992,3 +1992,66 @@ async fn test_planning_answer_ready_to_finalize_gates() {
     );
     server.stop().await;
 }
+
+// --- Wall-clock commit-mode bands (six-model consult, Opus 5 deadline
+// policy: inject budget pressure before the hard stop so the run ships
+// something). TB 3.0 evidence: two of four v3 failures were timeouts. ---
+
+#[tokio::test]
+async fn commit_mode_directive_fires_at_65_and_85_percent_once_each() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_wall_secs = Some(100);
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // 50%: nothing yet.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(50);
+    let before = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(agent.messages.len(), before, "nothing fires at 50%");
+
+    // 65%: COMMIT MODE once.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(70);
+    agent.maybe_inject_commit_mode_directive();
+    let body: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("COMMIT MODE"), "{body}");
+    let n = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(agent.messages.len(), n, "fires once");
+
+    // 85%: FINAL STRETCH once.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(90);
+    agent.maybe_inject_commit_mode_directive();
+    let body: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("FINAL STRETCH"), "{body}");
+    let n = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(agent.messages.len(), n, "fires once");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn commit_mode_is_silent_without_wall_budget() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(10_000);
+    let before = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(
+        agent.messages.len(),
+        before,
+        "no budget configured — no directive"
+    );
+    server.stop().await;
+}
