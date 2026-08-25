@@ -102,6 +102,8 @@ impl Agent {
             .clear();
         self.audit_rejected_attempts
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.output_key_check_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         self.verification_deadline_directive_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.probe_pivot_done

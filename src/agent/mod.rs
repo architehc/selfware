@@ -588,6 +588,9 @@ pub struct Agent {
     audit_findings: std::sync::Mutex<Vec<verification::AuditFinding>>,
     /// Completion rejections caused by open ledger findings.
     audit_rejected_attempts: std::sync::atomic::AtomicUsize,
+    /// Output-key contract latch (anti-hedge advisory): fires at most once
+    /// per task, and only when a violation is found.
+    output_key_check_done: std::sync::atomic::AtomicBool,
     /// Verification-deadline directive latch (loop 12): fires at most once
     /// per task, when 60% of the iteration budget is gone with no passing
     /// verification. Atomic to match the other per-task directive latches.
@@ -1275,6 +1278,7 @@ To call a tool, use this EXACT XML structure:
             commit_mode_85_fired: std::sync::atomic::AtomicBool::new(false),
             audit_findings: std::sync::Mutex::new(Vec::new()),
             audit_rejected_attempts: std::sync::atomic::AtomicUsize::new(0),
+            output_key_check_done: std::sync::atomic::AtomicBool::new(false),
             verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
             probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
             probe_command_counts: std::collections::HashMap::new(),

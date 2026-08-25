@@ -307,3 +307,44 @@ fn gate_outputs_prefer_diff_paths_when_present() {
     assert_eq!(outputs.len(), 1);
     assert!(outputs[0].to_string_lossy().contains("src/changed.py"));
 }
+
+// --- Output-key contract (anti-hedge, loop 13c; six-model consult unanimous):
+// cargo-flight-dispatch hedged turnaround_time_min into a NEW field
+// total_block_time_min (correct value, wrong place) while the graded field
+// stayed wrong. Deterministic check: keys in the named output artifact that
+// appear in neither the instruction nor the input census are orphans. ---
+
+#[test]
+fn named_fields_extract_from_instruction() {
+    let instruction = "Fix dispatch.py and write the plan to `/app/out/flight_plan.json` with a summary containing `total_time_min` and `route_feasible`.";
+    let fields = extract_named_fields(instruction);
+    assert!(fields.contains(&"total_time_min".to_string()), "{fields:?}");
+    assert!(fields.contains(&"route_feasible".to_string()), "{fields:?}");
+    let artifact = find_named_artifact(instruction);
+    assert_eq!(artifact.as_deref(), Some("/app/out/flight_plan.json"));
+}
+
+#[test]
+fn orphan_keys_in_output_artifact_block_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let artifact = dir.path().join("flight_plan.json");
+    std::fs::write(
+        &artifact,
+        r#"{"summary": {"total_time_min": 568.7, "total_block_time_min": 668.7}}"#,
+    )
+    .unwrap();
+    let instruction =
+        "Write the plan to the artifact path with a summary containing `total_time_min`.";
+    let known: Vec<String> = vec!["summary".into(), "total_time_min".into()];
+    let hits = orphan_output_keys(&artifact, instruction, &known);
+    assert_eq!(hits, vec!["summary.total_block_time_min".to_string()]);
+}
+
+#[test]
+fn clean_artifact_has_no_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let artifact = dir.path().join("plan.json");
+    std::fs::write(&artifact, r#"{"total_time_min": 668.7}"#).unwrap();
+    let known = vec!["total_time_min".to_string()];
+    assert!(orphan_output_keys(&artifact, "contains `total_time_min`", &known).is_empty());
+}

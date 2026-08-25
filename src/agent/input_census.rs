@@ -10,6 +10,7 @@
 //! for. No model call involved — pure extraction.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Hard caps: the census must stay a small context note, never a dump.
 pub(crate) const CENSUS_MAX_ENTRIES: usize = 150;
@@ -246,6 +247,73 @@ fn extract_value_keys(
             }
         }
         _ => {}
+    }
+}
+
+/// Extract identifiers the instruction names explicitly: backticked
+/// snake_case tokens. Conservative by design — used by the output-key
+/// contract, where false positives block completions.
+pub(crate) fn extract_named_fields(instruction: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = instruction;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('`') else { break };
+        let tok = &after[..end];
+        if tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && tok.contains('_') {
+            push_unique(&mut out, tok.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The output artifact path the instruction names — backticked or bare
+/// absolute path with a data extension (.json/.csv/.toml).
+pub(crate) fn find_named_artifact(instruction: &str) -> Option<String> {
+    static ARTIFACT_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = ARTIFACT_RE.get_or_init(|| {
+        regex::Regex::new(r"/[\w./-]+\.(?:json|csv|toml)").expect("artifact regex")
+    });
+    re.find(instruction).map(|m| m.as_str().to_string())
+}
+
+/// Keys in the output artifact (JSON, recursively flattened as `a.b` paths)
+/// that appear in neither the instruction text nor the known-keys set — the
+/// hedge shape: the right value parked under a made-up key.
+pub(crate) fn orphan_output_keys(
+    artifact: &Path,
+    instruction: &str,
+    known: &[String],
+) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(artifact) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    collect_key_paths(&value, "", &mut paths);
+    paths
+        .into_iter()
+        .filter(|p| {
+            let leaf = p.rsplit('.').next().unwrap_or(p);
+            !known.iter().any(|k| k == leaf || p == k) && !instruction.contains(leaf)
+        })
+        .collect()
+}
+
+fn collect_key_paths(value: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+    if let serde_json::Value::Object(map) = value {
+        for (k, val) in map {
+            let path = if prefix.is_empty() {
+                k.clone()
+            } else {
+                format!("{prefix}.{k}")
+            };
+            out.push(path.clone());
+            collect_key_paths(val, &path, out);
+        }
     }
 }
 
