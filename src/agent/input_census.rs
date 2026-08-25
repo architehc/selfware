@@ -223,6 +223,42 @@ pub(crate) fn leak_check_identifiers(
     hits
 }
 
+/// Conventional output directories scanned when no git diff is available
+/// (TB task containers have no .git — the leak check must not go blind).
+const OUTPUT_DIRS: &[&str] = &["dist", "build", "out", "output", "target"];
+const MAX_GATE_OUTPUT_FILES: usize = 100;
+
+/// Files the completion-time leak check scans. With git diff paths, those are
+/// the run's changed files. Without git (benchmark containers), the
+/// conventional output dirs are scanned — generated artifacts land there.
+pub(crate) fn collect_gate_outputs(root: &Path, diff_paths: Option<Vec<String>>) -> Vec<PathBuf> {
+    match diff_paths {
+        Some(paths) => paths.iter().map(|p| root.join(p)).collect(),
+        None => {
+            let mut out = Vec::new();
+            for dir_name in OUTPUT_DIRS {
+                let dir = root.join(dir_name);
+                if !dir.is_dir() {
+                    continue;
+                }
+                for entry in walkdir::WalkDir::new(&dir)
+                    .max_depth(3)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    if entry.file_type().is_file() {
+                        out.push(entry.path().to_path_buf());
+                        if out.len() >= MAX_GATE_OUTPUT_FILES {
+                            return out;
+                        }
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
 impl InputCensus {
     /// Render the census as a compact context note.
     pub(crate) fn render(&self) -> Option<String> {

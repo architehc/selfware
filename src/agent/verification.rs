@@ -1221,25 +1221,27 @@ impl Agent {
         {
             self.leak_check_done
                 .store(true, std::sync::atomic::Ordering::Relaxed);
-            if let Some(paths) = self.diff_paths_for_completion_gate().await {
-                let root = super::current_project_root();
-                let outputs: Vec<std::path::PathBuf> = paths.iter().map(|p| root.join(p)).collect();
-                let hits = super::input_census::leak_check_identifiers(
-                    &self.input_census_suspicious,
-                    &outputs,
-                );
-                if !hits.is_empty() {
-                    return Some(format!(
-                        "LEAK CHECK — completion blocked (fires once per task). Output artifacts \
-                         contain input-side sensitive identifiers:\n{}\n\
-                         Remove each leak (or state precisely why the identifier is safe to \
-                         publish), then complete.",
-                        hits.iter()
-                            .map(|h| format!("- {h}"))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    ));
-                }
+            let root = super::current_project_root();
+            // Git-less task roots (benchmark containers) return no diff —
+            // fall back to the conventional output dirs, where generated
+            // artifacts land (bun-sourcemap-leak's dist/*.map).
+            let diff_paths = self.diff_paths_for_completion_gate().await;
+            let outputs = super::input_census::collect_gate_outputs(&root, diff_paths);
+            let hits = super::input_census::leak_check_identifiers(
+                &self.input_census_suspicious,
+                &outputs,
+            );
+            if !hits.is_empty() {
+                return Some(format!(
+                    "LEAK CHECK — completion blocked (fires once per task). Output artifacts \
+                     contain input-side sensitive identifiers:\n{}\n\
+                     Remove each leak (or state precisely why the identifier is safe to \
+                     publish), then complete.",
+                    hits.iter()
+                        .map(|h| format!("- {h}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
             }
         }
 
