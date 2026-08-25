@@ -18,7 +18,7 @@ set -euo pipefail
 
 ITERATIONS="${1:-5}"
 ARCHIVE="${HARNESS_ARCHIVE:-/home/rig/harbor-agents/archive}"
-SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-bench/bun-sourcemap-leak terminal-bench/cli-2ph-simplex terminal-bench/data-anonymization terminal-bench/ctr-optimization terminal-bench/distributed-dedup terminal-bench/embedding-drift-monitor terminal-bench/cumulative-layout-shift}"
+SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-bench/bun-sourcemap-leak terminal-bench/cli-2ph-simplex terminal-bench/data-anonymization terminal-bench/html-js-filter terminal-bench/distributed-dedup terminal-bench/embedding-drift-monitor terminal-bench/cumulative-layout-shift}"
 SEED_CONFIG="${SEED_CONFIG:-/home/rig/selfware/benchmarks/harbor/selfware-harbor-medium.toml}"
 HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/bin/harbor}"
 SELFWARE="/home/rig/selfware/target/release/selfware"
