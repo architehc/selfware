@@ -256,6 +256,7 @@ impl Agent {
     /// is never cut: long prose answers are legitimate deliverables there.
     fn task_requires_mutation_now(&self) -> bool {
         !self.current_task_context.is_empty()
+            && !self.current_task_is_read_only()
             && super::tool_dispatch::task_requires_mutation(self.task_context_for_classification())
     }
 

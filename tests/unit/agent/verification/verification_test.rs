@@ -71,6 +71,33 @@ fn non_window_actions_without_expectation_skip_visual_gate() {
     assert!(visual_verification_expectation("computer_keyboard", &args).is_none());
 }
 
+#[tokio::test]
+async fn excluded_only_file_change_is_not_credited_as_verified() {
+    // P1 regression: when every changed file matches exclude_patterns,
+    // verify_change returns overall_passed: true with ZERO checks run.
+    // Crediting that vacuous pass marked the mutation sequence as verified
+    // without verifying anything (AGENTS.md rule 3).
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.mutation_sequence = 3;
+
+    // `*.md` is in the default VerificationConfig exclude_patterns, so this
+    // edit runs zero checks.
+    let nudge = agent
+        .maybe_verify_file_change("file_write", &json!({"path": "notes.md"}))
+        .await;
+
+    assert!(
+        nudge.is_none(),
+        "an excluded-only change must not produce a verification-failure nudge"
+    );
+    assert_eq!(
+        agent.last_successful_verification_mutation_sequence, 0,
+        "a vacuous pass (zero checks run) must not credit the mutation sequence as verified"
+    );
+}
+
 #[cfg(test)]
 mod completion_gate_tests {
     use super::*;
@@ -78,7 +105,7 @@ mod completion_gate_tests {
     use crate::config::Config;
 
     fn test_config() -> Config {
-        let mut config = Config::default();
+        let mut config = crate::config::Config::default();
         config.agent.min_completion_steps = 0;
         config.agent.require_verification_before_completion = true;
         config
@@ -779,6 +806,118 @@ mod completion_gate_tests {
             message
         );
     }
+
+    // P0 regression (a): a STALE pre-edit verification must not satisfy the
+    // completion gate. The gate used to accept any successful verification in
+    // the checkpoint, so a `cargo test` that ran BEFORE the last edit kept
+    // passing the gate no matter what changed afterwards. The credit must
+    // require the verification to cover the CURRENT mutation sequence.
+    #[tokio::test]
+    async fn stale_pre_edit_verification_does_not_satisfy_completion_gate() {
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        // The verification above ran, then the agent edited a file — the
+        // recorded verification no longer covers the current state.
+        agent.note_mutating_tool_call();
+        assert_eq!(agent.mutation_sequence, 1);
+        assert_eq!(agent.last_successful_verification_mutation_sequence, 0);
+
+        let result = agent.check_completion_gate().await;
+        assert!(
+            result.is_some(),
+            "a verification that predates the last edit must not satisfy the gate"
+        );
+        let msg = result.unwrap();
+        assert!(
+            msg.to_ascii_lowercase().contains("verif"),
+            "rejection should demand a fresh verification: {}",
+            msg
+        );
+
+        // Contrast: a verification credited AFTER the edit satisfies it.
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.note_mutating_tool_call();
+        agent.note_verification_outcome("shell_exec", r#"{"command":"cargo test"}"#, true, "ok");
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "a verification that ran after the last edit must satisfy the gate"
+        );
+    }
+
+    // P0 regression (b): a pipeline that masks the runner's exit code must not
+    // be credited as a passing verification — `cargo test | true` reports
+    // success to the agent even when the tests fail.
+    #[tokio::test]
+    async fn exit_code_masked_verification_is_not_credited() {
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test | true", true)]).await;
+        agent.note_mutating_tool_call();
+        agent.note_verification_outcome(
+            "shell_exec",
+            r#"{"command":"cargo test | true"}"#,
+            true,
+            "ok",
+        );
+        assert_eq!(
+            agent.last_successful_verification_mutation_sequence, 0,
+            "a masked pipeline must not credit the mutation sequence as verified"
+        );
+        assert!(
+            agent.check_completion_gate().await.is_some(),
+            "a masked verification must not satisfy the completion gate"
+        );
+    }
+
+    // P0 regression (c): the non-code readback gate must require an actual
+    // reader in command position. `rm notes.txt` used to count as a readback
+    // of the file it destroys.
+    #[tokio::test]
+    async fn non_code_rm_command_is_not_a_readback() {
+        let agent = artifact_agent(
+            "Create notes.txt containing hello.",
+            vec![
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "notes.txt", "content": "hello\n"}),
+                    true,
+                ),
+                checkpoint_call("shell_exec", json!({"command": "rm notes.txt"}), true),
+            ],
+        )
+        .await;
+
+        let readback = agent
+            .non_code_artifact_readback()
+            .expect("the text artifact should be tracked");
+        assert_eq!(
+            readback.missing_paths,
+            vec!["notes.txt"],
+            "`rm notes.txt` must not count as a readback"
+        );
+    }
+
+    // Companion to (c): a real reader in command position still counts.
+    #[tokio::test]
+    async fn non_code_reader_first_word_still_counts_as_readback() {
+        let agent = artifact_agent(
+            "Create notes.txt containing hello.",
+            vec![
+                checkpoint_call(
+                    "file_write",
+                    json!({"path": "notes.txt", "content": "hello\n"}),
+                    true,
+                ),
+                checkpoint_call("shell_exec", json!({"command": "head notes.txt"}), true),
+            ],
+        )
+        .await;
+
+        let readback = agent
+            .non_code_artifact_readback()
+            .expect("the text artifact should be tracked");
+        assert!(
+            readback.missing_paths.is_empty(),
+            "`head notes.txt` must still count as a readback"
+        );
+    }
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---
@@ -1049,4 +1188,104 @@ mod requirements_audit_tests {
             "[audit] verdict: UNADDRESSED(2)"
         );
     }
+}
+
+// =========================================================================
+// Task-aware policy: completion-gate read-only skip + [POLICY kind=gate]
+// =========================================================================
+
+/// Regression for the 4-model read-only study: a read-only review task whose
+/// only "write" is an auto-write artifact (mutation_sequence == 0 — nothing
+/// was actually mutated) must NOT be held to the "you wrote code, verify it"
+/// completion gate. The deliverable is the report itself.
+#[tokio::test]
+async fn read_only_task_with_zero_mutations_skips_written_file_verification_gate() {
+    let mut config = crate::config::Config::default();
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.expect("agent should build");
+    agent.start_learning_session(
+        "s1",
+        "Review the code in src/agent/ and report findings. Do NOT edit any files.",
+    );
+    assert!(agent.current_task_is_read_only());
+
+    let mut checkpoint =
+        crate::checkpoint::TaskCheckpoint::new("t1".to_string(), "review task".to_string());
+    checkpoint.log_tool_call(crate::checkpoint::ToolCallLog {
+        timestamp: chrono::Utc::now(),
+        tool_name: "file_read".to_string(),
+        arguments: serde_json::json!({"path": "src/agent/mod.rs"}).to_string(),
+        result: Some("...".to_string()),
+        success: true,
+        duration_ms: Some(10),
+    });
+    agent.current_checkpoint = Some(checkpoint);
+    // Auto-write artifact, NOT a model mutation: the sequence stays at 0.
+    agent.has_written_any_file = true;
+    agent.mutation_sequence = 0;
+    agent.last_assistant_response = "Review complete: findings reported above.".to_string();
+
+    assert!(
+        agent.check_completion_gate().await.is_none(),
+        "a read-only task with zero mutations must complete on its report"
+    );
+}
+
+/// Boundary: once something WAS mutated (mutation_sequence > 0), even a
+/// read-only-classified task must verify the mutation before completing.
+#[tokio::test]
+async fn read_only_task_with_a_mutation_still_requires_verification() {
+    let mut config = crate::config::Config::default();
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.expect("agent should build");
+    agent.start_learning_session(
+        "s1",
+        "Review the code in src/agent/ and report findings. Do NOT edit any files.",
+    );
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "t2".to_string(),
+        "review task".to_string(),
+    ));
+    agent.has_written_any_file = true;
+    agent.mutation_sequence = 1;
+    agent.last_assistant_response = "Edited one file; done.".to_string();
+
+    let msg = agent
+        .check_completion_gate()
+        .await
+        .expect("a mutated workspace must still require verification");
+    assert!(
+        msg.starts_with("[POLICY kind=gate retryable=true"),
+        "the rejection must carry the gate envelope: {msg}"
+    );
+}
+
+/// The written-without-verification rejection carries the structured gate
+/// envelope on non-read-only tasks.
+#[tokio::test]
+async fn written_without_verification_rejection_carries_gate_envelope() {
+    let mut config = crate::config::Config::default();
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.expect("agent should build");
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "t3".to_string(),
+        "test task".to_string(),
+    ));
+    agent.has_written_any_file = true;
+    agent.last_assistant_response = "Done.".to_string();
+
+    let msg = agent
+        .check_completion_gate()
+        .await
+        .expect("written code without verification must be rejected");
+    assert!(
+        msg.starts_with(
+            "[POLICY kind=gate retryable=true reason=\"file written without a passing verification\"]\n"
+        ),
+        "rejection must carry the gate envelope: {msg}"
+    );
+    assert!(msg.contains("You have written code, but you have not verified it."));
 }

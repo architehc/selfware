@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+use super::task_policy::{policy_envelope, PolicyKind};
 use super::*;
 use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
@@ -814,13 +815,12 @@ impl Agent {
                     // counts as content-verification for a NON-CODE artifact — the
                     // model legitimately confirms a docs/markdown/config edit this
                     // way, and demanding a `file_read` instead caused a doom-loop.
+                    // The command's FIRST shell word must be an actual reader:
+                    // containing a reader token anywhere credited `rm notes.txt`
+                    // as a readback of the file it destroys.
                     if matches!(call.tool_name.as_str(), "shell_exec" | "pty_shell") {
                         if let Some(cmd) = args.get("command").and_then(Value::as_str) {
-                            const READERS: &[&str] = &[
-                                "cat ", "grep ", "head ", "tail ", "less ", "more ", "nl ", "tac ",
-                                "rg ", "diff ", "sed -n", "awk ",
-                            ];
-                            let is_reader = READERS.iter().any(|r| cmd.contains(r));
+                            let is_reader = super::tool_dispatch::shell_command_is_reader(cmd);
                             let mentions_file = (!write_basename.is_empty()
                                 && cmd.contains(&write_basename))
                                 || cmd.contains(&write_full);
@@ -903,6 +903,13 @@ impl Agent {
     }
 
     async fn mutation_completion_gate(&self) -> Option<String> {
+        // Read-only task with zero mutations: the deliverable is the report
+        // itself, so no diff/source-edit demand may fire (4-model read-only
+        // study: NoSourceEdit killed review sessions that correctly never
+        // edited anything).
+        if self.current_task_is_read_only() && self.mutation_sequence == 0 {
+            return None;
+        }
         if !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification()) {
             return None;
         }
@@ -958,10 +965,15 @@ impl Agent {
                     .iter()
                     .any(|path| task_mentions_artifact_path(task, path))
             {
-                return Some(format!(
-                    "NoSourceEdit: the current diff does not include a supported source file ({:?}). \
-                     Edit source code in Python, JavaScript, TypeScript, Java, C#, C/C++, SQL, Go, Swift, or Rust before completing.",
-                    paths
+                return Some(policy_envelope(
+                    PolicyKind::Gate,
+                    true,
+                    "no supported source file in diff",
+                    &format!(
+                        "NoSourceEdit: the current diff does not include a supported source file ({:?}). \
+                         Edit source code in Python, JavaScript, TypeScript, Java, C#, C/C++, SQL, Go, Swift, or Rust before completing.",
+                        paths
+                    ),
                 ));
             }
         } else if self.mutating_tool_call_count() == 0 {
@@ -1004,6 +1016,17 @@ impl Agent {
                 })
             })
             .unwrap_or(false)
+    }
+
+    /// A verification only satisfies the completion gate when it ran AFTER
+    /// the last mutating tool call of the session: the credited verification
+    /// must cover the CURRENT mutation sequence
+    /// (`last_successful_verification_mutation_sequence >= mutation_sequence`),
+    /// not merely exist somewhere in the checkpoint. A pre-edit verification
+    /// used to satisfy the gate forever, no matter how many edits followed it
+    /// (AGENTS.md rule 3: honest status over optimistic success).
+    fn has_fresh_successful_verification(&self) -> bool {
+        self.last_successful_verification_mutation_sequence >= self.mutation_sequence
     }
 
     /// Loop-12 verification deadline: once the run passes
@@ -1103,10 +1126,11 @@ impl Agent {
         // flags the quoted snippet and the gate demands `file_write`, which a
         // read-only task correctly never does — so it can never complete (found
         // running a 10k-step read-only code review that churned to the step cap).
-        let is_read_only = !self.current_task_context.is_empty()
-            && !super::tool_dispatch::task_requires_mutation(
-                self.task_context_for_classification(),
-            );
+        let is_read_only = self.current_task_is_read_only()
+            || (!self.current_task_context.is_empty()
+                && !super::tool_dispatch::task_requires_mutation(
+                    self.task_context_for_classification(),
+                ));
         let skip_min_steps_for_read_only = is_read_only;
 
         if step_count < min_steps && !skip_min_steps_for_read_only {
@@ -1173,16 +1197,28 @@ impl Agent {
         // If any file has been written (including auto-written code from assistant
         // text), require at least one successful verification tool call before the
         // task can complete. This closes the bypass where auto-write injects code
-        // and the model then answers without verifying.
-        if self.has_written_any_file {
-            let has_verification = self.has_successful_verification_tool_call();
+        // and the model then answers without verifying. The verification must
+        // also be FRESH — it has to cover the current mutation sequence, so a
+        // pre-edit pass does not satisfy the gate after later edits.
+        //
+        // Exception: a read-only task (review/analysis/report) with zero real
+        // mutations delivers prose, not code — demanding a passing verification
+        // livelocks it (the 4-model read-only study). `mutation_sequence == 0`
+        // means nothing was mutated this run, so there is nothing to verify.
+        if self.has_written_any_file
+            && !(self.current_task_is_read_only() && self.mutation_sequence == 0)
+        {
+            let has_verification = self.has_successful_verification_tool_call()
+                && self.has_fresh_successful_verification();
             if !has_verification {
-                return Some(
+                return Some(policy_envelope(
+                    PolicyKind::Gate,
+                    true,
+                    "file written without a passing verification",
                     "You have written code, but you have not verified it. \
                      Run a verification command (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
-                     successfully before completing."
-                        .to_string(),
-                );
+                     successfully before completing.",
+                ));
             }
         }
 
@@ -1243,7 +1279,9 @@ impl Agent {
                 })
                 .unwrap_or(false);
 
-            if !all_calls_are_non_code_or_read_only && !self.has_successful_verification_tool_call()
+            if !all_calls_are_non_code_or_read_only
+                && !(self.has_successful_verification_tool_call()
+                    && self.has_fresh_successful_verification())
             {
                 return Some(
                     "You must run at least one verification tool (e.g. cargo_check, cargo_test, pytest, npm test, go test, mvn test, dotnet test) \
@@ -1691,7 +1729,19 @@ impl Agent {
             .await
         {
             Ok(report) => {
-                if report.overall_passed {
+                // Vacuous pass: every changed file matched exclude_patterns (or
+                // no checks are configured), so ZERO checks actually ran.
+                // Crediting this as a successful verification would mark the
+                // mutation sequence verified without verifying anything
+                // (AGENTS.md rule 3: honest status over optimistic success).
+                if report.overall_passed && report.checks.is_empty() {
+                    info!(
+                        "Verification after {} on {} ran no applicable checks — not crediting as verified",
+                        tool_name, path
+                    );
+                    spinner.stop_success("No applicable verification checks");
+                    None
+                } else if report.overall_passed {
                     self.last_successful_verification_mutation_sequence = self.mutation_sequence;
                     self.last_failed_verification_summary = None;
                     spinner.stop_success("Verification passed");

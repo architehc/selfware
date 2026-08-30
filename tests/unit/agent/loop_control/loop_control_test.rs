@@ -221,3 +221,157 @@ fn test_approaching_limit_warning_zero_max() {
     let loop_ctrl = AgentLoop::new(0);
     assert!(loop_ctrl.approaching_limit_warning().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Adaptive iteration budget (loop 13)
+// ---------------------------------------------------------------------------
+
+fn progress_turn(had_success: bool, sigs: &[(&str, u64)]) -> TurnProgress {
+    TurnProgress {
+        had_success,
+        signatures: sigs
+            .iter()
+            .map(|(name, hash)| (name.to_string(), *hash))
+            .collect(),
+    }
+}
+
+fn streak_of(turns: Vec<TurnProgress>) -> std::collections::VecDeque<TurnProgress> {
+    turns.into_iter().collect()
+}
+
+#[test]
+fn productive_streak_extends_when_all_turns_productive() {
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(productive_streak(&turns, 5));
+    // A longer history is fine — only the last `window` turns are judged.
+    let mut longer = streak_of(vec![progress_turn(false, &[("file_read", 1)])]);
+    longer.extend(turns);
+    assert!(productive_streak(&longer, 5));
+}
+
+#[test]
+fn productive_streak_needs_full_window_of_evidence() {
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("file_read", 2)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn repeated_identical_call_is_not_progress() {
+    // The same tool+args repeats across the window (turn 1 and turn 5).
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 1)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+
+    // A duplicated call inside a single turn also disqualifies it.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1), ("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn error_only_streak_is_not_progress() {
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(false, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+
+    // A tool-less turn (no calls at all) is no evidence of progress.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn extension_is_half_the_original_cap_and_granted_once() {
+    let mut loop_ctrl = AgentLoop::new(30);
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(15));
+    assert_eq!(loop_ctrl.max_iterations(), 45);
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        None,
+        "the extension fires at most once"
+    );
+    assert_eq!(loop_ctrl.max_iterations(), 45);
+}
+
+#[test]
+fn extension_of_tiny_cap_extends_by_at_least_one() {
+    let mut loop_ctrl = AgentLoop::new(1);
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(1));
+    assert_eq!(loop_ctrl.max_iterations(), 2);
+}
+
+#[test]
+fn extension_lets_the_loop_run_past_the_original_cap() {
+    let mut loop_ctrl = AgentLoop::new(4);
+    loop_ctrl.next_state(); // Planning
+    loop_ctrl
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+    for _ in 0..4 {
+        loop_ctrl.next_state(); // iterations 1-4
+    }
+    let capped = loop_ctrl.next_state(); // 5 > 4 — cap tripped
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
+    // Restore as the adaptive path does; the tripped slot (5) now fits the
+    // new cap (6), and the loop keeps running into the extension.
+    let step = loop_ctrl.current_step();
+    let iteration = loop_ctrl.current_iteration();
+    loop_ctrl.restore_progress(step, iteration);
+    assert!(matches!(
+        loop_ctrl.next_state(), // iteration 6 ≤ 6
+        Some(AgentState::Executing { .. })
+    ));
+    let exhausted = loop_ctrl.next_state(); // 7 > 6 — extension spent
+    assert!(matches!(exhausted, Some(AgentState::Failed { .. })));
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        None,
+        "no second extension after the budget is spent"
+    );
+}
+
+#[test]
+fn reset_for_task_restores_original_budget_and_extension() {
+    let mut loop_ctrl = AgentLoop::new(10);
+    assert!(loop_ctrl.extend_budget_once().is_some());
+    assert_eq!(loop_ctrl.max_iterations(), 15);
+    loop_ctrl.reset_for_task();
+    assert_eq!(loop_ctrl.max_iterations(), 10);
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        Some(5),
+        "a new task gets its own one-shot extension"
+    );
+}

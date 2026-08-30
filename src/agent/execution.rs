@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use tracing::{debug, info};
 
+use super::task_policy::{policy_envelope, PolicyKind};
 use super::*;
 use crate::errors::AgentError;
 use crate::hooks::HookContext;
@@ -914,7 +915,12 @@ impl Agent {
                     .unwrap_or(false);
                 if has_successful_tool_calls {
                     info!("Rejected false capability disclaimer after successful tool use");
-                    if self.pending_synthesis.is_none() {
+                    // Read-only task: do NOT arm phase-2 synthesis — its
+                    // consumer in task_runner auto-writes any extracted code
+                    // to disk (forced mutation on a "do NOT edit" task), and
+                    // the directive must not promise a pass that won't run.
+                    let read_only = self.current_task_is_read_only();
+                    if !read_only && self.pending_synthesis.is_none() {
                         let synthesis_task = self
                             .current_checkpoint
                             .as_ref()
@@ -922,15 +928,19 @@ impl Agent {
                             .unwrap_or_else(|| self.learning_context().to_string());
                         self.pending_synthesis = Some(synthesis_task);
                     }
-                    self.messages.push(crate::api::types::Message::user(
+                    let synthesis_note = if read_only {
+                        ""
+                    } else {
+                        " A synthesis pass will answer from the tool results if needed."
+                    };
+                    self.messages.push(crate::api::types::Message::user(format!(
                         "<selfware_system_directive>\n\
                          You already executed tools successfully in this session. \
                          Use the tool results that are already in context and answer the task directly. \
-                         Do NOT claim you cannot access tools, files, or the local filesystem. \
-                         A synthesis pass will answer from the tool results if needed.\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
+                         Do NOT claim you cannot access tools, files, or the local filesystem.{}\n\
+                         </selfware_system_directive>",
+                        synthesis_note
+                    )));
                     return Ok(false);
                 }
             }
@@ -1269,6 +1279,13 @@ impl Agent {
         }
 
         // TERMINAL PROGRESS GUARD: After N read-only steps, force synthesis.
+        // A read-only task (review/analysis/report) never mutates by design —
+        // reading IS the work — so the force-synthesis / scaffold machinery
+        // must not fire at all (4-model read-only study: every agent was
+        // killed fighting exactly this gate on a "do NOT edit" task).
+        if self.current_task_is_read_only() {
+            return Ok(false);
+        }
         // Use a relaxed threshold when the agent has already written source files —
         // verification loops (cargo check → cargo test → read output) are expected
         // after writing code and should not be punished.
@@ -1408,20 +1425,34 @@ impl Agent {
                 )];
                 self.consecutive_read_only_steps = 0;
                 self.seen_read_targets.clear();
-                self.has_written_any_file = true;
                 self.terminal_guard_hits = 0;
-                if let Err(e) = self.execute_tool_batch(calls).await {
-                    warn!("Scaffold write failed: {}", e);
+                match self.execute_tool_batch(calls).await {
+                    Ok(()) => {
+                        self.has_written_any_file = true;
+                        self.messages.push(crate::api::types::Message::user(
+                            "<selfware_system_directive>\n\
+                             A scaffold file was written to src/lib.rs. Now implement the full solution:\n\
+                             1. Use file_write to replace src/lib.rs with your complete implementation\n\
+                             2. Include unit tests in a #[cfg(test)] mod tests block\n\
+                             3. Run cargo test to verify\n\
+                             </selfware_system_directive>"
+                                .to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        // Honest status (AGENTS.md rule 3): the scaffold was NOT
+                        // written — do not claim it was or credit a file write.
+                        warn!("Scaffold write failed: {}", e);
+                        self.messages.push(crate::api::types::Message::user(format!(
+                            "<selfware_system_directive>\n\
+                                 Writing the scaffold to src/lib.rs FAILED: {e}. \
+                                 Nothing was written to disk. Create src/lib.rs yourself with \
+                                 file_write containing your complete implementation (including \
+                                 a #[cfg(test)] mod tests block), then run cargo test to verify.\n\
+                                 </selfware_system_directive>"
+                        )));
+                    }
                 }
-                self.messages.push(crate::api::types::Message::user(
-                    "<selfware_system_directive>\n\
-                     A scaffold file was written to src/lib.rs. Now implement the full solution:\n\
-                     1. Use file_write to replace src/lib.rs with your complete implementation\n\
-                     2. Include unit tests in a #[cfg(test)] mod tests block\n\
-                     3. Run cargo test to verify\n\
-                     </selfware_system_directive>"
-                        .to_string(),
-                ));
                 return Ok(false);
             }
 
@@ -1445,18 +1476,23 @@ impl Agent {
                 "Progress guard warning: {} read-only steps (threshold: {})",
                 self.consecutive_read_only_steps, terminal_threshold
             );
-            self.messages.push(crate::api::types::Message::user(format!(
-                "<selfware_system_directive>\n\
-                 You have spent {} consecutive steps reading without writing. \
-                 You have {} steps before forced synthesis. Write code NOW:\n\n\
-                 Use file_edit or file_write on an existing file you already read. \
-                 Do NOT create src/lib.rs unless this repository already has Cargo.toml.\n\n\
-                 <tool>\n<name>file_edit</name>\n\
-                 <arguments>{{\"path\": \"PATH_YOU_ALREADY_READ\", \"old_str\": \"EXACT OLD TEXT\", \"new_str\": \"EXACT NEW TEXT\"}}</arguments>\n\
-                 </tool>\n\
-                 </selfware_system_directive>",
-                self.consecutive_read_only_steps,
-                terminal_threshold - self.consecutive_read_only_steps
+            self.messages.push(crate::api::types::Message::user(policy_envelope(
+                PolicyKind::ForceMutation,
+                true,
+                "read-only streak approaching forced synthesis",
+                &format!(
+                    "<selfware_system_directive>\n\
+                     You have spent {} consecutive steps reading without writing. \
+                     You have {} steps before forced synthesis. Write code NOW:\n\n\
+                     Use file_edit or file_write on an existing file you already read. \
+                     Do NOT create src/lib.rs unless this repository already has Cargo.toml.\n\n\
+                     <tool>\n<name>file_edit</name>\n\
+                     <arguments>{{\"path\": \"PATH_YOU_ALREADY_READ\", \"old_str\": \"EXACT OLD TEXT\", \"new_str\": \"EXACT NEW TEXT\"}}</arguments>\n\
+                     </tool>\n\
+                     </selfware_system_directive>",
+                    self.consecutive_read_only_steps,
+                    terminal_threshold - self.consecutive_read_only_steps
+                ),
             )));
         }
 

@@ -2502,10 +2502,12 @@ async fn test_repeated_parse_failure_is_suppressed_before_reexecution() {
     assert!(recovery.content.text().contains("RETRY SUPPRESSED"));
     assert!(recovery.content.text().contains("valid JSON"));
     assert!(recovery.content.text().contains("`command`"));
-    assert!(agent
-        .pending_failure_hint
-        .as_deref()
-        .is_some_and(|hint| { hint.contains("RETRY SUPPRESSED") && hint.contains("valid JSON") }));
+    // Error-channel consolidation: the tool result is the ONE feedback
+    // channel — no duplicate pending-failure system hint may be set.
+    assert!(
+        agent.pending_failure_hint.is_none(),
+        "suppression feedback must live only in the tool result, not a second channel"
+    );
 
     server.stop().await;
 }
@@ -2539,9 +2541,12 @@ async fn test_repeated_validation_failure_is_suppressed_before_reexecution() {
     assert!(recovery.content.text().contains("RETRY SUPPRESSED"));
     assert!(recovery.content.text().contains("schema validation"));
     assert!(recovery.content.text().contains("`command`"));
-    assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
-        hint.contains("RETRY SUPPRESSED") && hint.contains("schema validation")
-    }));
+    // Error-channel consolidation: the tool result is the ONE feedback
+    // channel — no duplicate pending-failure system hint may be set.
+    assert!(
+        agent.pending_failure_hint.is_none(),
+        "suppression feedback must live only in the tool result, not a second channel"
+    );
 
     server.stop().await;
 }
@@ -3549,5 +3554,70 @@ async fn identical_code_bearing_completion_pinned_past_gate_aborts_early() {
         aborted,
         "pinned identical completions on a zero-edit mutation task must abort early, not spin to the timeout"
     );
+    server.stop().await;
+}
+
+// =========================================================================
+// Scaffold auto-write honesty (P1: no success claim before the write lands)
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn scaffold_write_claims_success_only_after_batch_succeeds() {
+    // P1 regression: the escalated progress guard used to set
+    // has_written_any_file and push a "scaffold was written" directive
+    // BEFORE the write attempt, swallowing any execute_tool_batch error.
+    // The success claim must only follow an Ok batch.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "// empty\n").unwrap();
+    cwd.switch_to(dir.path());
+
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"git status\"}</arguments>\n</tool>",
+        )
+        .build()
+        .await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement a calculator library in Rust".to_string();
+    agent.messages.push(crate::api::types::Message::user(
+        "Implement a calculator library in Rust".to_string(),
+    ));
+    agent.pending_synthesis = Some("Implement a calculator library in Rust".to_string());
+    agent.consecutive_read_only_steps = 8;
+
+    let done = agent.execute_step_internal(false).await.unwrap();
+
+    assert!(!done, "scaffold injection should continue the loop");
+    assert!(
+        agent.has_written_any_file,
+        "a successful scaffold write must credit the file write"
+    );
+    assert!(
+        agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("A scaffold file was written to src/lib.rs")),
+        "success directive should be pushed after the write succeeds"
+    );
+    assert!(
+        !agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("Writing the scaffold to src/lib.rs FAILED")),
+        "no failure directive when the write succeeded"
+    );
+    let written = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert!(
+        written.contains("AUTO-SCAFFOLD"),
+        "scaffold should be on disk, got: {written}"
+    );
+
     server.stop().await;
 }

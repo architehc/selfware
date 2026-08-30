@@ -86,6 +86,9 @@ impl Agent {
 
     pub(super) fn start_learning_session(&mut self, session_id: &str, task_context: &str) {
         self.current_task_context = task_context.to_string();
+        // Task-aware policy: classify read-only ONCE at task start so every
+        // guard/gate consults the same stored decision.
+        self.classify_task_policy();
         self.self_improvement.start_session(session_id);
     }
 

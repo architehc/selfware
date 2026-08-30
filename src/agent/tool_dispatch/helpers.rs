@@ -90,6 +90,69 @@ pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Like [`truncate_chars`] but keeps the TAIL: error messages put the
+/// actionable part (missing field, line/column, blocked pattern) at the end,
+/// so when the retry-suppression preview must be shortened the head is cut,
+/// not the tail.
+pub(crate) fn truncate_chars_tail(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(total - max_chars).collect();
+    format!("...{}", tail)
+}
+
+/// Human-readable failure category for the retry-suppression message. The
+/// 4-model harness study found "change X before retrying" without a named
+/// failure class left models guessing WHAT to change.
+pub(crate) fn failure_category(failure_kind: &str) -> &'static str {
+    match failure_kind {
+        "validation" => "schema validation",
+        "parsing" => "argument parse",
+        "safety" => "safety check",
+        "task_policy" | "operator_denied" => "policy refusal",
+        "progress_guard" => "progress guard",
+        _ => "execution error",
+    }
+}
+
+/// Field names a schema-validation error reports as missing, in either
+/// serde's "missing field `x`" form or this crate's validator form
+/// "missing required field(s): a, b" (src/tools/mod.rs).
+pub(crate) fn missing_fields_in_error(error: &str) -> Vec<String> {
+    const SERDE_MARKER: &str = "missing field `";
+    const VALIDATOR_MARKER: &str = "missing required field(s): ";
+    let mut fields = Vec::new();
+    let mut rest = error;
+    while let Some(pos) = rest.find(SERDE_MARKER) {
+        let after = &rest[pos + SERDE_MARKER.len()..];
+        if let Some(end) = after.find('`') {
+            fields.push(format!("`{}`", &after[..end]));
+        }
+        rest = after;
+    }
+    if let Some(pos) = error.find(VALIDATOR_MARKER) {
+        let after = &error[pos + VALIDATOR_MARKER.len()..];
+        let list: String = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | ',' | ' '))
+            .collect();
+        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+            fields.push(format!("`{}`", name));
+        }
+    }
+    fields
+}
+
+/// serde_json's "at line N column M" tail, when present — the position where
+/// the argument parser stopped, which is where the model should look first.
+pub(crate) fn parse_error_position(error: &str) -> Option<String> {
+    let pos = error.rfind(" at line ")?;
+    let tail = error[pos + 1..].trim_end_matches(['.', '\n', '\r', ' ']);
+    tail.starts_with("line ").then(|| tail.to_string())
+}
+
 pub(crate) fn canonicalize_tool_args(args_str: &str) -> String {
     serde_json::from_str::<serde_json::Value>(args_str)
         .and_then(|value| serde_json::to_string(&value))
@@ -645,6 +708,33 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "tail",
         "wc",
         "tree",
+        // Never-write inspection/filter utilities (2026-08-29: glm's
+        // `diff -q a b` was keyword-classified as mutating and the run was
+        // mislabeled REAL_EDIT). Redirection is rejected upstream by
+        // has_file_redirect, and none of these have a write mode of their
+        // own. Deliberately excluded: `sort` (-o writes), `awk` (program
+        // text may redirect internally), `python3 -c` (arbitrary code).
+        "diff",
+        "comm",
+        "jq",
+        "cut",
+        "uniq",
+        "column",
+        "file",
+        "stat",
+        "du",
+        "df",
+        "date",
+        "basename",
+        "dirname",
+        "readlink",
+        "realpath",
+        "md5sum",
+        "sha256sum",
+        "strings",
+        "uname",
+        "nproc",
+        "whoami",
         "pytest",
         "python -m pytest",
         "npm test",
@@ -784,10 +874,137 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
         "sqlfluff lint",
     ];
 
-    verification_prefixes
-        .iter()
-        .any(|prefix| command_contains_at_boundary(&normalized, prefix))
-        || shell_command_runs_test_script(&normalized)
+    // A verification prefix only counts when it appears in a pipeline segment
+    // whose FIRST shell word (after optional `sudo` / `env` / `VAR=value`
+    // prefixes) is the runner for that prefix. Substring matching alone
+    // credited `echo cargo test` as a real verification run (AGENTS.md rule
+    // 3: honest status over optimistic success).
+    //
+    // Exit-code masking: a runner whose pipeline masks its exit status
+    // (`cargo test | true`, `pytest || true`, `pytest || echo done`) must NOT
+    // be credited — the failing exit never reaches the agent, so the run is
+    // indistinguishable from a pass. Only an UNMASKED runner segment counts.
+    let segments = shell_segments_with_operators(&normalized);
+    segments.iter().enumerate().any(|(i, (_op, segment))| {
+        segment_starts_with_verification_runner(segment, &verification_prefixes)
+            && !segment_exit_is_masked(&segments[i + 1..])
+    }) || shell_command_runs_test_script(&normalized)
+}
+
+/// Split a shell command into pipeline segments, recording the operator run
+/// that introduced each segment. `("", "cargo test")` is the leading segment;
+/// `("&&", " pytest")` follows an `&&` chain. Consecutive delimiter characters
+/// collapse into one operator run, so `||` stays distinguishable from `|`.
+fn shell_segments_with_operators(command: &str) -> Vec<(&str, &str)> {
+    const DELIMS: &[char] = &['&', ';', '|', '(', ')', '\n'];
+    let mut segments: Vec<(&str, &str)> = Vec::new();
+    let mut seg_start = 0usize;
+    let mut op = "";
+    let mut rest = command.char_indices().peekable();
+    while let Some((i, c)) = rest.next() {
+        if !DELIMS.contains(&c) {
+            continue;
+        }
+        segments.push((op, &command[seg_start..i]));
+        let op_begin = i;
+        while let Some(&(_, c)) = rest.peek() {
+            if DELIMS.contains(&c) {
+                rest.next();
+            } else {
+                break;
+            }
+        }
+        let end = rest.peek().map(|(j, _)| *j).unwrap_or(command.len());
+        op = &command[op_begin..end];
+        seg_start = end;
+    }
+    segments.push((op, &command[seg_start..]));
+    segments
+}
+
+/// Does the operator run following a runner segment mask the runner's exit
+/// code? `| true` swallows a pipeline's status, and `|| true` / `|| echo …`
+/// replace a failing status with a passing one. `&&` and `;` propagate the
+/// real exit status, so they are not masks. `following` holds the segments
+/// after the runner; only the immediately-following segment's operator and
+/// first word decide.
+fn segment_exit_is_masked(following: &[(&str, &str)]) -> bool {
+    let Some((op, segment)) = following.first() else {
+        return false;
+    };
+    match *op {
+        // Any pipe replaces the runner's own exit status with the last
+        // stage's — `cargo test | true` always "passes".
+        "|" => true,
+        "||" => matches!(first_shell_word(segment), Some("true") | Some("echo")),
+        _ => false,
+    }
+}
+
+/// First shell word of a pipeline segment, skipping leading `sudo`, `env`,
+/// and `VAR=value` environment assignments.
+pub(crate) fn first_shell_word(segment: &str) -> Option<&str> {
+    let mut words = segment.split_whitespace();
+    let mut word = words.next()?;
+    loop {
+        let basename = word.rsplit('/').next().unwrap_or(word);
+        if matches!(basename, "sudo" | "env") {
+            word = words.next()?;
+            continue;
+        }
+        if let Some((name, _)) = word.split_once('=') {
+            if !name.is_empty()
+                && !name.starts_with('-')
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                word = words.next()?;
+                continue;
+            }
+        }
+        return Some(word);
+    }
+}
+
+/// Does this pipeline segment invoke a recognized verification runner as its
+/// first shell word? The runner set is derived from `verification_prefixes`
+/// (first token of each prefix); the existing boundary matching then decides
+/// whether the full prefix (e.g. `cargo test`, not `cargo add`) is present.
+/// Segments that merely PRINT a runner command (`echo`, `printf`, `true`,
+/// `exit`) never count.
+fn segment_starts_with_verification_runner(segment: &str, prefixes: &[&str]) -> bool {
+    let Some(word) = first_shell_word(segment) else {
+        return false;
+    };
+    let basename = word.rsplit('/').next().unwrap_or(word);
+    if matches!(basename, "echo" | "printf" | "true" | "exit") {
+        return false;
+    }
+    prefixes.iter().any(|prefix| {
+        let runner = prefix.split_whitespace().next().unwrap_or(prefix);
+        let runner_basename = runner.rsplit('/').next().unwrap_or(runner);
+        basename == runner_basename && command_contains_at_boundary(segment, prefix)
+    })
+}
+
+/// True when the command's FIRST shell word (after optional `sudo` / `env` /
+/// `VAR=value` prefixes) is a file-content reader: cat/head/tail/grep/less/
+/// more/nl/tac/rg/diff/awk, or `sed -n`. Containing a reader token anywhere
+/// used to credit `rm notes.txt`-style commands as a readback of the file
+/// they destroy — the readback gate must see an actual reader in command
+/// position (AGENTS.md rule 3: honest status over optimistic success).
+pub(crate) fn shell_command_is_reader(command: &str) -> bool {
+    let Some(word) = first_shell_word(command) else {
+        return false;
+    };
+    let basename = word.rsplit('/').next().unwrap_or(word);
+    if matches!(
+        basename,
+        "cat" | "head" | "tail" | "grep" | "less" | "more" | "nl" | "tac" | "rg" | "diff" | "awk"
+    ) {
+        return true;
+    }
+    // `sed` only reads-and-prints in its `-n` (quiet, explicit print) form.
+    basename == "sed" && command.contains(" -n")
 }
 
 pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {

@@ -59,6 +59,77 @@ fn test_shell_verification_matches_at_command_boundary() {
 }
 
 #[test]
+fn test_shell_verification_requires_runner_as_first_word() {
+    // P1 regression: `echo cargo test` (or `echo pytest`) is a model PRINTING
+    // a verification command, not running one — it must not be credited as a
+    // successful verification by note_verification_outcome.
+    assert!(!shell_command_is_verification("echo cargo test"));
+    assert!(!shell_command_is_verification("echo pytest"));
+    assert!(!shell_command_is_verification("printf 'cargo test\\n'"));
+    assert!(!shell_command_is_verification("true && echo cargo test"));
+    assert!(!shell_command_is_verification("exit 0 # cargo test"));
+    // Real invocations still count — plain, sudo-prefixed, env-assignment,
+    // and `env`-prefixed forms all strip to the runner as first shell word.
+    assert!(shell_command_is_verification("cargo test"));
+    assert!(shell_command_is_verification("sudo cargo test"));
+    assert!(shell_command_is_verification("FOO=1 pytest -x"));
+    assert!(shell_command_is_verification(
+        "env RUST_LOG=debug cargo test"
+    ));
+    // A printed runner in an earlier segment does not poison a real run in a
+    // later segment of the same command line.
+    assert!(shell_command_is_verification("echo pytest && cargo test"));
+    // Non-runner first words are not verification even when a runner string
+    // appears later in the segment.
+    assert!(!shell_command_is_verification("grep -rn 'cargo test' src/"));
+}
+
+#[test]
+fn test_shell_verification_rejects_exit_code_masks() {
+    // P0 regression: a pipeline that masks the runner's exit code must not be
+    // credited as verification — `cargo test | true` and `pytest || echo done`
+    // report success to the agent even when the tests fail (AGENTS.md rule 3).
+    assert!(!shell_command_is_verification("cargo test | true"));
+    assert!(!shell_command_is_verification("cargo test |tee /dev/null"));
+    assert!(!shell_command_is_verification("pytest || true"));
+    assert!(!shell_command_is_verification("pytest || echo done"));
+    assert!(!shell_command_is_verification("cargo check || echo ok"));
+    // A mask on a LATER, non-runner segment does not poison an earlier real
+    // runner whose status still propagates (`&&` / `;` are not masks).
+    assert!(shell_command_is_verification("cargo test && echo done"));
+    assert!(shell_command_is_verification("cargo test; echo done"));
+    // A runner followed by a pipe into a real consumer is still masked —
+    // the runner's own exit status never reaches the agent.
+    assert!(!shell_command_is_verification("cargo test | tee log.txt"));
+    // Unmasked runners still count.
+    assert!(shell_command_is_verification("cargo test"));
+    assert!(shell_command_is_verification("pytest -x"));
+}
+
+#[test]
+fn test_shell_reader_requires_reader_as_first_word() {
+    // P0 regression: the non-code readback gate must see an actual reader in
+    // command position. `rm notes.txt` used to count as a readback of the
+    // file it destroys because the filename alone matched.
+    assert!(shell_command_is_reader("cat notes.txt"));
+    assert!(shell_command_is_reader("head -5 notes.txt"));
+    assert!(shell_command_is_reader("tail notes.txt"));
+    assert!(shell_command_is_reader("grep foo notes.txt"));
+    assert!(shell_command_is_reader("sed -n '1,10p' notes.txt"));
+    assert!(shell_command_is_reader("less notes.txt"));
+    assert!(shell_command_is_reader("sudo cat notes.txt"));
+    // Non-readers in command position never count, even when a reader token
+    // or the filename appears in the command.
+    assert!(!shell_command_is_reader("rm notes.txt"));
+    assert!(!shell_command_is_reader("rm -f notes.txt # cat"));
+    assert!(!shell_command_is_reader("echo cat notes.txt"));
+    assert!(!shell_command_is_reader("mv notes.txt notes.bak"));
+    assert!(!shell_command_is_reader("truncate -s 0 notes.txt"));
+    // `sed` without `-n` is a stream editor invocation, not a quiet print.
+    assert!(!shell_command_is_reader("sed 's/a/b/' notes.txt"));
+}
+
+#[test]
 fn test_shell_verification_credits_direct_test_script_runs() {
     // P0-2 regression: on a non-Rust project the model verifies by running
     // the project's own test/check script directly. Those runs must count
@@ -3241,5 +3312,593 @@ async fn stagnation_resets_on_workspace_change_and_verification() {
         )
         .unwrap();
     assert_eq!(agent.stagnation_streak, 0, "green verification resets");
+    server.stop().await;
+}
+
+// =========================================================================
+// Honest success accounting for tool results (error-key detection)
+// =========================================================================
+
+#[test]
+fn tool_result_value_indicates_success_rejects_error_key() {
+    // A truthy top-level `error` key is a failure signal, even when the
+    // payload is otherwise structured JSON (e.g. CONTEXT_LOAD_SKELETON
+    // read failures). It must not be recorded as success.
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "error": "Failed to read src/missing.rs: No such file or directory"
+    })));
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "error": true
+    })));
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "error": 1
+    })));
+    // Falsy error values carry no failure signal.
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "error": null
+    })));
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "error": false
+    })));
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "error": ""
+    })));
+}
+
+#[test]
+fn tool_result_value_indicates_success_normal_results_unchanged() {
+    // Pre-existing behavior must be preserved for non-error payloads.
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "success": true, "output": "done"
+    })));
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "passed": true
+    })));
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "exit_code": 0, "stdout": "ok"
+    })));
+    assert!(tool_result_value_indicates_success(&serde_json::json!({})));
+    // Existing failure signals still work.
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "success": false
+    })));
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "passed": false
+    })));
+    assert!(!tool_result_value_indicates_success(&serde_json::json!({
+        "exit_code": 1
+    })));
+    // An error key nested inside a result field is NOT a top-level failure.
+    assert!(tool_result_value_indicates_success(&serde_json::json!({
+        "results": [{"error": "ignored"}]
+    })));
+}
+
+#[tokio::test]
+async fn context_tool_error_payload_recorded_as_failure() {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    agent.current_checkpoint = Some(crate::checkpoint::TaskCheckpoint::new(
+        "task-ctx".to_string(),
+        "load a skeleton".to_string(),
+    ));
+
+    // context_load_skeleton on a nonexistent file returns {"error": ...};
+    // the dispatch path must report failure instead of hardcoding true.
+    let args = serde_json::json!({"path": "definitely/missing/file.rs"});
+    let args_str = args.to_string();
+    let (ok, result, _) = agent
+        .execute_single_tool(
+            "context_load_skeleton",
+            &args_str,
+            &args,
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("dispatch should run");
+    assert!(
+        result.contains("\"error\""),
+        "expected an error payload, got: {result}"
+    );
+    assert!(
+        !ok,
+        "context tool error payload must be recorded as failure"
+    );
+
+    // The checkpoint tool_calls[] log must agree (honest status).
+    let logged = agent
+        .current_checkpoint
+        .as_ref()
+        .expect("checkpoint should exist")
+        .tool_calls
+        .last()
+        .expect("tool call should be logged");
+    assert_eq!(logged.tool_name, "context_load_skeleton");
+    assert!(!logged.success, "checkpoint must record success=false");
+
+    // Contrast: a successful context tool still reports success.
+    let args = serde_json::json!({});
+    let args_str = args.to_string();
+    let (ok, result, _) = agent
+        .execute_single_tool(
+            "context_status",
+            &args_str,
+            &args,
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("dispatch should run");
+    assert!(ok, "context_status should succeed: {result}");
+}
+
+// =========================================================================
+// Task-aware policy wiring (read-only classification + [POLICY] envelopes)
+// =========================================================================
+
+/// Regression for the 4-model read-only study: on an explicitly read-only
+/// review task the progress guard must NOT block read-only tools and must NOT
+/// inject a force-mutation ("write code NOW") directive — reading IS the work.
+#[tokio::test]
+async fn read_only_task_never_gets_force_mutation_directive() {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    agent.start_learning_session(
+        "s1",
+        "Review the code in src/agent/ and report findings. Do NOT edit any files.",
+    );
+    assert!(agent.current_task_is_read_only());
+    agent.consecutive_read_only_steps = 100;
+
+    let calls = vec![(
+        "file_read".to_string(),
+        serde_json::json!({"path": "src/agent/mod.rs"}).to_string(),
+        None,
+    )];
+    let result = agent
+        .maybe_block_progressless_batch(calls)
+        .await
+        .expect("read-only task must not be aborted by the progress guard");
+    assert!(
+        result.is_some(),
+        "read-only task tool calls must pass through unblocked"
+    );
+    assert!(
+        !agent
+            .messages
+            .iter()
+            .any(|m| m.content.contains("FORCE-MUTATION")),
+        "no force-mutation directive may be injected on a read-only task"
+    );
+}
+
+/// Contrast: a mutation task with a huge read-only streak must still be
+/// blocked, and every injected guard message must carry the policy envelope.
+#[tokio::test]
+async fn mutation_task_progress_guard_still_blocks_with_policy_envelope() {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s1", "Fix the bug in parse_port.");
+    assert!(!agent.current_task_is_read_only());
+    agent.consecutive_read_only_steps = 100;
+
+    let calls = vec![(
+        "file_read".to_string(),
+        serde_json::json!({"path": "src/agent/mod.rs"}).to_string(),
+        None,
+    )];
+    let result = agent
+        .maybe_block_progressless_batch(calls)
+        .await
+        .expect("first guard firing must not abort");
+    assert!(
+        result.is_none(),
+        "mutation task with a 100-step read-only streak must be blocked"
+    );
+    let injected = agent
+        .messages
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        injected.contains("[POLICY kind="),
+        "guard injections must carry the policy envelope: {injected}"
+    );
+}
+
+/// Every RETRY SUPPRESSED message must carry the structured envelope marker
+/// so downstream tooling (and the model) can recognize harness-injected
+/// policy text.
+#[tokio::test]
+async fn retry_suppressed_message_carries_policy_envelope() {
+    let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let failure = FailedToolAttempt {
+        tool_name: "file_read".to_string(),
+        args_hash: 42,
+        failure_kind: "validation",
+        error_preview: "missing field `path`".to_string(),
+    };
+    let msg = agent.build_failed_tool_retry_suppressed_message(&failure);
+    assert!(
+        msg.starts_with(
+            "[POLICY kind=retry_suppressed retryable=true reason=\"identical tool call already failed\"]\n"
+        ),
+        "retry-suppressed message must carry the policy envelope: {msg}"
+    );
+    assert!(msg.contains("RETRY SUPPRESSED: `file_read`"));
+}
+
+/// Schema-validation suppression must name the missing field and the failure
+/// category so the model knows WHAT to add, not just "change the arguments".
+#[tokio::test]
+async fn retry_suppressed_schema_failure_names_missing_field() {
+    let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let failure = FailedToolAttempt {
+        tool_name: "file_edit".to_string(),
+        args_hash: 7,
+        failure_kind: "validation",
+        error_preview:
+            "Schema validation failed for tool 'file_edit': missing required field(s): new_str"
+                .to_string(),
+    };
+    let msg = agent.build_failed_tool_retry_suppressed_message(&failure);
+    assert!(
+        msg.starts_with("[POLICY kind=retry_suppressed "),
+        "envelope marker must stay the first line: {msg}"
+    );
+    assert!(
+        msg.contains("Failure category: schema validation"),
+        "message must name the failure category: {msg}"
+    );
+    assert!(
+        msg.contains("suggested_fix: add the missing field(s): `new_str`"),
+        "suggested_fix must name the missing field: {msg}"
+    );
+}
+
+/// Safety-check suppression must quote the safety reason from the last
+/// attempt and point at the blocked pattern class.
+#[tokio::test]
+async fn retry_suppressed_safety_failure_includes_safety_reason() {
+    let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let failure = FailedToolAttempt {
+        tool_name: "shell_exec".to_string(),
+        args_hash: 9,
+        failure_kind: "safety",
+        error_preview:
+            "Safety check failed: command matches blocked destructive pattern `rm -rf /`"
+                .to_string(),
+    };
+    let msg = agent.build_failed_tool_retry_suppressed_message(&failure);
+    assert!(
+        msg.starts_with("[POLICY kind=retry_suppressed "),
+        "envelope marker must stay the first line: {msg}"
+    );
+    assert!(
+        msg.contains("Failure category: safety check"),
+        "message must name the failure category: {msg}"
+    );
+    assert!(
+        msg.contains("blocked destructive pattern `rm -rf /`"),
+        "message must quote the safety reason from the last attempt: {msg}"
+    );
+    assert!(
+        msg.contains("suggested_fix:"),
+        "message must carry a suggested_fix hint: {msg}"
+    );
+}
+
+/// Arg-parse suppression must surface the parser's stop position.
+#[tokio::test]
+async fn retry_suppressed_parse_failure_shows_error_position() {
+    let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let failure = FailedToolAttempt {
+        tool_name: "file_edit".to_string(),
+        args_hash: 11,
+        failure_kind: "parsing",
+        error_preview: "Failed to parse tool arguments as JSON: trailing comma at line 3 column 14"
+            .to_string(),
+    };
+    let msg = agent.build_failed_tool_retry_suppressed_message(&failure);
+    assert!(
+        msg.contains("Failure category: argument parse"),
+        "message must name the failure category: {msg}"
+    );
+    assert!(
+        msg.contains("at line 3 column 14"),
+        "suggested_fix must show the parse error position: {msg}"
+    );
+}
+
+/// Even with a maximal last-attempt error the full message (envelope line
+/// included) must stay bounded, and the quoted error must keep its
+/// actionable tail rather than its head.
+#[tokio::test]
+async fn retry_suppressed_message_is_bounded_and_keeps_error_tail() {
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let long_error = format!("{}ACTIONABLE_TAIL: missing field `path`", "x".repeat(2000));
+    agent.record_failed_tool_attempt("file_read", "{}", "execution", &long_error);
+    let failure = agent
+        .recent_failed_tool_attempts
+        .back()
+        .expect("failure should be recorded")
+        .clone();
+    assert!(
+        failure
+            .error_preview
+            .ends_with("ACTIONABLE_TAIL: missing field `path`"),
+        "recorded preview must keep the actionable tail: {}",
+        failure.error_preview
+    );
+    let msg = agent.build_failed_tool_retry_suppressed_message(&failure);
+    assert!(
+        msg.starts_with("[POLICY kind=retry_suppressed "),
+        "envelope marker must stay the first line: {msg}"
+    );
+    assert!(
+        msg.chars().count() <= 620,
+        "message must stay bounded (~600 chars), got {}: {msg}",
+        msg.chars().count()
+    );
+    assert!(
+        msg.contains("ACTIONABLE_TAIL: missing field `path`"),
+        "bounded message must still keep the actionable error tail: {msg}"
+    );
+}
+
+#[test]
+fn test_observational_includes_never_write_utilities() {
+    // 2026-08-29: glm's `diff -q src/cli/mod.rs scratchpad/...` was
+    // keyword-classified as mutating and the read-only review run was
+    // mislabeled REAL_EDIT. These utilities have no write mode.
+    for cmd in [
+        "diff -q src/cli/mod.rs scratchpad/sw_auto/src/cli/mod.rs",
+        "diff -u a.rs b.rs | head -50",
+        "comm -12 a.txt b.txt",
+        "jq '.nodes | length' .selfware/evolve-graph.yaml",
+        "cut -d: -f1 data.csv",
+        "uniq -c ids.txt",
+        "file src/main.rs",
+        "stat Cargo.toml",
+        "du -sh src/",
+        "df -h",
+        "date",
+        "basename /a/b/c.rs",
+        "dirname /a/b/c.rs",
+        "readlink -f ./target",
+        "sha256sum file.bin",
+        "strings binary | grep -i key",
+        "uname -a",
+        "nproc",
+        "whoami",
+    ] {
+        assert!(
+            shell_command_is_observational(cmd),
+            "{cmd} must be observational"
+        );
+    }
+    // Redirects and write-capable lookalikes stay mutating.
+    assert!(!shell_command_is_observational("diff a b > out.patch"));
+    assert!(!shell_command_is_observational(
+        "sort -o sorted.txt data.txt"
+    ));
+    assert!(!shell_command_is_observational(
+        "python3 -c \"open('f','w').write('x')\""
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Error-channel consolidation (4-model study): exactly ONE policy-enveloped
+// error-feedback message per failed tool call, identical in shape across
+// sequential and parallel dispatch.
+// ---------------------------------------------------------------------------
+
+/// Extract the first line of every `[POLICY kind=tool_error ...]` marker in
+/// the conversation — the shape signature of the unified error channel.
+fn tool_error_markers(agent: &Agent) -> Vec<String> {
+    agent
+        .messages
+        .iter()
+        .filter_map(|m| {
+            m.content
+                .text()
+                .lines()
+                .find(|line| line.contains("[POLICY kind=tool_error"))
+                .map(|line| {
+                    // Strip the <tool_result><error> wrapper so sequential
+                    // and parallel shapes compare on the marker alone.
+                    line.trim_start_matches("<tool_result><error>").to_string()
+                })
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn failed_tool_call_sequential_produces_one_unified_error_message() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    agent
+        .execute_tool_batch(vec![(
+            "file_read".to_string(),
+            serde_json::json!({"path": "/nonexistent/definitely-missing.rs"}).to_string(),
+            None,
+        )])
+        .await
+        .unwrap();
+
+    let markers = tool_error_markers(&agent);
+    assert_eq!(
+        markers.len(),
+        1,
+        "exactly one error-feedback message per failed call: {markers:?}"
+    );
+    assert_eq!(
+        markers[0],
+        "[POLICY kind=tool_error retryable=true reason=\"resource_not_found\"]"
+    );
+    let feedback = agent
+        .messages
+        .iter()
+        .find(|m| m.content.text().contains("[POLICY kind=tool_error"))
+        .expect("unified feedback message");
+    let text = feedback.content.text();
+    // All actionable information rides the single message: error text, the
+    // kind hint, and the tool-specific guidance — under ONE Recovery header.
+    assert!(text.contains("No such file"));
+    assert!(text.contains("Check the path exists or create the resource first."));
+    assert!(text.contains("Try ONE of these alternatives"));
+    assert!(text.contains("DO NOT attempt the same file path again"));
+    // One consolidated recovery section, not stacked blocks (glm-5.3 counted
+    // the old "Recovery:" + "ERROR RECOVERY:" pair as separate messages).
+    assert_eq!(
+        text.matches("Recovery").count(),
+        1,
+        "the recovery header must appear exactly once: {text}"
+    );
+    assert!(
+        !text.contains("ERROR RECOVERY"),
+        "the retired ERROR RECOVERY header must not survive: {text}"
+    );
+    // No non-system message may carry the retired header either.
+    assert!(
+        agent
+            .messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .all(|m| !m.content.text().contains("ERROR RECOVERY")),
+        "ERROR RECOVERY text must not appear in per-failure messages"
+    );
+    assert!(
+        agent.pending_failure_hint.is_none(),
+        "no duplicate pending-failure hint for executed tool failures"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn failed_tool_calls_parallel_produce_same_shape_as_sequential() {
+    // Parallel dispatch: 2+ parallel-safe tools with no path conflict.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut parallel_agent = Agent::new(config).await.unwrap();
+    parallel_agent
+        .execute_tool_batch(vec![
+            (
+                "file_read".to_string(),
+                serde_json::json!({"path": "/nonexistent/missing-a.rs"}).to_string(),
+                None,
+            ),
+            (
+                "file_read".to_string(),
+                serde_json::json!({"path": "/nonexistent/missing-b.rs"}).to_string(),
+                None,
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let parallel_markers = tool_error_markers(&parallel_agent);
+    assert_eq!(
+        parallel_markers.len(),
+        2,
+        "one unified message per failed parallel call: {parallel_markers:?}"
+    );
+
+    // Sequential dispatch: single-call batch forces the sequential path.
+    let server2 = MockLlmServer::builder().with_response("done").build().await;
+    let config2 = test_config(format!("{}/v1", server2.url()));
+    let mut sequential_agent = Agent::new(config2).await.unwrap();
+    sequential_agent
+        .execute_tool_batch(vec![(
+            "file_read".to_string(),
+            serde_json::json!({"path": "/nonexistent/missing-a.rs"}).to_string(),
+            None,
+        )])
+        .await
+        .unwrap();
+    let sequential_markers = tool_error_markers(&sequential_agent);
+    assert_eq!(sequential_markers.len(), 1);
+
+    // The failure memory's shape is dispatch-mode independent.
+    assert!(
+        parallel_markers.iter().all(|m| m == &sequential_markers[0]),
+        "parallel and sequential shapes diverged: {parallel_markers:?} vs {sequential_markers:?}"
+    );
+    assert!(
+        parallel_agent.pending_failure_hint.is_none(),
+        "no duplicate pending-failure hint for parallel failures"
+    );
+    server.stop().await;
+    server2.stop().await;
+}
+
+#[tokio::test]
+async fn already_enveloped_policy_errors_are_not_double_wrapped() {
+    // A retry-suppressed failure already carries a [POLICY ...] envelope; the
+    // unified channel must pass it through, not nest a second marker.
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let start = std::time::Instant::now();
+    agent
+        .parse_tool_args("shell_exec", "{broken", "call_1", false, start)
+        .await;
+    let suppressed = agent
+        .suppress_repeated_failed_tool_retry(
+            "shell_exec",
+            "{broken",
+            "call_2",
+            false,
+            std::time::Instant::now(),
+        )
+        .await;
+    assert!(suppressed);
+
+    // Two failed calls → two messages, one envelope each: the parse failure
+    // rides the unified tool_error channel; the suppressed retry keeps its
+    // original retry_suppressed envelope with no tool_error marker nested.
+    let feedback = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text())
+        .filter(|text| text.contains("[POLICY "))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        feedback.len(),
+        2,
+        "one policy message per failed call: {feedback:?}"
+    );
+    assert!(
+        feedback[0].contains("[POLICY kind=tool_error"),
+        "the parse failure rides the unified channel: {}",
+        feedback[0]
+    );
+    assert!(
+        feedback[1].contains("[POLICY kind=retry_suppressed"),
+        "the original envelope survives: {}",
+        feedback[1]
+    );
+    assert!(
+        !feedback[1].contains("[POLICY kind=tool_error"),
+        "no second envelope nested: {}",
+        feedback[1]
+    );
     server.stop().await;
 }

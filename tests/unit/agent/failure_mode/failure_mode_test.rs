@@ -43,6 +43,56 @@ async fn classify_fake_complete_on_natural_with_final_answer_no_mutation() {
     assert!(mode.evidence.contains("0 mutating"));
 }
 
+/// Regression: a read-only review session ended with verdict
+/// `FAKE_COMPLETE: "model emitted 'Final answer' but performed 0 mutating
+/// tool calls across 7 total calls"` — but on a read-only task 0 mutations
+/// is the CORRECT outcome. The classifier must consult the stored read-only
+/// decision and land on the natural NoChange label instead.
+#[tokio::test]
+async fn classify_read_only_task_with_final_answer_is_no_change_not_fake_complete() {
+    let mut agent = make_agent().await;
+    agent.test_set_task_read_only(true);
+    agent.test_set_mutating_count(0);
+    agent.test_set_total_tool_calls(7);
+    agent.test_set_last_assistant_response(
+        "Final answer: the review findings are as follows.".to_string(),
+    );
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert_eq!(
+        mode.kind,
+        FailureKind::NoChange,
+        "evidence: {}",
+        mode.evidence
+    );
+    assert!(mode.kind.is_nonfailure());
+}
+
+/// A mutation task with 0 mutations and a final-answer marker must STILL be
+/// FakeComplete — the read-only exemption must not weaken the gate.
+#[tokio::test]
+async fn classify_mutation_task_with_final_answer_stays_fake_complete() {
+    let mut agent = make_agent().await;
+    agent.test_set_task_read_only(false);
+    agent.test_set_mutating_count(0);
+    agent.test_set_total_tool_calls(7);
+    agent.test_set_last_assistant_response("Final answer: implementation complete.".to_string());
+
+    let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+    assert_eq!(mode.kind, FailureKind::FakeComplete);
+}
+
+/// Read-only exemption in the max-iterations path: prose output with 0
+/// mutating calls is the deliverable on a read-only task, so the honest
+/// label is MaxIterations, not FakeComplete.
+#[test]
+fn max_iter_failure_read_only_skips_fake_complete() {
+    let read_only = classify_max_iter_failure(0, 0, 0, 0, 9, 4_000, None, true);
+    assert_eq!(read_only.kind, FailureKind::MaxIterations);
+    let mutation = classify_max_iter_failure(0, 0, 0, 0, 9, 4_000, None, false);
+    assert_eq!(mutation.kind, FailureKind::FakeComplete);
+}
+
 #[tokio::test]
 async fn classify_nonterm_prose_when_consecutive_no_action_high() {
     let mut agent = make_agent().await;
@@ -333,10 +383,10 @@ fn cli_banner_no_change_is_neither_success_nor_abort() {
 #[test]
 fn advice_is_operator_facing_not_selfware_internal() {
     // ReadLoop branch: progress guard fired, zero mutations.
-    let read_loop = classify_max_iter_failure(0, 1, 0, 0, 5, 0, None);
+    let read_loop = classify_max_iter_failure(0, 1, 0, 0, 5, 0, None, false);
     assert_eq!(read_loop.kind, FailureKind::ReadLoop);
     // RetryLoop branch: a tool was permanently blocked.
-    let retry_loop = classify_max_iter_failure(0, 0, 0, 1, 5, 0, None);
+    let retry_loop = classify_max_iter_failure(0, 0, 0, 1, 5, 0, None, false);
     assert_eq!(retry_loop.kind, FailureKind::RetryLoop);
     for m in [&read_loop, &retry_loop] {
         let a = m.advice.to_lowercase();

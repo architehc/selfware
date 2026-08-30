@@ -46,7 +46,16 @@ where
 }
 
 pub(crate) const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
-pub(crate) const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
+/// Char budget for the last-attempt error quoted in the retry-suppression
+/// message. Truncation is TAIL-preserving (see `truncate_chars_tail`): the
+/// actionable part of an error — missing field, line/column, blocked
+/// pattern — sits at the end, so the head is what gets cut.
+pub(crate) const RETRY_SUPPRESSION_ERROR_PREVIEW_CHARS: usize = 300;
+/// Char budget for the retry-suppression message BODY (everything after the
+/// policy-envelope marker line). If the assembled body exceeds this, the
+/// quoted error is shrunk first — the failure category and suggested_fix
+/// lines are the actionable part and are never cut.
+pub(crate) const RETRY_SUPPRESSED_BODY_BUDGET_CHARS: usize = 500;
 pub(crate) const FAILED_TOOL_ATTEMPT_WINDOW_SIZE: usize = 16;
 
 /// Maximum tokens allowed for a single tool result before it gets summarized.
@@ -126,6 +135,12 @@ pub(crate) fn tool_result_value_indicates_success(result: &Value) -> bool {
     if result.get("passed").and_then(|v| v.as_bool()) == Some(false) {
         return false;
     }
+    // A truthy top-level `error` key means the tool reported a failure even
+    // if it returned a structured payload (e.g. CONTEXT_LOAD_SKELETON read
+    // errors). Honest status over optimistic success.
+    if result.get("error").is_some_and(is_truthy_json) {
+        return false;
+    }
     if result
         .get("exit_code")
         .and_then(|v| v.as_i64())
@@ -134,6 +149,20 @@ pub(crate) fn tool_result_value_indicates_success(result: &Value) -> bool {
         return false;
     }
     true
+}
+
+/// JSON truthiness: `null`/`false`/`""`/`0` are falsy, everything else truthy.
+/// Mirrors how a payload like `{"error": null}` or `{"error": false}` carries
+/// no failure signal, while `{"error": "..."}` does.
+fn is_truthy_json(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
+        Value::String(s) => !s.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        Value::Object(o) => !o.is_empty(),
+    }
 }
 
 pub(crate) fn summarize_directory_tree(raw: &str) -> String {

@@ -115,6 +115,7 @@ pub mod prompt_builder;
 mod recovery;
 mod session_log;
 mod streaming;
+mod task_policy;
 mod task_runner;
 mod tool_collect;
 mod tool_dispatch;
@@ -375,7 +376,11 @@ Error Recovery Rules:
 struct FailedToolAttempt {
     tool_name: String,
     args_hash: u64,
+    /// Failure class ("validation" / "parsing" / "safety" / ...); mapped to a
+    /// human-readable category by `failure_category` in the suppression message.
     failure_kind: &'static str,
+    /// Last attempt's error text, tail-truncated to
+    /// RETRY_SUPPRESSION_ERROR_PREVIEW_CHARS so the actionable end survives.
     error_preview: String,
 }
 
@@ -515,6 +520,9 @@ pub struct Agent {
     recent_tool_calls: VecDeque<(String, u64)>,
     /// Recent per-step tool batches for oscillation detection.
     recent_tool_batches: VecDeque<Vec<(String, u64)>>,
+    /// Per-turn progress signals (outcome + call signatures) for the
+    /// adaptive iteration-budget check — recorded per executed batch.
+    recent_turn_progress: VecDeque<loop_control::TurnProgress>,
     /// Failed tool attempts in the current recovery window.
     recent_failed_tool_attempts: VecDeque<FailedToolAttempt>,
     /// args-hashes of file_edit calls already escalated to file_write. Prevents
@@ -681,6 +689,12 @@ pub struct Agent {
     /// directive. The very next mutating edit is allowed to bypass the FILES:
     /// checklist guard so the model can recover from a read-only loop.
     force_mutation_pending: bool,
+    /// Task-aware policy: read-only classification computed ONCE at task
+    /// start (`classify_task_policy`) from the task context. When true, the
+    /// force-mutation directives, read-only streak stagnation blocks, and
+    /// the NoSourceEdit / has_written_any_file completion-gate demands are
+    /// suppressed — a review/analysis task's deliverable is the report.
+    task_is_read_only: bool,
     /// Monotonic sequence incremented after every successful state-changing tool.
     mutation_sequence: usize,
     /// Mutation sequence number covered by the most recent successful verification.
@@ -845,9 +859,9 @@ impl Agent {
 
         // Tool discovery message - explains deferred tool loading
         let tool_discovery_note = r#"## TOOL DISCOVERY
-You have access to a focused set of critical tools. Additional specialized tools (git, cargo, containers, browser, etc.) can be discovered using the `tool_search` tool.
+You have access to a focused set of critical tools (files, shell, search, routine git/cargo). Additional specialized tools (containers, browser, package managers, etc.) can be discovered using the `tool_search` tool.
 
-To find more tools: <tool><name>tool_search</name><arguments>{"query": "git"}</arguments></tool>
+To find more tools: <tool><name>tool_search</name><arguments>{"query": "container"}</arguments></tool>
 
 Found tools become available immediately for the rest of the session."#;
 
@@ -875,7 +889,7 @@ Additional tools can be discovered using tool_search.
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
 - Use grep_search to find specific code instead of reading entire files
 - Use directory_tree to understand structure before reading files
-- Need git, cargo, containers, or other tools? Use tool_search to discover them
+- Need containers, browsers, package managers, or other specialized tools? Use tool_search to discover them
 
 ## CRITICAL RULES
 - **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like "I'll..." or "Let me..." before calling tools.
@@ -977,7 +991,7 @@ To call a tool, use this EXACT XML structure:
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
 - Use grep_search to find specific code instead of reading entire files
 - Use directory_tree to understand structure before reading files
-- Need git, cargo, containers, or other tools? Use tool_search to discover them
+- Need containers, browsers, package managers, or other specialized tools? Use tool_search to discover them
 
 ## CRITICAL RULES
 - **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like "I'll..." or "Let me..." before calling tools.
@@ -1260,6 +1274,7 @@ To call a tool, use this EXACT XML structure:
             self_healing,
             recent_tool_calls: VecDeque::new(),
             recent_tool_batches: VecDeque::new(),
+            recent_turn_progress: VecDeque::new(),
             recent_failed_tool_attempts: VecDeque::new(),
             escalated_edit_args_hashes: VecDeque::new(),
             hook_registry,
@@ -1316,6 +1331,7 @@ To call a tool, use this EXACT XML structure:
             has_written_any_file: false,
             files_checklist_seen: false,
             force_mutation_pending: false,
+            task_is_read_only: false,
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
@@ -2269,8 +2285,34 @@ To call a tool, use this EXACT XML structure:
     /// that requires file mutation (`fix`, `implement`, `edit`, `add`, etc.).
     /// Used by `FailureMode::classify` to flag suspicious natural-completion
     /// runs where the model wrote zero files but claimed success.
+    ///
+    /// A task classified read-only at task start (`classify_task_policy`)
+    /// NEVER requires mutation here, even when its text trips the raw
+    /// keyword classifier: every mutation-demanding guard (no-tool stall
+    /// aborts, force-mutation fallbacks, completion demands) consults this
+    /// one method, so honoring the stored decision in this single place
+    /// gates them all consistently.
     pub fn current_task_requires_mutation(&self) -> bool {
-        tool_dispatch::task_requires_mutation(self.task_context_for_classification())
+        !self.current_task_is_read_only()
+            && tool_dispatch::task_requires_mutation(self.task_context_for_classification())
+    }
+
+    /// True when the current task was classified read-only (review /
+    /// analysis / report deliverable, no mutation required) at task start.
+    /// All mutation-demanding machinery (force-mutation directives,
+    /// read-only streak blocks, NoSourceEdit completion demands) consults
+    /// this stored decision instead of re-deriving it.
+    pub(super) fn current_task_is_read_only(&self) -> bool {
+        self.task_is_read_only
+    }
+
+    /// Wire the task-aware policy ONCE at task start: classify the task
+    /// context as read-only (review/analysis/report AND no mutation
+    /// required) and store the decision. Deterministic and unit-testable
+    /// via `task_policy::task_is_read_only`.
+    pub(super) fn classify_task_policy(&mut self) {
+        self.task_is_read_only =
+            task_policy::task_is_read_only(self.task_context_for_classification());
     }
 
     /// Reset all per-task failure-mode counters. Called when starting or
@@ -2450,6 +2492,10 @@ To call a tool, use this EXACT XML structure:
     #[cfg(test)]
     pub(super) fn test_set_last_assistant_response(&mut self, s: String) {
         self.last_assistant_response = s;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_task_read_only(&mut self, v: bool) {
+        self.task_is_read_only = v;
     }
 }
 

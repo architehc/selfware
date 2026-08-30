@@ -40,8 +40,46 @@ impl std::error::Error for InvalidStateTransition {}
 pub struct AgentLoop {
     state: AgentState,
     max_iterations: usize,
+    /// The cap the task started with — the adaptive extension adds a
+    /// fraction of THIS, never of an already-extended budget.
+    original_max: usize,
+    /// The one-shot adaptive extension has been granted.
+    extension_used: bool,
     current_step: usize,
     iteration: usize,
+}
+
+/// One executed tool batch distilled to its progress signal, for the
+/// adaptive iteration-budget check (`productive_streak`).
+#[derive(Debug, Clone)]
+pub struct TurnProgress {
+    /// At least one tool result in the turn was not an error.
+    pub had_success: bool,
+    /// (tool name, args hash) of every attempted call in the turn.
+    pub signatures: Vec<(String, u64)>,
+}
+
+/// Conservative forward-progress test for the adaptive iteration budget:
+/// the last `window` turns must EACH contain at least one non-error tool
+/// result, and no identical tool call (same tool, same args) may repeat
+/// anywhere in the window. Anything less — an error-only turn, a repeated
+/// call, missing evidence — is NOT progress, and the run dies at the cap.
+pub fn productive_streak(turns: &std::collections::VecDeque<TurnProgress>, window: usize) -> bool {
+    if turns.len() < window {
+        return false;
+    }
+    let mut seen: std::collections::HashSet<&(String, u64)> = std::collections::HashSet::new();
+    for turn in turns.iter().rev().take(window) {
+        if !turn.had_success || turn.signatures.is_empty() {
+            return false;
+        }
+        for signature in &turn.signatures {
+            if !seen.insert(signature) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 impl AgentLoop {
@@ -49,9 +87,24 @@ impl AgentLoop {
         Self {
             state: AgentState::Planning,
             max_iterations,
+            original_max: max_iterations,
+            extension_used: false,
             current_step: 0,
             iteration: 0,
         }
+    }
+
+    /// Grant the one-shot adaptive budget extension: +50% of the ORIGINAL
+    /// cap (at least 1), at most once per task. Returns the added
+    /// iterations, or `None` when the extension was already used.
+    pub fn extend_budget_once(&mut self) -> Option<usize> {
+        if self.extension_used {
+            return None;
+        }
+        self.extension_used = true;
+        let added = (self.original_max / 2).max(1);
+        self.max_iterations += added;
+        Some(added)
     }
 
     pub fn next_state(&mut self) -> Option<AgentState> {
@@ -171,6 +224,11 @@ impl AgentLoop {
         self.iteration
     }
 
+    /// The current iteration cap, including any adaptive extension.
+    pub fn max_iterations(&self) -> usize {
+        self.max_iterations
+    }
+
     pub fn current_state_label(&self) -> &'static str {
         self.state.label()
     }
@@ -190,6 +248,9 @@ impl AgentLoop {
         self.state = AgentState::Planning;
         self.current_step = 0;
         self.iteration = 0;
+        // A new task gets a fresh budget: the extension is per-task.
+        self.max_iterations = self.original_max;
+        self.extension_used = false;
     }
 }
 
