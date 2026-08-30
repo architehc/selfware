@@ -348,3 +348,12 @@ fn clean_artifact_has_no_orphans() {
     let known = vec!["total_time_min".to_string()];
     assert!(orphan_output_keys(&artifact, "contains `total_time_min`", &known).is_empty());
 }
+
+#[test]
+fn census_applies_to_small_tasks_but_not_self_contained_documents() {
+    assert!(census_applies("fix the parser bug in src/main.rs"));
+    // >50K estimated tokens of unique words = a self-contained document
+    // payload (e.g. an injected evolve-graph pack); the census must skip it.
+    let big: String = (0..60_000).map(|i| format!("uniq{i:05} ")).collect();
+    assert!(!census_applies(&big));
+}

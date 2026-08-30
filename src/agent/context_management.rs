@@ -27,6 +27,7 @@ impl Agent {
                 || text.contains("NO ACTION LOOP DETECTED")
                 || text.contains("NO ACTION DETECTED AGAIN")
                 || text.contains("selfware_system_directive")
+                || text.contains("selfware_context_note")
                 || text.contains("Use a tool NOW")
                 || text.contains("FAILURE #")
                 || text.contains("Attempt ")
@@ -112,6 +113,14 @@ impl Agent {
         }
     }
 
+    /// Per-message truncation cap for the over-budget fallback: 3/4 of the
+    /// conversation budget, floored at 50K. A flat 50K silently destroyed
+    /// deliberately injected large context — a 780K evolve-graph pack on a
+    /// 1M window was cut to 50K and the model reviewed garbage (2026-08-29).
+    pub(super) fn per_message_cap(max_context_tokens: usize) -> usize {
+        (max_context_tokens * 3 / 4).max(50_000)
+    }
+
     /// Trim the message history so total estimated tokens stay within
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
@@ -165,7 +174,10 @@ impl Agent {
             if remaining <= self.max_context_tokens {
                 break;
             }
-            if self.messages[i].role != "system" && keep[i] {
+            // Pinned messages (original task, recent criticals) are never
+            // evicted — an oversized pinned message reaches the truncation
+            // fallback below instead of silently vanishing from context.
+            if self.messages[i].role != "system" && keep[i] && !pinned_critical.contains(&i) {
                 keep[i] = false;
                 remaining -= tokens;
             }
@@ -182,9 +194,10 @@ impl Agent {
         });
 
         // Fallback: If we're still over budget, truncate individual messages
-        // that exceed 50K tokens. This handles the edge case where a single
-        // message is too large to fit, even after removing all other messages.
-        const MAX_MESSAGE_TOKENS: usize = 50_000;
+        // that exceed the per-message cap. This handles the edge case where a
+        // single message is too large to fit, even after removing all other
+        // messages.
+        let max_message_tokens = Self::per_message_cap(self.max_context_tokens);
         let mut remaining = self.estimate_messages_tokens();
         if remaining > self.max_context_tokens {
             // Pre-compute which messages need truncation to avoid borrow issues
@@ -193,7 +206,7 @@ impl Agent {
                 .iter()
                 .enumerate()
                 .filter(|(_, msg)| {
-                    msg.role != "system" && estimate_message_tokens(msg) > MAX_MESSAGE_TOKENS
+                    msg.role != "system" && estimate_message_tokens(msg) > max_message_tokens
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -203,12 +216,12 @@ impl Agent {
                     break;
                 }
                 let msg_tokens = estimate_message_tokens(&self.messages[idx]);
-                if msg_tokens > MAX_MESSAGE_TOKENS {
-                    // Truncate this message to MAX_MESSAGE_TOKENS
+                if msg_tokens > max_message_tokens {
+                    // Truncate this message to the budget-relative cap
                     let current_text = self.messages[idx].content.text().to_string();
                     let current_chars: Vec<char> = current_text.chars().collect();
                     let target_chars = (current_chars.len() as f64
-                        * (MAX_MESSAGE_TOKENS as f64 / msg_tokens as f64))
+                        * (max_message_tokens as f64 / msg_tokens as f64))
                         as usize;
                     let truncated: String = current_chars
                         .into_iter()

@@ -1584,10 +1584,18 @@ async fn test_trim_does_not_exceed_max_context_tokens() {
 
     let after_tokens = agent.estimate_messages_tokens();
     // After trim the reported token count should be <= the budget,
-    // OR the only surviving messages are system (which cannot be removed).
-    let all_system = agent.messages.iter().all(|m| m.role == "system");
+    // OR the only surviving messages are unremovable ones: system messages
+    // plus the pinned first user message (original task). Since 2026-08-29
+    // the pinned task is never evicted — it is truncated instead when
+    // oversized — so a tiny budget can remain exceeded by design.
+    let first_user_idx = agent.messages.iter().position(|m| m.role == "user");
+    let only_unremovable = agent
+        .messages
+        .iter()
+        .enumerate()
+        .all(|(i, m)| m.role == "system" || Some(i) == first_user_idx);
     assert!(
-        after_tokens <= budget || all_system,
+        after_tokens <= budget || only_unremovable,
         "after trim, token usage should be within budget ({}); got {} tokens",
         budget,
         after_tokens
@@ -1733,4 +1741,78 @@ async fn test_parallel_bulk_read_loads_after_compression() {
     assert!(tokens_added > 0);
     assert_eq!(agent.context_map.level_of(&file), Some(ContextMode::Full));
     server.stop().await;
+}
+
+// =====================================================================
+// trim_message_history — oversized injected task message (2026-08-29)
+// A deliberately injected large context (e.g. a 780K-token evolve-graph
+// pack via `selfware -p -`) must be truncated to a budget-relative cap,
+// never cut to a flat 50K and never evicted wholesale.
+// =====================================================================
+
+#[test]
+fn test_per_message_cap_scales_with_budget() {
+    assert_eq!(Agent::per_message_cap(100_000), 75_000);
+    assert_eq!(Agent::per_message_cap(1_000_000), 750_000);
+    // Small budgets keep the 50K floor so normal tasks are untouched.
+    assert_eq!(Agent::per_message_cap(10_000), 50_000);
+}
+
+#[tokio::test]
+async fn test_trim_oversized_first_user_message_truncated_not_evicted() {
+    let server = MockLlmServer::builder().with_response("ok").build().await;
+    let mut agent = make_test_agent(&server).await;
+
+    agent.max_context_tokens = 100_000; // cap = 75_000
+                                        // >100K tokens of injected context in the original task message.
+                                        // Unique words: a repeated string BPE-compresses below the budget and
+                                        // the trim early-returns, which is not the path under test.
+    let big: String = (0..60_000).map(|i| format!("uniq{i:05} ")).collect();
+    agent.messages.push(Message::user(&big));
+
+    agent.trim_message_history();
+
+    let user = agent
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .expect("original task message must survive trimming");
+    assert!(
+        user.content
+            .text()
+            .contains("truncated to fit context budget"),
+        "oversized task message should be truncated, not evicted"
+    );
+    let msg_tokens = crate::agent::context::estimate_message_tokens(user);
+    assert!(
+        msg_tokens <= 80_000,
+        "truncated task should respect the budget-relative cap, got {msg_tokens}"
+    );
+    assert!(
+        msg_tokens > 50_000,
+        "budget-relative cap must allow more than the old flat 50K, got {msg_tokens}"
+    );
+
+    server.stop().await;
+}
+
+#[test]
+fn test_graph_summary_note_is_critical_context() {
+    // The task-start L0 graph orientation note must survive context trimming:
+    // it is the repo's map and the pointer to the graph tools, so losing it
+    // mid-run strands the model without orientation.
+    let note = Message::user(
+        "<selfware_context_note kind=graph_summary revision=0123456789ab built_at=2026-08-29>\n\
+         # Architectural taxonomy\n\
+         Query the full graph via tool_search: graph_summary, hotspots, context_pack, impact, neighbors, test_map.\n\
+         </selfware_context_note>",
+    );
+    assert!(
+        Agent::is_critical_context_message(&note),
+        "selfware_context_note messages must be pinned as critical"
+    );
+    // An ordinary user message stays non-critical (guard against the marker
+    // matching everything).
+    let ordinary = Message::user("please refactor the parser");
+    assert!(!Agent::is_critical_context_message(&ordinary));
 }

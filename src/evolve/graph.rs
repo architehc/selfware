@@ -312,8 +312,15 @@ pub(crate) fn repository_relative_path_supported(path: &Path) -> bool {
 }
 
 fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_str().unwrap_or_default();
+    // Cargo-style build output under any name (`target`, `sw_auto_target`,
+    // `.fingerprint`): measured 2026-08-29, the evolve graph's single largest
+    // node was a 70K-token aws-lc-sys fingerprint JSON — pure noise.
+    if name.ends_with("_target") || name == ".fingerprint" {
+        return true;
+    }
     matches!(
-        name.to_str().unwrap_or_default(),
+        name,
         ".git"
             | ".selfware"
             | ".worktrees"
@@ -1005,5 +1012,33 @@ fn edge_type_order(edge_type: &EdgeType) -> u8 {
         EdgeType::ContextIncluded => 4,
         EdgeType::DuplicateOf => 5,
         EdgeType::SimilarTo => 6,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_excluded_repository_directory;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn excludes_cargo_style_build_dirs_under_any_name() {
+        // 2026-08-29: the evolve graph's largest node was a 70K-token
+        // aws-lc-sys fingerprint JSON under `scratchpad/sw_auto_target`.
+        for dir in ["target", "sw_auto_target", "my_target", ".fingerprint"] {
+            assert!(
+                is_excluded_repository_directory(OsStr::new(dir)),
+                "{dir} must be excluded"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_real_source_dirs() {
+        for dir in ["src", "scratchpad", "tests", "targetted", "target_utils"] {
+            assert!(
+                !is_excluded_repository_directory(OsStr::new(dir)),
+                "{dir} must stay indexed"
+            );
+        }
     }
 }

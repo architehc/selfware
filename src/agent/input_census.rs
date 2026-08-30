@@ -35,6 +35,21 @@ const SUSPICIOUS_MAX_IDENTIFIERS: usize = 50;
 /// A value longer than this is a blob, not an identifier.
 const SUSPICIOUS_VALUE_MAX_CHARS: usize = 200;
 
+/// Tasks whose payload is one large self-contained document skip the census:
+/// the environment's data contract is a distractor there, not a requirement.
+/// Measured 2026-08-29 (4-model evolve-view study): with a 700K-token
+/// injected graph, glm had to formally waive the census, deepseek burned
+/// turns on it and hit MAX_ITERATIONS, gemini wasted output "accounting
+/// for" irrelevant config fields.
+pub(crate) const CENSUS_SELF_CONTAINED_TASK_TOKENS: usize = 50_000;
+
+/// True when the environment census should be enumerated and injected for
+/// this task (small, environment-driven tasks), false for self-contained
+/// document payloads.
+pub(crate) fn census_applies(task: &str) -> bool {
+    crate::token_count::estimate_content_tokens(task) <= CENSUS_SELF_CONTAINED_TASK_TOKENS
+}
+
 /// The environment's data contract, extracted deterministically.
 pub(crate) struct InputCensus {
     /// `relative/path.json: nested.key.path` entries (CSV: `path columns: a, b`).
