@@ -47,3 +47,24 @@ Token accounting goes through `crate::token_count::estimate_content_tokens`;
 context sizing uses measured projections (`evolve::context_fit::TierMeasurer`,
 `evolve::envelope`), not fractional heuristics. The old 0.18 signature fraction
 overstated Lite by 42% — heuristics survive only as per-node fallbacks.
+
+## 6. Window placement: stay inside the visible region, touch only your own windows
+
+When arranging desktop windows with `wmctrl`/`xdotool`:
+
+- Only move windows your session owns (e.g. `sw-*` study terminals). Never
+  reposition other windows (chat terminals, Firefox, System Monitor) — the
+  user arranges those.
+- The X screen is 7680x2928 (GNOME X11, 200% scale). The visible area of the
+  main display is device coords **x 0–7680, y 768–2928** (the small VGA
+  monitor sits above it at x 3840–4864, y 0–768).
+- mutter doubles `wmctrl -e` position requests: request = target/2; sizes pass
+  through 1:1. So a window meant for device (1920, 800) is requested as
+  `(960, 400)`.
+- Sanity-check after every placement with `wmctrl -lG`: every window must land
+  at y >= 768 and x+width <= 7680 in the listing. If not, fix it immediately.
+
+Failure mode it prevents: tiling loops requested coordinates like (0,0) or
+(3840,1065), which doubled to device y=0 (above the visible top edge) or
+x=7680 (past the right edge), repeatedly pushing study terminals and other
+people's windows off-screen.
