@@ -36,6 +36,7 @@ pub mod file;
 pub mod fim;
 pub mod git;
 pub mod git_worktree;
+pub mod graph;
 pub mod grep_search;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
@@ -348,7 +349,9 @@ pub struct ToolRegistry {
 }
 
 /// List of critical tools that are always available.
-/// These are the minimal tools needed for basic operations.
+/// These cover basic file/shell/search operations plus the routine
+/// development tools (cargo check/test, git status/diff, symbol search)
+/// that must not be deferred behind `tool_search`.
 pub const CRITICAL_TOOLS: &[&str] = &[
     // File operations - essential for reading/writing files
     "file_read",
@@ -362,6 +365,12 @@ pub const CRITICAL_TOOLS: &[&str] = &[
     // Search operations - essential for finding code
     "grep_search",
     "glob_find",
+    "symbol_search",
+    // Routine development tools - always on, not deferred behind tool_search
+    "cargo_check",
+    "cargo_test",
+    "git_status",
+    "git_diff",
     // Tool search - essential for discovering deferred tools
     "tool_search",
 ];
@@ -415,12 +424,24 @@ impl ToolRegistry {
         // Critical: Search operations
         registry.register_critical(GrepSearch);
         registry.register_critical(GlobFind);
-        // SymbolSearch is deferred - less commonly used
+        registry.register_critical(SymbolSearch);
+
+        // Critical: Routine git operations (always on; the rest of the git
+        // toolset stays deferred behind tool_search)
+        if let Some(cfg) = safety_config {
+            registry.register_critical(GitStatus::with_safety_config(cfg.clone()));
+            registry.register_critical(GitDiff::with_safety_config(cfg.clone()));
+        } else {
+            registry.register_critical(GitStatus::new());
+            registry.register_critical(GitDiff::new());
+        }
+
+        // Critical: Routine cargo verification (cargo_clippy/cargo_fmt stay deferred)
+        registry.register_critical(CargoCheck);
+        registry.register_critical(CargoTest);
 
         // Deferred: Git operations (can be discovered via tool_search)
         if let Some(cfg) = safety_config {
-            registry.register_deferred(GitStatus::with_safety_config(cfg.clone()));
-            registry.register_deferred(GitDiff::with_safety_config(cfg.clone()));
             registry.register_deferred(GitCommit::with_safety_config(cfg.clone()));
             registry.register_deferred(GitPush::with_safety_config(cfg.clone()));
             registry.register_deferred(GitCheckpoint::with_safety_config(cfg.clone()));
@@ -428,27 +449,20 @@ impl ToolRegistry {
             registry.register_deferred(ExitWorktreeTool::with_safety_config(cfg.clone()));
             registry.register_deferred(ListWorktreesTool::with_safety_config(cfg.clone()));
         } else {
-            registry.register_deferred(GitStatus::new());
             registry.register_deferred(EnterWorktreeTool::new());
             registry.register_deferred(ExitWorktreeTool::new());
             registry.register_deferred(ListWorktreesTool::new());
-            registry.register_deferred(GitDiff::new());
             registry.register_deferred(GitCommit::new());
             registry.register_deferred(GitPush::new());
             registry.register_deferred(GitCheckpoint::new());
         }
 
         // Deferred: Cargo/Build operations
-        registry.register_deferred(CargoTest);
-        registry.register_deferred(CargoCheck);
         registry.register_deferred(CargoClippy);
         registry.register_deferred(CargoFmt);
 
         // Deferred: System operations
         registry.register_deferred(PtyShellTool);
-
-        // Deferred: Search operations
-        registry.register_deferred(SymbolSearch);
 
         // Deferred: HTTP/Web operations
         registry.register_deferred(HttpRequest);
@@ -530,7 +544,7 @@ impl ToolRegistry {
         registry.register_deferred(lsp_hover);
 
         let (lsp_diag, lsp_ws, lsp_impl) =
-            lsp_tools::create_extra_lsp_tools(project_root, safety_config.cloned());
+            lsp_tools::create_extra_lsp_tools(project_root.clone(), safety_config.cloned());
         registry.register_deferred(lsp_diag);
         registry.register_deferred(lsp_ws);
         registry.register_deferred(lsp_impl);
@@ -548,6 +562,17 @@ impl ToolRegistry {
         registry.register_deferred(codemap::CodeMapTool);
         registry.register_deferred(codemap::ContextBudgetTool);
         registry.register_deferred(codemap::ContextActionTool);
+
+        // Deferred: Evolve graph query tools (read-only views over the cached
+        // graph built by `selfware self-evolve`)
+        registry.register_deferred(graph::GraphSummaryTool::new(project_root.clone()));
+        registry.register_deferred(graph::HotspotsTool::new(project_root.clone()));
+        registry.register_deferred(graph::ContextPackTool::new(project_root.clone()));
+        registry.register_deferred(graph::ImpactTool::new(project_root.clone()));
+        registry.register_deferred(graph::NeighborsTool::new(project_root.clone()));
+        registry.register_deferred(graph::TestMapTool::new(project_root.clone()));
+        registry.register_deferred(graph::CyclesTool::new(project_root.clone()));
+        registry.register_deferred(graph::DupsTool::new(project_root));
 
         // Deferred: Patch apply tool
         registry.register_deferred(PatchApply);

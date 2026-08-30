@@ -433,6 +433,10 @@ pub fn classify_tool_metadata(tool_name: &str) -> Option<ToolMetadata> {
         // Code map
         "code_map" | "context_budget" | "context_action" => ToolMetadata::read_only(),
 
+        // Evolve graph queries — read-only views over the cached graph.
+        "graph_summary" | "context_pack" | "hotspots" | "impact" | "neighbors" | "test_map"
+        | "cycles" | "dups" => ToolMetadata::read_only(),
+
         // Additional file editors — these MUTATE files (found missing by the
         // registry↔safety parity test; the permissive default under-classified
         // them as non-mutating).

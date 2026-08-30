@@ -134,7 +134,7 @@ impl Tool for ToolSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query to find tools. Can be a tool name (e.g., 'git', 'cargo') or description keyword (e.g., 'container', 'browser')."
+                    "description": "Search query to find tools. Can be a tool name (e.g., 'git', 'cargo') or description keyword (e.g., 'container', 'browser'). Category keywords: git, file, cargo, container, browser, process, package, vision, knowledge, lsp, http, code_intelligence, computer_control, shell, search."
                 },
                 "limit": {
                     "type": "integer",
@@ -229,7 +229,16 @@ pub fn categorize_tool(name: &str) -> &'static str {
         "lsp"
     } else if name.starts_with("http_") {
         "http"
-    } else if name.starts_with("code_") || name.starts_with("context_") {
+    } else if name.starts_with("code_")
+        || name.starts_with("context_")
+        || name.starts_with("graph_")
+        || name == "hotspots"
+        || name == "impact"
+        || name == "neighbors"
+        || name == "test_map"
+        || name == "cycles"
+        || name == "dups"
+    {
         "code_intelligence"
     } else if name.starts_with("computer_") {
         "computer_control"

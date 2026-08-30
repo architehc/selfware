@@ -364,16 +364,98 @@ fn test_tool_search_is_critical() {
 }
 
 #[test]
+fn test_routine_dev_tools_always_on() {
+    let registry = ToolRegistry::new();
+
+    // Tool-discovery consensus: routine development tools must be always-on
+    // critical, never deferred behind tool_search.
+    const ALWAYS_ON: &[&str] = &[
+        "cargo_check",
+        "cargo_test",
+        "git_status",
+        "git_diff",
+        "symbol_search",
+    ];
+
+    let critical_names: std::collections::HashSet<&str> =
+        registry.list_critical().iter().map(|t| t.name()).collect();
+
+    for name in ALWAYS_ON {
+        assert!(
+            CRITICAL_TOOLS.contains(name),
+            "{} should be listed in CRITICAL_TOOLS",
+            name
+        );
+        assert!(
+            registry.is_activated(name),
+            "{} should be activated without tool_search",
+            name
+        );
+        assert!(
+            critical_names.contains(name),
+            "{} should be a critical tool",
+            name
+        );
+        // Usable immediately — no activation round-trip required
+        assert!(
+            registry.get_activated(name).is_some(),
+            "{} should be executable without activation",
+            name
+        );
+    }
+}
+
+#[test]
+fn test_activate_already_active_critical_tool_is_idempotent() {
+    let mut registry = ToolRegistry::new();
+
+    // tool_search may ask to activate a tool that is already active; this
+    // must succeed honestly, not error or change state.
+    assert!(registry.is_activated("cargo_check"));
+    let before = registry.activated_count();
+    assert!(registry.activate("cargo_check"));
+    assert_eq!(registry.activated_count(), before);
+    assert!(registry.is_activated("cargo_check"));
+}
+
+#[tokio::test]
+async fn test_tool_search_reports_critical_tool_as_already_available() {
+    let registry = ToolRegistry::new();
+    let tool = registry.get("tool_search").expect("tool_search registered");
+    let result = tool
+        .execute(serde_json::json!({"query": "git_status", "limit": 5}))
+        .await
+        .expect("tool_search should execute");
+
+    assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+    let found = result
+        .get("found_tools")
+        .and_then(|v| v.as_array())
+        .expect("found_tools should be an array");
+    let git_status = found
+        .iter()
+        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("git_status"))
+        .expect("git_status should still be discoverable");
+    assert_eq!(
+        git_status.get("is_critical").and_then(|v| v.as_bool()),
+        Some(true),
+        "git_status should be reported as critical (already available)"
+    );
+}
+
+#[test]
 fn test_git_tools_deferred() {
     let mut registry = ToolRegistry::new();
 
-    // Git tools should exist but not be activated initially
-    assert!(registry.get("git_status").is_some());
-    assert!(!registry.is_activated("git_status"));
+    // Mutating git tools should exist but not be activated initially
+    // (git_status/git_diff are always-on critical tools — see
+    // test_routine_dev_tools_always_on)
+    assert!(registry.get("git_commit").is_some());
+    assert!(!registry.is_activated("git_commit"));
 
     // Activate and check
-    assert!(registry.activate("git_status"));
-    assert!(registry.is_activated("git_status"));
+    assert!(registry.activate("git_commit"));
+    assert!(registry.is_activated("git_commit"));
 }
 
 #[test]
@@ -417,7 +499,7 @@ fn test_definitions_returns_activated_only() {
     assert_eq!(initial_count, registry.activated_count());
 
     // Activate a deferred tool
-    registry.activate("cargo_test");
+    registry.activate("cargo_clippy");
 
     // Definitions should now include the activated tool
     let new_count = registry.definitions().len();
@@ -437,13 +519,15 @@ fn test_critical_definitions_count() {
 }
 
 #[test]
-fn test_cargo_tools_deferred() {
+fn test_cargo_clippy_and_fmt_stay_deferred() {
     let registry = ToolRegistry::new();
 
-    // Cargo tools should exist but not be activated
-    assert!(registry.get("cargo_test").is_some());
-    assert!(!registry.is_activated("cargo_test"));
-    assert!(!registry.is_activated("cargo_check"));
+    // cargo_clippy/cargo_fmt remain deferred behind tool_search, while
+    // cargo_check/cargo_test are always-on critical tools
+    assert!(registry.get("cargo_clippy").is_some());
+    assert!(registry.get("cargo_fmt").is_some());
+    assert!(!registry.is_activated("cargo_clippy"));
+    assert!(!registry.is_activated("cargo_fmt"));
 }
 
 #[test]

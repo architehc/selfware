@@ -288,14 +288,33 @@ impl Agent {
         // deterministically at task start. The hidden verifier grades the full
         // contract — the instruction text is a subset (measured: the cargo and
         // bun TB 3.0 misses were fields the instruction never names).
-        let census = super::input_census::census_task_inputs(&super::current_project_root());
-        self.input_census_suspicious = census.suspicious_identifiers.clone();
-        self.input_census_note = census.render();
-        if let Some(note) = &self.input_census_note {
-            let note_msg = Message::user(format!(
-                "<selfware_system_directive>\n{note}\nAccount for every field above: consume it or consciously waive it. Fields the instruction never mentions still count.\n</selfware_system_directive>"
-            ));
-            self.messages.push(note_msg);
+        // Self-contained document payloads skip it (see census_applies).
+        if super::input_census::census_applies(task) {
+            let census = super::input_census::census_task_inputs(&super::current_project_root());
+            self.input_census_suspicious = census.suspicious_identifiers.clone();
+            self.input_census_note = census.render();
+            if let Some(note) = &self.input_census_note {
+                let note_msg = Message::user(format!(
+                    "<selfware_system_directive>\n{note}\nAccount for every field above: consume it or consciously waive it. Fields the instruction never mentions still count.\n</selfware_system_directive>"
+                ));
+                self.messages.push(note_msg);
+            }
+        }
+
+        // L0 graph orientation: the repo's architectural map, injected at
+        // EVERY task start (unlike the census, it is independent of task
+        // size) so the model knows the evolve graph exists and what it says.
+        // Silent absence when no graph has been built — never an error
+        // surfaced to the model, and the graph is never built here. Off the
+        // async hot path: the first call may parse the YAML graph.
+        {
+            let root = super::current_project_root();
+            if let Ok(Some(note)) =
+                tokio::task::spawn_blocking(move || crate::tools::graph::graph_summary_note(&root))
+                    .await
+            {
+                self.messages.push(Message::user(note));
+            }
         }
 
         self.run_execution_loop(&task_description, LoopMode::NewTask)
@@ -690,6 +709,43 @@ impl Agent {
         }
     }
 
+    /// Adaptive turn budget (loop 13): the iteration cap just tripped. When
+    /// the last turns each show real forward progress — a non-error tool
+    /// result and no identical call repeated — grant ONE bounded extension
+    /// (+50% of the original cap) and resume Executing. Returns the state to
+    /// continue with, or `None` to fail as before. Conservative by
+    /// construction: error-only streaks, repeated calls, and thin evidence
+    /// all abort; the extension can fire at most once per task
+    /// (`AgentLoop::extend_budget_once`).
+    fn maybe_extend_iteration_budget(&mut self) -> Option<AgentState> {
+        const PROGRESS_WINDOW: usize = 5;
+        if !super::loop_control::productive_streak(&self.recent_turn_progress, PROGRESS_WINDOW) {
+            return None;
+        }
+        let added = self.loop_control.extend_budget_once()?;
+        let new_cap = self.loop_control.max_iterations();
+        info!(
+            "Adaptive iteration budget: +{} iterations (new cap {}) after {} productive turns",
+            added, new_cap, PROGRESS_WINDOW
+        );
+        self.emit_progress(super::progress::ProgressEvent::GuardFired {
+            kind: "budget_extension".to_string(),
+            count: 1,
+        });
+        self.emit_event(AgentEvent::Status {
+            message: format!(
+                "Iteration budget extended by +{} (cap {}) — productive streak detected",
+                added, new_cap
+            ),
+        });
+        // next_state() already parked the loop in Failed; resume Executing
+        // with the counters as they stand (iteration now fits the new cap).
+        let step = self.loop_control.current_step();
+        let iteration = self.loop_control.current_iteration();
+        self.loop_control.restore_progress(step, iteration);
+        Some(AgentState::Executing { step })
+    }
+
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         let result = self.run_execution_loop_inner(task_description, mode).await;
         match &result {
@@ -832,6 +888,20 @@ impl Agent {
         // messages and wasted context — GLM-5.2 finding on task_runner.rs).
         let mut last_warned_band = 0u8;
         while let Some(state) = self.loop_control.next_state() {
+            // Adaptive turn budget: the iteration cap just tripped. If the
+            // recent turns show real forward progress, grant ONE bounded
+            // extension and keep working instead of aborting productive
+            // deep-review runs (qwen capstone: died at the 30-turn cap with
+            // 23 productive tool calls and no derailment).
+            let state = match state {
+                AgentState::Failed { ref reason } if reason == "Max iterations exceeded" => {
+                    match self.maybe_extend_iteration_budget() {
+                        Some(resumed) => resumed,
+                        None => state.clone(),
+                    }
+                }
+                other => other,
+            };
             // Liveness heartbeat: a turning loop stays healthy on the health
             // endpoint; a hung process stops pinging and goes stale so a
             // systemd/k8s watchdog can restart it.
@@ -1165,18 +1235,32 @@ impl Agent {
                                             )];
                                         self.consecutive_read_only_steps = 0;
                                         self.seen_read_targets.clear();
-                                        self.has_written_any_file = true;
                                         self.terminal_guard_hits = 0;
-                                        if let Err(e) = self.execute_tool_batch(calls).await {
-                                            warn!("Auto-write from synthesis failed: {}", e);
+                                        match self.execute_tool_batch(calls).await {
+                                            Ok(()) => {
+                                                self.has_written_any_file = true;
+                                                self.messages.push(Message::user(
+                                                    "<selfware_system_directive>\n\
+                                                     Code from your response was auto-written to file. \
+                                                     Now run cargo check or cargo test to verify.\n\
+                                                     </selfware_system_directive>"
+                                                        .to_string(),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                // Honest status (AGENTS.md rule 3): the write
+                                                // did not happen, so say so — do NOT claim the
+                                                // code is on disk or credit a file write.
+                                                warn!("Auto-write from synthesis failed: {}", e);
+                                                self.messages.push(Message::user(format!(
+                                                    "<selfware_system_directive>\n\
+                                                     Auto-writing the code from your response FAILED: {e}. \
+                                                     Nothing was written to disk. Write the code yourself \
+                                                     with file_write, then run cargo check or cargo test to verify.\n\
+                                                     </selfware_system_directive>"
+                                                )));
+                                            }
                                         }
-                                        self.messages.push(Message::user(
-                                            "<selfware_system_directive>\n\
-                                             Code from your response was auto-written to file. \
-                                             Now run cargo check or cargo test to verify.\n\
-                                             </selfware_system_directive>"
-                                                .to_string(),
-                                        ));
                                         // Don't complete — let the agent verify
                                         continue;
                                     }

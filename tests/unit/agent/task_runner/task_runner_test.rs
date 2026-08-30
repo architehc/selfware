@@ -2055,3 +2055,161 @@ async fn commit_mode_is_silent_without_wall_budget() {
     );
     server.stop().await;
 }
+
+// =========================================================================
+// Synthesis auto-write honesty (P1: no success claim before the write lands)
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn synthesis_auto_write_claims_success_only_after_batch_succeeds() {
+    // P1 regression: the phase-2 synthesis auto-write used to set
+    // has_written_any_file and push a "code was auto-written" directive
+    // BEFORE the write attempt, swallowing any execute_tool_batch error.
+    // The success claim must only follow an Ok batch.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    cwd.switch_to(dir.path());
+
+    let code_answer = "Here is the implementation for src/lib.rs:\n```rust\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n```";
+    let server = MockLlmServer::builder()
+        .with_response("Analyzed.")
+        .with_response(code_answer)
+        .with_default_response(MockResponse::Text(
+            "Complete. The helper is explained and the requested code is written to disk."
+                .to_string(),
+        ))
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_iterations = 4;
+    let mut agent = Agent::new(config).await.unwrap();
+    // Ground phase-2 synthesis with prior tool history and queue it so it
+    // fires at the top of the first Executing step.
+    agent.messages.push(Message::user(
+        "<tool_result>pub fn existing_helper() -> i32 { 41 } // contents of src/lib.rs read earlier</tool_result>".to_string(),
+    ));
+    agent.pending_synthesis = Some("Explain what the helper function does".to_string());
+
+    // The run's own outcome is not under test here — the auto-write side
+    // effects are.
+    let _ = agent
+        .run_task("Explain what the helper function does")
+        .await;
+
+    assert!(
+        agent.has_written_any_file,
+        "a successful synthesis auto-write must credit the file write"
+    );
+    assert!(
+        agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("auto-written to file")),
+        "success directive should be pushed after the write succeeds"
+    );
+    assert!(
+        !agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("Auto-writing the code from your response FAILED")),
+        "no failure directive when the write succeeded"
+    );
+    let written = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert!(
+        written.contains("pub fn add"),
+        "synthesized code should be on disk, got: {written}"
+    );
+
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive iteration budget (loop 13) — Agent-level wiring
+// ---------------------------------------------------------------------------
+
+fn productive_turn(name: &str, args_hash: u64) -> crate::agent::loop_control::TurnProgress {
+    crate::agent::loop_control::TurnProgress {
+        had_success: true,
+        signatures: vec![(name.to_string(), args_hash)],
+    }
+}
+
+#[tokio::test]
+async fn adaptive_budget_extends_once_on_productive_streak() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Five turns, each with a distinct successful tool call.
+    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        agent
+            .recent_turn_progress
+            .push_back(productive_turn(name, i as u64));
+    }
+
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    agent
+        .loop_control
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+    agent.loop_control.restore_progress(0, 4);
+    let capped = agent.loop_control.next_state(); // 5 > 4 — cap tripped
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    let resumed = agent
+        .maybe_extend_iteration_budget()
+        .expect("productive streak must earn the extension");
+    assert!(matches!(resumed, AgentState::Executing { .. }));
+    assert_eq!(agent.loop_control.max_iterations(), 6);
+    assert!(matches!(
+        agent.loop_control.current_state_label(),
+        "executing"
+    ));
+
+    // Drive into the extension and trip the new cap: no second extension.
+    agent.loop_control.restore_progress(0, 6);
+    let capped = agent.loop_control.next_state(); // 7 > 6
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+    assert!(
+        agent.maybe_extend_iteration_budget().is_none(),
+        "the extension fires at most once per task"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn adaptive_budget_aborts_without_progress_signals() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Error-only streak: turns ran, but nothing succeeded.
+    for i in 0..5u64 {
+        agent
+            .recent_turn_progress
+            .push_back(crate::agent::loop_control::TurnProgress {
+                had_success: false,
+                signatures: vec![("file_read".to_string(), i)],
+            });
+    }
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    agent.loop_control.restore_progress(0, 4);
+    let capped = agent.loop_control.next_state();
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+    assert!(
+        agent.maybe_extend_iteration_budget().is_none(),
+        "error-only streak must not earn an extension"
+    );
+
+    // No recorded turns at all: thin evidence also aborts.
+    agent.recent_turn_progress.clear();
+    assert!(agent.maybe_extend_iteration_budget().is_none());
+    server.stop().await;
+}
