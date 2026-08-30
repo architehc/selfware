@@ -367,7 +367,10 @@ impl ApiClient {
         stop: Option<Vec<String>>,
     ) -> Result<CompletionResponse> {
         self.circuit_breaker
-            .call(|| self.completion_inner(prompt, max_tokens, stop.clone()))
+            .call_with_classifier(
+                || self.completion_inner(prompt, max_tokens, stop.clone()),
+                counts_toward_circuit_breaker,
+            )
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
@@ -432,7 +435,12 @@ impl ApiClient {
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
-                    return Err(Self::http_status_error(&self.base_url, status, text));
+                    return Err(Self::http_status_error(
+                        &self.base_url,
+                        status,
+                        text,
+                        self.config.api_key.as_ref(),
+                    ));
                 }
                 Err(e) => {
                     if attempt < max_attempts {
@@ -654,7 +662,10 @@ impl ApiClient {
         let body_for_meta = body.clone();
         let stream = self
             .circuit_breaker
-            .call(|| self.chat_stream_send(body.clone()))
+            .call_with_classifier(
+                || self.chat_stream_send(body.clone()),
+                counts_toward_circuit_breaker,
+            )
             .await
             .map_err(|e| -> anyhow::Error {
                 match e {
@@ -789,7 +800,12 @@ impl ApiClient {
                             delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                             continue;
                         }
-                        return Err(Self::http_status_error(&self.base_url, status, text));
+                        return Err(Self::http_status_error(
+                            &self.base_url,
+                            status,
+                            text,
+                            self.config.api_key.as_ref(),
+                        ));
                     }
                     Err(e) => {
                         if attempt < max_attempts {
@@ -828,7 +844,17 @@ impl ApiClient {
         endpoint: &str,
         status: reqwest::StatusCode,
         body: String,
+        api_key: Option<&crate::config::RedactedString>,
     ) -> anyhow::Error {
+        // Some OpenAI-compatible gateways echo the offending API key back in
+        // error bodies, and this error flows to headless output — redact the
+        // body before embedding it (generic secret patterns plus the literal
+        // configured key, same treatment as the raw-response debug log).
+        let body = crate::observability::telemetry::redact_secrets(&body);
+        let body = match api_key {
+            Some(key) if key.expose().trim().len() >= 8 => body.replace(key.expose(), "[REDACTED]"),
+            _ => body,
+        };
         let message = if status == reqwest::StatusCode::UNAUTHORIZED {
             format!(
                 "{}\nHint: authentication failed against '{}'. Set SELFWARE_API_KEY{} in your \
@@ -876,7 +902,10 @@ impl ApiClient {
 
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
         self.circuit_breaker
-            .call(|| self.send_with_retry_inner(body))
+            .call_with_classifier(
+                || self.send_with_retry_inner(body),
+                counts_toward_circuit_breaker,
+            )
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
@@ -1099,6 +1128,22 @@ impl ApiClient {
                             .map(|s| s.min(300));
 
                         let error_text = response.text().await.unwrap_or_default();
+                        // Some OpenAI-compatible gateways echo the offending
+                        // API key back in error bodies — and 429/5xx bodies are
+                        // no exception. Redact before the warn! log fires on
+                        // every retry and before the message propagates to
+                        // headless output / the session log: generic secret
+                        // patterns plus the literal configured key, the same
+                        // treatment `http_status_error` gives the
+                        // non-retryable path.
+                        let error_text =
+                            crate::observability::telemetry::redact_secrets(&error_text);
+                        let error_text = match api_key {
+                            Some(key) if key.expose().trim().len() >= 8 => {
+                                error_text.replace(key.expose(), "[REDACTED]")
+                            }
+                            _ => error_text,
+                        };
                         warn!("Retryable error ({}): {}", status, error_text);
                         last_error = Some(
                             ApiError::HttpStatus {
@@ -1119,7 +1164,12 @@ impl ApiClient {
 
                     let status_code = status;
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(Self::http_status_error(endpoint, status_code, error_text));
+                    return Err(Self::http_status_error(
+                        endpoint,
+                        status_code,
+                        error_text,
+                        api_key,
+                    ));
                 }
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {
@@ -1265,6 +1315,27 @@ fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
         .map(str::trim)
         .filter(|r| !r.is_empty())?;
     Some(reasoning.len())
+}
+
+/// Whether a failure should count toward opening the circuit breaker.
+///
+/// Only transient conditions — network errors, timeouts, and retryable
+/// 5xx/429 statuses — indicate a sick backend. Permanent typed errors (401
+/// auth, 400 bad request, context overflow, parse failures, …) must surface
+/// their own remediation message instead of tripping the breaker and being
+/// masked as "API unavailable".
+fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<ApiError>() {
+        Some(ApiError::Network(_)) | Some(ApiError::Timeout) | Some(ApiError::RateLimit { .. }) => {
+            true
+        }
+        Some(ApiError::HttpStatus { status, .. }) => *status == 429 || (500..600).contains(status),
+        Some(_) => false,
+        // Untyped errors (e.g. reqwest body-read failures) keep the previous
+        // behavior and count — except the run-level wall-clock budget stop,
+        // which is a deliberate halt, not a sick backend.
+        None => err.downcast_ref::<WallClockBudgetExceeded>().is_none(),
+    }
 }
 
 pub fn detect_backend(endpoint: &str) -> Result<String> {

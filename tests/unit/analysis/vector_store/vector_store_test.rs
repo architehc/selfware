@@ -1326,3 +1326,55 @@ async fn live_openrouter_qwen3_embedding() {
         "unrelated text should be far from code"
     );
 }
+
+// ---------------------------------------------------------------------------
+// HttpEmbeddingProvider credential endpoint-safety gate (P1): the bearer
+// token must go through the same plaintext-HTTP / userinfo refusal as every
+// other authenticated request path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_http_embedding_provider_refuses_insecure_remote_endpoint_with_key() {
+    let provider = HttpEmbeddingProvider::new("http://remote.example.com/v1", "test-model", 384)
+        .with_api_key(Some("sk-test-1234567890".to_string()));
+    let err = provider
+        .request(&serde_json::json!({}))
+        .expect_err("plaintext-HTTP remote endpoint with a key must be refused");
+    assert!(
+        err.to_string().contains("Refusing to send the API key"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_http_embedding_provider_refuses_userinfo_endpoint_with_key() {
+    let provider =
+        HttpEmbeddingProvider::new("http://user:pass@remote.example.com/v1", "test-model", 384)
+            .with_api_key(Some("sk-test-1234567890".to_string()));
+    let err = provider
+        .request(&serde_json::json!({}))
+        .expect_err("userinfo-embedding endpoint with a key must be refused");
+    assert!(
+        err.to_string().contains("Refusing to send the API key"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn test_http_embedding_provider_allows_local_http_endpoint_with_key() {
+    let provider = HttpEmbeddingProvider::new("http://127.0.0.1:1234/v1", "test-model", 384)
+        .with_api_key(Some("sk-test-1234567890".to_string()));
+    assert!(
+        provider.request(&serde_json::json!({})).is_ok(),
+        "local HTTP endpoints keep working (traffic stays on the machine)"
+    );
+}
+
+#[test]
+fn test_http_embedding_provider_allows_remote_endpoint_without_key() {
+    let provider = HttpEmbeddingProvider::new("http://remote.example.com/v1", "test-model", 384);
+    assert!(
+        provider.request(&serde_json::json!({})).is_ok(),
+        "no credential, no refusal"
+    );
+}

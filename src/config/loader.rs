@@ -236,6 +236,8 @@ impl Config {
     ) -> Option<(std::path::PathBuf, Vec<String>)> {
         let mut reset: Vec<String> = Vec::new();
         let mut origin: Option<std::path::PathBuf> = None;
+        // Safe built-in defaults used to restore weakened safety fields below.
+        let safe = super::safety::SafetyConfig::default();
 
         // Arbitrary tool auto-approval (`tool_pattern = "*"` → silent approval).
         if let Some(p) = untrusted_checkout_origin(sources, "safety.permissions") {
@@ -275,9 +277,63 @@ impl Config {
             origin.get_or_insert_with(|| p.to_path_buf());
             reset.push("yolo".to_string());
         }
+        // Forced yolo via the TOP-LEVEL `execution_mode` key: the agent's
+        // confirmation policy consumes `config.execution_mode` directly
+        // (Yolo / Daemon never ask — src/agent/mod.rs `needs_confirmation`),
+        // so an untrusted repo shipping `execution_mode = "yolo"` bypasses
+        // every confirmation without ever touching the [yolo] section. Reset
+        // to the safe default (Normal). Env (`SELFWARE_MODE`) and CLI
+        // (`--yolo`) origins are operator decisions and unaffected.
+        if let Some(p) = untrusted_checkout_origin(sources, "execution_mode") {
+            if self.execution_mode != ExecutionMode::default() {
+                self.execution_mode = ExecutionMode::default();
+                origin.get_or_insert_with(|| p.to_path_buf());
+                reset.push("execution_mode".to_string());
+            }
+        }
+        // Prompt-injection scan kill switch: `trust_gate_tool_results` gates
+        // the scan of tool output before it enters the model's context
+        // (src/agent/tool_dispatch/mod.rs passes
+        // `self.config.safety.trust_gate_tool_results` to
+        // `trust_gate_tool_result`). An untrusted repo disabling it lets
+        // attacker-controlled tool output steer the model unfiltered.
+        if let Some(p) = untrusted_checkout_origin(sources, "safety.trust_gate_tool_results") {
+            if !self.safety.trust_gate_tool_results {
+                self.safety.trust_gate_tool_results = safe.trust_gate_tool_results;
+                origin.get_or_insert_with(|| p.to_path_buf());
+                reset.push("safety.trust_gate_tool_results".to_string());
+            }
+        }
+        // Verification gate kill switch: `require_verification_before_completion`
+        // forces a successful cargo_check/cargo_test/cargo_clippy before the
+        // agent may accept completion (src/agent/execution.rs and
+        // `Agent::completion_requires_verification`). An untrusted repo
+        // disabling it lets the agent declare victory on unverified edits.
+        if let Some(p) =
+            untrusted_checkout_origin(sources, "agent.require_verification_before_completion")
+        {
+            if !self.agent.require_verification_before_completion {
+                self.agent.require_verification_before_completion =
+                    super::agent::AgentConfig::default().require_verification_before_completion;
+                origin.get_or_insert_with(|| p.to_path_buf());
+                reset.push("agent.require_verification_before_completion".to_string());
+            }
+        }
+        // `safety.strict_permissions` hardens the loader itself (config-file
+        // permission checks and the plaintext-API-key refusal). An untrusted
+        // repo cannot gain by weakening it (default is already false), but it
+        // CAN silence the operator's own hardening by shipping `false` over a
+        // trusted `true` — so restore the safe default when the value
+        // originated from the untrusted file.
+        if let Some(p) = untrusted_checkout_origin(sources, "safety.strict_permissions") {
+            if !self.safety.strict_permissions {
+                self.safety.strict_permissions = safe.strict_permissions;
+                origin.get_or_insert_with(|| p.to_path_buf());
+                reset.push("safety.strict_permissions".to_string());
+            }
+        }
         // Weakening the safety defaults (confirmation list / path guardrails):
         // reset to the strong built-in defaults rather than the project's.
-        let safe = super::safety::SafetyConfig::default();
         if let Some(p) = untrusted_checkout_origin(sources, "safety.require_confirmation") {
             self.safety.require_confirmation = safe.require_confirmation.clone();
             origin.get_or_insert_with(|| p.to_path_buf());
@@ -532,7 +588,13 @@ impl Config {
         // 3. Config file (lowest priority, plaintext on disk -- warn the user)
         let mut api_key_source = ApiKeySource::None;
 
-        if let Ok(api_key) = std::env::var("SELFWARE_API_KEY") {
+        // An EMPTY SELFWARE_API_KEY must not count as "set" — it would
+        // suppress the keyring / OpenRouter fallbacks below and leave the
+        // run with no credential at all.
+        if let Some(api_key) = std::env::var("SELFWARE_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+        {
             config.api_key = Some(RedactedString::new(api_key));
             api_key_source = ApiKeySource::EnvVar;
         }
@@ -630,6 +692,27 @@ impl Config {
                      Use https:// or a local endpoint (localhost / 127.0.0.1).",
                     config.endpoint
                 );
+            }
+            // Profile endpoints (`[models.*] endpoint`) route profile traffic
+            // (`chat_with_profile` via `resolve_model`) to their OWN endpoint,
+            // so they need the same refusal — otherwise a checkout-local
+            // config smuggles the key to a plaintext-HTTP / userinfo-embedding
+            // host through a profile while the top-level endpoint stays safe.
+            for profile in config.models.values() {
+                if endpoint_has_userinfo(&profile.endpoint) {
+                    bail!(
+                        "Refusing to send the API key: profile endpoint '{}' embeds URL credentials \
+                         (user:pass@host), a host-spoofing vector. Remove the '@' userinfo.",
+                        profile.endpoint
+                    );
+                }
+                if is_insecure_remote_endpoint(&profile.endpoint) {
+                    bail!(
+                        "Refusing to send the API key over plaintext HTTP to a remote profile \
+                         endpoint '{}'. Use https:// or a local endpoint (localhost / 127.0.0.1).",
+                        profile.endpoint
+                    );
+                }
             }
         }
 

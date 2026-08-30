@@ -393,3 +393,15 @@ fn test_message_content_helpers() {
     assert_eq!(mc.chars().count(), 5);
     assert_eq!(format!("{}", mc), "hello");
 }
+
+#[test]
+fn test_usage_deserialization_with_missing_fields() {
+    // Providers may omit `total_tokens` (or any counter) on an otherwise
+    // successful billed response; missing fields must default to 0 instead
+    // of failing the whole parse.
+    let usage: Usage = serde_json::from_str(r#"{"prompt_tokens": 5}"#).unwrap();
+    assert_eq!(usage.prompt_tokens, 5);
+    assert_eq!(usage.completion_tokens, 0);
+    assert_eq!(usage.total_tokens, 0);
+    assert!(usage.cost.is_none());
+}

@@ -137,3 +137,131 @@ fn wall_budget_stop_message_matches_canonical_budget_reason() {
     .into();
     assert_eq!(err.to_string(), "Wall-clock timeout: 51s >= 8s");
 }
+
+#[test]
+fn circuit_breaker_classifier_counts_only_transient_errors() {
+    let network: anyhow::Error = ApiError::Network("connection reset".into()).into();
+    assert!(counts_toward_circuit_breaker(&network));
+
+    let timeout: anyhow::Error = ApiError::Timeout.into();
+    assert!(counts_toward_circuit_breaker(&timeout));
+
+    let rate_limited: anyhow::Error = ApiError::RateLimit {
+        retry_after_secs: Some(1),
+    }
+    .into();
+    assert!(counts_toward_circuit_breaker(&rate_limited));
+
+    let server_error: anyhow::Error = ApiError::HttpStatus {
+        status: 503,
+        message: "unavailable".into(),
+    }
+    .into();
+    assert!(counts_toward_circuit_breaker(&server_error));
+
+    let too_many: anyhow::Error = ApiError::HttpStatus {
+        status: 429,
+        message: "slow down".into(),
+    }
+    .into();
+    assert!(counts_toward_circuit_breaker(&too_many));
+
+    let auth: anyhow::Error = ApiError::HttpStatus {
+        status: 401,
+        message: "bad key".into(),
+    }
+    .into();
+    assert!(!counts_toward_circuit_breaker(&auth));
+
+    let bad_request: anyhow::Error = ApiError::HttpStatus {
+        status: 400,
+        message: "invalid".into(),
+    }
+    .into();
+    assert!(!counts_toward_circuit_breaker(&bad_request));
+
+    let overflow: anyhow::Error = ApiError::ContextOverflow("too long".into()).into();
+    assert!(!counts_toward_circuit_breaker(&overflow));
+
+    let parse: anyhow::Error = ApiError::Parse("not json".into()).into();
+    assert!(!counts_toward_circuit_breaker(&parse));
+
+    // The run-level wall-clock budget stop is a deliberate halt, not a sick
+    // backend — it must not trip the breaker either.
+    let budget: anyhow::Error = WallClockBudgetExceeded {
+        elapsed_secs: 10,
+        limit_secs: 8,
+    }
+    .into();
+    assert!(!counts_toward_circuit_breaker(&budget));
+}
+
+// ---------------------------------------------------------------------------
+// http_status_error redaction (P1): upstream gateways can echo the API key
+// in error bodies; the key must not reach headless output via the error.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn http_status_error_redacts_configured_api_key_echoed_in_body() {
+    let key = crate::config::RedactedString::new("sk-test-1234567890");
+    let err = ApiClient::http_status_error(
+        "https://api.example.com/v1",
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        "upstream failure: invalid key sk-test-1234567890 provided".to_string(),
+        Some(&key),
+    );
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("sk-test-1234567890"),
+        "configured key must be redacted from the error, got: {msg}"
+    );
+    assert!(
+        msg.contains("[REDACTED]"),
+        "redaction marker present: {msg}"
+    );
+    assert!(
+        msg.contains("upstream failure"),
+        "non-secret body content preserved: {msg}"
+    );
+}
+
+#[test]
+fn http_status_error_redacts_key_in_401_hint_path() {
+    let key = crate::config::RedactedString::new("sk-test-1234567890");
+    let err = ApiClient::http_status_error(
+        "https://api.example.com/v1",
+        reqwest::StatusCode::UNAUTHORIZED,
+        "401 No cookie auth credentials found for sk-test-1234567890".to_string(),
+        Some(&key),
+    );
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("sk-test-1234567890"),
+        "configured key must be redacted from the 401 error, got: {msg}"
+    );
+    assert!(
+        msg.contains("SELFWARE_API_KEY"),
+        "remediation hint preserved: {msg}"
+    );
+}
+
+#[test]
+fn http_status_error_ignores_short_or_absent_key() {
+    // A short key (< 8 chars) is not literal-replaced (too collision-prone);
+    // generic secret-pattern redaction still runs.
+    let short = crate::config::RedactedString::new("abc");
+    let err = ApiClient::http_status_error(
+        "https://api.example.com/v1",
+        reqwest::StatusCode::BAD_REQUEST,
+        "bad request: abc".to_string(),
+        Some(&short),
+    );
+    assert!(err.to_string().contains("bad request"));
+    let err = ApiClient::http_status_error(
+        "https://api.example.com/v1",
+        reqwest::StatusCode::BAD_REQUEST,
+        "bad request".to_string(),
+        None,
+    );
+    assert!(err.to_string().contains("bad request"));
+}

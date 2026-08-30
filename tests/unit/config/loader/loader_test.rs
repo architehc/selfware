@@ -1712,6 +1712,155 @@ fn untrusted_project_config_restores_protected_branches() {
     assert!(config.safety.protected_branches.is_empty());
 }
 
+#[test]
+fn untrusted_project_config_resets_execution_mode() {
+    // An untrusted repo shipping top-level `execution_mode = "yolo"` forces
+    // the agent into no-confirmation execution (consumed directly by
+    // `Agent::needs_confirmation` at src/agent/mod.rs) without ever touching
+    // the [yolo] section — the restriction must reset it to Normal.
+    let path = untrusted_selfware_toml();
+    let mut config = Config::default();
+    config.execution_mode = crate::config::ExecutionMode::Yolo;
+
+    let mut sources = ConfigSources::new();
+    sources.set("execution_mode", ConfigSource::ConfigFile(path.clone()));
+
+    let restricted = config.restrict_untrusted_project_config(&sources);
+    let (_, keys) = restricted.expect("restriction must be reported");
+    assert!(keys.iter().any(|k| k == "execution_mode"));
+    assert_eq!(
+        config.execution_mode,
+        crate::config::ExecutionMode::Normal,
+        "untrusted execution_mode reset to the safe default (Normal)",
+    );
+
+    // A trusted origin (env / CLI / explicit config) is preserved.
+    let mut config = Config::default();
+    config.execution_mode = crate::config::ExecutionMode::Yolo;
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "execution_mode",
+        ConfigSource::EnvVar("SELFWARE_MODE".into()),
+    );
+    assert!(config.restrict_untrusted_project_config(&sources).is_none());
+    assert_eq!(
+        config.execution_mode,
+        crate::config::ExecutionMode::Yolo,
+        "env-selected execution_mode preserved",
+    );
+}
+
+#[test]
+fn untrusted_project_config_resets_trust_gate_tool_results() {
+    // `safety.trust_gate_tool_results = false` disables the prompt-injection
+    // scan of tool output (src/config/safety.rs:34, consumed by
+    // src/agent/tool_dispatch/mod.rs) — an untrusted repo must not be able to
+    // turn it off.
+    let path = untrusted_selfware_toml();
+    let mut config = Config::default();
+    config.safety.trust_gate_tool_results = false; // weakened away
+
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "safety.trust_gate_tool_results",
+        ConfigSource::ConfigFile(path.clone()),
+    );
+
+    let restricted = config.restrict_untrusted_project_config(&sources);
+    let (_, keys) = restricted.expect("restriction must be reported");
+    assert!(keys.iter().any(|k| k == "safety.trust_gate_tool_results"));
+    assert!(
+        config.safety.trust_gate_tool_results,
+        "trust gate restored to the safe default (enabled)",
+    );
+
+    // A trusted origin (env / home config) is preserved.
+    let mut config = Config::default();
+    config.safety.trust_gate_tool_results = false;
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "safety.trust_gate_tool_results",
+        ConfigSource::EnvVar("SELFWARE_X".into()),
+    );
+    assert!(config.restrict_untrusted_project_config(&sources).is_none());
+    assert!(!config.safety.trust_gate_tool_results);
+}
+
+#[test]
+fn untrusted_project_config_resets_require_verification() {
+    // `agent.require_verification_before_completion = false` disables the
+    // cargo_check/cargo_test/cargo_clippy completion gate
+    // (src/config/agent.rs:53, consumed by src/agent/execution.rs and
+    // `Agent::completion_requires_verification`) — an untrusted repo must not
+    // be able to turn it off.
+    let path = untrusted_selfware_toml();
+    let mut config = Config::default();
+    config.agent.require_verification_before_completion = false; // weakened away
+
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "agent.require_verification_before_completion",
+        ConfigSource::ConfigFile(path.clone()),
+    );
+
+    let restricted = config.restrict_untrusted_project_config(&sources);
+    let (_, keys) = restricted.expect("restriction must be reported");
+    assert!(keys
+        .iter()
+        .any(|k| k == "agent.require_verification_before_completion"));
+    assert!(
+        config.agent.require_verification_before_completion,
+        "verification gate restored to the safe default (required)",
+    );
+
+    // A trusted origin (env / home config) is preserved.
+    let mut config = Config::default();
+    config.agent.require_verification_before_completion = false;
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "agent.require_verification_before_completion",
+        ConfigSource::EnvVar("SELFWARE_X".into()),
+    );
+    assert!(config.restrict_untrusted_project_config(&sources).is_none());
+    assert!(!config.agent.require_verification_before_completion);
+}
+
+#[test]
+fn untrusted_project_config_resets_strict_permissions() {
+    // `safety.strict_permissions = false` weakens the loader's own
+    // config-permission and plaintext-API-key checks (src/config/safety.rs:23,
+    // consumed by `Config::load`) — an untrusted repo must not be able to
+    // silence the operator's hardening.
+    let path = untrusted_selfware_toml();
+    let mut config = Config::default();
+    config.safety.strict_permissions = false; // weakened away
+
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "safety.strict_permissions",
+        ConfigSource::ConfigFile(path.clone()),
+    );
+
+    let restricted = config.restrict_untrusted_project_config(&sources);
+    let (_, keys) = restricted.expect("restriction must be reported");
+    assert!(keys.iter().any(|k| k == "safety.strict_permissions"));
+    assert!(
+        !config.safety.strict_permissions,
+        "strict_permissions restored to the built-in default (false)",
+    );
+
+    // A trusted origin (env / home config) is preserved.
+    let mut config = Config::default();
+    config.safety.strict_permissions = true;
+    let mut sources = ConfigSources::new();
+    sources.set(
+        "safety.strict_permissions",
+        ConfigSource::EnvVar("SELFWARE_X".into()),
+    );
+    assert!(config.restrict_untrusted_project_config(&sources).is_none());
+    assert!(config.safety.strict_permissions);
+}
+
 // =========================================================================
 // Untrusted-endpoint gate: a checkout-local selfware.toml must not point a
 // REMOTE endpoint at an attacker host, even with no credential configured.
@@ -2294,5 +2443,102 @@ fn agent_section_known_keys_include_none_defaulted_options() {
     assert!(
         keys.contains("max_wall_secs"),
         "Option fields must count as known keys"
+    );
+}
+
+// =========================================================================
+// Profile-endpoint credential safety (P1): the plaintext-HTTP / userinfo
+// refusal must cover `[models.*] endpoint`, not just the top-level endpoint.
+// =========================================================================
+
+#[test]
+fn test_profile_endpoint_plaintext_http_remote_refused_with_key() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:11434/v1"
+        model = "anything"
+
+        [models.default]
+        endpoint = "http://remote.example.com/v1"
+        model = "anything"
+        "#,
+        "profile_insecure.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "sk-test-1234567890");
+    let err = Config::load(Some(path.to_str().unwrap()))
+        .expect_err("plaintext-HTTP remote profile endpoint with a key must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("plaintext HTTP"),
+        "refusal must name the plaintext-HTTP reason, got: {msg}"
+    );
+}
+
+#[test]
+fn test_profile_endpoint_userinfo_refused_with_key() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:11434/v1"
+        model = "anything"
+
+        [models.default]
+        endpoint = "http://user:pass@remote.example.com/v1"
+        model = "anything"
+        "#,
+        "profile_userinfo.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "sk-test-1234567890");
+    let err = Config::load(Some(path.to_str().unwrap()))
+        .expect_err("userinfo-embedding profile endpoint with a key must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("userinfo") || msg.contains("URL credentials"),
+        "refusal must name the userinfo reason, got: {msg}"
+    );
+}
+
+#[test]
+fn test_profile_endpoint_https_remote_allowed_with_key() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:11434/v1"
+        model = "anything"
+
+        [models.default]
+        endpoint = "https://remote.example.com/v1"
+        model = "anything"
+        "#,
+        "profile_https.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "sk-test-1234567890");
+    Config::load(Some(path.to_str().unwrap()))
+        .expect("https profile endpoint with a key must load");
+}
+
+// =========================================================================
+// Empty SELFWARE_API_KEY (P2): an empty/whitespace value must not count as
+// "set" and suppress the keyring / OPENROUTER_API_KEY fallbacks.
+// =========================================================================
+
+#[test]
+fn test_empty_selfware_api_key_does_not_suppress_openrouter_fallback() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "https://openrouter.ai/api/v1"
+        model = "z-ai/glm-5.2"
+        "#,
+        "empty_selfware_key.toml",
+    );
+    std::env::set_var("SELFWARE_API_KEY", "   ");
+    std::env::set_var("OPENROUTER_API_KEY", "sk-or-test-key");
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(
+        config.api_key.as_ref().map(|k| k.expose()),
+        Some("sk-or-test-key"),
+        "an empty SELFWARE_API_KEY must not suppress the OPENROUTER_API_KEY fallback"
     );
 }

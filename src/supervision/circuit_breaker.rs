@@ -106,6 +106,24 @@ impl CircuitBreaker {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
     {
+        self.call_with_classifier(operation, |_| true).await
+    }
+
+    /// Execute operation with circuit breaker protection, counting a failure
+    /// toward opening the circuit only when `counts_toward_failure` returns
+    /// true for it. Permanent errors (e.g. 401 auth, context overflow) pass
+    /// through untouched so their remediation message is never masked by an
+    /// open circuit.
+    pub async fn call_with_classifier<F, Fut, T, E, P>(
+        &self,
+        operation: F,
+        counts_toward_failure: P,
+    ) -> Result<T, CircuitBreakerError<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        P: FnOnce(&E) -> bool,
+    {
         // Check current state
         match self.current_state() {
             CircuitState::Open => {
@@ -134,7 +152,9 @@ impl CircuitBreaker {
                 Ok(result)
             }
             Err(e) => {
-                self.on_failure().await;
+                if counts_toward_failure(&e) {
+                    self.on_failure().await;
+                }
                 Err(CircuitBreakerError::OperationFailed(e))
             }
         }

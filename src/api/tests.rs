@@ -1188,8 +1188,16 @@ fn test_parse_sse_event_json_without_choices() {
 #[test]
 fn test_parse_sse_event_usage_with_invalid_structure() {
     let mut acc = ToolCallAccumulator::new();
-    // Usage field is present but cannot deserialize to Usage struct
+    // Usage fields are serde(default) now: an object with only unknown fields
+    // deserializes to a zeroed Usage instead of being dropped.
     let event = r#"data: {"usage":{"invalid":"fields"}}"#;
+    let results = parse_sse_event(event, &mut acc);
+    assert_eq!(results.len(), 1);
+    assert!(matches!(&results[0], StreamChunk::Usage(u) if u.total_tokens == 0));
+
+    // A non-object usage still cannot deserialize and is dropped (with a
+    // warn! log so the undercounting is visible).
+    let event = r#"data: {"usage":"not-an-object"}"#;
     let results = parse_sse_event(event, &mut acc);
     assert!(results.is_empty());
 }
@@ -4071,6 +4079,7 @@ fn test_http_status_error_401_includes_remediation_hint() {
         "https://api.openai.com/v1",
         reqwest::StatusCode::UNAUTHORIZED,
         "No cookie auth credentials found".to_string(),
+        None,
     );
     let msg = format!("{}", err);
     assert!(msg.contains("401"), "status preserved: {}", msg);
@@ -4102,6 +4111,7 @@ fn test_http_status_error_401_names_openrouter_var_for_openrouter() {
         "https://openrouter.ai/api/v1",
         reqwest::StatusCode::UNAUTHORIZED,
         "unauthorized".to_string(),
+        None,
     );
     let msg = format!("{}", err);
     assert!(msg.contains("OPENROUTER_API_KEY"), "{}", msg);
@@ -4114,6 +4124,7 @@ fn test_http_status_error_non_401_has_no_hint() {
         "https://openrouter.ai/api/v1",
         reqwest::StatusCode::BAD_REQUEST,
         "bad request body".to_string(),
+        None,
     );
     let msg = format!("{}", err);
     assert!(msg.contains("bad request body"), "{}", msg);
@@ -4434,5 +4445,88 @@ async fn test_chat_no_reasoning_retry_when_user_pinned_effort() {
         ),
     }
     assert_eq!(bodies.lock().unwrap().len(), 1, "no retry when user pinned");
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_streaming_response_collect_missing_finish_reason_stays_none() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_http_request(&mut socket).await;
+        // Content but no finish_reason on any chunk: collect() must report
+        // None (callers map it to "unknown"), not a fabricated "stop".
+        let events = vec![
+            r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
+            "data: [DONE]",
+        ];
+
+        let mut full_body = String::new();
+        for event in &events {
+            full_body.push_str(event);
+            full_body.push_str("\n\n");
+        }
+
+        let chunk = format!("{:X}\r\n{}\r\n", full_body.len(), full_body);
+        let end_chunk = "0\r\n\r\n";
+        let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
+    let result = stream.collect().await;
+    assert!(result.is_ok());
+    let chat_resp = result.unwrap();
+    assert_eq!(chat_resp.choices[0].message.content, "Hello");
+    assert!(chat_resp.choices[0].finish_reason.is_none());
+
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_streaming_response_collect_zero_events_without_done_is_error() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_http_request(&mut socket).await;
+        // A proxy answering 200 with an HTML error page: zero parseable SSE
+        // events and no [DONE] marker must surface as a typed error, not an
+        // empty "successful" completion.
+        let body = "<html><body><h1>502 Bad Gateway</h1></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
+    let result = stream.collect().await;
+    let err = result.expect_err("zero-event stream without [DONE] must fail");
+    assert!(
+        err.chain().any(|c| matches!(
+            c.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::Parse(_))
+        )),
+        "expected ApiError::Parse, got: {:?}",
+        err
+    );
+
     let _ = server.await;
 }

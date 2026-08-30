@@ -929,7 +929,13 @@ pub async fn run() -> Result<()> {
         }
         if let Err(e) = &run_result {
             if !cli.quiet && !is_structured {
-                eprintln!("✗ Task failed: {}", e);
+                // Defense-in-depth: upstream error bodies can echo the API
+                // key (redacted at the source in http_status_error) — scrub
+                // again before printing.
+                eprintln!(
+                    "✗ Task failed: {}",
+                    crate::observability::telemetry::redact_secrets(&e.to_string())
+                );
             }
         }
         return run_result;
@@ -989,7 +995,10 @@ fn build_session_result(
             .last_run_failure_mode()
             .map(|fm| fm.kind.tag().to_string())
             .unwrap_or_else(|| "completed".to_string()),
-        Err(e) => format!("error: {}", e),
+        Err(e) => format!(
+            "error: {}",
+            crate::observability::telemetry::redact_secrets(&e.to_string())
+        ),
     };
     let num_turns = agent.current_iteration();
     // A capture failure must NOT masquerade as a clean empty patch (0 bytes),

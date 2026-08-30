@@ -230,3 +230,42 @@ fn test_circuit_breaker_error_display() {
         CircuitBreakerError::OperationFailed("db timeout".into());
     assert_eq!(format!("{}", op_err), "Operation failed: db timeout");
 }
+
+#[tokio::test]
+async fn test_classifier_permanent_failures_do_not_count() {
+    let cb = CircuitBreaker::new(fast_config());
+
+    // More failures than the threshold (3), but the classifier rejects them:
+    // the error must pass through and the breaker must stay closed.
+    for _ in 0..5 {
+        let result: Result<i32, CircuitBreakerError<String>> = cb
+            .call_with_classifier(
+                || async { Err::<i32, String>("permanent".into()) },
+                |_| false,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(CircuitBreakerError::OperationFailed(_))
+        ));
+    }
+
+    assert_eq!(cb.current_state(), CircuitState::Closed);
+    assert_eq!(cb.metrics().failure_count, 0);
+}
+
+#[tokio::test]
+async fn test_classifier_transient_failures_open_circuit() {
+    let cb = CircuitBreaker::new(fast_config());
+
+    for _ in 0..3 {
+        let _: Result<i32, _> = cb
+            .call_with_classifier(
+                || async { Err::<i32, String>("transient".into()) },
+                |_| true,
+            )
+            .await;
+    }
+
+    assert_eq!(cb.current_state(), CircuitState::Open);
+}

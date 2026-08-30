@@ -630,10 +630,13 @@ pub struct Choice {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     /// Number of tokens in the prompt (including system message and context).
+    #[serde(default)]
     pub prompt_tokens: usize,
     /// Number of tokens in the generated completion.
+    #[serde(default)]
     pub completion_tokens: usize,
     /// Total tokens used (prompt + completion).
+    #[serde(default)]
     pub total_tokens: usize,
     /// Provider-reported cost in USD for this call, when available (e.g.
     /// OpenRouter's `usage.cost`). `None` for providers that don't report it.
