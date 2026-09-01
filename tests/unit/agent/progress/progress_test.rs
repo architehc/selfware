@@ -157,3 +157,58 @@ fn simulated_loop_with_guard_fire() {
     assert!(tool_done_idx < guard_idx);
     assert!(guard_idx < step_done_idx);
 }
+
+#[test]
+fn dedupe_consecutive_suppresses_identical_lines_only() {
+    let mut last = None;
+    assert!(dedupe_consecutive(
+        &mut last,
+        "kind=guard_fired guard=x count=1"
+    ));
+    // Identical repeat: suppressed.
+    assert!(!dedupe_consecutive(
+        &mut last,
+        "kind=guard_fired guard=x count=1"
+    ));
+    // A count change is new information: printed.
+    assert!(dedupe_consecutive(
+        &mut last,
+        "kind=guard_fired guard=x count=2"
+    ));
+    // A different line resets the window: the earlier line may print again.
+    assert!(dedupe_consecutive(
+        &mut last,
+        "kind=turn_decision decision=input_census detail=\"applied\""
+    ));
+    assert!(dedupe_consecutive(
+        &mut last,
+        "kind=guard_fired guard=x count=2"
+    ));
+}
+
+#[test]
+fn render_event_kv_covers_run_state_decisions() {
+    // The A1 default-visible lines reuse the TurnDecision envelope — pin
+    // their rendered shape so headless text output stays parseable.
+    assert_eq!(
+        render_event_kv(&ProgressEvent::TurnDecision {
+            decision: "budget_extension".into(),
+            detail: "+15 iterations (new cap 45)".into(),
+        }),
+        "kind=turn_decision decision=budget_extension detail=\"+15 iterations (new cap 45)\""
+    );
+    assert_eq!(
+        render_event_kv(&ProgressEvent::TurnDecision {
+            decision: "context_trim".into(),
+            detail: "dropped 12 message(s), ~45000 tokens".into(),
+        }),
+        "kind=turn_decision decision=context_trim detail=\"dropped 12 message(s), ~45000 tokens\""
+    );
+    assert_eq!(
+        render_event_kv(&ProgressEvent::GuardFired {
+            kind: "budget_extension".into(),
+            count: 1,
+        }),
+        "kind=guard_fired guard=budget_extension count=1"
+    );
+}

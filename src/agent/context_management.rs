@@ -185,6 +185,25 @@ impl Agent {
 
         Self::enforce_tool_call_pair_invariants(&self.messages, &mut keep);
 
+        // Default-visible run event (A1): surface what the trim actually
+        // dropped — a headless run otherwise sheds context silently.
+        let dropped_messages = keep.iter().filter(|k| !**k).count();
+        let dropped_tokens: usize = token_counts
+            .iter()
+            .zip(keep.iter())
+            .filter(|(_, k)| !**k)
+            .map(|(t, _)| t)
+            .sum();
+        if dropped_messages > 0 {
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "context_trim".to_string(),
+                detail: format!(
+                    "dropped {} message(s), ~{} tokens",
+                    dropped_messages, dropped_tokens
+                ),
+            });
+        }
+
         // Retain only the messages we decided to keep (single O(N) pass).
         let mut idx = 0;
         self.messages.retain(|_| {

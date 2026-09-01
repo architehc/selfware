@@ -229,6 +229,11 @@ impl AgentLoop {
         self.max_iterations
     }
 
+    /// Whether the one-shot adaptive budget extension fired this task.
+    pub fn extension_was_used(&self) -> bool {
+        self.extension_used
+    }
+
     pub fn current_state_label(&self) -> &'static str {
         self.state.label()
     }

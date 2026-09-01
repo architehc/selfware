@@ -37,7 +37,50 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         || msg.contains("NONTERM_PROSE_NO_TOOL")
 }
 
+/// Human-facing end-of-run summary (headless text mode). Every field comes
+/// from tracked run state — no invented numbers (AGENTS.md rule 3): token
+/// and cost totals are the API-usage accumulators, files changed is the
+/// file tracker's written/edited set, verification is the gate's last
+/// report or an honest `None` ("not performed").
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    /// Iterations consumed (loop counter after the final turn).
+    pub iterations: usize,
+    /// The iteration cap, including any adaptive extension.
+    pub max_iterations: usize,
+    /// The one-shot adaptive budget extension fired this run.
+    pub budget_extended: bool,
+    /// Files written/edited by the agent this run, sorted.
+    pub files_changed: Vec<String>,
+    /// (overall passed, check count) from the verification gate's last
+    /// report; `None` when no verification ran.
+    pub verification: Option<(bool, usize)>,
+    /// Total API tokens consumed (input + output).
+    pub total_tokens: usize,
+    /// Total USD cost, `Some` only when the endpoint billed anything.
+    pub cost_usd: Option<f64>,
+}
+
 impl Agent {
+    /// Snapshot the run state for the end-of-run summary.
+    pub fn run_summary(&self) -> RunSummary {
+        let mut files_changed: Vec<String> =
+            self.file_tracker.stale_files.iter().cloned().collect();
+        files_changed.sort();
+        RunSummary {
+            iterations: self.loop_control.current_iteration(),
+            max_iterations: self.loop_control.max_iterations(),
+            budget_extended: self.loop_control.extension_was_used(),
+            files_changed,
+            verification: self
+                .verification_gate
+                .last_results()
+                .map(|report| (report.overall_passed, report.checks.len())),
+            total_tokens: self.cumulative_token_usage.total,
+            cost_usd: (self.cumulative_cost_usd > 0.0).then_some(self.cumulative_cost_usd),
+        }
+    }
+
     fn set_loop_state(&mut self, state: AgentState) -> Result<()> {
         self.loop_control.transition_to(state).map_err(Into::into)
     }
@@ -225,7 +268,7 @@ impl Agent {
         // so the model sees it BEFORE the tool list, not after.
         let task_type = crate::tools::task_focus::classify_task(&task_description);
         let preamble = task_type.preamble();
-        if !preamble.is_empty() && !self.messages.is_empty() && self.messages[0].role == "system" {
+        if !self.messages.is_empty() && self.messages[0].role == "system" {
             // Extract file paths mentioned in the task for explicit targeting.
             let mentioned_files: Vec<&str> = task_description
                 .split_whitespace()
@@ -269,15 +312,45 @@ impl Agent {
                 )
             };
 
-            let focus_block = format!(
-                "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
-                preamble,
-                file_hint,
-                explicit_tool_guidance,
-                task_type.primary_tools().join(", ")
-            );
-            let current = self.messages[0].content.to_string();
-            self.messages[0] = Message::system(format!("{}{}", focus_block, current));
+            // Modality gate (capstone: gemini/qwen got IMPLEMENT→VERIFY
+            // mandates on explicit read-only tasks — the same hijack class
+            // as the census, fixed the same way). Verified read-only tasks
+            // get NO mutation mandates: no MANDATORY WORKFLOW, no
+            // task-type preamble, no primary-tools steering — only the
+            // file hint and explicit tool requirements stay.
+            let focus_block = if self.current_task_is_read_only() {
+                if file_hint.is_empty() && explicit_tool_guidance.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n## TASK FOCUS\n{file_hint}{explicit_tool_guidance}")
+                }
+            } else {
+                // The MANDATORY WORKFLOW block moved here from the static
+                // system prompt so read-only tasks can be spared it (it is
+                // identical text for mutation tasks, now per-task).
+                let project_type = super::detect_project_type().await;
+                let (verify_step, test_step, _) = super::verification_instructions(project_type);
+                let workflow = format!(
+                    "## MANDATORY WORKFLOW\n\
+                     1. PLAN: Understand what needs to change — read relevant files first\n\
+                     2. IMPLEMENT: Make code changes using file_edit or file_write\n\
+                     {verify_step}\n\
+                     4. FIX: If verification fails, fix errors before proceeding\n\
+                     {test_step}\n"
+                );
+                format!(
+                    "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
+                    workflow,
+                    preamble,
+                    file_hint,
+                    explicit_tool_guidance,
+                    task_type.primary_tools().join(", ")
+                )
+            };
+            if !focus_block.is_empty() {
+                let current = self.messages[0].content.to_string();
+                self.messages[0] = Message::system(format!("{}{}", focus_block, current));
+            }
         }
 
         let msg = Message::user(task);
@@ -299,6 +372,15 @@ impl Agent {
                 ));
                 self.messages.push(note_msg);
             }
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "input_census".to_string(),
+                detail: "applied".to_string(),
+            });
+        } else {
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "input_census".to_string(),
+                detail: "skipped: self-contained document payload".to_string(),
+            });
         }
 
         // L0 graph orientation: the repo's architectural map, injected at
@@ -315,6 +397,17 @@ impl Agent {
             {
                 self.messages.push(Message::user(note));
             }
+        }
+
+        // Deferred-tool manifest (capstone: all three completers' #1 ask) —
+        // names + one-liners in the prompt kill the per-capability discovery
+        // tax. Measured budget; pinned critical like the L0 note (the
+        // selfware_context_note marker keeps it alive under trim).
+        const TOOL_MANIFEST_BUDGET_TOKENS: usize = 500;
+        if let Some(manifest) = self.tools.deferred_manifest(TOOL_MANIFEST_BUDGET_TOKENS) {
+            self.messages.push(Message::user(format!(
+                "<selfware_context_note kind=tool_manifest>\n{manifest}\n</selfware_context_note>"
+            )));
         }
 
         self.run_execution_loop(&task_description, LoopMode::NewTask)
@@ -713,8 +806,7 @@ impl Agent {
     /// the last turns each show real forward progress — a non-error tool
     /// result and no identical call repeated — grant ONE bounded extension
     /// (+50% of the original cap) and resume Executing. Returns the state to
-    /// continue with, or `None` to fail as before. Conservative by
-    /// construction: error-only streaks, repeated calls, and thin evidence
+    /// continue with, or `None` to fail as before. Conservative by/// construction: error-only streaks, repeated calls, and thin evidence
     /// all abort; the extension can fire at most once per task
     /// (`AgentLoop::extend_budget_once`).
     fn maybe_extend_iteration_budget(&mut self) -> Option<AgentState> {
@@ -731,6 +823,10 @@ impl Agent {
         self.emit_progress(super::progress::ProgressEvent::GuardFired {
             kind: "budget_extension".to_string(),
             count: 1,
+        });
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "budget_extension".to_string(),
+            detail: format!("+{} iterations (new cap {})", added, new_cap),
         });
         self.emit_event(AgentEvent::Status {
             message: format!(

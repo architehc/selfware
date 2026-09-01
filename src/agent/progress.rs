@@ -189,6 +189,9 @@ pub struct StderrProgressEmitter {
     use_system_clock: bool,
     /// Lock to keep multi-tool concurrent emissions atomic per line.
     lock: Mutex<()>,
+    /// Last printed line (sans timestamp) — identical consecutive lines are
+    /// suppressed so a repeating guard prints with its count, not N copies.
+    last_line: Mutex<Option<String>>,
 }
 
 impl Default for StderrProgressEmitter {
@@ -203,6 +206,7 @@ impl StderrProgressEmitter {
             start: Instant::now(),
             use_system_clock: true,
             lock: Mutex::new(()),
+            last_line: Mutex::new(None),
         }
     }
 
@@ -300,6 +304,18 @@ pub fn render_event_kv(event: &ProgressEvent) -> String {
     }
 }
 
+/// Consecutive-duplicate suppression for the stderr emitter: returns true
+/// when `line` should be printed (and records it as the new last line),
+/// false when it repeats the immediately previous one — a guard re-firing
+/// with no new information shows its count, not N identical lines.
+fn dedupe_consecutive(last: &mut Option<String>, line: &str) -> bool {
+    if last.as_deref() == Some(line) {
+        return false;
+    }
+    *last = Some(line.to_string());
+    true
+}
+
 impl ProgressEmitter for StderrProgressEmitter {
     fn emit(&self, event: ProgressEvent) {
         // Suppress when the TUI owns the terminal — the TUI consumes events
@@ -308,7 +324,14 @@ impl ProgressEmitter for StderrProgressEmitter {
         if crate::output::is_tui_active() {
             return;
         }
-        let line = format!("[{}] {}", self.timestamp(), render_event_kv(&event));
+        let body = render_event_kv(&event);
+        {
+            let mut last = self.last_line.lock().unwrap_or_else(|e| e.into_inner());
+            if !dedupe_consecutive(&mut last, &body) {
+                return;
+            }
+        }
+        let line = format!("[{}] {}", self.timestamp(), body);
         // Best-effort: hold the global output lock so we don't interleave
         // with `cli_println!` chrome on stderr/stdout, then write the line.
         let _global = crate::output::OUTPUT_LOCK
