@@ -577,6 +577,18 @@ pub async fn run() -> Result<()> {
         }
     }
 
+    // ── Global --model override (Claude Code / Codex / Gemini parity) ──
+    // Overrides the config `model` key for this session. Long-only on
+    // purpose: `-m` stays --mode for existing scripts.
+    if let Some(ref model) = cli.model {
+        let model = model.trim();
+        anyhow::ensure!(
+            !model.is_empty(),
+            "--model must not be empty — it overrides the `model` key in the configuration"
+        );
+        config.model = model.to_string();
+    }
+
     // Tell the tokenizer which model is configured so it can pick a matching
     // HF tokenizer. It must NOT reload the config itself: a mid-session
     // `Config::load(None)` ignores `-c` and prints a spurious
@@ -798,6 +810,30 @@ pub async fn run() -> Result<()> {
         );
     }
 
+    // --continue (claude -c parity, long-only so -c stays --config): resume
+    // the MOST RECENT journal entry via the exact `resume <task-id>` path.
+    if cli.continue_flag {
+        if cli.command.is_some() || cli.prompt.is_some() {
+            anyhow::bail!(
+                "--continue cannot be combined with a subcommand or -p (it resumes the latest session)"
+            );
+        }
+        let tasks = Agent::list_tasks()?;
+        let Some(latest) = tasks.first() else {
+            anyhow::bail!("--continue: no sessions to continue (journal is empty)");
+        };
+        if !cli.quiet {
+            println!(
+                "{} Resuming latest session: {}",
+                Glyphs::bookmark(),
+                journal_title(&latest.task_description, 60)
+            );
+        }
+        let mut agent = Agent::resume(config, &latest.task_id).await?;
+        agent.continue_execution().await?;
+        return Ok(());
+    }
+
     // Headless mode: run prompt directly and exit (like qwen -p)
     if let Some(prompt) = cli.prompt {
         use std::io::IsTerminal;
@@ -895,7 +931,7 @@ pub async fn run() -> Result<()> {
             Vec::new();
         if is_stream_json {
             emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
-        } else if !cli.quiet {
+        } else if !cli.quiet && !is_structured {
             emitters.push(std::sync::Arc::new(
                 crate::agent::progress::StderrProgressEmitter::new(),
             ));
@@ -920,6 +956,17 @@ pub async fn run() -> Result<()> {
         }
         let run_result = agent.run_task(&actual_prompt).await;
         let duration_ms = start.elapsed().as_millis() as u64;
+
+        if !cli.quiet && !is_structured {
+            let failure = run_result
+                .as_ref()
+                .err()
+                .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
+            println!(
+                "{}",
+                render_run_summary(&agent.run_summary(), failure.as_deref())
+            );
+        }
 
         if is_structured {
             let result = build_session_result(&agent, &run_result, duration_ms);
@@ -1099,12 +1146,39 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     // Process user inputs from TUI.
     // The recv() is blocking (std::sync::mpsc), so we use block_in_place
     // to let tokio move other tasks off this thread while we wait.
+    let skill_registry = crate::skills::SkillRegistry::discover();
+    let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::Log {
+        level: crate::ui::tui::LogLevel::Info,
+        message: "type /help for commands · !cmd to run a shell command · @path to attach a file"
+            .to_string(),
+    });
     loop {
         let input = tokio::task::block_in_place(|| user_input_rx.recv());
 
         match input {
-            Ok(ref input) if input == "exit" || input == "quit" => break,
+            Ok(ref input) if matches!(input.as_str(), "exit" | "quit" | "/exit" | "/quit") => break,
             Ok(input) => {
+                // Log helper for the slash handlers below (TUI log panel).
+                let log_line = |message: String| {
+                    let _ = bridge_event_tx.send(crate::ui::tui::TuiEvent::Log {
+                        level: crate::ui::tui::LogLevel::Info,
+                        message,
+                    });
+                };
+
+                // Shell passthrough (gemini/aider `!cmd`): run the command,
+                // show the output, and push it into the conversation as
+                // context so the next task sees it.
+                if let Some(cmd) = input.strip_prefix('!').map(str::trim) {
+                    if cmd.is_empty() {
+                        log_line("usage: !<command>".to_string());
+                        continue;
+                    }
+                    let rendered = agent.shell_passthrough(cmd).await;
+                    log_line(rendered);
+                    continue;
+                }
+
                 // /clear resets the model conversation so the next task starts
                 // fresh (the TUI already cleared the display).
                 if input == "/clear" {
@@ -1129,6 +1203,197 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                     agent.set_plan_mode(false);
                     continue;
                 }
+                // Session slash commands (harness-alignment round E). All of
+                // them answer in the TUI log panel; the same handlers serve
+                // the palette (its commands route through this loop).
+                if input == "/help" {
+                    for line in slash_help_text().lines() {
+                        log_line(line.to_string());
+                    }
+                    continue;
+                }
+                if input == "/status" {
+                    log_line(session_status_text(&agent));
+                    continue;
+                }
+                if input == "/compact" {
+                    let before = agent.message_count();
+                    let target = agent.max_context_tokens() * 3 / 4;
+                    agent.compress_to_structured_summary(target);
+                    log_line(format!(
+                        "/compact: context compression pass complete — {} → {} messages (target ~{} tokens)",
+                        before,
+                        agent.message_count(),
+                        target
+                    ));
+                    continue;
+                }
+                if input == "/cost" {
+                    log_line(render_cost_line(&agent.run_summary()));
+                    continue;
+                }
+                if input == "/model" {
+                    log_line(model_status_text(&agent));
+                    continue;
+                }
+                if let Some(name) = input.strip_prefix("/model ") {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        log_line(model_status_text(&agent));
+                    } else {
+                        match agent.switch_model(name) {
+                            Ok(previous) => log_line(format!(
+                                "/model: session model switched {previous} → {name} (config file unchanged)"
+                            )),
+                            Err(e) => log_line(format!("/model failed: {e}")),
+                        }
+                    }
+                    continue;
+                }
+                if input == "/doctor" {
+                    let report = crate::doctor::run_doctor(None).await;
+                    let issues: Vec<&str> = report
+                        .checks
+                        .iter()
+                        .filter(|check| !matches!(check.status, crate::doctor::CheckStatus::Ok))
+                        .map(|check| check.name.as_str())
+                        .collect();
+                    if issues.is_empty() {
+                        log_line(format!(
+                            "/doctor: all {} checks passed",
+                            report.checks.len()
+                        ));
+                    } else {
+                        log_line(format!(
+                            "/doctor: {} issue(s) — {}",
+                            issues.len(),
+                            issues.join(", ")
+                        ));
+                    }
+                    continue;
+                }
+                if input == "/mcp" {
+                    log_line(mcp_servers_text(agent.config()));
+                    continue;
+                }
+                // ── Round E2 handlers (classic ↔ TUI parity + power features)
+                if input == "/undo" {
+                    log_line(agent.undo_last_edit().await);
+                    continue;
+                }
+                if input == "/redo" {
+                    log_line(agent.redo_last_edit().await);
+                    continue;
+                }
+                if input == "/agents" {
+                    log_line(agents_status_text());
+                    continue;
+                }
+                if input == "/permissions" {
+                    log_line(permissions_text(&agent));
+                    continue;
+                }
+                if input == "/bug" {
+                    log_line(bug_report_text(&agent));
+                    continue;
+                }
+                if input == "/journal" {
+                    log_line(journal_entries_text(10));
+                    continue;
+                }
+                if input == "/memory" {
+                    log_line(agent.memory_status_text());
+                    continue;
+                }
+                if input == "/tools" {
+                    log_line(tools_text(&agent));
+                    continue;
+                }
+                if input == "/garden" {
+                    match crate::ui::garden::build_garden_from_path(".") {
+                        Ok(garden) => {
+                            let rendered = garden.render();
+                            for line in rendered.lines().take(24) {
+                                log_line(line.to_string());
+                            }
+                        }
+                        Err(e) => log_line(format!("/garden failed: {e}")),
+                    }
+                    continue;
+                }
+                if let Some(path) = input.strip_prefix("/analyze ").map(str::trim) {
+                    if let Err(e) = agent.analyze(path).await {
+                        log_line(format!("/analyze failed: {e}"));
+                    }
+                    continue;
+                }
+                if let Some(path) = input.strip_prefix("/review ").map(str::trim) {
+                    if let Err(e) = agent.review(path).await {
+                        log_line(format!("/review failed: {e}"));
+                    }
+                    continue;
+                }
+                if input == "/resume" {
+                    log_line(journal_entries_text(10));
+                    log_line("resume one with: /resume <task-id-prefix>".to_string());
+                    continue;
+                }
+                if let Some(prefix) = input.strip_prefix("/resume ").map(str::trim) {
+                    let tasks = crate::agent::Agent::list_tasks().unwrap_or_default();
+                    let entry = tasks.iter().find(|t| t.task_id.starts_with(prefix));
+                    match entry {
+                        Some(entry) => {
+                            let task_id = entry.task_id.clone();
+                            let title = journal_title(&entry.task_description, 48);
+                            match Agent::resume(agent.config().clone(), &task_id).await {
+                                Ok(resumed) => {
+                                    let count = resumed.message_count();
+                                    agent = resumed;
+                                    log_line(format!(
+                                        "resumed '{title}' ({count} messages) — continue chatting"
+                                    ));
+                                }
+                                Err(e) => log_line(format!("/resume failed: {e}")),
+                            }
+                        }
+                        None => log_line(format!("no journal entry matching '{prefix}'")),
+                    }
+                    continue;
+                }
+                if input == "/skills" {
+                    if skill_registry.is_empty() {
+                        log_line(
+                            "no skills found in ~/.selfware/skills, ./.selfware/skills, or ./.selfware/commands"
+                                .to_string(),
+                        );
+                    } else {
+                        let mut out = format!("{} skill(s) available:", skill_registry.len());
+                        for skill in skill_registry.list() {
+                            out.push_str(&format!("\n  /{} — {}", skill.name, skill.description));
+                        }
+                        log_line(out);
+                    }
+                    continue;
+                }
+                // /<skill-name> [args] — inject a discovered user skill
+                // (markdown + YAML frontmatter; $ARGUMENTS substituted).
+                if let Some(invocation) = input.strip_prefix('/') {
+                    let mut parts = invocation.splitn(2, char::is_whitespace);
+                    let name = parts.next().unwrap_or("");
+                    let arguments = parts.next().unwrap_or("").trim();
+                    if let Some(skill) = skill_registry.get(name) {
+                        let task = format!(
+                            "[Skill: {}]\n{}",
+                            skill.name,
+                            skill.render_content(arguments)
+                        );
+                        agent.reset_cancellation();
+                        if let Err(e) = agent.run_task(&task).await {
+                            warn!("Agent failed to run skill task: {}", e);
+                        }
+                        continue;
+                    }
+                }
                 // Other slash commands must NOT be sent to the LLM as prompts.
                 // In TUI dashboard mode the full interactive command
                 // dispatcher is not available, so skip LLM routing and say so
@@ -1147,8 +1412,25 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
                 // A stale latched cancel token (e.g. Esc pressed just as the
                 // previous run finished) must not abort the new task.
                 agent.reset_cancellation();
+                // @path attachments (claude/gemini parity): resolve `@file`
+                // tokens into context blocks appended to the task.
+                let attachments = expand_attachments(&input);
+                let task = if attachments.is_empty() {
+                    input
+                } else {
+                    log_line(format!(
+                        "attached {} file(s): {}",
+                        attachments.len(),
+                        attachments
+                            .iter()
+                            .map(|a| a.path.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    format!("{}{}", input, render_attachments(&attachments))
+                };
                 // Run the task — this will emit events to the TUI through event_tx
-                if let Err(e) = agent.run_task(&input).await {
+                if let Err(e) = agent.run_task(&task).await {
                     warn!("Agent failed to run task: {}", e);
                 }
             }
@@ -1157,6 +1439,10 @@ async fn run_live_agent_tui(config: Config) -> Result<()> {
     }
 
     crate::output::set_tui_active(false);
+
+    // Session-exit summary (claude prints usage on quit): the Round A run
+    // summary — outcome, iterations, files changed, verification, tokens.
+    println!("{}", render_run_summary(&agent.run_summary(), None));
 
     // Auto-save conversation/session on exit so history isn't lost.
     if let Err(e) = agent.save_checkpoint("TUI session exit") {
@@ -1591,6 +1877,13 @@ async fn handle_command(
                 Vec::new();
             if is_stream_json {
                 emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+            } else if !quiet && !is_structured {
+                // Default-visible run events in headless text mode (same
+                // attachment the `-p` path already had) — a `run` dying at
+                // MAX_ITERATIONS previously explained nothing.
+                emitters.push(std::sync::Arc::new(
+                    crate::agent::progress::StderrProgressEmitter::new(),
+                ));
             }
             #[cfg(feature = "bench-harness")]
             {
@@ -1612,6 +1905,17 @@ async fn handle_command(
             }
             let run_result = agent.run_task(&task).await;
             let duration_ms = start.elapsed().as_millis() as u64;
+
+            if !quiet && !is_structured {
+                let failure = run_result
+                    .as_ref()
+                    .err()
+                    .map(|e| crate::observability::telemetry::redact_secrets(&e.to_string()));
+                println!(
+                    "{}",
+                    render_run_summary(&agent.run_summary(), failure.as_deref())
+                );
+            }
 
             if is_structured {
                 let result = build_session_result(&agent, &run_result, duration_ms);
@@ -1766,8 +2070,7 @@ async fn handle_command(
                         checkpoint::TaskStatus::Paused => Glyphs::bookmark(),
                     };
 
-                    let desc =
-                        truncate_with_ellipsis(&task.task_description, JOURNAL_DESC_MAX_CHARS);
+                    let desc = journal_title(&task.task_description, JOURNAL_DESC_MAX_CHARS);
 
                     println!(
                         "   {} {} {}",
@@ -2317,7 +2620,7 @@ async fn handle_command(
                 };
 
                 if !quiet {
-                    let snippet = truncate_with_ellipsis(task, 60);
+                    let snippet = journal_title(task, 60);
                     let status = if ok { "PASS" } else { "FAIL" };
                     if ok {
                         println!("  ✓ {} · {} ({}s)", status, snippet, duration.as_secs());
@@ -2351,7 +2654,7 @@ async fn handle_command(
                 total, passed, failed
             );
             for r in &results {
-                let snippet = truncate_with_ellipsis(&r.task, 50);
+                let snippet = journal_title(&r.task, 50);
                 let status = if r.ok { "PASS" } else { "FAIL" };
                 if r.ok {
                     println!("  {} · {} · {}", r.index + 1, status, snippet);
@@ -3004,6 +3307,80 @@ async fn handle_command(
                 };
                 let endpoint = crate::config::set_api_key_for_endpoint(&config, &key)?;
                 println!("API key stored in the OS keyring for {}", endpoint);
+            }
+        },
+
+        Commands::Mcp { command } => match command {
+            args::McpCommands::List => {
+                if !quiet {
+                    println!("{}", render_header(ctx));
+                }
+                if config.mcp.servers.is_empty() {
+                    println!(
+                        "No MCP servers configured (add [[mcp.servers]] to your config file, or use `selfware mcp add`)."
+                    );
+                } else {
+                    println!("Configured MCP servers (from config, not live connectivity):");
+                    for server in &config.mcp.servers {
+                        let args = if server.args.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", server.args.join(" "))
+                        };
+                        println!(
+                            "  {} — {}{} (init timeout {}s)",
+                            server.name, server.command, args, server.init_timeout_secs
+                        );
+                    }
+                }
+            }
+            args::McpCommands::Add {
+                name,
+                command,
+                args,
+            } => {
+                let path = mcp_target_config_path(&config);
+                let message = edit_mcp_servers(&path, |servers| {
+                    if servers
+                        .iter()
+                        .any(|s| s.get("name").and_then(|n| n.as_str()) == Some(name.as_str()))
+                    {
+                        anyhow::bail!("MCP server '{name}' already exists in {}", path.display());
+                    }
+                    let mut entry = toml::value::Table::new();
+                    entry.insert("name".to_string(), toml::Value::String(name.clone()));
+                    entry.insert("command".to_string(), toml::Value::String(command.clone()));
+                    if !args.is_empty() {
+                        entry.insert(
+                            "args".to_string(),
+                            toml::Value::Array(
+                                args.iter()
+                                    .map(|a| toml::Value::String(a.clone()))
+                                    .collect(),
+                            ),
+                        );
+                    }
+                    servers.push(toml::Value::Table(entry));
+                    Ok(format!("added MCP server '{name}' to {}", path.display()))
+                })?;
+                println!("{message}");
+                println!("  takes effect on the next `selfware` start.");
+            }
+            args::McpCommands::Remove { name } => {
+                let path = mcp_target_config_path(&config);
+                let message = edit_mcp_servers(&path, |servers| {
+                    let before = servers.len();
+                    servers
+                        .retain(|s| s.get("name").and_then(|n| n.as_str()) != Some(name.as_str()));
+                    if servers.len() == before {
+                        anyhow::bail!("no MCP server named '{name}' in {}", path.display());
+                    }
+                    Ok(format!(
+                        "removed MCP server '{name}' from {}",
+                        path.display()
+                    ))
+                })?;
+                println!("{message}");
             }
         },
 
@@ -3938,6 +4315,311 @@ fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Res
     Ok(())
 }
 
+/// Slash-command help for the chat surfaces (classic chat + TUI palette —
+/// both route through the same input loop, so this is the single list).
+pub(crate) fn slash_help_text() -> String {
+    [
+        "Available slash commands:",
+        "  /help            — this list",
+        "  /status          — session status (model, endpoint, messages, iterations)",
+        "  /compact         — compress context now (structured summary pass)",
+        "  /cost            — token totals and cost (when the endpoint bills)",
+        "  /model [name]    — show current model/endpoint; with a name, hot-switch the session model",
+        "  /doctor          — run environment diagnostics inline",
+        "  /mcp             — list configured MCP servers",
+        "  /clear           — reset the conversation",
+        "  /plan            — enter plan mode (propose without executing)",
+        "  /execute         — approve and run the current plan",
+        "  /modify          — discard the plan, back to normal mode",
+        "  /undo, /redo     — revert / reapply the last file edit (single-step, drift-guarded)",
+        "  /agents          — configured swarm roster (no live agents between runs)",
+        "  /resume [prefix] — list journal entries; with a task-id prefix, resume that session",
+        "  /permissions     — current approval mode and how to change it",
+        "  /journal         — recent journal entries",
+        "  /memory          — memory entries and token usage",
+        "  /tools           — registered tools (* = active)",
+        "  /garden          — codebase garden visualization",
+        "  /analyze <path>  — analyze a directory",
+        "  /review <file>   — review a file",
+        "  /bug             — copy-pasteable issue blurb (version, endpoint, model)",
+        "  /skills          — discovered user skills (also /<name> to invoke)",
+        "  /quit, /exit     — leave the session",
+        "Also: !cmd runs a shell command (output goes into context), @path attaches a file.",
+    ]
+    .join("\n")
+}
+
+/// One-line session status for /status (model, endpoint, conversation size,
+/// loop position) — the classic-chat form of the status panel.
+pub(crate) fn session_status_text(agent: &crate::agent::Agent) -> String {
+    format!(
+        "model: {} · endpoint: {} · messages: {} · iteration: {}/{}",
+        agent.model(),
+        agent.config().endpoint,
+        agent.message_count(),
+        agent.current_iteration(),
+        agent.run_summary().max_iterations,
+    )
+}
+
+/// /cost — token totals from the Round A counters; cost only when the
+/// endpoint actually billed (rule 3: no invented numbers).
+pub(crate) fn render_cost_line(summary: &crate::agent::RunSummary) -> String {
+    match summary.cost_usd {
+        Some(cost) => format!("tokens: {} total · cost ${:.4}", summary.total_tokens, cost),
+        None => format!(
+            "tokens: {} total · cost not tracked (endpoint reports no billing)",
+            summary.total_tokens
+        ),
+    }
+}
+
+/// /model without an argument — current model, endpoint, and how to change it.
+pub(crate) fn model_status_text(agent: &crate::agent::Agent) -> String {
+    format!(
+        "model: {} · endpoint: {} · session switch: `/model <name>` · persistent: config key `model`",
+        agent.model(),
+        agent.config().endpoint
+    )
+}
+
+/// /mcp — configured MCP servers from the resolved config (read-only;
+/// reports configuration, not live connectivity).
+pub(crate) fn mcp_servers_text(config: &crate::config::Config) -> String {
+    if config.mcp.servers.is_empty() {
+        return "no MCP servers configured (add [[mcp.servers]] to your config file)".to_string();
+    }
+    let mut out = format!("{} configured MCP server(s):", config.mcp.servers.len());
+    for server in &config.mcp.servers {
+        let args = if server.args.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", server.args.join(" "))
+        };
+        out.push_str(&format!(
+            "\n  {} — {}{} (init timeout {}s)",
+            server.name, server.command, args, server.init_timeout_secs
+        ));
+    }
+    out
+}
+
+/// @path file attachment (claude/gemini parity): whitespace tokens of the
+/// form `@some/file` that resolve to a readable file attach their content
+/// as context. Unresolvable `@` tokens pass through untouched — never
+/// pretend an attachment happened (rule 3).
+pub(crate) struct Attachment {
+    pub path: String,
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// Cap on one attached file's content (chars) before the truncation flag.
+const ATTACHMENT_MAX_CHARS: usize = 50_000;
+
+/// Extract `@path` attachments from chat input. Returns the input unchanged
+/// (the `@token` stays in the text) plus the resolved attachments.
+pub(crate) fn expand_attachments(input: &str) -> Vec<Attachment> {
+    let mut out = Vec::new();
+    for token in input.split_whitespace() {
+        let Some(raw) = token.strip_prefix('@') else {
+            continue;
+        };
+        let raw = raw.trim_matches(|c| matches!(c, '"' | '\'' | ',' | ';'));
+        if raw.is_empty() {
+            continue;
+        }
+        let path = std::path::Path::new(raw);
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let truncated = content.chars().count() > ATTACHMENT_MAX_CHARS;
+        let content: String = content.chars().take(ATTACHMENT_MAX_CHARS).collect();
+        out.push(Attachment {
+            path: raw.to_string(),
+            content,
+            truncated,
+        });
+    }
+    out
+}
+
+/// Render attachments as a context block appended to the task text.
+pub(crate) fn render_attachments(attachments: &[Attachment]) -> String {
+    let mut out = String::new();
+    for attachment in attachments {
+        out.push_str(&format!(
+            "\n\n<attached-file path=\"{}\"{}>\n{}\n</attached-file>",
+            attachment.path,
+            if attachment.truncated {
+                " truncated=\"true\""
+            } else {
+                ""
+            },
+            attachment.content
+        ));
+    }
+    out
+}
+
+/// /bug — a copy-pasteable issue blurb from tracked state only.
+pub(crate) fn bug_report_text(agent: &crate::agent::Agent) -> String {
+    let config = agent.config();
+    format!(
+        "selfware bug report\n\
+         - version: {}\n\
+         - endpoint: {}\n\
+         - model: {}\n\
+         - execution mode: {:?}\n\
+         - config: {}",
+        env!("CARGO_PKG_VERSION"),
+        config.endpoint,
+        config.model,
+        config.execution_mode,
+        config
+            .loaded_config_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(defaults / env)".to_string()),
+    )
+}
+
+/// /agents — the configured swarm roster with an honest liveness note
+/// (no agents are tracked between runs).
+pub(crate) fn agents_status_text() -> String {
+    let swarm = crate::orchestration::swarm::create_dev_swarm();
+    let mut agents: Vec<_> = swarm.list_agents();
+    agents.sort_by_key(|a| std::cmp::Reverse(a.role.priority()));
+    let mut out = format!(
+        "{} configured swarm agent(s) — roster only; no live agents are tracked between runs:",
+        agents.len()
+    );
+    for agent in agents {
+        out.push_str(&format!("\n  {} ({})", agent.name, agent.role.name()));
+    }
+    out
+}
+
+/// /permissions — current approval mode and how to change it.
+pub(crate) fn permissions_text(agent: &crate::agent::Agent) -> String {
+    let mode = agent.config().execution_mode;
+    let description = match mode {
+        crate::config::ExecutionMode::Normal => "normal — asks for confirmation on mutating tools",
+        crate::config::ExecutionMode::AutoEdit => "auto-edit — auto-approves file operations",
+        crate::config::ExecutionMode::Yolo => "yolo — executes all tools without confirmation",
+        crate::config::ExecutionMode::Daemon => "daemon — permanent yolo",
+    };
+    format!(
+        "approval mode: {description}\nchange with: `-m normal|auto-edit|yolo`, `--yolo`, or SELFWARE_MODE env var"
+    )
+}
+
+/// /journal + /resume listing — recent journal entries, titled.
+pub(crate) fn journal_entries_text(limit: usize) -> String {
+    match crate::agent::Agent::list_tasks() {
+        Ok(tasks) if tasks.is_empty() => {
+            "no journal entries yet — run a task to create one".to_string()
+        }
+        Ok(tasks) => {
+            let mut out = format!("journal entries ({} total, showing {limit}):", tasks.len());
+            for task in tasks.iter().take(limit) {
+                out.push_str(&format!(
+                    "\n  {} [{:?}] {}",
+                    task.task_id,
+                    task.status,
+                    journal_title(&task.task_description, 48)
+                ));
+            }
+            out
+        }
+        Err(e) => format!("journal unavailable: {e}"),
+    }
+}
+
+/// /tools — registered tools, compact (activated marked).
+pub(crate) fn tools_text(agent: &crate::agent::Agent) -> String {
+    let registry = agent.registry();
+    let mut names: Vec<(String, bool)> = registry
+        .list()
+        .iter()
+        .map(|t| (t.name().to_string(), registry.is_activated(t.name())))
+        .collect();
+    names.sort();
+    let mut out = format!("{} registered tools (* = active):", names.len());
+    for (name, active) in names {
+        out.push_str(&format!("\n  {}{}", name, if active { " *" } else { "" }));
+    }
+    out
+}
+
+/// Which config file `mcp add`/`mcp remove` should edit. The resolved loaded
+/// path wins when it's a user-level or TRUSTED repo config; an untrusted
+/// repo-local config gets its mcp.servers reset on load, so editing it is
+/// pointless — fall back to the user-level config with a note.
+fn mcp_target_config_path(config: &crate::config::Config) -> std::path::PathBuf {
+    if let Some(path) = config.loaded_config_path() {
+        let checkout_local = path.file_name() == Some(std::ffi::OsStr::new("selfware.toml"));
+        if !checkout_local || crate::config::trust::is_config_trusted(path) {
+            return path.to_path_buf();
+        }
+        eprintln!(
+            "note: '{}' is an untrusted repo config (its mcp.servers would be reset on load) — writing to the user config instead",
+            path.display()
+        );
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".config/selfware/config.toml")
+}
+
+/// Apply one edit to the config file's `mcp.servers` array and persist
+/// atomically (temp file + rename, like OntologyStore). The edit closure
+/// returns the user-facing result message.
+fn edit_mcp_servers(
+    path: &std::path::Path,
+    edit: impl FnOnce(&mut Vec<toml::Value>) -> Result<String>,
+) -> Result<String> {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    let mut doc: toml::Value = if content.trim().is_empty() {
+        toml::Value::Table(Default::default())
+    } else {
+        toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {}", path.display(), e))?
+    };
+    let root = doc
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} root is not a TOML table", path.display()))?;
+    let mcp = root
+        .entry("mcp".to_string())
+        .or_insert_with(|| toml::Value::Table(Default::default()));
+    let servers = mcp
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[mcp] in {} is not a table", path.display()))?
+        .entry("servers".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    let servers = servers
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("mcp.servers in {} is not an array", path.display()))?;
+    let message = edit(servers)?;
+
+    let rendered = toml::to_string_pretty(&doc)?;
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    use std::io::Write;
+    tmp.write_all(rendered.as_bytes())?;
+    tmp.flush()?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(path)
+        .map_err(|e| anyhow::anyhow!("failed to persist {}: {}", path.display(), e.error))?;
+    Ok(message)
+}
+
 fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         return input.to_string();
@@ -3947,6 +4629,77 @@ fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
     let mut out: String = input.chars().take(keep_chars).collect();
     out.push_str("...");
     out
+}
+
+/// Title for a task prompt in journal/task listings: the first NON-EMPTY
+/// trimmed line, ellipsized. A raw char-prefix of a multi-line prompt
+/// renders blank when the prompt starts with newlines or indentation —
+/// observed live: `-p` heredoc/stdin prompts produced empty journal titles.
+pub(crate) fn journal_title(input: &str, max_chars: usize) -> String {
+    let first_line = input
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first_line.is_empty() {
+        return "(untitled task)".to_string();
+    }
+    truncate_with_ellipsis(first_line, max_chars)
+}
+
+/// Render the end-of-run summary block (headless text mode): the handful of
+/// lines a user actually reads after a run — outcome, iterations, files
+/// changed, verification, tokens/cost. Printed for completed AND failed
+/// runs (a bare `✗ Task failed: MAX_ITERATIONS` explained nothing).
+fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>) -> String {
+    let mut lines = vec!["── Run summary ──".to_string()];
+    match failure {
+        Some(reason) => lines.push(format!("outcome: failed — {reason}")),
+        None => lines.push("outcome: completed".to_string()),
+    }
+    let extension_note = if summary.budget_extended {
+        " (budget extended)"
+    } else {
+        ""
+    };
+    lines.push(format!(
+        "iterations: {}/{}{}",
+        summary.iterations, summary.max_iterations, extension_note
+    ));
+    if summary.files_changed.is_empty() {
+        lines.push("files changed: none".to_string());
+    } else {
+        let preview: Vec<&str> = summary
+            .files_changed
+            .iter()
+            .take(3)
+            .map(String::as_str)
+            .collect();
+        let more = summary.files_changed.len().saturating_sub(preview.len());
+        let suffix = if more > 0 {
+            format!(", +{more} more")
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "files changed: {} ({}{})",
+            summary.files_changed.len(),
+            preview.join(", "),
+            suffix
+        ));
+    }
+    let verification = match summary.verification {
+        Some((true, checks)) => format!("passed ({checks} checks)"),
+        Some((false, checks)) => format!("failed ({checks} checks)"),
+        None => "not performed".to_string(),
+    };
+    lines.push(format!("verification: {verification}"));
+    let cost = summary
+        .cost_usd
+        .map(|c| format!(", cost ${c:.4}"))
+        .unwrap_or_default();
+    lines.push(format!("tokens: {} total{cost}", summary.total_tokens));
+    lines.join("\n")
 }
 
 fn take_prefix_chars(input: &str, max_chars: usize) -> String {

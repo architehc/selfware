@@ -44,6 +44,11 @@ pub(crate) struct Cli {
     #[arg(short = 'm', long, value_enum, global = true)]
     pub(crate) mode: Option<ExecutionMode>,
 
+    /// Model override for this session (overrides the config `model` key;
+    /// long-only on purpose — `-m` stays --mode for existing scripts)
+    #[arg(long, value_name = "MODEL", global = true)]
+    pub(crate) model: Option<String>,
+
     /// Shortcut for --mode=yolo
     #[arg(short = 'y', long, global = true)]
     pub(crate) yolo: bool,
@@ -92,6 +97,11 @@ pub(crate) struct Cli {
     /// Resume a named chat session (alias for `selfware chat --resume <name>`)
     #[arg(long, value_name = "NAME")]
     pub(crate) resume_session: Option<String>,
+
+    /// Resume the MOST RECENT journal entry and continue it (claude -c
+    /// parity; long-only so `-c` stays --config for existing scripts)
+    #[arg(long = "continue")]
+    pub(crate) continue_flag: bool,
 
     /// Multi-chat: assign each task to role-matched idle swarm agents by trust.
     ///
@@ -213,8 +223,8 @@ pub(crate) enum Commands {
     #[command(alias = "c", display_order = 2)]
     Chat,
 
-    /// Run a task headless and exit
-    #[command(alias = "r", display_order = 3)]
+    /// Run a task headless and exit (aliases: `r`, `exec`)
+    #[command(alias = "r", visible_alias = "exec", display_order = 3)]
     Run {
         /// The task to run (omit when --preset is given)
         #[arg(required_unless_present = "preset")]
@@ -495,6 +505,13 @@ pub(crate) enum Commands {
         workflow: String,
     },
 
+    /// Manage MCP servers (`mcp list` shows the configured ones)
+    #[command(display_order = 10)]
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
+    },
+
     /// Run as MCP server (stdio transport) so other AI tools can use Selfware's capabilities
     #[command(display_order = 10)]
     McpServer,
@@ -732,6 +749,31 @@ pub(crate) enum ConfigCommands {
     SetKey {
         /// The API key to store (kept out of files; omit to be prompted)
         key: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum McpCommands {
+    /// List MCP servers from the resolved configuration (read-only —
+    /// reports what is configured, not live connectivity)
+    List,
+
+    /// Add an MCP server to the config file
+    Add {
+        /// Server name (used as the tool prefix)
+        name: String,
+        /// Command that spawns the server
+        #[arg(long)]
+        command: String,
+        /// Arguments for the command (repeatable)
+        #[arg(long)]
+        args: Vec<String>,
+    },
+
+    /// Remove an MCP server from the config file
+    Remove {
+        /// Server name to remove
+        name: String,
     },
 }
 

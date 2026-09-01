@@ -213,6 +213,17 @@ impl Agent {
             let input = input.trim();
 
             if is_exit_command(input) {
+                // Session-exit cost summary (claude prints usage on quit) —
+                // same counters as /cost.
+                let (prompt, completion) = output::get_total_tokens();
+                if prompt + completion > 0 {
+                    println!(
+                        "session tokens: {} prompt + {} completion = {} total",
+                        prompt,
+                        completion,
+                        prompt + completion
+                    );
+                }
                 break;
             }
 
@@ -674,25 +685,43 @@ impl Agent {
             }
 
             if input == "/undo" {
-                if let Some(checkpoint) = self.edit_history.undo() {
-                    let restored = restore_checkpoint_guarded(&checkpoint.files).await;
-                    if restored == 0 {
-                        println!(
-                            "{} Undo: {} (no files to restore)",
-                            "↩".bright_yellow(),
-                            checkpoint.action.description()
-                        );
-                    } else {
-                        println!(
-                            "{} Undone: {} ({} file(s) restored)",
-                            "↩".bright_green(),
-                            checkpoint.action.description(),
-                            restored
-                        );
-                    }
-                } else {
-                    println!("{} Nothing to undo", "ℹ".bright_yellow());
-                }
+                println!("{} {}", "↩".bright_green(), self.undo_last_edit().await);
+                continue;
+            }
+
+            if input == "/redo" {
+                println!("{} {}", "↪".bright_green(), self.redo_last_edit().await);
+                continue;
+            }
+
+            if input == "/permissions" {
+                use crate::config::ExecutionMode;
+                let description = match self.config.execution_mode {
+                    ExecutionMode::Normal => "normal — asks for confirmation on mutating tools",
+                    ExecutionMode::AutoEdit => "auto-edit — auto-approves file operations",
+                    ExecutionMode::Yolo => "yolo — executes all tools without confirmation",
+                    ExecutionMode::Daemon => "daemon — permanent yolo",
+                };
+                println!("approval mode: {description}");
+                println!(
+                    "change with: /mode (cycle), `-m normal|auto-edit|yolo`, `--yolo`, or SELFWARE_MODE env var"
+                );
+                continue;
+            }
+
+            if input == "/bug" {
+                println!("selfware bug report");
+                println!("- version: {}", env!("CARGO_PKG_VERSION"));
+                println!("- endpoint: {}", self.config.endpoint);
+                println!("- model: {}", self.config.model);
+                println!("- execution mode: {:?}", self.config.execution_mode);
+                println!(
+                    "- config: {}",
+                    self.config
+                        .loaded_config_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(defaults / env)".to_string())
+                );
                 continue;
             }
 
@@ -1253,9 +1282,10 @@ impl Agent {
 
             // ── Guarded checkpoint restore (shared by /undo and /restore <n>) ──
 
-            /// Restore a checkpoint's files with integrity guards: drift detection
-            /// (skip files that changed since the checkpoint — undo must never clobber
-            /// newer work), corrupt-snapshot rejection, and atomic temp+rename writes.
+            /// Restore a checkpoint's files with an integrity guard: the
+            /// snapshot's recorded hash must match its own content before it
+            /// is written back (atomic temp+rename). Files already holding
+            /// the snapshot content count as restored without a rewrite.
             /// Returns the number of files actually restored.
             async fn restore_checkpoint_guarded(
                 files: &std::collections::HashMap<
@@ -1265,28 +1295,21 @@ impl Agent {
             ) -> usize {
                 let mut restored = 0;
                 for (path, snapshot) in files {
-                    let current_hash = match tokio::fs::read_to_string(path).await {
-                        Ok(content) => crate::session::edit_history::compute_hash(&content),
-                        Err(_) => snapshot.hash.clone(), // missing file is safe to restore
-                    };
-                    if current_hash != snapshot.hash {
-                        let snapshot_ok =
-                            crate::session::edit_history::compute_hash(&snapshot.content)
-                                == snapshot.hash;
-                        if !snapshot_ok {
-                            println!(
-                                "  {} Skipped {} (snapshot hash mismatch — corrupt checkpoint)",
-                                "✗".bright_red(),
-                                path.display().to_string().bright_white()
-                            );
+                    if crate::session::edit_history::compute_hash(&snapshot.content)
+                        != snapshot.hash
+                    {
+                        println!(
+                            "  {} Skipped {} (snapshot hash mismatch — corrupt checkpoint)",
+                            "✗".bright_red(),
+                            path.display().to_string().bright_white()
+                        );
+                        continue;
+                    }
+                    if let Ok(current) = tokio::fs::read_to_string(path).await {
+                        if current == snapshot.content {
+                            restored += 1;
                             continue;
                         }
-                        println!(
-                "  {} Skipped {} (file changed since checkpoint — restore would clobber newer edits)",
-                "⚠".bright_yellow(),
-                path.display().to_string().bright_white()
-            );
-                        continue;
                     }
                     // Atomic write: temp file + rename, never a torn write.
                     let tmp = path.with_extension(format!(
@@ -1740,11 +1763,15 @@ impl Agent {
             }
 
             // /<skill-name> - inject a discovered user skill as instructions
-            if let Some(name) = input.strip_prefix('/') {
+            if let Some(invocation) = input.strip_prefix('/') {
+                let mut parts = invocation.splitn(2, char::is_whitespace);
+                let name = parts.next().unwrap_or("");
+                let arguments = parts.next().unwrap_or("").trim();
                 if let Some(skill) = skill_registry.get(name) {
+                    let content = skill.render_content(arguments);
                     self.messages.push(Message::system(format!(
                         "The user invoked the /{} skill. Follow these instructions:\n\n{}",
-                        skill.name, skill.content
+                        skill.name, content
                     )));
                     println!(
                         "  Skill '{}' loaded — instructions added to context.",
@@ -2688,6 +2715,8 @@ impl Agent {
                 println!("  /queue clear    - Clear all queued messages");
                 println!("  /queue drop <n> - Remove message by index");
                 println!("  exit            - Exit interactive mode");
+                println!();
+                println!("{}", crate::cli::slash_help_text());
                 continue;
             }
 
@@ -2953,11 +2982,15 @@ impl Agent {
             }
 
             // /<skill-name> - inject a discovered user skill as instructions
-            if let Some(name) = input.strip_prefix('/') {
+            if let Some(invocation) = input.strip_prefix('/') {
+                let mut parts = invocation.splitn(2, char::is_whitespace);
+                let name = parts.next().unwrap_or("");
+                let arguments = parts.next().unwrap_or("").trim();
                 if let Some(skill) = skill_registry.get(name) {
+                    let content = skill.render_content(arguments);
                     self.messages.push(Message::system(format!(
                         "The user invoked the /{} skill. Follow these instructions:\n\n{}",
-                        skill.name, skill.content
+                        skill.name, content
                     )));
                     println!(
                         "  Skill '{}' loaded — instructions added to context.",
@@ -2965,6 +2998,138 @@ impl Agent {
                     );
                     continue;
                 }
+            }
+
+            // Shell passthrough (gemini/aider `!cmd`) — the smoke test that
+            // found this hole: a piped `!git log` became an agent task and
+            // burned turns. Same shared runner as the TUI/interactive paths.
+            if let Some(cmd) = input.strip_prefix('!').map(str::trim) {
+                if cmd.is_empty() {
+                    println!("{} Usage: !<command>", "ℹ".bright_yellow());
+                    continue;
+                }
+                let rendered = self.shell_passthrough(cmd).await;
+                println!("{rendered}");
+                continue;
+            }
+
+            // Session slash commands (harness-alignment rounds E/E2) — the
+            // basic loop shares the cli render helpers, one routing table.
+            if input == "/compact" {
+                let before = self.messages.len();
+                let target = self.max_context_tokens() * 3 / 4;
+                self.compress_to_structured_summary(target);
+                println!(
+                    "/compact: context compression pass complete — {} → {} messages (target ~{} tokens)",
+                    before,
+                    self.messages.len(),
+                    target
+                );
+                continue;
+            }
+            if input == "/cost" {
+                println!("{}", crate::cli::render_cost_line(&self.run_summary()));
+                continue;
+            }
+            if input == "/model" {
+                println!("{}", crate::cli::model_status_text(self));
+                continue;
+            }
+            if let Some(name) = input.strip_prefix("/model ") {
+                let name = name.trim();
+                if name.is_empty() {
+                    println!("{}", crate::cli::model_status_text(self));
+                } else {
+                    match self.switch_model(name) {
+                        Ok(previous) => println!(
+                            "/model: session model switched {previous} → {name} (config file unchanged)"
+                        ),
+                        Err(e) => println!("/model failed: {e}"),
+                    }
+                }
+                continue;
+            }
+            if input == "/doctor" {
+                let report = crate::doctor::run_doctor(None).await;
+                let issues: Vec<&str> = report
+                    .checks
+                    .iter()
+                    .filter(|check| !matches!(check.status, crate::doctor::CheckStatus::Ok))
+                    .map(|check| check.name.as_str())
+                    .collect();
+                if issues.is_empty() {
+                    println!("/doctor: all {} checks passed", report.checks.len());
+                } else {
+                    println!("/doctor: {} issue(s) — {}", issues.len(), issues.join(", "));
+                }
+                continue;
+            }
+            if input == "/mcp" {
+                println!("{}", crate::cli::mcp_servers_text(self.config()));
+                continue;
+            }
+            if input == "/permissions" {
+                println!("{}", crate::cli::permissions_text(self));
+                continue;
+            }
+            if input == "/bug" {
+                println!("{}", crate::cli::bug_report_text(self));
+                continue;
+            }
+            if input == "/agents" {
+                println!("{}", crate::cli::agents_status_text());
+                continue;
+            }
+            if input == "/undo" {
+                println!("{}", self.undo_last_edit().await);
+                continue;
+            }
+            if input == "/redo" {
+                println!("{}", self.redo_last_edit().await);
+                continue;
+            }
+            if input == "/resume" {
+                println!("{}", crate::cli::journal_entries_text(10));
+                println!("resume one with: /resume <task-id-prefix>");
+                continue;
+            }
+            if let Some(prefix) = input.strip_prefix("/resume ").map(str::trim) {
+                let tasks = crate::agent::Agent::list_tasks().unwrap_or_default();
+                let entry = tasks.iter().find(|t| t.task_id.starts_with(prefix));
+                match entry {
+                    Some(entry) => {
+                        let task_id = entry.task_id.clone();
+                        let title = crate::cli::journal_title(&entry.task_description, 48);
+                        match Agent::resume(self.config.clone(), &task_id).await {
+                            Ok(resumed) => {
+                                let count = resumed.message_count();
+                                *self = resumed;
+                                println!(
+                                    "resumed '{title}' ({count} messages) — continue chatting"
+                                );
+                            }
+                            Err(e) => println!("/resume failed: {e}"),
+                        }
+                    }
+                    None => println!("no journal entry matching '{prefix}'"),
+                }
+                continue;
+            }
+            if input == "/journal" {
+                println!("{}", crate::cli::journal_entries_text(10));
+                continue;
+            }
+            if input == "/garden" {
+                match crate::ui::garden::build_garden_from_path(".") {
+                    Ok(garden) => {
+                        let rendered = garden.render();
+                        for line in rendered.lines().take(24) {
+                            println!("{line}");
+                        }
+                    }
+                    Err(e) => println!("/garden failed: {e}"),
+                }
+                continue;
             }
 
             // Unknown slash command — reject with a pointer to the command
@@ -3021,7 +3186,27 @@ impl Agent {
                 }
             }
 
-            match self.run_task_with_queue(input).await {
+            // @path attachments (claude/gemini parity), same shared expander
+            // as the TUI loop.
+            let attachments = crate::cli::expand_attachments(input);
+            let task_owned;
+            let task = if attachments.is_empty() {
+                input
+            } else {
+                println!(
+                    "attached {} file(s): {}",
+                    attachments.len(),
+                    attachments
+                        .iter()
+                        .map(|a| a.path.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                task_owned = format!("{}{}", input, crate::cli::render_attachments(&attachments));
+                &task_owned
+            };
+
+            match self.run_task_with_queue(task).await {
                 Ok(_) => {}
                 Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }

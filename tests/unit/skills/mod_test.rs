@@ -93,3 +93,45 @@ fn test_registry_list_sorted() {
         .collect();
     assert_eq!(names, vec!["alpha", "beta"]);
 }
+
+#[test]
+fn render_content_substitutes_arguments_claude_style() {
+    let with_placeholder = Skill::from_markdown(
+        "---\nname: greet\ndescription: greet\n---\nSay hello to $ARGUMENTS loudly.",
+    )
+    .expect("skill");
+    assert_eq!(
+        with_placeholder.render_content("the team"),
+        "Say hello to the team loudly."
+    );
+
+    let without_placeholder =
+        Skill::from_markdown("---\nname: audit\ndescription: audit\n---\nAudit the module.")
+            .expect("skill");
+    assert_eq!(
+        without_placeholder.render_content("src/auth"),
+        "Audit the module.\n\nArguments: src/auth"
+    );
+    // No arguments: content passes through untouched.
+    assert_eq!(without_placeholder.render_content(""), "Audit the module.");
+}
+
+#[test]
+fn discover_dir_loads_commands_markdown_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let commands = temp.path().join("commands");
+    std::fs::create_dir_all(&commands).expect("mkdir");
+    std::fs::write(
+        commands.join("review.md"),
+        "---\nname: review\ndescription: Review code\n---\nReview $ARGUMENTS carefully.",
+    )
+    .expect("write");
+
+    let mut registry = SkillRegistry::new();
+    registry.discover_dir(&commands);
+    let skill = registry.get("review").expect("skill discovered");
+    assert_eq!(
+        skill.render_content("src/lib.rs"),
+        "Review src/lib.rs carefully."
+    );
+}

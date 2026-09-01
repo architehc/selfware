@@ -117,6 +117,34 @@ impl CommandPalette {
                 category: CommandCategory::Chat,
                 shortcut: None,
             },
+            PaletteCommand {
+                name: "Compact context".into(),
+                description: "Compress the conversation context now".into(),
+                command: "/compact".into(),
+                category: CommandCategory::Chat,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Show cost".into(),
+                description: "Token totals and cost (when the endpoint bills)".into(),
+                command: "/cost".into(),
+                category: CommandCategory::Chat,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Show or switch model".into(),
+                description: "Current model/endpoint; `/model <name>` hot-switches".into(),
+                command: "/model".into(),
+                category: CommandCategory::Chat,
+                shortcut: None,
+            },
+            PaletteCommand {
+                name: "Quit".into(),
+                description: "Leave the session".into(),
+                command: "/quit".into(),
+                category: CommandCategory::Chat,
+                shortcut: None,
+            },
             // File commands
             PaletteCommand {
                 name: "Analyze codebase".into(),

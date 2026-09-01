@@ -1802,9 +1802,9 @@ fn test_graph_summary_note_is_critical_context() {
     // it is the repo's map and the pointer to the graph tools, so losing it
     // mid-run strands the model without orientation.
     let note = Message::user(
-        "<selfware_context_note kind=graph_summary revision=0123456789ab built_at=2026-08-29>\n\
+        "<selfware_context_note kind=graph_summary content_revision=0123456789ab built_at=2026-08-29>\n\
          # Architectural taxonomy\n\
-         Query the full graph via tool_search: graph_summary, hotspots, context_pack, impact, neighbors, test_map.\n\
+         Call these graph tools directly by name (no tool_search needed): graph_summary, hotspots, context_pack, impact, neighbors, test_map.\n\
          </selfware_context_note>",
     );
     assert!(

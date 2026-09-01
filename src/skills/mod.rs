@@ -72,6 +72,20 @@ impl Skill {
         skill.source = Some(path.to_path_buf());
         Ok(skill)
     }
+
+    /// Render the skill body for an invocation: `$ARGUMENTS` substituted
+    /// when the template names it, otherwise arguments are appended (the
+    /// Claude Code commands convention).
+    pub fn render_content(&self, arguments: &str) -> String {
+        let arguments = arguments.trim();
+        if self.content.contains("$ARGUMENTS") {
+            self.content.replace("$ARGUMENTS", arguments)
+        } else if arguments.is_empty() {
+            self.content.clone()
+        } else {
+            format!("{}\n\nArguments: {arguments}", self.content)
+        }
+    }
 }
 
 /// Registry of discovered skills.
@@ -122,19 +136,24 @@ impl SkillRegistry {
     }
 
     /// Discover skills in the standard locations:
-    /// - `~/.selfware/skills/`
-    /// - `./.selfware/skills/`
+    /// - `~/.selfware/skills/` and `~/.selfware/commands/`
+    /// - `./.selfware/skills/` and `./.selfware/commands/`
+    ///
+    /// (`commands/` is the Claude-Code-parity alias — same markdown +
+    /// frontmatter format, not a second template system.)
     pub fn discover() -> Self {
         let mut registry = Self::new();
 
         // User-global skills
         if let Some(home) = dirs::home_dir() {
             registry.discover_dir(&home.join(".selfware").join("skills"));
+            registry.discover_dir(&home.join(".selfware").join("commands"));
         }
 
         // Project-local skills
         if let Ok(cwd) = std::env::current_dir() {
             registry.discover_dir(&cwd.join(".selfware").join("skills"));
+            registry.discover_dir(&cwd.join(".selfware").join("commands"));
         }
 
         registry

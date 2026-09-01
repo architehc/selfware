@@ -931,6 +931,7 @@ impl ApiClient {
 
         let url = format!("{}/chat/completions", endpoint);
         let mut last_error: Option<anyhow::Error> = None;
+        let mut saw_connect_error = false;
         let mut delay_ms = self.retry_config.initial_delay_ms;
         let mut honored_retry_after = false;
 
@@ -1173,6 +1174,7 @@ impl ApiClient {
                 }
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {
+                        saw_connect_error |= e.is_connect();
                         warn!("Network error (retrying): {}", e);
                         last_error = Some(ApiError::Network(e.to_string()).into());
                         continue;
@@ -1182,9 +1184,20 @@ impl ApiClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
+        // Endpoint-down must say how to fix it, not just "connection
+        // refused": the retry loop exhausted against an unreachable server.
+        let terminal = last_error.unwrap_or_else(|| {
             ApiError::Network("Request failed after all retries".to_string()).into()
-        }))
+        });
+        if saw_connect_error {
+            Err(terminal.context(format!(
+                "endpoint '{endpoint}' is unreachable — is the model server running? \
+                 Check the `endpoint` config key, start your local server, or run \
+                 `selfware llm-doctor` for diagnosis"
+            )))
+        } else {
+            Err(terminal)
+        }
     }
 
     /// Send a chat completion to an alternate model described by a `ModelProfile`.
