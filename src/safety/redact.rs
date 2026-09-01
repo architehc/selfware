@@ -88,11 +88,43 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
     })
 }
 
-/// Redact secrets from a string
-pub fn redact_secrets(input: &str) -> Cow<'_, str> {
+/// What kind of content is being redacted. First-party workspace Rust
+/// source gets the conservative carve-out (glm capstone: the generic
+/// keyword patterns mangle ordinary code — `let secret = compute()` — so
+/// the model reads redacted source and has to reconstruct it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionContext {
+    /// Unknown or mixed content — the full pattern set applies.
+    Generic,
+    /// First-party workspace Rust source (the trust gate's `rust_source`
+    /// classification, `tool_dispatch/trust_gate.rs:classification_for`).
+    /// Generic keyword patterns are OFF; high-signal key formats still
+    /// redact everywhere.
+    RustSource,
+}
+
+/// Pattern names exempted in [`RedactionContext::RustSource`] — the generic
+/// keyword patterns that fire on ordinary Rust (`api_key = some_fn()`,
+/// `let secret = compute()`, keyword-named consts). Everything else —
+/// PEM blocks, AWS/GitHub/GitLab/Google/Stripe/Slack/OpenAI key formats,
+/// sk-/key-/token- prefixes, JWTs, DB connection strings — still redacts
+/// everywhere, first-party source included.
+const RUST_SOURCE_EXEMPT: &[&str] = &[
+    "api_key",
+    "bearer_token",
+    "password",
+    "env_token",
+    "base64_secret",
+];
+
+/// Redact secrets from a string with a content-classification carve-out.
+pub fn redact_secrets_with_context(input: &str, context: RedactionContext) -> Cow<'_, str> {
     let mut result = Cow::Borrowed(input);
 
     for pattern in get_patterns() {
+        if context == RedactionContext::RustSource && RUST_SOURCE_EXEMPT.contains(&pattern.name) {
+            continue;
+        }
         if pattern.regex.is_match(&result) {
             let replacement = format!("{}={}", pattern.name, REDACTED);
             result = Cow::Owned(
@@ -105,6 +137,11 @@ pub fn redact_secrets(input: &str) -> Cow<'_, str> {
     }
 
     result
+}
+
+/// Redact secrets from a string
+pub fn redact_secrets(input: &str) -> Cow<'_, str> {
+    redact_secrets_with_context(input, RedactionContext::Generic)
 }
 
 /// Redact secrets from a JSON value (recursively)

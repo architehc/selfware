@@ -42,7 +42,7 @@ pub(crate) struct TrustGateOutcome {
 /// Rust is trusted, documentation markup is prose, everything else is data.
 /// Pathless outputs (shell_exec, web fetch, MCP) are data — they should
 /// never carry instructions.
-fn classification_for(args_str: &str) -> &'static str {
+pub(crate) fn classification_for(args_str: &str) -> &'static str {
     let path = serde_json::from_str::<serde_json::Value>(args_str)
         .ok()
         .and_then(|v| {

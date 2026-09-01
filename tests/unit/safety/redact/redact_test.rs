@@ -375,3 +375,59 @@ fn test_redact_openssh_private_key() {
         "fake key material must not survive redaction"
     );
 }
+
+// ── First-party rust_source carve-out (glm capstone: generic keyword
+// patterns mangle ordinary workspace code the model must read verbatim) ──
+
+#[test]
+fn rust_source_keeps_ordinary_code_verbatim() {
+    // The exact mangle shapes from the capstone: keyword-named bindings
+    // whose "value" is a function call or a benign const.
+    let source = concat!(
+        "let secret = compute_hash();\n",
+        "let api_key = fetch_remote_api_key();\n",
+        "const TIMEOUT_KEY: &str = \"timeout\";\n",
+        "const API_TOKEN: &str = \"abcdefghijklmnop\";\n",
+        "let auth_token = \"dGVzdCB0b2tlbiBmb3IgZXhhbXBsZSBwdXJwb3Nl\";\n",
+    );
+    let output = redact_secrets_with_context(source, RedactionContext::RustSource);
+    assert_eq!(output, source, "workspace Rust must survive verbatim");
+}
+
+#[test]
+fn generic_context_still_redacts_the_same_code() {
+    // Proof the carve-out is what saves the code: the full pattern set
+    // mangles these exact lines (the pre-fix behavior).
+    let source = "let secret = compute_hash();\nlet api_key = fetch_remote_api_key();\n";
+    let output = redact_secrets_with_context(source, RedactionContext::Generic);
+    assert!(output.contains("[REDACTED]"));
+    assert!(!output.contains("secret = compute_hash()"));
+}
+
+#[test]
+fn rust_source_still_redacts_high_signal_key_formats() {
+    // An actual sk- key in first-party source must redact — the carve-out
+    // only covers generic keyword patterns, never real key formats.
+    let source = "let key = \"sk-abcdefghijklmnopqrstuvwxyz123456\";\n";
+    let output = redact_secrets_with_context(source, RedactionContext::RustSource);
+    assert!(output.contains("[REDACTED]"), "got: {output}");
+    assert!(!output.contains("sk-abcdefghijklmnopqrstuvwxyz123456"));
+
+    // PEM blocks redact everywhere too.
+    let pem = "-----BEGIN PRIVATE KEY-----\nMIIBog==\n-----END PRIVATE KEY-----";
+    let output = redact_secrets_with_context(pem, RedactionContext::RustSource);
+    assert!(output.contains("[REDACTED]"));
+    assert!(!output.contains("MIIBog=="));
+
+    // AWS access key ids redact everywhere.
+    let output = redact_secrets_with_context("AKIAIOSFODNN7EXAMPLE", RedactionContext::RustSource);
+    assert!(output.contains("[REDACTED]"));
+}
+
+#[test]
+fn plain_redact_secrets_unchanged_for_non_rust_content() {
+    // Backward compatibility: the context-free entry point keeps the full
+    // pattern set for non-workspace / unknown content.
+    let output = redact_secrets("let secret = compute_hash();");
+    assert!(output.contains("[REDACTED]"));
+}
