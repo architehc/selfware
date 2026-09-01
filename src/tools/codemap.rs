@@ -1,7 +1,9 @@
 //! Code map tools for context-aware action planning.
 //!
 //! Provides three agent tools:
-//! - `CodeMapTool` — generates the code graph on-demand for a focused area
+//! - `CodeMapTool` — generates the code map for a focused area, backed by the
+//!   cached evolve graph (measured per-node tokens, real `DependsOn` edges)
+//!   with a live measured fallback for files the graph misses or predates
 //! - `ContextBudgetTool` — reports current context token budget usage
 //! - `ContextActionTool` — estimates token/time cost of an action before executing
 
@@ -180,12 +182,50 @@ pub struct ActionCostEstimate {
     pub recommended_depth: u8,
 }
 
-/// Estimate the token cost for a file, using ~4 chars per token heuristic.
-fn estimate_file_tokens(path: &Path) -> usize {
-    match std::fs::metadata(path) {
-        Ok(meta) => (meta.len() as usize) / 4,
-        Err(_) => 500, // fallback for non-existent / unreadable
+/// Stated fallback when a file cannot be read (nonexistent / unreadable) —
+/// an explicit constant, not a byte-fraction estimate.
+const UNREADABLE_FILE_FALLBACK_TOKENS: usize = 500;
+
+/// Measured token cost of a file's content (AGENTS.md rule 4: token
+/// accounting goes through `estimate_content_tokens`, never byte-fraction
+/// heuristics). Falls back to [`UNREADABLE_FILE_FALLBACK_TOKENS`] when the
+/// file cannot be read.
+fn measure_file_tokens(path: &Path) -> usize {
+    match std::fs::read_to_string(path) {
+        Ok(content) => crate::token_count::estimate_content_tokens(&content),
+        Err(_) => UNREADABLE_FILE_FALLBACK_TOKENS,
     }
+}
+
+/// Token base for a `context_action` estimate: the evolve graph's measured
+/// node tokens when the cached graph covers the file and is not older than
+/// it, else a live measured read. Returns (tokens, source) so the response
+/// can say which path served the number (AGENTS.md rule 3).
+fn file_token_base(root: &Path, target: &Path) -> (usize, &'static str) {
+    if let Ok(index) = crate::evolve::graph_cache::shared_graph_index(root) {
+        let graph_mtime = std::fs::metadata(crate::evolve::graph_cache::graph_path(root))
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let fresh = target
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime <= graph_mtime)
+            .unwrap_or(false);
+        if fresh {
+            if let Ok(rel) = target.strip_prefix(root) {
+                let rel = rel.to_string_lossy();
+                if let Some(node) = index
+                    .graph
+                    .nodes
+                    .iter()
+                    .find(|node| node.path.as_deref() == Some(rel.as_ref()))
+                {
+                    return (node.tokens, "graph");
+                }
+            }
+        }
+    }
+    (measure_file_tokens(target), "live")
 }
 
 /// Estimate the cost of an action on a target path.
@@ -194,7 +234,15 @@ pub fn estimate_action_cost(
     target: &Path,
     fusion: FusionLevel,
 ) -> ActionCostEstimate {
-    let base_tokens = estimate_file_tokens(target);
+    estimate_action_cost_with_base(action, fusion, measure_file_tokens(target))
+}
+
+/// Cost math shared by the live-measure path and the graph-backed path.
+fn estimate_action_cost_with_base(
+    action: ContextAction,
+    fusion: FusionLevel,
+    base_tokens: usize,
+) -> ActionCostEstimate {
     let token_cost =
         (base_tokens as f64 * action.cost_multiplier() * fusion.multiplier()).ceil() as usize;
 
@@ -239,6 +287,10 @@ pub fn estimate_action_cost(
 // Code graph node (lightweight)
 // ---------------------------------------------------------------------------
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// A node in the code map graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeMapNode {
@@ -247,9 +299,77 @@ pub struct CodeMapNode {
     pub token_estimate: usize,
     pub children: Vec<String>,
     pub dependencies: Vec<String>,
+    /// True when this file was served from a LIVE measured read (tokens and
+    /// deps from current disk content) because the evolve graph was missing
+    /// it or predates it — a stale graph number is never served as fresh
+    /// (AGENTS.md rule 3). Absent (false) when the graph served the node.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub live: bool,
+}
+
+/// The evolve-graph overlay for the map walk: measured per-node tokens and
+/// real `DependsOn` edges, looked up by repo-relative path. Built once per
+/// `build_code_map` call; `None` when no graph exists (every file then
+/// takes the live path).
+struct GraphOverlay<'g> {
+    index: &'g crate::evolve::GraphIndex,
+    graph_mtime: std::time::SystemTime,
+    by_path: HashMap<&'g str, &'g crate::evolve::Node>,
+}
+
+impl<'g> GraphOverlay<'g> {
+    fn load(index: &'g crate::evolve::GraphIndex, root: &Path) -> Self {
+        let graph_mtime = std::fs::metadata(crate::evolve::graph_cache::graph_path(root))
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let by_path = index
+            .graph
+            .nodes
+            .iter()
+            .filter_map(|node| node.path.as_deref().map(|path| (path, node)))
+            .collect();
+        Self {
+            index,
+            graph_mtime,
+            by_path,
+        }
+    }
+
+    /// Token cost + dependencies for one file: the graph's measured values
+    /// when the graph covers the file and is not older than it; otherwise a
+    /// live measured read whose held content also feeds the dependency scan
+    /// (the fallback is per-file — no full re-walk, no second cache).
+    fn tokens_and_deps(&self, path: &Path, rel: &str) -> (usize, Vec<String>, bool) {
+        let fresh = std::fs::metadata(path)
+            .and_then(|m| m.modified())
+            .map(|mtime| mtime <= self.graph_mtime)
+            .unwrap_or(false);
+        if fresh {
+            if let Some(node) = self.by_path.get(rel) {
+                let deps = self
+                    .index
+                    .dependencies(&node.id)
+                    .iter()
+                    .map(|target| target.strip_prefix("crate::").unwrap_or(target).to_string())
+                    .collect();
+                return (node.tokens, deps, false);
+            }
+        }
+        let content = std::fs::read_to_string(path).ok();
+        let tokens = content
+            .as_deref()
+            .map(crate::token_count::estimate_content_tokens)
+            .unwrap_or(UNREADABLE_FILE_FALLBACK_TOKENS);
+        let deps = content.as_deref().map(extract_use_deps).unwrap_or_default();
+        (tokens, deps, true)
+    }
 }
 
 /// Build a lightweight code map for a directory, optionally focused on a module path.
+///
+/// Directory structure comes from a listing-only walk (no file reads); token
+/// costs and dependency edges come from the cached evolve graph where it is
+/// fresh, with per-file live fallback otherwise.
 fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String, CodeMapNode> {
     let mut nodes: HashMap<String, CodeMapNode> = HashMap::new();
 
@@ -263,12 +383,27 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
             let rs_file = candidate.with_extension("rs");
             if rs_file.is_file() {
                 // Single file focus — add it and return
-                let tokens = estimate_file_tokens(&rs_file);
+                let index = crate::evolve::graph_cache::shared_graph_index(root).ok();
+                let overlay = index.as_ref().map(|index| GraphOverlay::load(index, root));
                 let rel = rs_file
                     .strip_prefix(root)
                     .unwrap_or(&rs_file)
                     .to_string_lossy()
                     .to_string();
+                let (tokens, dependencies, live) = match &overlay {
+                    Some(overlay) => overlay.tokens_and_deps(&rs_file, &rel),
+                    None => {
+                        let content = std::fs::read_to_string(&rs_file).ok();
+                        (
+                            content
+                                .as_deref()
+                                .map(crate::token_count::estimate_content_tokens)
+                                .unwrap_or(UNREADABLE_FILE_FALLBACK_TOKENS),
+                            content.as_deref().map(extract_use_deps).unwrap_or_default(),
+                            true,
+                        )
+                    }
+                };
                 nodes.insert(
                     rel.clone(),
                     CodeMapNode {
@@ -276,7 +411,8 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
                         kind: "file".to_string(),
                         token_estimate: tokens,
                         children: Vec::new(),
-                        dependencies: extract_use_deps(&rs_file),
+                        dependencies,
+                        live,
                     },
                 );
                 return nodes;
@@ -291,16 +427,21 @@ fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String
         return nodes;
     }
 
-    collect_rs_files(&scan_dir, root, depth, 0, &mut nodes);
+    let index = crate::evolve::graph_cache::shared_graph_index(root).ok();
+    let overlay = index.as_ref().map(|index| GraphOverlay::load(index, root));
+    let overlay = overlay.as_ref();
+    collect_rs_files(&scan_dir, root, depth, 0, overlay, &mut nodes);
     nodes
 }
 
-/// Recursively collect .rs files up to a given depth.
+/// Recursively collect .rs files up to a given depth (directory listing
+/// only — file contents are read solely by the per-file live fallback).
 fn collect_rs_files(
     dir: &Path,
     root: &Path,
     max_depth: u8,
     current_depth: u8,
+    overlay: Option<&GraphOverlay>,
     nodes: &mut HashMap<String, CodeMapNode>,
 ) {
     if current_depth > max_depth {
@@ -328,16 +469,30 @@ fn collect_rs_files(
                     token_estimate: 0,
                     children: Vec::new(),
                     dependencies: Vec::new(),
+                    live: false,
                 },
             );
-            collect_rs_files(&path, root, max_depth, current_depth + 1, nodes);
+            collect_rs_files(&path, root, max_depth, current_depth + 1, overlay, nodes);
         } else if path.extension().is_some_and(|e| e == "rs") {
-            let tokens = estimate_file_tokens(&path);
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .to_string();
+            let (tokens, dependencies, live) = match overlay {
+                Some(overlay) => overlay.tokens_and_deps(&path, &rel),
+                None => {
+                    let content = std::fs::read_to_string(&path).ok();
+                    (
+                        content
+                            .as_deref()
+                            .map(crate::token_count::estimate_content_tokens)
+                            .unwrap_or(UNREADABLE_FILE_FALLBACK_TOKENS),
+                        content.as_deref().map(extract_use_deps).unwrap_or_default(),
+                        true,
+                    )
+                }
+            };
 
             // Find parent module node and add this as a child
             if let Some(parent_rel) = path
@@ -358,20 +513,18 @@ fn collect_rs_files(
                     kind: "file".to_string(),
                     token_estimate: tokens,
                     children: Vec::new(),
-                    dependencies: extract_use_deps(&path),
+                    dependencies,
+                    live,
                 },
             );
         }
     }
 }
 
-/// Extract `use crate::...` dependency paths from a Rust file (quick scan, no full parse).
-fn extract_use_deps(path: &Path) -> Vec<String> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
+/// Extract `use crate::...` dependency paths from Rust source (quick scan,
+/// no full parse). Only used for files served by the live fallback — files
+/// the graph covers get real `DependsOn` edges instead.
+fn extract_use_deps(content: &str) -> Vec<String> {
     content
         .lines()
         .filter_map(|line| {
@@ -434,7 +587,7 @@ impl Tool for CodeMapTool {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        let focus = args.get("focus").and_then(|v| v.as_str());
+        let focus = args.get("focus").and_then(|v| v.as_str()).map(String::from);
         let depth = args
             .get("depth")
             .and_then(|v| v.as_u64())
@@ -443,10 +596,18 @@ impl Tool for CodeMapTool {
         let format = args
             .get("format")
             .and_then(|v| v.as_str())
-            .unwrap_or("summary");
+            .unwrap_or("summary")
+            .to_string();
 
+        // The first shared_graph_index call may parse the graph YAML — keep
+        // it off the async hot path (subsequent calls are stat-only).
         let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let nodes = build_code_map(&root, focus, depth);
+        let focus_for_closure = focus.clone();
+        let nodes = tokio::task::spawn_blocking(move || {
+            build_code_map(&root, focus_for_closure.as_deref(), depth)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("code_map task failed: {e}"))?;
 
         let total_tokens: usize = nodes
             .values()
@@ -491,9 +652,12 @@ impl Tool for CodeMapTool {
                 } else {
                     format!(" -> [{}]", node.dependencies.join(", "))
                 };
+                // Honesty marker: this node's numbers came from a live read
+                // because the graph was missing the file or predates it.
+                let live_marker = if node.live { " [live]" } else { "" };
                 lines.push(format!(
-                    "{}{} (~{} tok){}",
-                    prefix, node.path, node.token_estimate, deps
+                    "{}{} (~{} tok){}{}",
+                    prefix, node.path, node.token_estimate, deps, live_marker
                 ));
             }
 
@@ -648,7 +812,8 @@ impl Tool for ContextActionTool {
             }
         };
 
-        let estimate = estimate_action_cost(action, &target_path, fusion);
+        let (base_tokens, token_source) = file_token_base(&root, &target_path);
+        let estimate = estimate_action_cost_with_base(action, fusion, base_tokens);
 
         Ok(json!({
             "action": action_str,
@@ -660,6 +825,7 @@ impl Tool for ContextActionTool {
             "recommended_depth": estimate.recommended_depth,
             "cost_multiplier": action.cost_multiplier(),
             "fusion_multiplier": fusion.multiplier(),
+            "token_source": token_source,
         }))
     }
 }
