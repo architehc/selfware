@@ -1076,6 +1076,14 @@ impl Agent {
             "Suppressing repeated failed tool call for '{}' after prior {} failure",
             tool_name, failure.failure_kind
         );
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "retry_suppressed".to_string(),
+            detail: format!(
+                "`{}` — {}",
+                tool_name,
+                failure_category(failure.failure_kind)
+            ),
+        });
         cli_println!("{} {}", "✗".bright_red(), err);
         self.push_tool_result_message(use_native_fc, call_id, tool_name, args_str, false, &err)
             .await;
@@ -1405,7 +1413,7 @@ impl Agent {
             }
 
             if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                let error_msg = format!("Safety check failed: {}", e);
+                let error_msg = self.model_facing_safety_error(&e);
                 crate::output::safety_blocked(&error_msg);
                 if let Some(ref logger) = self.audit_logger {
                     logger.log_safety_block(&name, &error_msg);
@@ -1536,6 +1544,18 @@ impl Agent {
 
         // Execute all validated tools concurrently using the tool registry
         let mut results: Vec<(usize, (bool, String, String))> = Vec::with_capacity(validated.len());
+
+        // Implicit activation for deferred tools called by exact name
+        // (done before the concurrent block — activation mutates the
+        // registry, which the futures only borrow). Consumed when the
+        // model-facing results are pushed below.
+        let mut activations: std::collections::HashMap<usize, serde_json::Value> =
+            std::collections::HashMap::new();
+        for (idx, vt) in validated.iter().enumerate() {
+            if let Some(schema) = self.implicit_activation_schema(&vt.name) {
+                activations.insert(idx, schema);
+            }
+        }
 
         {
             use futures::stream::{FuturesUnordered, StreamExt};
@@ -1731,7 +1751,11 @@ impl Agent {
                 &vt.name,
                 &vt.args_str,
                 success,
-                &result_str,
+                &Self::activation_envelope(
+                    &vt.name,
+                    activations.get(&idx).cloned(),
+                    result_str.clone(),
+                ),
             )
             .await;
 
@@ -1854,7 +1878,7 @@ impl Agent {
         }
 
         if let Err(e) = self.safety.check_tool_call(&fake_call) {
-            let error_msg = format!("Safety check failed: {}", e);
+            let error_msg = self.model_facing_safety_error(&e);
             let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
             spinner.stop_error(&error_msg);
             crate::output::safety_blocked(&error_msg);
@@ -2305,10 +2329,22 @@ impl Agent {
             "newly_activated": activated,
             "total_tools_available": total_tools,
             "activated_tools_count": activated_tools,
-            "note": if activated.is_empty() {
-                "These tools are available for use in this session."
+            "note": if found_tools.is_empty() {
+                let suggestions = self.tools.search_suggestions(query, 5);
+                if suggestions.is_empty() {
+                    format!(
+                        "No tools matched '{query}'. Try different keywords, or proceed with the tools you already have — do NOT repeat the same tool_search."
+                    )
+                } else {
+                    format!(
+                        "No tools matched '{query}'. Did you mean: {}? Or try different keywords.",
+                        suggestions.join(", ")
+                    )
+                }
+            } else if activated.is_empty() {
+                "These tools are available for use in this session.".to_string()
             } else {
-                "These tools are now available for use in this session."
+                "These tools are now available for use in this session.".to_string()
             },
         })
     }
@@ -2741,6 +2777,10 @@ impl Agent {
             return Ok((true, result_str, summary));
         }
 
+        // Implicit activation (capstone): a deferred tool called by its
+        // exact registered name activates transparently; the schema rides
+        // the result envelope. Unknown names stay hard errors below.
+        let activation_schema = self.implicit_activation_schema(name);
         let Some(tool) = self.tools.get(name) else {
             let err = format!("Unknown tool: {}", name);
             self.log_tool_call(name, args_str, &err, false, start_time, false);
@@ -2786,6 +2826,14 @@ impl Agent {
         }
 
         // Snapshot file before edit/write for undo support + diff display.
+        // A NEW mutating edit supersedes the redo stack (standard undo-tree
+        // rule: redo only survives until the next change).
+        if matches!(
+            name,
+            "file_edit" | "file_write" | "file_delete" | "file_multi_edit" | "patch_apply"
+        ) {
+            self.redo_stack.clear();
+        }
         let pre_edit_content: Option<(String, String)> =
             if matches!(name, "file_edit" | "file_write" | "file_delete") {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
@@ -3023,6 +3071,7 @@ impl Agent {
                         ),
                     }.into());
                 }
+                let final_result = Self::activation_envelope(name, activation_schema, final_result);
                 Ok((tool_success, final_result, summary))
             }
             Ok(Err(e)) => {
@@ -3131,7 +3180,18 @@ impl Agent {
         // contain BEFORE it enters the model's conversation context — otherwise a
         // command that echoes a secret (or a mis-run `cat .env`) would leak
         // credentials into context and every downstream log/exfil path.
-        let result_to_store = crate::safety::redact::redact_secrets(&result_to_store).into_owned();
+        // Redact with the trust gate's content classification: first-party
+        // workspace Rust gets the conservative carve-out (generic keyword
+        // patterns off — they mangle ordinary code the model must read
+        // verbatim); key-format patterns still redact everywhere.
+        let redaction_context = if classification_for(args_str) == "rust_source" {
+            crate::safety::redact::RedactionContext::RustSource
+        } else {
+            crate::safety::redact::RedactionContext::Generic
+        };
+        let result_to_store =
+            crate::safety::redact::redact_secrets_with_context(&result_to_store, redaction_context)
+                .into_owned();
 
         // Trust gate: scan untrusted tool output for prompt-injection
         // patterns and neutralize high-severity findings in place (the loop
@@ -3191,6 +3251,76 @@ impl Agent {
             };
             self.messages.push(Message::user(formatted));
         }
+    }
+
+    /// Implicit activation (capstone convergence — all three completers
+    /// asked for this): a deferred tool called by its exact registered name
+    /// activates transparently instead of staying invisible behind
+    /// tool_search. Returns the tool's schema for the result envelope when
+    /// the call triggered an activation, `None` when the tool was already
+    /// active (or doesn't exist — that stays a hard error).
+    fn implicit_activation_schema(&mut self, name: &str) -> Option<serde_json::Value> {
+        if self.tools.is_activated(name) {
+            return None;
+        }
+        let schema = self.tools.get(name)?.schema();
+        self.tools.activate(name);
+        info!("deferred tool '{name}' implicitly activated on exact-name call");
+        Some(schema)
+    }
+
+    /// Wrap a tool result when its call implicitly activated a deferred tool:
+    /// the model sees the activation, the schema to call with next time, and
+    /// the original result — one message (glm's ask). Internal accounting
+    /// always sees the RAW result; only the model-facing message is wrapped.
+    fn activation_envelope(
+        name: &str,
+        schema: Option<serde_json::Value>,
+        result: String,
+    ) -> String {
+        let Some(schema) = schema else {
+            return result;
+        };
+        let result_value: serde_json::Value =
+            serde_json::from_str(&result).unwrap_or_else(|_| serde_json::json!(result));
+        serde_json::json!({
+        "auto_activated": name,
+        "note": "This deferred tool is now active for the rest of the session — future calls can use it directly, no tool_search needed.",
+        "schema": schema,
+        "result": result_value,
+    })
+    .to_string()
+    }
+
+    /// Render a safety-check failure for the model. An unregistered-tool    /// call gets an actionable rewrite (gemini capstone: "Register it in
+    /// checker.rs" is harness-developer language with no valid names
+    /// offered — the model retried identically into the suppression loop).
+    fn model_facing_safety_error(&self, error: &crate::errors::SelfwareError) -> String {
+        if let crate::errors::SelfwareError::Safety(
+            crate::errors::SafetyError::UnregisteredTool { tool },
+        ) = error
+        {
+            let mut names: Vec<&str> = self
+                .tools
+                .list_activated()
+                .iter()
+                .map(|tool| tool.name())
+                .collect();
+            names.sort_unstable();
+            let preview: Vec<&str> = names.iter().take(20).copied().collect();
+            let more = names.len().saturating_sub(preview.len());
+            let suffix = if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            };
+            return format!(
+                "Safety check failed: tool '{tool}' does not exist. Available tools: {}{suffix}. \
+                 Call one of those by exact name, or use tool_search with a keyword to discover more tools.",
+                preview.join(", ")
+            );
+        }
+        format!("Safety check failed: {error}")
     }
 
     /// The single error-feedback channel for a failed tool call: one

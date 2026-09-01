@@ -233,6 +233,13 @@ impl Agent {
     /// force-mutation recovery is pending, the guard is bypassed once and the
     /// pending flag is consumed.
     fn check_files_guard(&mut self, has_file_write_intent: bool) -> bool {
+        // Verified read-only task: no FILES: ceremony. The session intends
+        // zero edits — if the model edits anyway, the block+discard only
+        // burns turns re-issuing (qwen capstone: refused while complying on
+        // a read-only session, and the "edit not applied" misfire).
+        if self.current_task_is_read_only() {
+            return false;
+        }
         let blocked = has_file_write_intent
             && !self.has_written_any_file
             && !self.files_checklist_seen

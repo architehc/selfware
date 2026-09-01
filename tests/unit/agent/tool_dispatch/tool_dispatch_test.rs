@@ -3902,3 +3902,122 @@ async fn already_enveloped_policy_errors_are_not_double_wrapped() {
     );
     server.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// Implicit deferred-tool activation + model-actionable unregistered error
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn implicit_activation_activates_deferred_tool_by_exact_name() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // A tool the registry ships as deferred: not activated at session start.
+    assert!(agent.tools.get("container_list").is_some());
+    assert!(!agent.tools.is_activated("container_list"));
+
+    let schema = agent.implicit_activation_schema("container_list");
+    assert!(schema.is_some(), "deferred call must yield its schema");
+    assert!(
+        agent.tools.is_activated("container_list"),
+        "exact-name call activates the deferred tool"
+    );
+
+    // Already-active (critical) tools and unknown names do not activate.
+    assert!(agent.implicit_activation_schema("file_read").is_none());
+    assert!(agent.implicit_activation_schema("nope_tool").is_none());
+    server.stop().await;
+}
+
+#[test]
+fn activation_envelope_wraps_schema_and_result_once() {
+    // No activation: the result passes through untouched.
+    assert_eq!(
+        Agent::activation_envelope("x", None, "{\"ok\":true}".to_string()),
+        "{\"ok\":true}"
+    );
+
+    let wrapped = Agent::activation_envelope(
+        "container_list",
+        Some(serde_json::json!({"type": "object"})),
+        "{\"containers\":[]}".to_string(),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&wrapped).expect("envelope is JSON");
+    assert_eq!(parsed["auto_activated"], "container_list");
+    assert!(parsed["schema"]["type"] == "object");
+    assert_eq!(parsed["result"]["containers"], serde_json::json!([]));
+    assert!(
+        parsed["note"]
+            .as_str()
+            .unwrap()
+            .contains("no tool_search needed"),
+        "the note must tell the model what changed: {parsed}"
+    );
+
+    // Non-JSON results are preserved as a string, not mangled.
+    let wrapped = Agent::activation_envelope(
+        "container_list",
+        Some(serde_json::json!({})),
+        "plain text result".to_string(),
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&wrapped).expect("envelope is JSON");
+    assert_eq!(parsed["result"], "plain text result");
+}
+
+#[tokio::test]
+async fn unregistered_tool_error_is_model_actionable_not_developer_language() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let agent = Agent::new(config).await.unwrap();
+
+    let error = agent.model_facing_safety_error(&crate::errors::SelfwareError::Safety(
+        crate::errors::SafetyError::UnregisteredTool {
+            tool: "...".to_string(),
+        },
+    ));
+    assert!(
+        error.contains("tool '...' does not exist"),
+        "must name the missing tool: {error}"
+    );
+    assert!(
+        error.contains("Available tools:"),
+        "must offer valid names: {error}"
+    );
+    assert!(
+        error.contains("tool_search"),
+        "must point at discovery: {error}"
+    );
+    assert!(
+        !error.contains("checker.rs") && !error.contains("Register it"),
+        "no harness-developer language in model-facing text: {error}"
+    );
+
+    // Other safety errors keep the generic prefix (the FailureMode
+    // classifier matches on it).
+    let generic = agent.model_facing_safety_error(&crate::errors::SelfwareError::Safety(
+        crate::errors::SafetyError::BlockedPath {
+            path: "/etc/passwd".to_string(),
+        },
+    ));
+    assert!(generic.starts_with("Safety check failed:"), "{generic}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn tool_search_zero_match_offers_edit_distance_suggestions() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let out = agent
+        .execute_tool_search(&serde_json::json!({"query": "zzzqqqxyzzy"}))
+        .await;
+    let note = out["note"].as_str().unwrap_or_default();
+    assert_eq!(out["count"], 0, "gibberish must match nothing: {out}");
+    assert!(
+        note.contains("Did you mean:"),
+        "zero matches must suggest, not dead-end: {note}"
+    );
+    server.stop().await;
+}

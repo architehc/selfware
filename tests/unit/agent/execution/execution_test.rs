@@ -3621,3 +3621,19 @@ async fn scaffold_write_claims_success_only_after_batch_succeeds() {
 
     server.stop().await;
 }
+
+#[tokio::test]
+async fn files_checklist_guard_skips_verified_read_only_tasks() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(test_config(format!("{}/v1", server.url())))
+        .await
+        .unwrap();
+
+    // Mutation task: the guard still blocks a blind first edit.
+    assert!(agent.check_files_guard(true));
+
+    // Verified read-only task: no FILES: ceremony even with write intent.
+    agent.test_set_task_read_only(true);
+    assert!(!agent.check_files_guard(true));
+    server.stop().await;
+}

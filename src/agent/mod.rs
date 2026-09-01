@@ -122,6 +122,8 @@ mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
+
+pub use task_runner::RunSummary;
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
@@ -392,6 +394,53 @@ struct FileReadState {
     unchanged_read_count: u32,
 }
 
+/// Render the result of an undo/redo restore: restored count plus honest
+/// notes for files already current or skipped (corrupt snapshots), never
+/// claiming restores that the guards refused.
+fn render_restore_outcomes(
+    verb: &str,
+    description: &str,
+    outcomes: &[(
+        std::path::PathBuf,
+        crate::session::edit_history::RestoreOutcome,
+    )],
+) -> String {
+    use crate::session::edit_history::RestoreOutcome;
+    let restored = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::Restored)
+        .count();
+    let already_current = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::AlreadyCurrent)
+        .count();
+    let skipped: Vec<String> = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::SkippedCorrupt)
+        .map(|(p, _)| p.display().to_string())
+        .collect();
+    let write_failed = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::WriteFailed)
+        .count();
+    let mut line =
+        if restored == 0 && already_current == 0 && skipped.is_empty() && write_failed == 0 {
+            format!("{verb}: {description} (no files to restore)")
+        } else {
+            format!("{verb}: {description} ({restored} file(s) restored)")
+        };
+    if already_current > 0 {
+        line.push_str(&format!(" · {already_current} already current"));
+    }
+    if !skipped.is_empty() {
+        line.push_str(&format!(" · skipped (corrupt): {}", skipped.join(", ")));
+    }
+    if write_failed > 0 {
+        line.push_str(&format!(" · {write_failed} write(s) failed"));
+    }
+    line
+}
+
 /// Consolidated file-context tracking.
 ///
 /// Groups the three previously-scattered file tracking structures into one
@@ -523,6 +572,13 @@ pub struct Agent {
     /// Per-turn progress signals (outcome + call signatures) for the
     /// adaptive iteration-budget check — recorded per executed batch.
     recent_turn_progress: VecDeque<loop_control::TurnProgress>,
+    /// Redo stack for /undo-/redo: one entry per undo (edit description +
+    /// the file bytes as they were before that undo). New mutating edits
+    /// clear it (standard undo-tree semantics).
+    redo_stack: Vec<(
+        String,
+        std::collections::HashMap<std::path::PathBuf, crate::session::edit_history::FileSnapshot>,
+    )>,
     /// Failed tool attempts in the current recovery window.
     recent_failed_tool_attempts: VecDeque<FailedToolAttempt>,
     /// args-hashes of file_edit calls already escalated to file_write. Prevents
@@ -850,7 +906,7 @@ impl Agent {
 
         // Detect project type for verification instructions
         let project_type = detect_project_type().await;
-        let (verify_step, test_step, completion_rule) = verification_instructions(project_type);
+        let (_, _, completion_rule) = verification_instructions(project_type);
         info!("Detected project type: {:?}", project_type);
 
         // Build system prompt using Static/Dynamic boundary system
@@ -877,13 +933,6 @@ Additional tools can be discovered using tool_search.
 
 {}
 
-## MANDATORY WORKFLOW
-1. PLAN: Understand what needs to change — read relevant files first
-2. IMPLEMENT: Make code changes using file_edit or file_write
-{}
-4. FIX: If verification fails, fix errors before proceeding
-{}
-
 ## EFFICIENCY RULES
 - To read multiple files at once, use context_bulk_read with a glob pattern (e.g. "src/agent/*.rs")
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
@@ -898,7 +947,7 @@ Additional tools can be discovered using tool_search.
 - When editing files, include 3-5 lines of context for unique matches
 - You have a large budget. Do NOT rush. Be thorough and methodical.
 - When the task is complete, respond with a summary of what was done."#,
-                tool_discovery_note, verify_step, test_step, completion_rule
+                tool_discovery_note, completion_rule
             ));
             prompt_builder.add_static(ERROR_RECOVERY_INSTRUCTIONS.to_string());
         } else {
@@ -979,13 +1028,6 @@ To call a tool, use this EXACT XML structure:
 - <function>tool_name</function> — WRONG
 - Any format other than <tool><name>...</name><arguments>...</arguments></tool> — WRONG
 
-## MANDATORY WORKFLOW
-1. PLAN: Understand what needs to change — read relevant files first
-2. IMPLEMENT: Make code changes using file_edit or file_write
-{}
-4. FIX: If verification fails, fix errors before proceeding
-{}
-
 ## EFFICIENCY RULES
 - To read multiple files at once, use context_bulk_read with a glob pattern (e.g. "src/agent/*.rs")
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
@@ -1004,7 +1046,7 @@ To call a tool, use this EXACT XML structure:
 - You have a large budget. Do NOT rush. Be thorough and methodical.
 - When done, respond with plain text only (no tool tags)"#,
                 critical_tools.len(), deferred_count, tool_descriptions,
-                tool_discovery_note, verify_step, test_step, completion_rule
+                tool_discovery_note, completion_rule
             ));
             prompt_builder.add_static(ERROR_RECOVERY_INSTRUCTIONS.to_string());
         }
@@ -1275,6 +1317,7 @@ To call a tool, use this EXACT XML structure:
             recent_tool_calls: VecDeque::new(),
             recent_tool_batches: VecDeque::new(),
             recent_turn_progress: VecDeque::new(),
+            redo_stack: Vec::new(),
             recent_failed_tool_attempts: VecDeque::new(),
             escalated_edit_args_hashes: VecDeque::new(),
             hook_registry,
@@ -2256,6 +2299,149 @@ To call a tool, use this EXACT XML structure:
     /// The model name configured for this agent.
     pub fn model(&self) -> &str {
         &self.config.model
+    }
+
+    /// Read-only access to the resolved configuration.
+    pub fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
+
+    /// Number of messages currently in the conversation.
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// The context token budget the trim/compression machinery targets.
+    pub fn max_context_tokens(&self) -> usize {
+        self.max_context_tokens
+    }
+
+    /// Read-only access to the tool registry (for /tools-style listings).
+    pub fn registry(&self) -> &crate::tools::ToolRegistry {
+        &self.tools
+    }
+
+    /// Push a user-role message into the conversation (chat `!cmd` shell
+    /// passthrough output, operator notes) so the next turn sees it.
+    pub fn push_user_message(&mut self, content: String) {
+        self.messages
+            .push(crate::api::types::Message::user(content));
+    }
+
+    /// Run a chat `!cmd` shell passthrough (gemini/aider parity): execute
+    /// via the default shell, capture output (4K-char cap, honest
+    /// truncation flag), push it into the conversation as context, and
+    /// return the display text (`$ cmd (exit N)\n<output>`). Shared by the
+    /// TUI loop, the interactive REPL, and the basic-mode stdin loop — one
+    /// implementation, one format.
+    pub async fn shell_passthrough(&mut self, cmd: &str) -> String {
+        const MAX_SHELL_OUT_CHARS: usize = 4_000;
+        let (shell, flag) = crate::tools::shell_exec::default_shell();
+        let output = tokio::process::Command::new(shell)
+            .args([flag, cmd])
+            .output()
+            .await;
+        let out = match output {
+            Ok(out) => out,
+            Err(e) => return format!("$ {cmd} — failed to start: {e}"),
+        };
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if !stderr.trim().is_empty() {
+            text.push_str(&format!("\n[stderr]\n{stderr}"));
+        }
+        let truncated = text.chars().count() > MAX_SHELL_OUT_CHARS;
+        let mut text: String = text.chars().take(MAX_SHELL_OUT_CHARS).collect();
+        if truncated {
+            text.push_str("\n…[truncated]");
+        }
+        let status_note = if out.status.success() {
+            String::new()
+        } else {
+            format!(" (exit {})", out.status.code().unwrap_or(-1))
+        };
+        self.push_user_message(format!(
+            "<shell_command>{cmd}</shell_command>\n<output{truncated_attr}>{text}</output>",
+            truncated_attr = if truncated { " truncated=\"true\"" } else { "" },
+        ));
+        format!("$ {cmd}{status_note}\n{text}")
+    }
+
+    /// Memory/context status line for /memory-style commands (same data the
+    /// interactive dispatcher prints).
+    pub fn memory_status_text(&self) -> String {
+        let (entries, tokens, near_limit) = self.memory_stats();
+        let mut out = format!(
+            "memory entries: {} · estimated tokens: {} · context window: {} · near limit: {}",
+            entries,
+            tokens,
+            self.memory.context_window(),
+            near_limit
+        );
+        if !self.memory.is_empty() {
+            out.push_str(&format!("\nrecent:\n{}", self.memory.summary(3)));
+        }
+        out
+    }
+
+    /// Undo the most recent file edit (/undo): restore the pre-edit bytes
+    /// captured in the tip checkpoint. Before reverting, the current bytes
+    /// are pushed onto the redo stack so /redo can honestly reapply (one
+    /// stack entry per undo, most recent first). Single-step per call —
+    /// chained undos/redos walk the stack in order. Returns a
+    /// human-readable result line.
+    pub async fn undo_last_edit(&mut self) -> String {
+        use crate::session::edit_history::FileSnapshot;
+        if let Some(tip) = self.edit_history.current_checkpoint() {
+            if !tip.files.is_empty() {
+                let mut snapshots = std::collections::HashMap::new();
+                for path in tip.files.keys() {
+                    if let Ok(content) = tokio::fs::read_to_string(path).await {
+                        snapshots.insert(path.clone(), FileSnapshot::new(path.clone(), content));
+                    }
+                }
+                if !snapshots.is_empty() {
+                    self.redo_stack.push((tip.action.description(), snapshots));
+                }
+            }
+        }
+        let Some(checkpoint) = self.edit_history.undo() else {
+            return "Nothing to undo".to_string();
+        };
+        let outcomes =
+            crate::session::edit_history::restore_checkpoint_guarded(&checkpoint.files).await;
+        render_restore_outcomes("Undone", &checkpoint.action.description(), &outcomes)
+    }
+
+    /// Redo the last undone edit (/redo): pop the redo stack entry the
+    /// matching /undo pushed (the file bytes as they were BEFORE the undo —
+    /// i.e. the reapplied state). Never claims to reapply changes no
+    /// snapshot covers.
+    pub async fn redo_last_edit(&mut self) -> String {
+        let Some((description, snapshots)) = self.redo_stack.pop() else {
+            return "Nothing to redo".to_string();
+        };
+        let outcomes = crate::session::edit_history::restore_checkpoint_guarded(&snapshots).await;
+        render_restore_outcomes("Reapplied", &description, &outcomes)
+    }
+
+    /// Hot-switch the session model: update the config, rebuild the API
+    /// client against it (the same rebuild the recovery tree uses for
+    /// endpoint fallback, progress emitter re-attached), and re-key the
+    /// tokenizer. Session-only — the config file is not written. Returns
+    /// the previous model name.
+    pub fn switch_model(&mut self, model: &str) -> Result<String> {
+        let model = model.trim();
+        anyhow::ensure!(
+            !model.is_empty(),
+            "model name must not be empty (it overrides the `model` config key)"
+        );
+        let previous = std::mem::replace(&mut self.config.model, model.to_string());
+        self.client = crate::api::ApiClient::new(&self.config)?;
+        self.client
+            .with_progress_emitter(std::sync::Arc::clone(&self.progress_emitter));
+        crate::token_count::set_configured_model(&self.config.model);
+        Ok(previous)
     }
 
     /// Count of HTTP 400 "Assistant response prefill incompatible" responses.

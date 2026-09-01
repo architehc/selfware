@@ -765,22 +765,73 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Compact manifest of the deferred tools, for the system prompt: one
+    /// line per tool (name — first line of its description), measured to
+    /// `budget` tokens via `estimate_content_tokens` (AGENTS.md rule 4).
+    /// Degrades honestly: full one-liners first, names-only when those
+    /// don't fit, then a `+N more` tail. `None` when nothing is deferred.
+    pub fn deferred_manifest(&self, budget: usize) -> Option<String> {
+        let mut deferred: Vec<(&str, &str)> = self
+            .list_deferred()
+            .into_iter()
+            .map(|tool| (tool.name(), tool.description()))
+            .collect();
+        if deferred.is_empty() {
+            return None;
+        }
+        deferred.sort_by(|left, right| left.0.cmp(right.0));
+        let total = deferred.len();
+        let header = format!(
+            "## Deferred tools ({total}) — call any by exact name and it activates automatically (no tool_search needed)"
+        );
+        let one_liner = |description: &str| {
+            let first = description.lines().next().unwrap_or("").trim();
+            let mut line: String = first.chars().take(100).collect();
+            if first.chars().count() > 100 {
+                line.push('…');
+            }
+            line
+        };
+        let render = |names_only: bool, take: usize| {
+            let mut out = header.clone();
+            for (name, description) in deferred.iter().take(take) {
+                if names_only {
+                    out.push_str(&format!("\n- {name}"));
+                } else {
+                    out.push_str(&format!("\n- {name} — {}", one_liner(description)));
+                }
+            }
+            if take < total {
+                out.push_str(&format!("\n- … +{} more", total - take));
+            }
+            out
+        };
+        let full = render(false, total);
+        if crate::token_count::estimate_content_tokens(&full) <= budget {
+            return Some(full);
+        }
+        let names = render(true, total);
+        if crate::token_count::estimate_content_tokens(&names) <= budget {
+            return Some(names);
+        }
+        // Greedy names-only prefix that fits, with the remainder counted.
+        let mut take = total;
+        while take > 0 {
+            let candidate = render(true, take);
+            if crate::token_count::estimate_content_tokens(&candidate) <= budget {
+                return Some(candidate);
+            }
+            take -= 1;
+        }
+        Some(header)
+    }
+
     /// Search for tools by name or description.
     /// Returns up to `limit` matching tools.
     pub fn search(&self, query: &str, limit: usize) -> Vec<tool_search::ToolSearchResult> {
-        let query_lower = query.to_lowercase();
-        self.all_tools
+        let all: Vec<tool_search::ToolSearchResult> = self
+            .all_tools
             .values()
-            .filter(|info| {
-                let name_match = info.tool.name().to_lowercase().contains(&query_lower);
-                let desc_match = info
-                    .tool
-                    .description()
-                    .to_lowercase()
-                    .contains(&query_lower);
-                name_match || desc_match
-            })
-            .take(limit)
             .map(|info| tool_search::ToolSearchResult {
                 name: info.tool.name().to_string(),
                 description: info.tool.description().to_string(),
@@ -788,7 +839,55 @@ impl ToolRegistry {
                 is_critical: info.is_critical,
                 category: info.category.clone(),
             })
-            .collect()
+            .collect();
+        // Delegate to the tokenizing matcher: underscore-to-space
+        // normalization ("cargo check" finds cargo_check), ALL-tokens
+        // preferred with ANY-tokens fallback (qwen capstone).
+        tool_search::ToolSearchable::search(&all, query, limit)
+    }
+
+    /// Up to `k` closest tool names by edit distance, for the zero-match
+    /// "did you mean" path (a typo'd name should point somewhere useful,
+    /// not dead-end). Substring hits rank before raw distance.
+    pub fn search_suggestions(&self, query: &str, k: usize) -> Vec<String> {
+        let tokens: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() >= 2)
+            .map(String::from)
+            .collect();
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(String, usize)> = self
+            .all_tools
+            .keys()
+            .map(|name| {
+                // Distance against the full name AND each `_` segment, so a
+                // long name isn't penalized for its prefix ("chek" →
+                // "cargo_check" via the "check" segment, distance 1).
+                let best = tokens
+                    .iter()
+                    .map(|t| {
+                        let full = tool_search::edit_distance(t, name);
+                        name.split('_')
+                            .map(|segment| tool_search::edit_distance(t, segment))
+                            .min()
+                            .unwrap_or(usize::MAX)
+                            .min(full)
+                    })
+                    .min()
+                    .unwrap_or(usize::MAX);
+                (name.clone(), best)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.contains(tokens[0].as_str())
+                .cmp(&a.0.contains(tokens[0].as_str()))
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.into_iter().take(k).map(|(name, _)| name).collect()
     }
 
     /// Get the count of all registered tools.

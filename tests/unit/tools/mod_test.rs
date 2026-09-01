@@ -664,3 +664,109 @@ fn every_registered_tool_has_explicit_safety_metadata() {
             missing
         );
 }
+
+#[test]
+fn deferred_manifest_lists_deferred_tools_within_measured_budget() {
+    let registry = ToolRegistry::new();
+    let manifest = registry
+        .deferred_manifest(500)
+        .expect("registry ships deferred tools");
+    assert!(
+        crate::token_count::estimate_content_tokens(&manifest) <= 500,
+        "manifest must fit its measured budget"
+    );
+    assert!(manifest.contains("## Deferred tools"), "{manifest}");
+    assert!(
+        manifest.contains("activates automatically"),
+        "manifest must pitch exact-name activation: {manifest}"
+    );
+    assert!(manifest.contains("graph_summary"), "{manifest}");
+    // Sorted by tool name for a stable, scannable list.
+    let mut names = manifest.lines().filter_map(|line| {
+        if line.contains('…') {
+            return None; // the "+N more" tail line
+        }
+        line.strip_prefix("- ")
+            .map(|l| l.split([' ', '—']).next().unwrap_or(l))
+    });
+    let mut previous = names.next().unwrap_or_default().to_string();
+    for name in names {
+        assert!(
+            previous.as_str() <= name,
+            "manifest sorted: {previous} > {name}"
+        );
+        previous = name.to_string();
+    }
+}
+
+#[test]
+fn deferred_manifest_degrades_honestly_under_tiny_budgets() {
+    let registry = ToolRegistry::new();
+    // A realistic-but-tight budget forces the names-only (or prefix) form;
+    // it must still fit and still say what it covers.
+    let manifest = registry
+        .deferred_manifest(200)
+        .expect("manifest degrades, never vanishes");
+    assert!(
+        crate::token_count::estimate_content_tokens(&manifest) <= 200,
+        "tight budget must be honored: {manifest}"
+    );
+    assert!(manifest.contains("## Deferred tools"), "{manifest}");
+    // Absurdly small: at minimum the header survives.
+    let manifest = registry
+        .deferred_manifest(1)
+        .expect("header survives even a 1-token budget");
+    assert!(manifest.contains("## Deferred tools"), "{manifest}");
+}
+
+#[test]
+fn deferred_manifest_is_none_when_nothing_is_deferred() {
+    let mut registry = ToolRegistry::new();
+    for name in registry
+        .list()
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect::<Vec<_>>()
+    {
+        registry.activate(&name);
+    }
+    assert!(registry.list_deferred().is_empty());
+    assert!(registry.deferred_manifest(500).is_none());
+}
+
+#[test]
+fn search_uses_the_tokenizer_underscore_to_space() {
+    let registry = ToolRegistry::new();
+    // The capstone miss: "cargo check" (space) must find `cargo_check`.
+    let results = registry.search("cargo check", 5);
+    assert!(
+        results.iter().any(|r| r.name == "cargo_check"),
+        "cargo check must resolve cargo_check: {:?}",
+        results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn search_falls_back_to_any_token_when_all_fail() {
+    let registry = ToolRegistry::new();
+    // "xyzzy cargo" matches nothing by ALL tokens; the ANY fallback must
+    // still surface the cargo family instead of dead-ending.
+    let results = registry.search("xyzzy cargo", 5);
+    assert!(
+        results.iter().any(|r| r.name.starts_with("cargo_")),
+        "ANY-token fallback must surface cargo tools: {:?}",
+        results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn search_suggestions_ranks_closest_names_first() {
+    let registry = ToolRegistry::new();
+    let suggestions = registry.search_suggestions("cargo chek", 5);
+    assert_eq!(
+        suggestions.first().map(String::as_str),
+        Some("cargo_check"),
+        "typo must suggest the closest real name: {suggestions:?}"
+    );
+    assert!(suggestions.len() <= 5);
+}
