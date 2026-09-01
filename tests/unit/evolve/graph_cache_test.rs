@@ -84,3 +84,39 @@ fn different_paths_do_not_share_a_slot() {
         "a slot keyed to path A must not serve path B"
     );
 }
+
+#[test]
+fn loads_pre_v2_yaml_without_symbol_fields() {
+    // A graph file written before schema v2 (no symbol_kind / parent_id /
+    // line_range fields, no Symbol layer) must still load: serde defaults
+    // fill the new Option fields with None.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = graph_path(temp.path());
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(
+        &path,
+        "nodes:\n\
+         - id: crate::alpha\n\
+         \x20 layer: Code\n\
+         \x20 path: src/alpha.rs\n\
+         \x20 tokens: 10\n\
+         \x20 lines: 2\n\
+         \x20 files: 1\n\
+         \x20 coverage: null\n\
+         \x20 dead_code_annotation_ratio: null\n\
+         \x20 warning_count: null\n\
+         \x20 complexity: null\n\
+         edges: []\n",
+    )
+    .expect("write old-format yaml");
+
+    let mut slot = None;
+    let index = cached_or_load(&mut slot, &path)
+        .expect("old-format yaml must load")
+        .clone();
+    let node = index.node("crate::alpha").expect("node present");
+    assert_eq!(node.tokens, 10);
+    assert!(node.symbol_kind.is_none());
+    assert!(node.parent_id.is_none());
+    assert!(node.line_range.is_none());
+}

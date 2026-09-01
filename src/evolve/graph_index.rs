@@ -452,6 +452,9 @@ impl GraphIndex {
             .nodes
             .iter()
             .filter(|node| layer.is_none_or(|wanted| node.layer == wanted))
+            // Symbol nodes are opt-in (`layer: "symbol"`): the default
+            // all-layers view stays file-level so file queries don't change.
+            .filter(|node| layer.is_some() || node.layer != NodeLayer::Symbol)
             .filter(|node| !excluded(node))
             .collect();
         nodes.sort_by(|left, right| {

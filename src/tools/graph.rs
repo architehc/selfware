@@ -50,6 +50,7 @@ fn layer_name(layer: NodeLayer) -> &'static str {
         NodeLayer::Concept => "concept",
         NodeLayer::Preset => "preset",
         NodeLayer::Auxiliary => "auxiliary",
+        NodeLayer::Symbol => "symbol",
     }
 }
 
@@ -61,6 +62,7 @@ fn parse_layer(s: &str) -> Option<NodeLayer> {
         "concept" => Some(NodeLayer::Concept),
         "preset" => Some(NodeLayer::Preset),
         "auxiliary" => Some(NodeLayer::Auxiliary),
+        "symbol" => Some(NodeLayer::Symbol),
         _ => None,
     }
 }
@@ -349,7 +351,7 @@ pub fn graph_summary_note(root: &Path) -> Option<String> {
     let packed = pack_summary_sections(&index, L0_NOTE_BUDGET, text_render);
     let summary_text = text_render(&packed.outline, &packed.hotspots, &packed.clusters);
     let mut note = format!(
-        "<selfware_context_note kind=graph_summary revision={} built_at={}>\n{}\n",
+        "<selfware_context_note kind=graph_summary content_revision={} built_at={}>\n{}\n",
         index.revision,
         graph_built_at(root),
         summary_text
@@ -362,7 +364,7 @@ pub fn graph_summary_note(root: &Path) -> Option<String> {
         ));
     }
     note.push_str(
-        "Query the full graph via tool_search: graph_summary, hotspots, context_pack, impact, neighbors, test_map, cycles, dups.\n</selfware_context_note>",
+        "Call these graph tools directly by name (no tool_search needed): graph_summary, hotspots, context_pack, impact, neighbors, test_map, cycles, dups.\n</selfware_context_note>",
     );
     Some(note)
 }
@@ -409,8 +411,8 @@ impl Tool for HotspotsTool {
                 },
                 "layer": {
                     "type": "string",
-                    "enum": ["code", "test", "structure", "concept", "preset", "auxiliary"],
-                    "description": "Restrict to one node layer. Omit for all layers."
+                    "enum": ["code", "test", "structure", "concept", "preset", "auxiliary", "symbol"],
+                    "description": "Restrict to one node layer. Omit for all file-level layers (symbol nodes are opt-in)."
                 },
                 "exclude_prefix": {
                     "type": "string",
@@ -1230,10 +1232,16 @@ impl Tool for TestMapTool {
         run_blocking(move || {
             let index = shared_graph_index(&root)?;
             let node = require_node(&index, &id)?;
+            // Symbol nodes answer through their parent file: the parent's
+            // Contains/mirror tests, plus name-matched test fns inside them.
+            let (query_id, query_node) = match &node.parent_id {
+                Some(parent) => (parent.clone(), require_node(&index, parent)?.clone()),
+                None => (id.clone(), node.clone()),
+            };
             let inline = json!({
-                "inline_test_ranges": node.inline_test_ranges,
-                "inline_test_lines": node.inline_test_lines,
-                "inline_test_tokens": node.inline_test_tokens,
+                "inline_test_ranges": query_node.inline_test_ranges,
+                "inline_test_lines": query_node.inline_test_lines,
+                "inline_test_tokens": query_node.inline_test_tokens,
             });
             let test_row = |test_id: &str, source: &str| {
                 let test_node = index.node(test_id);
@@ -1245,7 +1253,7 @@ impl Tool for TestMapTool {
                     "source": source,
                 })
             };
-            let contains_tests: Vec<String> = index.tests_for(&id);
+            let contains_tests: Vec<String> = index.tests_for(&query_id);
             let tests: Vec<Value> = contains_tests
                 .iter()
                 .map(|test_id| test_row(test_id, "contains_edge"))
@@ -1253,11 +1261,12 @@ impl Tool for TestMapTool {
             // Mirror-tree fallback (Contains edges miss the mirrored
             // tests/unit/<module>/ tree — the repo's #[path] test convention).
             // Labeled honestly: these come from a path rule, not graph edges.
-            let (mirror_rule, mirror_tests) = mirror_tests_for(&index, node, &contains_tests);
+            let (mirror_rule, mirror_tests) =
+                mirror_tests_for(&index, &query_node, &contains_tests);
             // Depth-1 dependents' tests: the suites that break when `id`
             // breaks its contract, named with the dependent they hang off.
             let mut also_run: Vec<Value> = Vec::new();
-            for dependent in index.dependents(&id) {
+            for dependent in index.dependents(&query_id) {
                 for test_id in index.tests_for(dependent) {
                     let mut row = test_row(&test_id, "contains_edge");
                     row["via"] = json!(dependent);
@@ -1266,6 +1275,25 @@ impl Tool for TestMapTool {
             }
             let mut payload = Map::new();
             payload.insert("id".into(), json!(id));
+            if let Some(parent) = &node.parent_id {
+                payload.insert(
+                    "symbol".into(),
+                    json!({
+                        "parent": parent,
+                        "kind": node.symbol_kind,
+                        "line_range": node.line_range,
+                    }),
+                );
+                let linked_paths: Vec<String> = tests
+                    .iter()
+                    .chain(mirror_tests.iter())
+                    .filter_map(|row| row["path"].as_str().map(String::from))
+                    .collect();
+                payload.insert(
+                    "symbol_tests".into(),
+                    Value::Array(symbol_tests_for(&root, node, &linked_paths)),
+                );
+            }
             payload.insert("tests".into(), Value::Array(tests));
             payload.insert("mirror_tests".into(), Value::Array(mirror_tests));
             if let Some(rule) = mirror_rule {
@@ -1283,8 +1311,49 @@ impl Tool for TestMapTool {
     }
 }
 
-/// Mirror-tree test probe: the repo's `#[path]` test convention maps
-/// `src/a/b.rs` (or `src/a/b/mod.rs`) to `tests/unit/a/b/*` with node ids
+/// Test fns inside the linked test files whose name mentions the symbol —
+/// `test_<name>`, `<name>_test`, or any test fn named after it. Scans only
+/// the test files already linked to the parent (bounded, honest about the
+/// name-match heuristic via `source: "name_match"`).
+fn symbol_tests_for(root: &Path, symbol: &Node, linked_paths: &[String]) -> Vec<Value> {
+    let name = symbol.id.rsplit("::").next().unwrap_or(&symbol.id);
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for rel in linked_paths {
+        if !seen.insert(rel.clone()) {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        for (index, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            let Some(rest) = trimmed
+                .strip_prefix("fn ")
+                .or_else(|| trimmed.strip_prefix("pub fn "))
+                .or_else(|| trimmed.strip_prefix("async fn "))
+                .or_else(|| trimmed.strip_prefix("pub async fn "))
+            else {
+                continue;
+            };
+            let ident: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if ident.contains(name) {
+                out.push(json!({
+                    "fn": ident,
+                    "file": rel,
+                    "line": index + 1,
+                    "source": "name_match",
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// Mirror-tree test probe: the repo's `#[path]` test convention maps/// `src/a/b.rs` (or `src/a/b/mod.rs`) to `tests/unit/a/b/*` with node ids
 /// prefixed `test::unit::a::b::` (verified against the real graph:
 /// `tests/unit/tools/graph/graph_test.rs` → `test::unit::tools::graph::graph_test`).
 /// Returns the cited rule plus matching Test-layer rows, excluding ids the

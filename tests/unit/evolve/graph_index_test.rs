@@ -459,3 +459,38 @@ fn dependency_cycles_reports_self_loops_and_respects_k() {
     // k caps the number of reported cycles.
     assert_eq!(index.dependency_cycles(1).len(), 1);
 }
+
+#[test]
+fn hotspots_exclude_symbol_nodes_unless_requested() {
+    let mut graph_nodes: Vec<Node> = vec![
+        node("crate::alpha", "src/alpha.rs", 100, 10, None),
+        node("crate::beta", "src/beta.rs", 300, 30, None),
+    ];
+    graph_nodes.push(Node::symbol(
+        "crate::beta::worker",
+        "crate::beta",
+        "fn",
+        "src/beta.rs",
+        (1, 5),
+        500,
+    ));
+    let graph = Graph {
+        nodes: graph_nodes,
+        edges: vec![],
+    };
+    let index = GraphIndex::from_graph(Arc::new(graph), &"ab".repeat(32));
+
+    let default_layers: Vec<NodeLayer> = index
+        .hotspots(Metric::Tokens, None, None, 10)
+        .iter()
+        .map(|n| n.layer)
+        .collect();
+    assert!(
+        !default_layers.contains(&NodeLayer::Symbol),
+        "the default all-layers view stays file-level: {default_layers:?}"
+    );
+
+    let symbols = index.hotspots(Metric::Tokens, Some(NodeLayer::Symbol), None, 10);
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].id, "crate::beta::worker");
+}

@@ -722,8 +722,9 @@ fn graph_summary_note_renders_envelope_and_pointer() {
     let note = graph_summary_note(temp.path()).expect("note must render with a graph");
 
     assert!(
-        note.contains("<selfware_context_note kind=graph_summary revision="),
-        "envelope opening missing: {note}"
+        note.contains("<selfware_context_note kind=graph_summary content_revision="),
+        "envelope must label the hash as content revision (models read bare \
+         `revision=` as a git commit hash and puzzled when it wasn't HEAD): {note}"
     );
     assert!(note.contains("built_at="), "built_at missing: {note}");
     assert!(
@@ -735,17 +736,17 @@ fn graph_summary_note_renders_envelope_and_pointer() {
         "hotspot rows missing: {note}"
     );
     assert!(
-        note.contains("Query the full graph via tool_search: graph_summary, hotspots, context_pack, impact, neighbors, test_map, cycles, dups."),
+        note.contains("Call these graph tools directly by name (no tool_search needed): graph_summary, hotspots, context_pack, impact, neighbors, test_map, cycles, dups."),
         "tool pointer missing: {note}"
     );
     assert!(note.trim_end().ends_with("</selfware_context_note>"));
 
     // Revision inside the envelope is the 12-char graph revision.
     let revision = note
-        .split("revision=")
+        .split("content_revision=")
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
-        .expect("revision field");
+        .expect("content_revision field");
     assert_eq!(revision.len(), 12);
 
     // The tiny fixture packs well under the L0 budget — measured, not assumed.
@@ -1003,4 +1004,152 @@ async fn impact_pages_with_offset_and_next_offset() {
         .expect("impact past end");
     assert!(out["payload"]["rows"].as_array().unwrap().is_empty());
     assert!(out["payload"]["next_offset"].is_null());
+}
+
+// ---------------------------------------------------------------------------
+// Symbol-level graph queries (schema v2)
+// ---------------------------------------------------------------------------
+
+/// Mixed file+symbol fixture: alpha owns test file + two symbol nodes, with
+/// a symbol-level DependsOn edge caller → worker.
+fn fixture_project_symbols() -> tempfile::TempDir {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("src")).expect("src dir");
+    std::fs::create_dir_all(root.join("tests")).expect("tests dir");
+    std::fs::write(
+        root.join("src/alpha.rs"),
+        "pub fn caller() {\n    worker();\n}\n\npub fn worker() {}\n",
+    )
+    .expect("write alpha");
+    std::fs::write(
+        root.join("tests/alpha_test.rs"),
+        "fn worker_handles_edge() {}\nfn other_test() {}\n",
+    )
+    .expect("write test file");
+
+    let alpha = code_node("crate::alpha", "src/alpha.rs", 100, 10, None);
+    let caller = crate::evolve::Node::symbol(
+        "crate::alpha::caller",
+        "crate::alpha",
+        "fn",
+        "src/alpha.rs",
+        (1, 3),
+        20,
+    );
+    let worker = crate::evolve::Node::symbol(
+        "crate::alpha::worker",
+        "crate::alpha",
+        "fn",
+        "src/alpha.rs",
+        (5, 5),
+        10,
+    );
+    let mut alpha_test = Node::test("tests::alpha_test", "tests/alpha_test.rs");
+    alpha_test.tokens = 40;
+    alpha_test.lines = 2;
+    let graph = Graph {
+        nodes: vec![alpha, caller, worker, alpha_test],
+        edges: vec![
+            Edge {
+                from: "crate::alpha".into(),
+                to: "tests::alpha_test".into(),
+                edge_type: EdgeType::Contains,
+            },
+            Edge {
+                from: "crate::alpha".into(),
+                to: "crate::alpha::caller".into(),
+                edge_type: EdgeType::Contains,
+            },
+            Edge {
+                from: "crate::alpha".into(),
+                to: "crate::alpha::worker".into(),
+                edge_type: EdgeType::Contains,
+            },
+            Edge {
+                from: "crate::alpha::caller".into(),
+                to: "crate::alpha::worker".into(),
+                edge_type: EdgeType::DependsOn,
+            },
+        ],
+    };
+    OntologyStore::new(root.join(".selfware/evolve-graph.yaml"))
+        .save(&graph)
+        .expect("save graph");
+    temp
+}
+
+#[tokio::test]
+async fn impact_answers_at_symbol_level() {
+    let temp = fixture_project_symbols();
+    let tool = ImpactTool::new(temp.path().to_path_buf());
+    let out = tool
+        .execute(json!({"id": "crate::alpha::worker"}))
+        .await
+        .expect("symbol impact");
+
+    let rows = out["payload"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], "crate::alpha::caller");
+    assert_eq!(rows[0]["edge_type"], "depends_on");
+    assert_eq!(rows[0]["via"], "crate::alpha::worker");
+    // The symbol row carries its measured range tokens.
+    assert_eq!(rows[0]["tokens"], 20);
+}
+
+#[tokio::test]
+async fn neighbors_mixes_symbol_and_file_edges() {
+    let temp = fixture_project_symbols();
+    let tool = NeighborsTool::new(temp.path().to_path_buf());
+    let out = tool
+        .execute(json!({"id": "crate::alpha::caller"}))
+        .await
+        .expect("symbol neighbors");
+
+    let rows = out["payload"]["rows"].as_array().unwrap();
+    let worker = rows
+        .iter()
+        .find(|r| r["id"] == "crate::alpha::worker")
+        .expect("symbol dependency row");
+    assert_eq!(worker["edge_type"], "depends_on");
+    assert_eq!(worker["direction"], "out");
+    let parent = rows
+        .iter()
+        .find(|r| r["id"] == "crate::alpha")
+        .expect("parent contains row");
+    assert_eq!(parent["edge_type"], "contains");
+    assert_eq!(parent["direction"], "in");
+
+    // File-level queries are unchanged on the mixed graph.
+    let out = tool
+        .execute(json!({"id": "crate::alpha", "kind": "contains"}))
+        .await
+        .expect("file neighbors");
+    let rows = out["payload"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+}
+
+#[tokio::test]
+async fn test_map_maps_symbol_to_parent_tests_and_name_matches() {
+    let temp = fixture_project_symbols();
+    let tool = TestMapTool::new(temp.path().to_path_buf());
+    let out = tool
+        .execute(json!({"id": "crate::alpha::worker"}))
+        .await
+        .expect("symbol test_map");
+
+    let payload = &out["payload"];
+    assert_eq!(payload["symbol"]["parent"], "crate::alpha");
+    assert_eq!(payload["symbol"]["kind"], "fn");
+    // Parent file's Contains-linked tests ride along.
+    let tests = payload["tests"].as_array().unwrap();
+    assert_eq!(tests.len(), 1);
+    assert_eq!(tests[0]["id"], "tests::alpha_test");
+    // Name-matched test fns: worker_handles_edge mentions `worker`;
+    // other_test does not.
+    let symbol_tests = payload["symbol_tests"].as_array().unwrap();
+    assert_eq!(symbol_tests.len(), 1);
+    assert_eq!(symbol_tests[0]["fn"], "worker_handles_edge");
+    assert_eq!(symbol_tests[0]["file"], "tests/alpha_test.rs");
+    assert_eq!(symbol_tests[0]["source"], "name_match");
 }

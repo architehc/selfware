@@ -17,6 +17,8 @@ use super::{AstAnalyzer, Edge, EdgeType, Graph, Node};
 
 pub struct GraphBuilder {
     src_root: PathBuf,
+    /// Include symbol-level nodes (schema v2) in the build.
+    symbols: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +38,18 @@ impl GraphBuilder {
     pub fn new(src_root: impl AsRef<Path>) -> Self {
         Self {
             src_root: src_root.as_ref().to_path_buf(),
+            symbols: true,
         }
+    }
+
+    /// Include symbol-level nodes (schema v2: top-level `pub` items of
+    /// Code-layer Rust files) in the build. Default ON — the agent's graph
+    /// tools answer symbol-level queries from these nodes; the self-evolve
+    /// server can disable them when a leaner graph matters more than
+    /// symbol queries.
+    pub fn with_symbols(mut self, symbols: bool) -> Self {
+        self.symbols = symbols;
+        self
     }
 
     /// Build one node per supported source file. IDs are derived from
@@ -148,6 +161,35 @@ impl GraphBuilder {
         nodes.sort_by(|left, right| left.id.cmp(&right.id));
 
         let node_ids: HashSet<String> = nodes.iter().map(|node| node.id.clone()).collect();
+
+        // Symbol nodes (schema v2): top-level `pub` items of Code-layer Rust
+        // files. `file_symbols` keeps (parent id, rel path, decls) for the
+        // edge pass below. Symbol ids that would collide with an existing
+        // node id (a file `a/b.rs` named like a symbol in module `a::b`)
+        // are SKIPPED — a false negative, never a wrong edge.
+        let mut file_symbols: Vec<(String, String, Vec<super::symbols::SymbolDecl>)> = Vec::new();
+        if self.symbols {
+            for node in &nodes {
+                if node.layer != super::NodeLayer::Code {
+                    continue;
+                }
+                let Some(rel) = node.path.as_deref() else {
+                    continue;
+                };
+                let full_path = project_root.join(rel);
+                if !is_rust_source(&full_path) {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&full_path) else {
+                    continue;
+                };
+                let decls = super::symbols::extract_pub_symbols(&content);
+                if !decls.is_empty() {
+                    file_symbols.push((node.id.clone(), rel.to_string(), decls));
+                }
+            }
+        }
+
         let mut edges = hierarchy_edges;
         edges.extend(containment_edges(&node_ids));
         let path_to_id: HashMap<PathBuf, String> = nodes
@@ -173,6 +215,9 @@ impl GraphBuilder {
             }
         }
 
+        // Import leftovers for cross-file symbol resolution (filled by the
+        // import loop below, consumed by the symbol edge pass).
+        let mut import_symbols: HashMap<String, Vec<(String, String)>> = HashMap::new();
         for node in &nodes {
             let Some(path) = node.path.as_deref() else {
                 continue;
@@ -183,12 +228,123 @@ impl GraphBuilder {
                     if target != node.id {
                         edges.push(Edge {
                             from: node.id.clone(),
-                            to: target,
+                            to: target.clone(),
                             edge_type: EdgeType::DependsOn,
                         });
                     }
+                    // The trimmed-off tail of a use path is a symbol name
+                    // imported from that file (`use crate::a::b::Foo` →
+                    // `Foo` from `crate::a::b`) — the confident half of
+                    // cross-file symbol resolution.
+                    let prefix_len = target.split("::").count();
+                    if imported.len() == prefix_len + 1 {
+                        import_symbols
+                            .entry(node.id.clone())
+                            .or_default()
+                            .push((target, imported[prefix_len].clone()));
+                    }
                 }
             }
+        }
+
+        // Symbol nodes + edges. Conservative resolution (false negatives
+        // fine, false positives not): intra-file identifier mentions always
+        // link; cross-file mentions link only when the name is unambiguous
+        // crate-wide (exactly one file defines it) or the source file
+        // imports that name from the defining file.
+        if self.symbols && !file_symbols.is_empty() {
+            let mut symbol_nodes: Vec<Node> = Vec::new();
+            for (parent_id, rel, decls) in &file_symbols {
+                for decl in decls {
+                    let id = format!("{parent_id}::{}", decl.name);
+                    if node_ids.contains(&id) {
+                        tracing::debug!("symbol id collision with file node, skipped: {id}");
+                        continue;
+                    }
+                    edges.push(Edge {
+                        from: parent_id.clone(),
+                        to: id.clone(),
+                        edge_type: EdgeType::Contains,
+                    });
+                    symbol_nodes.push(Node::symbol(
+                        &id,
+                        parent_id,
+                        decl.kind,
+                        rel,
+                        decl.line_range,
+                        decl.tokens,
+                    ));
+                }
+            }
+
+            // name → symbol node indices, and file id → symbol indices.
+            let mut by_name: HashMap<&str, Vec<usize>> = HashMap::new();
+            let mut parent_of: Vec<&str> = Vec::with_capacity(symbol_nodes.len());
+            for (index, node) in symbol_nodes.iter().enumerate() {
+                let name = node.id.rsplit("::").next().unwrap_or(&node.id);
+                by_name.entry(name).or_default().push(index);
+                parent_of.push(node.parent_id.as_deref().unwrap_or(""));
+            }
+
+            // Body identifiers per symbol, from the parent file's content.
+            let files_defining = |name: &str| -> usize {
+                by_name.get(name).map_or(0, |indices| {
+                    indices
+                        .iter()
+                        .map(|&i| parent_of[i])
+                        .collect::<HashSet<_>>()
+                        .len()
+                })
+            };
+            let mut content_cache: HashMap<&str, String> = HashMap::new();
+            for (index, node) in symbol_nodes.iter().enumerate() {
+                let Some(rel) = node.path.as_deref() else {
+                    continue;
+                };
+                let content = content_cache
+                    .entry(rel)
+                    .or_insert_with(|| {
+                        std::fs::read_to_string(project_root.join(rel)).unwrap_or_default()
+                    })
+                    .clone();
+                let Some((start, end)) = node.line_range else {
+                    continue;
+                };
+                let body: String = content
+                    .lines()
+                    .skip(start.saturating_sub(1))
+                    .take(end.saturating_sub(start) + 1)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for ident in super::symbols::identifiers(&body) {
+                    let Some(candidates) = by_name.get(ident.as_str()) else {
+                        continue;
+                    };
+                    for &target_index in candidates {
+                        if target_index == index {
+                            continue;
+                        }
+                        let target_parent = parent_of[target_index];
+                        let source_parent = parent_of[index];
+                        let linked = target_parent == source_parent
+                            || files_defining(ident.as_str()) == 1
+                            || import_symbols.get(source_parent).is_some_and(|imports| {
+                                imports.iter().any(|(file_id, name)| {
+                                    file_id == target_parent && name == &ident
+                                })
+                            });
+                        if linked {
+                            edges.push(Edge {
+                                from: node.id.clone(),
+                                to: symbol_nodes[target_index].id.clone(),
+                                edge_type: EdgeType::DependsOn,
+                            });
+                        }
+                    }
+                }
+            }
+            nodes.extend(symbol_nodes);
+            nodes.sort_by(|left, right| left.id.cmp(&right.id));
         }
 
         let mut graph = Graph { nodes, edges };

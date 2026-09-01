@@ -68,6 +68,9 @@ pub fn concept_node(id: &str) -> Node {
         inline_test_lines: 0,
         inline_test_tokens: 0,
         classification: "concept".to_string(),
+        symbol_kind: None,
+        parent_id: None,
+        line_range: None,
     }
 }
 
