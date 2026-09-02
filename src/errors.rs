@@ -226,6 +226,9 @@ pub enum SafetyError {
     )]
     PathSuspiciousMix { component: String },
 
+    #[error("Path contains encoding-evasion sequence: {reason}")]
+    PathInvalidEncoding { reason: String },
+
     #[error("Path not in allowed list: {path}")]
     PathNotAllowed { path: String },
 
@@ -312,6 +315,9 @@ pub enum SafetyError {
 
     #[error("Blocked request to private network address: {ip}")]
     BlockedPrivateNetwork { ip: String },
+
+    #[error("Blocked URL containing shell substitution (potential exfiltration channel)")]
+    BlockedUrlShellSubstitution,
 
     #[error("Suspicious browser eval blocked: potential data exfiltration")]
     BlockedBrowserEval,

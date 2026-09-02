@@ -57,6 +57,22 @@ static EVAL_WITH_SUBSTITUTION: LazyLock<Regex> =
 static EVAL_SUBSTITUTION_PROGRAM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\beval\b[^\n;]*?\$\(\s*([a-z0-9_.-]+)").expect("Invalid regex"));
 
+/// Extract a shell command from tool arguments in either wire form: a plain
+/// string ("command": "cargo test") or an argv array ("command":
+/// ["/bin/sh", "-c", "..."]). The array form previously skipped the shell
+/// check entirely because only `as_str()` was consulted (red-team finding).
+fn command_arg_string(args: &serde_json::Value) -> String {
+    match args.get("command") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(items)) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        _ => String::new(),
+    }
+}
+
 /// Whether an `eval` invokes command substitution with a program outside
 /// the known-safe shell-integration list. `eval` without substitution is
 /// not handled here. (The command is first run through
@@ -127,8 +143,8 @@ impl SafetyChecker {
             }
             "shell_exec" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                self.check_shell_command(cmd)?;
+                let cmd = command_arg_string(&args);
+                self.check_shell_command(&cmd)?;
 
                 if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
                     self.check_path(cwd)?;
@@ -165,28 +181,44 @@ impl SafetyChecker {
             }
             "container_exec" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                    self.check_shell_command(cmd)?;
+                let cmd = command_arg_string(&args);
+                if !cmd.is_empty() {
+                    self.check_shell_command(&cmd)?;
                 }
             }
             "container_run" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                    self.check_shell_command(cmd)?;
+                let cmd = command_arg_string(&args);
+                if !cmd.is_empty() {
+                    self.check_shell_command(&cmd)?;
                 }
-                // Check for dangerous volume mounts
+                // Check for dangerous volume mounts — both the string form
+                // ("/etc:/host") and the object form
+                // ({"host": "/etc", "container": "/host"} / docker's
+                // {"source": ..., "target": ...}); the object form previously
+                // bypassed this check entirely (red-team finding).
                 if let Some(volumes) = args.get("volumes").and_then(|v| v.as_array()) {
                     for vol in volumes {
                         if let Some(mount) = vol.as_str() {
                             self.check_volume_mount(mount)?;
+                        } else if let Some(obj) = vol.as_object() {
+                            let host = obj
+                                .get("host")
+                                .or_else(|| obj.get("source"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if !host.is_empty() {
+                                self.check_volume_mount(host)?;
+                            }
                         }
                     }
                 }
             }
             "process_start" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
-                if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
-                    self.check_shell_command(cmd)?;
+                let cmd = command_arg_string(&args);
+                if !cmd.is_empty() {
+                    self.check_shell_command(&cmd)?;
                 }
                 if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
                     self.check_path(cwd)?;
@@ -512,6 +544,20 @@ impl SafetyChecker {
 
         // Check for base64-encoded command execution
         if BASE64_EXEC_PATTERN.is_match(&normalized) || BASE64_EXEC_PATTERN.is_match(&dequoted) {
+            return Err(SelfwareError::Safety(SafetyError::BlockedBase64Command));
+        }
+
+        // Interpreter-embedded decode+execute — `python3 -c "exec(__import__(
+        // 'base64').b64decode(...))"`, JS `eval(atob(...))`. The pipe-based
+        // pattern above cannot see these: nothing pipes to a shell (red-team
+        // finding: base64 reverse shell via process_start).
+        if (dequoted.contains("b64decode") || dequoted.contains("atob("))
+            && (dequoted.contains("exec(")
+                || dequoted.contains("eval(")
+                || dequoted.contains("subprocess")
+                || dequoted.contains("os.system")
+                || dequoted.contains("popen"))
+        {
             return Err(SelfwareError::Safety(SafetyError::BlockedBase64Command));
         }
 
@@ -880,6 +926,15 @@ impl SafetyChecker {
     /// Shared body of the HTTP-request, browser, and vision-endpoint checks
     /// (page-control URLs additionally allow `file://`, so they are separate).
     fn check_endpoint_url(&self, url: &str) -> Result<()> {
+        // URLs carrying shell substitution (`$(…)`, backticks, `${…}`) are an
+        // exfiltration channel when any layer builds the request through a
+        // shell (red-team finding: k8s serviceaccount token smuggled into a
+        // query param via $(head … token | base64)).
+        if url.contains("$(") || url.contains('`') || url.contains("${") {
+            return Err(SelfwareError::Safety(
+                SafetyError::BlockedUrlShellSubstitution,
+            ));
+        }
         self.check_url_ssrf_with_options(
             url,
             UrlSafetyOptions {

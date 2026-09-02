@@ -84,6 +84,90 @@ fn canonicalize_or_fail(path: &Path) -> Result<PathBuf> {
 /// Resolve a path that does not yet exist by canonicalizing its deepest
 /// existing ancestor and appending the missing components. This allows safe
 /// validation of paths that will be created by tools like `file_write`.
+///
+/// Lexically collapse `.`/`..` components. `Path::components()` keeps
+/// `ParentDir` entries and `resolve_missing_path` joins a lexical suffix onto
+/// a canonical ancestor, so without this a path containing `..` escapes the
+/// workspace while still string-matching the working-dir prefix.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            // pop() at the root returns false — `..` above root clamps at /.
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// One round of percent-decoding. `%` not followed by two hex digits is kept
+/// literally (legit filenames like `100%.txt`). Escapes decoding to invalid
+/// UTF-8 (overlong forms like `%c0%af`, a classic `/` smuggle) are rejected.
+fn percent_decode_once(input: &str) -> Result<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut changed = false;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                changed = true;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    if !changed {
+        return Ok(input.to_string());
+    }
+    String::from_utf8(out).map_err(|_| {
+        SelfwareError::Safety(SafetyError::PathInvalidEncoding {
+            reason: "percent-escapes decode to invalid UTF-8 (overlong encoding?)".to_string(),
+        })
+    })
+}
+
+/// Encoding-evasion normalization, run BEFORE any other path check:
+/// iterative percent-decode (cap 4 rounds so `%252f` → `%2f` → `/`),
+/// backslash → slash, and rejection of all-dot components longer than two
+/// (`....//` collapses to `..//` on PHP/Windows parsers). The validator then
+/// sees the decoded form, so encoded traversal cannot bypass literal checks.
+fn decode_path_escapes(path: &str) -> Result<String> {
+    let mut current = path.to_string();
+    for _ in 0..4 {
+        let next = percent_decode_once(&current)?;
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    let normalized = current.replace('\\', "/");
+    for component in normalized.split('/') {
+        if component.len() > 2 && component.bytes().all(|b| b == b'.') {
+            return Err(SelfwareError::Safety(SafetyError::PathInvalidEncoding {
+                reason: format!("dot-overflow component '{component}'"),
+            }));
+        }
+    }
+    Ok(normalized)
+}
+
 fn resolve_missing_path(path: &Path) -> Result<PathBuf> {
     for ancestor in path.ancestors() {
         match open_nofollow_and_resolve(ancestor) {
@@ -97,7 +181,13 @@ fn resolve_missing_path(path: &Path) -> Result<PathBuf> {
                     })?
                     .iter()
                     .collect::<PathBuf>();
-                return Ok(real.join(suffix));
+                // The suffix is joined LEXICALLY — `..` components in it are
+                // never collapsed by the filesystem open above (only the
+                // existing ancestor was opened). Without normalization,
+                // `node_modules/.bin/../../../.aws/credentials` keeps its
+                // `..`, passes the starts-with/glob allowed checks against
+                // the working-dir prefix, and escapes the workspace.
+                return Ok(normalize_lexical(&real.join(suffix)));
             }
             Err(e) if e.raw_os_error() == Some(ELOOP) => {
                 // Symlink in the existing portion — let the caller resolve it
@@ -151,6 +241,17 @@ impl PathValidator {
         if path.contains('\0') {
             return Err(SelfwareError::Safety(SafetyError::PathNullBytes));
         }
+
+        // SECURITY: encoding-evasion normalization (see decode_path_escapes).
+        // `%2e%2e%2f`, double-encoded `%252f`, backslash separators, `....//`
+        // dot-overflow, and overlong UTF-8 (`%c0%af`) execute as traversal on
+        // some parsers while matching no literal `..` check. Re-check nulls
+        // afterwards: `%00` decodes to a real NUL.
+        let decoded_path = decode_path_escapes(path)?;
+        if decoded_path.contains('\0') {
+            return Err(SelfwareError::Safety(SafetyError::PathNullBytes));
+        }
+        let path = decoded_path.as_str();
 
         // SECURITY: Unicode normalization bypass prevention.
         // Reject paths with characters that look like ASCII but are not.
