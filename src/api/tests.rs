@@ -2663,6 +2663,42 @@ fn test_canonicalize_already_ordered() {
     assert_eq!(msgs[0].role, "system");
     assert_eq!(msgs[1].role, "user");
     assert_eq!(msgs[2].role, "assistant");
+    // Anthropic prefill guard: a trailing assistant message is no longer a
+    // valid end-state — a user continuation closes the turn instead.
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs[3].role, "user");
+    assert_eq!(msgs[3].content, "Continue with the task.");
+}
+
+#[test]
+fn test_canonicalize_trailing_assistant_gets_user_continuation() {
+    // The measured claude-fable-5/opus-5 failure: recovery left the history
+    // ending on assistant and Anthropic 400'd every request ("This model does
+    // not support assistant message prefill").
+    let mut msgs = vec![
+        Message::system("sys".to_string()),
+        Message::user("task".to_string()),
+        Message::assistant("partial answer".to_string()),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.last().unwrap().role, "user");
+    // Mid-conversation assistant messages are untouched.
+    assert_eq!(msgs[2].role, "assistant");
+    assert_eq!(msgs[2].content, "partial answer");
+}
+
+#[test]
+fn test_canonicalize_trailing_user_unchanged() {
+    let mut msgs = vec![
+        Message::system("sys".to_string()),
+        Message::user("task".to_string()),
+        Message::assistant("call".to_string()),
+        Message::user("tool result".to_string()),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs.last().unwrap().role, "user");
+    assert_eq!(msgs.last().unwrap().content, "tool result");
 }
 
 #[test]
@@ -2696,11 +2732,14 @@ fn test_canonicalize_multiple_misplaced_system() {
     ];
     canonicalize_message_order(&mut msgs);
     // All system messages merged into one at position 0
-    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[0].role, "system");
     assert_eq!(msgs[0].content, "sys1\n\nsys2\n\nsys3");
     assert_eq!(msgs[1].role, "user");
     assert_eq!(msgs[2].role, "assistant");
+    // Prefill guard: trailing assistant is closed with a user continuation.
+    assert_eq!(msgs[3].role, "user");
+    assert_eq!(msgs[3].content, "Continue with the task.");
 }
 
 #[test]

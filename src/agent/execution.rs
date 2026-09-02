@@ -512,6 +512,43 @@ impl Agent {
         ))
     }
 
+    /// Edit-failure loop handling after a successful mutation: the FIRST time
+    /// suppressions reach the threshold after a mutating call, recover (reset
+    /// the counter, clear the failed-tool cache, force a fresh read) instead of
+    /// killing the run — the old direct bail killed TB4 medical-claims at iter
+    /// 37 after a SUCCESSFUL mutation with zero recovery chance (kimi-k3 +
+    /// deepseek diagnoses). Only a recurrence after that recovery is fatal.
+    fn handle_edit_failure_loop(&mut self) -> Result<()> {
+        if !(self.current_task_requires_mutation()
+            && self.mutating_tool_call_count() > 0
+            && self.consecutive_suppressions >= 3)
+        {
+            return Ok(());
+        }
+        if self.edit_loop_recovery_used {
+            bail!(
+                "EDIT_FAILURE_LOOP_AFTER_EDIT: repeated stale edit retries after a successful mutation; stopping so the captured patch can be evaluated"
+            );
+        }
+        info!(
+            "Edit-failure loop after successful mutation — recovering once (reset + re-read directive) instead of bailing"
+        );
+        self.edit_loop_recovery_used = true;
+        self.consecutive_suppressions = 0;
+        self.clear_failed_tool_attempts();
+        self.messages.push(crate::api::types::Message::user(
+            "<selfware_system_directive>\n\
+             Your last edit SUCCEEDED, but your subsequent tool calls were suppressed as \
+             stale duplicates — you are retrying an old version of the file. STOP editing \
+             from memory: RE-READ the current file state with file_read first, then make \
+             only the remaining changes against what is actually on disk. If the task is \
+             already complete, explain why in plain text instead of calling tools.\n\
+             </selfware_system_directive>"
+                .to_string(),
+        ));
+        Ok(())
+    }
+
     async fn execute_step_internal_inner(&mut self, use_last_message: bool) -> Result<bool> {
         // Emit a structured progress event at the top of every loop iteration.
         // Step is 1-based; tool count is the registry's current size.
@@ -1018,6 +1055,29 @@ impl Agent {
                             )));
                             return Ok(false);
                         }
+                        // No rescuable verification command was detected (non-Rust
+                        // task containers: no cargo project, no recognizable test
+                        // runner): the gate keeps refusing but the model cannot
+                        // guess HOW to verify, so it narrates and gets refused
+                        // again — TB4 production-planning spun 253 refused turns
+                        // in exactly this deadlock. Name the path out explicitly.
+                        info!(
+                            "StaleVerification churn with no rescuable verification command — directing the model to run verification itself"
+                        );
+                        self.consecutive_stale_verification = 0;
+                        self.messages.push(crate::api::types::Message::user(
+                            "<selfware_system_directive>\n\
+                             The completion gate requires a PASSING verification after your last edit, \
+                             but no default verification command could be detected in this environment. \
+                             Run the project's verification YOURSELF now with shell_exec: find the \
+                             test/check command from the task description, README, Makefile, or tests/ \
+                             directory (e.g. `cd /app && python -m pytest -x` or `make test`). If it \
+                             passes, give your final answer; if it fails, fix the errors and re-run it. \
+                             Do NOT answer in prose again without running it — that turn will be refused.\n\
+                             </selfware_system_directive>"
+                                .to_string(),
+                        ));
+                        return Ok(false);
                     }
                 } else {
                     self.consecutive_stale_verification = 0;
@@ -1243,14 +1303,8 @@ impl Agent {
         // When the model keeps emitting identical tool calls that are all
         // suppressed (retry suppressed / no-op), it is stuck in tool-calling
         // mode and cannot produce a final text response on its own.
-        if self.current_task_requires_mutation()
-            && self.mutating_tool_call_count() > 0
-            && self.consecutive_suppressions >= 3
-        {
-            bail!(
-                "EDIT_FAILURE_LOOP_AFTER_EDIT: repeated stale edit retries after a successful mutation; stopping so the captured patch can be evaluated"
-            );
-        } else if self.consecutive_suppressions >= 10 {
+        self.handle_edit_failure_loop()?;
+        if self.consecutive_suppressions >= 10 {
             // After many suppressed calls, nudge the model to try a different approach.
             // Do NOT abort or force completion — the task may still need work.
             // Also clear the failed-tool cache so the agent gets fresh chances.

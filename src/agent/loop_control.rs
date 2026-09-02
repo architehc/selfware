@@ -43,8 +43,12 @@ pub struct AgentLoop {
     /// The cap the task started with — the adaptive extension adds a
     /// fraction of THIS, never of an already-extended budget.
     original_max: usize,
-    /// The one-shot adaptive extension has been granted.
-    extension_used: bool,
+    /// Adaptive extensions granted so far this task. Each grant is +25% of
+    /// the ORIGINAL cap; total extension is capped at +100% of the original
+    /// (at most 4 grants). Long-horizon tasks (TB4: 5/12 trials died at the
+    /// cap while still productive, 2 died even after the old one-shot +50%)
+    /// need sustained progress to keep earning budget, not one blind bump.
+    extensions_granted: usize,
     current_step: usize,
     iteration: usize,
 }
@@ -88,21 +92,24 @@ impl AgentLoop {
             state: AgentState::Planning,
             max_iterations,
             original_max: max_iterations,
-            extension_used: false,
+            extensions_granted: 0,
             current_step: 0,
             iteration: 0,
         }
     }
 
-    /// Grant the one-shot adaptive budget extension: +50% of the ORIGINAL
-    /// cap (at least 1), at most once per task. Returns the added
-    /// iterations, or `None` when the extension was already used.
+    /// Grant one adaptive budget extension: +25% of the ORIGINAL cap (at
+    /// least 1). Extensions may fire multiple times per task — sustained
+    /// productivity keeps earning budget — but the total extension never
+    /// exceeds +100% of the original cap. Returns the added iterations, or
+    /// `None` once the extension ceiling is reached.
     pub fn extend_budget_once(&mut self) -> Option<usize> {
-        if self.extension_used {
+        const MAX_GRANTS: usize = 4; // 4 × +25% = +100% ceiling
+        if self.extensions_granted >= MAX_GRANTS {
             return None;
         }
-        self.extension_used = true;
-        let added = (self.original_max / 2).max(1);
+        self.extensions_granted += 1;
+        let added = (self.original_max / 4).max(1);
         self.max_iterations += added;
         Some(added)
     }
@@ -229,9 +236,9 @@ impl AgentLoop {
         self.max_iterations
     }
 
-    /// Whether the one-shot adaptive budget extension fired this task.
+    /// Whether any adaptive budget extension fired this task.
     pub fn extension_was_used(&self) -> bool {
-        self.extension_used
+        self.extensions_granted > 0
     }
 
     pub fn current_state_label(&self) -> &'static str {
@@ -253,9 +260,9 @@ impl AgentLoop {
         self.state = AgentState::Planning;
         self.current_step = 0;
         self.iteration = 0;
-        // A new task gets a fresh budget: the extension is per-task.
+        // A new task gets a fresh budget: extensions are per-task.
         self.max_iterations = self.original_max;
-        self.extension_used = false;
+        self.extensions_granted = 0;
     }
 }
 

@@ -2140,7 +2140,7 @@ fn productive_turn(name: &str, args_hash: u64) -> crate::agent::loop_control::Tu
 }
 
 #[tokio::test]
-async fn adaptive_budget_extends_once_on_productive_streak() {
+async fn adaptive_budget_extends_repeatedly_on_sustained_productive_streak() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
         .await
@@ -2166,19 +2166,34 @@ async fn adaptive_budget_extends_once_on_productive_streak() {
         .maybe_extend_iteration_budget()
         .expect("productive streak must earn the extension");
     assert!(matches!(resumed, AgentState::Executing { .. }));
-    assert_eq!(agent.loop_control.max_iterations(), 6);
+    assert_eq!(agent.loop_control.max_iterations(), 5);
     assert!(matches!(
         agent.loop_control.current_state_label(),
         "executing"
     ));
 
-    // Drive into the extension and trip the new cap: no second extension.
-    agent.loop_control.restore_progress(0, 6);
-    let capped = agent.loop_control.next_state(); // 7 > 6
-    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+    // Multi-fire policy (TB4: the one-shot +50% still left productive tasks
+    // dead at the cap): a still-productive streak keeps earning +25% grants,
+    // up to the +100% ceiling (4 grants: cap 4 → 8).
+    for expected_cap in [6, 7, 8] {
+        let cap = agent.loop_control.max_iterations();
+        agent.loop_control.restore_progress(0, cap);
+        let tripped = agent.loop_control.next_state();
+        assert!(matches!(tripped, Some(AgentState::Failed { .. })));
+        assert!(
+            agent.maybe_extend_iteration_budget().is_some(),
+            "sustained productivity re-earns budget"
+        );
+        assert_eq!(agent.loop_control.max_iterations(), expected_cap);
+    }
+    // Fifth trip: the extension ceiling is reached.
+    let cap = agent.loop_control.max_iterations();
+    agent.loop_control.restore_progress(0, cap);
+    let tripped = agent.loop_control.next_state();
+    assert!(matches!(tripped, Some(AgentState::Failed { .. })));
     assert!(
         agent.maybe_extend_iteration_budget().is_none(),
-        "the extension fires at most once per task"
+        "total extension is capped at +100% of the original cap"
     );
     server.stop().await;
 }
@@ -2244,7 +2259,7 @@ async fn run_summary_reflects_tracked_state_honestly() {
         "files changed sorted"
     );
     assert!(summary.budget_extended);
-    assert_eq!(summary.max_iterations, 15);
+    assert_eq!(summary.max_iterations, 12);
     assert_eq!(summary.total_tokens, 42_000);
     assert_eq!(summary.cost_usd, Some(0.5));
     server.stop().await;

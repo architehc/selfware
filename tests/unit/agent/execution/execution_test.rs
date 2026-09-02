@@ -3637,3 +3637,71 @@ async fn files_checklist_guard_skips_verified_read_only_tasks() {
     assert!(!agent.check_files_guard(true));
     server.stop().await;
 }
+
+#[tokio::test]
+async fn edit_failure_loop_first_trigger_recovers_instead_of_bailing() {
+    // TB4 medical-claims class: killed at iter 37 after a SUCCESSFUL mutation
+    // with zero recovery chance. The first trigger must recover, not bail.
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s", "Fix the bug in parse_port.");
+    assert!(agent.current_task_requires_mutation());
+    agent.mutating_tool_call_count = 1;
+    agent.consecutive_suppressions = 3;
+
+    agent
+        .handle_edit_failure_loop()
+        .expect("first trigger must recover, not bail");
+
+    assert!(agent.edit_loop_recovery_used);
+    assert_eq!(agent.consecutive_suppressions, 0);
+    let directive = agent.messages.last().expect("recovery directive");
+    assert!(directive
+        .content
+        .text()
+        .contains("RE-READ the current file state"));
+}
+
+#[tokio::test]
+async fn edit_failure_loop_recurrence_after_recovery_is_fatal() {
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s", "Fix the bug in parse_port.");
+    agent.mutating_tool_call_count = 1;
+    agent.consecutive_suppressions = 3;
+    agent
+        .handle_edit_failure_loop()
+        .expect("first trigger recovers");
+
+    // Same stale pattern recurs after the forced recovery: now fatal.
+    agent.consecutive_suppressions = 3;
+    let err = agent
+        .handle_edit_failure_loop()
+        .expect_err("recurrence after recovery must hard-stop");
+    assert!(err.to_string().contains("EDIT_FAILURE_LOOP_AFTER_EDIT"));
+}
+
+#[tokio::test]
+async fn edit_failure_loop_does_not_fire_below_threshold_or_on_read_only() {
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s", "Fix the bug in parse_port.");
+    agent.mutating_tool_call_count = 1;
+    // Below threshold: no-op.
+    agent.consecutive_suppressions = 2;
+    agent
+        .handle_edit_failure_loop()
+        .expect("no-op below threshold");
+    assert!(!agent.edit_loop_recovery_used);
+
+    // Read-only task: never fires even at threshold.
+    agent.test_set_task_read_only(true);
+    agent.consecutive_suppressions = 5;
+    agent
+        .handle_edit_failure_loop()
+        .expect("read-only tasks never enter the edit-failure loop");
+    assert!(!agent.edit_loop_recovery_used);
+}

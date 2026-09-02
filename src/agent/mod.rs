@@ -705,6 +705,11 @@ pub struct Agent {
     /// When this exceeds a threshold the agent forces completion instead of
     /// looping until max_iterations.
     consecutive_suppressions: usize,
+    /// One-shot latch for the recoverable edit-failure loop: the first time
+    /// `consecutive_suppressions >= 3` fires after a successful mutation we
+    /// recover (reset + re-read directive) instead of bailing; only a
+    /// recurrence after that recovery is fatal. Reset per task.
+    edit_loop_recovery_used: bool,
     /// Total injection findings the trust gate has sanitized out of tool
     /// results this session. Surfaced in the interactive status line when > 0.
     trust_gate_findings: usize,
@@ -1365,6 +1370,7 @@ To call a tool, use this EXACT XML structure:
             rag_engine: None,
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
+            edit_loop_recovery_used: false,
             trust_gate_findings: 0,
             consecutive_read_only_steps: 0,
             seen_read_targets: std::collections::HashSet::new(),

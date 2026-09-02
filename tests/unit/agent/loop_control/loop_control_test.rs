@@ -311,16 +311,22 @@ fn error_only_streak_is_not_progress() {
 }
 
 #[test]
-fn extension_is_half_the_original_cap_and_granted_once() {
+fn extension_is_quarter_of_original_and_grants_up_to_four() {
     let mut loop_ctrl = AgentLoop::new(30);
-    assert_eq!(loop_ctrl.extend_budget_once(), Some(15));
-    assert_eq!(loop_ctrl.max_iterations(), 45);
+    // Multi-fire policy (TB4: the one-shot +50% still left productive tasks
+    // dead at the cap): each grant is +25% of the ORIGINAL cap, at most 4
+    // grants (+100% total).
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.max_iterations(), 58);
     assert_eq!(
         loop_ctrl.extend_budget_once(),
         None,
-        "the extension fires at most once"
+        "total extension is capped at +100% of the original cap"
     );
-    assert_eq!(loop_ctrl.max_iterations(), 45);
+    assert_eq!(loop_ctrl.max_iterations(), 58);
 }
 
 #[test]
@@ -332,46 +338,49 @@ fn extension_of_tiny_cap_extends_by_at_least_one() {
 
 #[test]
 fn extension_lets_the_loop_run_past_the_original_cap() {
-    let mut loop_ctrl = AgentLoop::new(4);
+    let mut loop_ctrl = AgentLoop::new(8);
     loop_ctrl.next_state(); // Planning
     loop_ctrl
         .transition_to(AgentState::Executing { step: 0 })
         .unwrap();
-    for _ in 0..4 {
-        loop_ctrl.next_state(); // iterations 1-4
+    for _ in 0..8 {
+        loop_ctrl.next_state(); // iterations 1-8
     }
-    let capped = loop_ctrl.next_state(); // 5 > 4 — cap tripped
+    let capped = loop_ctrl.next_state(); // 9 > 8 — cap tripped
     assert!(matches!(capped, Some(AgentState::Failed { .. })));
 
-    assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
-    // Restore as the adaptive path does; the tripped slot (5) now fits the
-    // new cap (6), and the loop keeps running into the extension.
-    let step = loop_ctrl.current_step();
-    let iteration = loop_ctrl.current_iteration();
-    loop_ctrl.restore_progress(step, iteration);
-    assert!(matches!(
-        loop_ctrl.next_state(), // iteration 6 ≤ 6
-        Some(AgentState::Executing { .. })
-    ));
-    let exhausted = loop_ctrl.next_state(); // 7 > 6 — extension spent
-    assert!(matches!(exhausted, Some(AgentState::Failed { .. })));
+    // Each grant adds 8/4 = 2; sustained productivity re-earns budget up to
+    // the +100% ceiling (4 grants: cap 8 → 16).
+    for expected_cap in [10, 12, 14, 16] {
+        assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
+        assert_eq!(loop_ctrl.max_iterations(), expected_cap);
+        let step = loop_ctrl.current_step();
+        let iteration = loop_ctrl.current_iteration();
+        loop_ctrl.restore_progress(step, iteration);
+        assert!(matches!(
+            loop_ctrl.next_state(), // fits within the new cap
+            Some(AgentState::Executing { .. })
+        ));
+        let tripped = loop_ctrl.next_state(); // past the new cap
+        assert!(matches!(tripped, Some(AgentState::Failed { .. })));
+    }
     assert_eq!(
         loop_ctrl.extend_budget_once(),
         None,
-        "no second extension after the budget is spent"
+        "after four grants the extension ceiling is reached"
     );
 }
 
 #[test]
 fn reset_for_task_restores_original_budget_and_extension() {
     let mut loop_ctrl = AgentLoop::new(10);
-    assert!(loop_ctrl.extend_budget_once().is_some());
-    assert_eq!(loop_ctrl.max_iterations(), 15);
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
+    assert_eq!(loop_ctrl.max_iterations(), 12);
     loop_ctrl.reset_for_task();
     assert_eq!(loop_ctrl.max_iterations(), 10);
     assert_eq!(
         loop_ctrl.extend_budget_once(),
-        Some(5),
-        "a new task gets its own one-shot extension"
+        Some(2),
+        "a new task gets its own extension budget"
     );
 }

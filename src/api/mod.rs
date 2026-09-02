@@ -91,6 +91,15 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
         };
         messages.insert(insert_pos, Message::user("Continue with the task."));
     }
+
+    // Anthropic rejects assistant prefill: the conversation must not END with
+    // an assistant message (measured live 2026-09-01: claude-fable-5/opus-5 via
+    // OpenRouter 400'd on every request once a recovery path left the history
+    // trailing on assistant). Ending on a user message is accepted by every
+    // provider, so close the turn with a minimal continuation.
+    if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
+        messages.push(Message::user("Continue with the task."));
+    }
 }
 
 fn maybe_prepend_disabled_thinking_instruction(

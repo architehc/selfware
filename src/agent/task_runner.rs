@@ -48,7 +48,7 @@ pub struct RunSummary {
     pub iterations: usize,
     /// The iteration cap, including any adaptive extension.
     pub max_iterations: usize,
-    /// The one-shot adaptive budget extension fired this run.
+    /// At least one adaptive budget extension fired this run.
     pub budget_extended: bool,
     /// Files written/edited by the agent this run, sorted.
     pub files_changed: Vec<String>,
@@ -124,6 +124,7 @@ impl Agent {
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
         self.clear_failed_tool_attempts();
+        self.edit_loop_recovery_used = false;
         self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
         self.total_no_action_prompts = 0;
@@ -802,13 +803,14 @@ impl Agent {
         }
     }
 
-    /// Adaptive turn budget (loop 13): the iteration cap just tripped. When
-    /// the last turns each show real forward progress — a non-error tool
-    /// result and no identical call repeated — grant ONE bounded extension
-    /// (+50% of the original cap) and resume Executing. Returns the state to
-    /// continue with, or `None` to fail as before. Conservative by/// construction: error-only streaks, repeated calls, and thin evidence
-    /// all abort; the extension can fire at most once per task
-    /// (`AgentLoop::extend_budget_once`).
+    /// Adaptive turn budget (loop 13, multi-fire since the TB4 diagnosis): the
+    /// iteration cap just tripped. When the last turns each show real forward
+    /// progress — a non-error tool result and no identical call repeated —
+    /// grant ONE bounded extension (+25% of the original cap, up to a +100%
+    /// total ceiling) and resume Executing. Returns the state to continue
+    /// with, or `None` to fail as before. Conservative by construction:
+    /// error-only streaks, repeated calls, and thin evidence all abort; the
+    /// ceiling lives in `AgentLoop::extend_budget_once`.
     fn maybe_extend_iteration_budget(&mut self) -> Option<AgentState> {
         const PROGRESS_WINDOW: usize = 5;
         if !super::loop_control::productive_streak(&self.recent_turn_progress, PROGRESS_WINDOW) {

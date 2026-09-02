@@ -24,9 +24,9 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
 [agent]
 # Terminal-Bench tasks are long-horizon (agent timeout 3600s): generous
 # iteration cap, wall budget leaves ~10 min of teardown headroom.
-max_iterations = 400
+max_iterations = 2000
 step_timeout_secs = 600
-max_wall_secs = 3300
+max_wall_secs = 14400
 # GLM 5.3 on OpenRouter supports native tool calling (the TB 3.0 leaderboard
 # ran it through Claude Code, a native-tool harness).
 native_function_calling = true
