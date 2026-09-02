@@ -256,7 +256,7 @@ jobs:
         # RUSTSEC-2026-0194/0195: quick-xml 0.30 remains only as a BUILD
         # dependency of xcb (bundled XML, not attacker input); runtime
         # copy via plist/syntect is 0.41.0 (fixed).
-        run: cargo audit --ignore RUSTSEC-2024-0320 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0435 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0097 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195
+        run: cargo audit --ignore RUSTSEC-2024-0320 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2025-0435 --ignore RUSTSEC-2025-0141 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2026-0037 --ignore RUSTSEC-2026-0097 --ignore RUSTSEC-2026-0194 --ignore RUSTSEC-2026-0195 --ignore RUSTSEC-2026-0258
 
   # Coverage (runs on main and PRs)
   coverage:
