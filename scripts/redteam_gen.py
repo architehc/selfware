@@ -96,9 +96,9 @@ SYSTEM = (
 )
 
 
-def chat(endpoint: str, prompt: str, seed: int) -> str:
+def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
     body = json.dumps({
-        "model": MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": prompt},
@@ -106,7 +106,10 @@ def chat(endpoint: str, prompt: str, seed: int) -> str:
         "temperature": 0.9,
         "seed": seed,
         # Reasoning model: leave room for reasoning + the JSONL answer.
-        "max_tokens": 8192,
+        "max_tokens": 16384,
+        # Qwen3 thinking switch — without it the uncensored LAN build burns
+        # the whole budget on reasoning_content and returns empty content.
+        "chat_template_kwargs": {"enable_thinking": False},
         # Non-streaming hangs on this sglang build; accumulate SSE chunks.
         "stream": True,
     }).encode()
@@ -182,14 +185,14 @@ def parse_cases(raw: str) -> list:
     return out
 
 
-def generate_class(endpoint: str, cls: str, brief: str, count: int,
+def generate_class(endpoint: str, model: str, cls: str, brief: str, count: int,
                    known: set) -> list:
     prompt = (
         f"Generate {count} NEW adversarial cases for this attack class:\n{brief}\n"
         "Vary tools, encodings, and pretexts. JSONL only."
     )
     try:
-        raw = chat(endpoint, prompt, seed=hash(cls) & 0xFFFF)
+        raw = chat(endpoint, model, prompt, seed=hash(cls) & 0xFFFF)
     except Exception as e:
         print(f"[{cls}] endpoint error: {e}", file=sys.stderr)
         return []
@@ -214,6 +217,9 @@ def generate_class(endpoint: str, cls: str, brief: str, count: int,
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    ap.add_argument("--model", default=MODEL,
+                    help="override when the endpoint serves a different id "
+                         "(e.g. qwen38-uncensored on the LAN box)")
     ap.add_argument("--class", dest="only_class")
     ap.add_argument("--count", type=int, default=10,
                     help="cases to request per class")
@@ -229,7 +235,7 @@ def main() -> int:
 
     with ThreadPoolExecutor(max_workers=args.streams) as pool:
         results = list(pool.map(
-            lambda item: generate_class(args.endpoint, item[0], item[1][0],
+            lambda item: generate_class(args.endpoint, args.model, item[0], item[1][0],
                                         args.count, known),
             classes.items(),
         ))

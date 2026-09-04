@@ -55,6 +55,9 @@ pub fn default_denied_paths() -> Vec<String> {
     vec![
         "**/.env".to_string(),
         "**/.env.local".to_string(),
+        // `.env.production`, `.env.staging`, … — the same credential file in
+        // a costume (red-team wave-3 finding).
+        "**/.env.*".to_string(),
         "**/.ssh/**".to_string(),
         "**/secrets/**".to_string(),
         // Block writing into git executable-config vectors: an agent could

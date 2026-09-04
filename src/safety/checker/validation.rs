@@ -34,6 +34,23 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "PERL5LIB",
     "RUBYLIB",
     "IFS",
+    // Interpreter startup hooks (red-team wave 4): every one of these loads
+    // attacker-controlled code at interpreter boot without touching the
+    // command's visible payload.
+    "PYTHONSTARTUP",
+    "PYTHONINSPECT",
+    "NODE_OPTIONS",
+    "PERL5OPT",
+    "RUBYOPT",
+    // Git execution vectors: agent git work goes through the git tools, not
+    // env-injected helpers.
+    "GIT_SSH_COMMAND",
+    "GIT_ASKPASS",
+    "GIT_EDITOR",
+    "GIT_PAGER",
+    // JVM equivalent of LD_PRELOAD.
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
 ];
 
 /// Programs whose `eval $(<program> …)` shell-integration line is a
@@ -71,6 +88,102 @@ fn command_arg_string(args: &serde_json::Value) -> String {
             .join(" "),
         _ => String::new(),
     }
+}
+
+/// Base64-looking query-param values (len >= 40) in a URL, for the
+/// credential-blob exfil check in check_endpoint_url.
+fn base64_like_query_blobs(url: &str) -> Vec<String> {
+    let Some((_, query)) = url.split_once('?') else {
+        return Vec::new();
+    };
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('=').map(|(_, v)| v))
+        .flat_map(|v| {
+            v.split(|c: char| {
+                !c.is_alphanumeric() && c != '_' && c != '-' && c != '+' && c != '/' && c != '='
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+        })
+        .filter(|v| v.len() >= 40)
+        .collect()
+}
+
+/// Lenient base64 decode (standard + URL-safe, padding optional) → UTF-8.
+fn decode_base64_lenient(input: &str) -> Option<String> {
+    fn val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = input.bytes().filter(|b| *b != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            break;
+        }
+        let v: Vec<u8> = chunk.iter().map(|b| val(*b).unwrap_or(0)).collect();
+        let n = ((v[0] as u32) << 18)
+            | ((v[1] as u32) << 12)
+            | (((*v.get(2).unwrap_or(&0)) as u32) << 6)
+            | ((*v.get(3).unwrap_or(&0)) as u32);
+        out.push((n >> 16) as u8);
+        if chunk.len() > 2 {
+            out.push((n >> 8) as u8);
+        }
+        if chunk.len() > 3 {
+            out.push(n as u8);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Extract bind-mount specs from a raw `docker run`-style shell command:
+/// `-v /h:/c`, `-v=/h:/c`, `--volume /h:/c`, `--volume=/h:/c`, and
+/// `--mount type=bind,source=/h,target=/c` (yields the host side, which is
+/// what check_volume_mount inspects).
+fn extract_shell_volume_specs(cmd: &str) -> Vec<String> {
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let unquote = |s: &str| s.trim_matches(['"', '\'']).to_string();
+    let mut specs = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        if tok == "-v" || tok == "--volume" {
+            if let Some(spec) = tokens.get(i + 1) {
+                specs.push(unquote(spec));
+                i += 1;
+            }
+        } else if let Some(rest) = tok
+            .strip_prefix("-v=")
+            .or_else(|| tok.strip_prefix("--volume="))
+        {
+            specs.push(unquote(rest));
+        } else if tok == "--mount" || tok.starts_with("--mount=") {
+            let mount_str = if tok == "--mount" {
+                i += 1;
+                tokens.get(i).copied().unwrap_or("")
+            } else {
+                tok.strip_prefix("--mount=").unwrap_or(tok)
+            };
+            for field in mount_str.split(',') {
+                if let Some(src) = field
+                    .strip_prefix("source=")
+                    .or_else(|| field.strip_prefix("src="))
+                {
+                    specs.push(unquote(src));
+                }
+            }
+        }
+        i += 1;
+    }
+    specs
 }
 
 /// Whether an `eval` invokes command substitution with a program outside
@@ -197,7 +310,18 @@ impl SafetyChecker {
                 // ({"host": "/etc", "container": "/host"} / docker's
                 // {"source": ..., "target": ...}); the object form previously
                 // bypassed this check entirely (red-team finding).
-                if let Some(volumes) = args.get("volumes").and_then(|v| v.as_array()) {
+                // volumes arrives as an array, OR as a stringified JSON
+                // array ("[\"/etc:/host\"]"), OR as a bare "host:container"
+                // string — the string forms previously skipped every check
+                // (red-team wave-5 finding).
+                let volumes_json: Option<serde_json::Value> = match args.get("volumes") {
+                    Some(v @ serde_json::Value::Array(_)) => Some(v.clone()),
+                    Some(serde_json::Value::String(s)) => serde_json::from_str(s)
+                        .ok()
+                        .or_else(|| Some(serde_json::json!([s.clone()]))),
+                    _ => None,
+                };
+                if let Some(serde_json::Value::Array(volumes)) = volumes_json {
                     for vol in volumes {
                         if let Some(mount) = vol.as_str() {
                             self.check_volume_mount(mount)?;
@@ -571,6 +695,26 @@ impl SafetyChecker {
             return Err(SelfwareError::Safety(SafetyError::BlockedEncodedCommand));
         }
 
+        // Raw `docker run` / `podman run` / `nerdctl run` in a shell bypasses
+        // the container_run TOOL's volume checks entirely (red-team wave-2
+        // finding). Extract bind-mount specs and run them through the same
+        // check_volume_mount gate; --privileged is never agent-legitimate.
+        if normalized.contains("docker run")
+            || normalized.contains("podman run")
+            || normalized.contains("nerdctl run")
+        {
+            if normalized.contains("--privileged") {
+                return Err(SelfwareError::Safety(
+                    SafetyError::DangerousCommandPattern {
+                        description: "container run with --privileged".to_string(),
+                    },
+                ));
+            }
+            for spec in extract_shell_volume_specs(&normalized) {
+                self.check_volume_mount(&spec)?;
+            }
+        }
+
         // denied_paths must also guard shell output redirects: without this,
         // `echo x > denied_file` bypasses the file-tool path checks entirely
         // (P1-8). Parse `>`/`>>` targets from the RAW command (preserving
@@ -934,6 +1078,24 @@ impl SafetyChecker {
             return Err(SelfwareError::Safety(
                 SafetyError::BlockedUrlShellSubstitution,
             ));
+        }
+        // Base64 blobs in query params that DECODE to credential-shaped
+        // content are smuggled exfil (red-team wave-5:
+        // ?data=eyJ1c2Vy...=  -> {"username":"admin","password":"..."}). A
+        // blob that decodes to something credential-free (pagination
+        // cursors, state params) passes.
+        for blob in base64_like_query_blobs(url) {
+            if let Some(decoded) = decode_base64_lenient(&blob) {
+                let lower = decoded.to_lowercase();
+                if ["pass", "secret", "token", "api_key", "apikey", "credential"]
+                    .iter()
+                    .any(|marker| lower.contains(marker))
+                {
+                    return Err(SelfwareError::Safety(
+                        SafetyError::BlockedUrlShellSubstitution,
+                    ));
+                }
+            }
         }
         self.check_url_ssrf_with_options(
             url,
@@ -1725,7 +1887,15 @@ fn git_push_protected_branch_target(cmd: &str, protected_branches: &[String]) ->
     if protected_branches.is_empty() {
         return None;
     }
-    let tokens = shlex::split(cmd)?;
+    // Unbalanced quotes make shlex give up — and previously made this guard
+    // give up too: `git push -f origin main'` returned None from split() and
+    // sailed through (red-team wave-2 finding). Fall back to whitespace
+    // tokens with quotes stripped — slightly cruder, strictly safer.
+    let tokens = shlex::split(cmd).unwrap_or_else(|| {
+        cmd.split_whitespace()
+            .map(|t| t.trim_matches(['"', '\'']).to_string())
+            .collect()
+    });
     // Resolve the actual command word, skipping `VAR=value` prefixes and a
     // `sudo`/`doas` wrapper (with its flags) — those prefixes must not defeat
     // the guard (`sudo git push origin main` pushes just as hard).

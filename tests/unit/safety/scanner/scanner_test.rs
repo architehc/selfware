@@ -437,11 +437,20 @@ fn test_secret_scanner_detect_base64_secret() {
 }
 
 #[test]
-fn test_secret_scanner_skip_double_slash_comment() {
+fn test_secret_scanner_finds_critical_patterns_in_comments() {
+    // Policy changed 2026-09-03 (red-team wave-3 finding): comment lines are
+    // no longer skipped outright — a secret in a comment leaks exactly like a
+    // secret in code (`// GITHUB_TOKEN=ghp_…` was the generated attack).
+    // Critical high-confidence shapes (AWS keys, GitHub/Stripe/Azure tokens,
+    // private keys) ARE found in comments; lower-severity patterns stay
+    // skipped to keep prose safe (see test_secret_scanner_skip_hash_comment).
     let mut scanner = SecretScanner::new();
     let content = "// aws_key = AKIAIOSFODNN7EXAMPLE";
     let findings = scanner.scan_content(content, None);
-    assert!(findings.is_empty());
+    assert!(
+        findings.iter().any(|f| f.title == "AWS Access Key"),
+        "Critical secret in a comment must be found: {findings:?}"
+    );
 }
 
 #[test]
