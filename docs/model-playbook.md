@@ -22,7 +22,7 @@ when a measurement changes.
 | tencent/hy4-preview | running | |
 | z-ai/glm-5.3 | running | |
 | meta/muse-spark-1.3-contributor | 0/9 | Never committed to writing. |
-| minimax/minimax-m3:free | 400 native-FC | No native tool support; XML retry required. |
+| minimax/minimax-m3:free | 0/9 | Two stacked issues: 400 on native FC (auto-fallback latches XML correctly) AND "tool call result does not follow tool call (2013)" — a history-pairing error the format flip cannot fix. Dead lane. |
 | z-ai/glm-5.2:free | 429 persistent | Free-tier upstream congestion. Dead lane. |
 | 27B locals (unc-kt, uncensored) | 0/173 across 8 instances | Reads forever, writes nothing. Not a Lean model. |
 
