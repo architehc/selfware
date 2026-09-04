@@ -33,6 +33,18 @@ HARBOR_JOBS = Path("/home/rig/harbor-agents/jobs")
 VERO_RUNS = Path("/home/rig/vero/agent_runs")
 CORPUS = Path("/home/rig/selfware/tests/redteam/corpus")
 
+# OpenRouter price per token (prompt, completion) for cost-equivalence.
+# Measured from the OpenRouter /models API 2026-09-04. Local models priced at
+# their closest hosted equivalent: 27B locals -> qwen3.8-27b ($0.42/$3.0 per M),
+# flash-next (flagship class) -> qwen3.8-max ($2.0/$6.0 per M).
+SHADOW_RATES = {
+    "ablit/31000": (0.42e-6, 3.0e-6),
+    "unc/lan8000": (0.42e-6, 3.0e-6),
+    "flash/design": (2.0e-6, 6.0e-6),
+    "glm/openrouter": (1.4e-6, 4.4e-6),
+    "unknown": (1.4e-6, 4.4e-6),
+}
+
 CONFIG_ENDPOINT = {
     "selfware-harbor.toml": "glm/openrouter",
     "selfware-harbor-local.toml": "ablit/31000",
@@ -136,6 +148,54 @@ def job_rewards(job_dir: Path):
     return {}
 
 
+RATE_WINDOWS = [("1m", 60), ("5m", 300), ("15m", 900), ("1h", 3600)]
+
+
+def scan_rates(now: float):
+    """Per-endpoint tok/s (in/out) over rolling windows, from recent trial logs.
+
+    Anchors each log's event timestamps to the file's mtime (container clocks
+    differ; rates only need within-file consistency).
+    """
+    rates = defaultdict(lambda: {w: [0, 0] for w, _ in RATE_WINDOWS})
+    if not HARBOR_JOBS.exists():
+        return rates
+    for log in HARBOR_JOBS.glob("2026-*/*__*/agent/selfware.txt"):
+        try:
+            mtime = log.stat().st_mtime
+        except OSError:
+            continue
+        if now - mtime > 3600:
+            continue  # only files active in the last hour can contribute
+        try:
+            job_dir = log.parent.parent.parent
+            ep = endpoint_of(job_dir)
+            with log.open(errors="replace") as f:
+                for line in f:
+                    m = REQ_RE.search(line)
+                    if m:
+                        h, mi, s = map(int, m.group(1).split(":"))
+                        ts = mtime - ((mtime % 86400) - (h * 3600 + mi * 60 + s))
+                        if ts > mtime:
+                            ts -= 86400
+                        for w, secs in RATE_WINDOWS:
+                            if now - ts <= secs:
+                                rates[ep][w][0] += int(m.group(2))
+                        continue
+                    m = RESP_RE.search(line)
+                    if m:
+                        h, mi, s = map(int, m.group(1).split(":"))
+                        ts = mtime - ((mtime % 86400) - (h * 3600 + mi * 60 + s))
+                        if ts > mtime:
+                            ts -= 86400
+                        for w, secs in RATE_WINDOWS:
+                            if now - ts <= secs:
+                                rates[ep][w][1] += int(m.group(2))
+        except OSError:
+            continue
+    return rates
+
+
 def bucket(t: float, now: float) -> str:
     age = now - t
     if age <= 3600:
@@ -208,6 +268,8 @@ def report(now: float) -> str:
             continue
         corpus_lines += sum(1 for _ in f.open(errors="replace"))
 
+    shadow = defaultdict(float)
+    shadow_paid = defaultdict(float)
     out = []
     out.append(f"selfdev stats — {datetime.now().strftime('%F %T')}  ({trials_seen} trials scanned)")
     out.append("")
@@ -220,11 +282,45 @@ def report(now: float) -> str:
             f"{int(d['prompt_tokens']):>12,} {int(d['completion_tokens']):>11,} "
             f"{int(d['total_tokens']):>13,} {d['cost']:>9.2f}"
         )
+        pr, cr = SHADOW_RATES.get(ep, (0.0, 0.0))
+        if ep in ("glm/openrouter", "unknown"):
+            shadow_paid[b] += d["prompt_tokens"] * pr + d["completion_tokens"] * cr
+        else:
+            shadow[b] += d["prompt_tokens"] * pr + d["completion_tokens"] * cr
     out.append("")
+    if shadow or shadow_paid:
+        out.append("cost at OpenRouter rates:")
+        for b in ["1h", "24h", "7d"]:
+            saved = shadow.get(b, 0.0)
+            paid = shadow_paid.get(b, 0.0)
+            if saved or paid:
+                out.append(f"  {b:>4}: saved by local fleet ${saved:,.2f}   (glm-equivalent spend ${paid:,.2f})")
+        out.append("")
     if rewards:
         out.append("rewards by endpoint: " + ", ".join(
             f"{ep}={rw}×{n}" for (ep, rw), n in sorted(rewards.items())))
         out.append("")
+    rates = scan_rates(now)
+    if rates:
+        out.append("LIVE RATES (tok/s in/out by endpoint)")
+        hdr2 = f"{'endpoint':<16}" + "".join(f"  {w:>11}" for w, _ in RATE_WINDOWS)
+        out.append(hdr2)
+        out.append("-" * len(hdr2))
+        for ep in sorted(rates):
+            cells = []
+            for w, secs in RATE_WINDOWS:
+                i, o = rates[ep][w]
+                cells.append(f"{i//secs:>5}/{o//secs:<5}")
+                # total tok/s into 24h calc below
+            out.append(f"{ep:<16}" + "  ".join(f"{c:>11}" for c in cells))
+        # fleet totals
+        fleet_bits = []
+        for ep in sorted(rates):
+            i, o = rates[ep]["1h"]
+            fleet_bits.append(f"{ep} {(i + o) // 3600} tok/s")
+        out.append("fleet total/h: " + ", ".join(fleet_bits))
+        out.append("")
+
     out.append(f"vero: {dict((k, v) for k, v in vero.items() if not k.startswith('by_benchmark'))}")
     out.append(f"red-team corpus: {corpus_lines} attack cases")
     return "\n".join(out)
