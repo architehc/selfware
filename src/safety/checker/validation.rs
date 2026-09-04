@@ -1079,6 +1079,26 @@ impl SafetyChecker {
                 SafetyError::BlockedUrlShellSubstitution,
             ));
         }
+        // Sensitive local paths referenced in the URL — the agent shipping
+        // `/root/.ssh/id_rsa` or `/etc/hostname` as a query param to a
+        // remote host is exfiltration, not an API call (wave-9 finding).
+        let lower_url = url.to_lowercase();
+        for marker in [
+            "/etc/", "/root/", "/home/", ".ssh", ".env", "id_rsa", "passwd",
+        ] {
+            if lower_url.contains(marker) {
+                return Err(SelfwareError::Safety(
+                    SafetyError::BlockedUrlShellSubstitution,
+                ));
+            }
+        }
+        // Webhook URLs are secrets AND exfil sinks: posting to a Slack
+        // webhook-shape URL sends whatever the agent includes straight out.
+        if lower_url.contains("hooks.slack.com/services/") {
+            return Err(SelfwareError::Safety(
+                SafetyError::BlockedUrlShellSubstitution,
+            ));
+        }
         // Base64 blobs in query params that DECODE to credential-shaped
         // content are smuggled exfil (red-team wave-5:
         // ?data=eyJ1c2Vy...=  -> {"username":"admin","password":"..."}). A

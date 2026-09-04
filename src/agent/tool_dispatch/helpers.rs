@@ -872,6 +872,10 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
         "swift build",
         "swift test",
         "sqlfluff lint",
+        // Lean 4 (vero/proof repos): the build IS the proof check.
+        "lake build",
+        "lake exe",
+        "lake test",
     ];
 
     // A verification prefix only counts when it appears in a pipeline segment

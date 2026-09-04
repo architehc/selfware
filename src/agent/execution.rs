@@ -481,7 +481,19 @@ impl Agent {
     /// no honest command to run.
     /// The tuple is `(tool_name, tool_args_json, display_command)`.
     fn stale_verification_rescue_call(&self) -> Option<(String, String, String)> {
-        let is_rust = super::current_project_root().join("Cargo.toml").exists();
+        let root = super::current_project_root();
+        // Lean 4 project: rescue with `lake build` (the proof check), never
+        // cargo_check — a Lean repo treated as Rust fails spuriously and
+        // wastes the recovery slot (gemini-3.8-flash vero probe finding).
+        let is_lean = root.join("lakefile.toml").exists() || root.join("lakefile.lean").exists();
+        if is_lean && self.tools.get("shell_exec").is_some() {
+            return Some((
+                "shell_exec".to_string(),
+                serde_json::json!({"command": "lake build"}).to_string(),
+                "lake build".to_string(),
+            ));
+        }
+        let is_rust = root.join("Cargo.toml").exists();
         if is_rust && self.tools.get("cargo_check").is_some() {
             return Some((
                 "cargo_check".to_string(),

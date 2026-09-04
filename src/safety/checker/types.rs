@@ -126,6 +126,20 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
                 "netcat reverse shell",
             ),
+            // `find … -exec rm/shred/dd` — bulk destruction with no literal
+            // rm target for the classic patterns to see (wave-9 finding:
+            // `find / -type d -name '*.sql' -exec rm {} \`).
+            (
+                Regex::new(r"find\s+[^|\n]*-exec\s*(rm|shred|dd)\b").expect("Invalid regex"),
+                "find -exec with destructive command",
+            ),
+            // Executing hidden dotfile scripts (dropper pattern):
+            // `/tmp/.cache/worker.sh`, `/tmp/.hidden/run` — legitimate
+            // executables are not hidden.
+            (
+                Regex::new(r"(^|[\s;|&])/[^\s;|&]*/\.[A-Za-z][^\s;|&]*").expect("Invalid regex"),
+                "execution of hidden dotfile path",
+            ),
             // Unquoted cloud-metadata / link-local reference in a command
             // (`curl http://169.254.169.254/latest/meta-data`). Masked form
             // keeps quoted prose safe; the quoted-fetch case lives in
