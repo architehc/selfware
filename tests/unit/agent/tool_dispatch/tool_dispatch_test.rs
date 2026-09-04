@@ -1088,6 +1088,8 @@ fn test_inject_runtime_tool_defaults_uses_vision_profile() {
                 map
             }),
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
 
@@ -1123,6 +1125,8 @@ fn test_inject_runtime_tool_defaults_preserves_explicit_values() {
             context_length: 262_144,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
 
@@ -1154,6 +1158,8 @@ fn test_inject_runtime_tool_defaults_ignores_text_only_default_profile() {
             context_length: 131_072,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
 

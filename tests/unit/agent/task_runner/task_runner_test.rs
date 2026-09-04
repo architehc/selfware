@@ -64,6 +64,7 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
         agent: AgentConfig {
             max_iterations: 8,
             step_timeout_secs: 30,
+            stream_stall_timeout_secs: None,
             streaming,
             native_function_calling: false,
             min_completion_steps: 0,

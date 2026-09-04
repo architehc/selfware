@@ -440,6 +440,7 @@ fn mock_config(endpoint: String) -> Config {
         agent: crate::config::AgentConfig {
             max_iterations: 5,
             step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             ..Default::default()
@@ -2628,6 +2629,8 @@ async fn test_execute_tool_batch_vision_analyze_uses_configured_vision_profile()
                 extra
             }),
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let mut agent = Agent::new(config).await.unwrap();

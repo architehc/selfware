@@ -895,6 +895,8 @@ fn test_resolve_model_existing_id() {
             context_length: default_context_length(),
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(Some("coder"));
@@ -917,6 +919,8 @@ fn test_resolve_model_nonexistent_falls_back_to_default() {
             context_length: default_context_length(),
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(Some("nonexistent"));
@@ -939,6 +943,8 @@ fn test_resolve_model_none_falls_back_to_default() {
             context_length: default_context_length(),
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(None);
@@ -2065,6 +2071,8 @@ fn untrusted_project_config_resets_profile_endpoints() {
         context_length: 8192,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     config
         .models

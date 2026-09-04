@@ -227,6 +227,7 @@ fn live_config() -> Option<selfware::config::Config> {
         agent: selfware::config::AgentConfig {
             max_iterations: 20,
             step_timeout_secs: 120,
+            stream_stall_timeout_secs: None,
             token_budget: 900_000,
             streaming: true,
             native_function_calling: false,

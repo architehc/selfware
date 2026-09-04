@@ -348,6 +348,7 @@ fn test_config_full_roundtrip() {
         agent: AgentConfig {
             max_iterations: 50,
             step_timeout_secs: 120,
+            stream_stall_timeout_secs: None,
             token_budget: 100000,
             native_function_calling: false,
             streaming: true,
@@ -1363,6 +1364,8 @@ fn test_model_profile_clone() {
         context_length: 4096,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let cloned = profile.clone();
     assert_eq!(cloned.endpoint, profile.endpoint);
@@ -1383,6 +1386,8 @@ fn test_model_profile_serialize_roundtrip() {
         context_length: 16384,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let toml_str = toml::to_string(&profile).unwrap();
     let parsed: ModelProfile = toml::from_str(&toml_str).unwrap();
@@ -1405,6 +1410,8 @@ fn test_model_profile_debug_format() {
         context_length: 4096,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let debug = format!("{:?}", profile);
     assert!(debug.contains("ModelProfile"));
@@ -1485,6 +1492,8 @@ fn test_resolve_model_default() {
             context_length: 131072,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(None);
@@ -1507,6 +1516,8 @@ fn test_resolve_model_by_name() {
             context_length: 8192,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(Some("vision"));
@@ -1529,6 +1540,8 @@ fn test_resolve_model_fallback_to_default() {
             context_length: 131072,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(Some("nonexistent"));
@@ -1558,6 +1571,8 @@ fn test_resolve_model_none_with_no_default() {
             context_length: 131072,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let profile = config.resolve_model(None);
@@ -2333,6 +2348,7 @@ fn test_agent_config_serialize_roundtrip() {
     let config = AgentConfig {
         max_iterations: 25,
         step_timeout_secs: 60,
+        stream_stall_timeout_secs: None,
         token_budget: 100000,
         native_function_calling: true,
         streaming: false,
@@ -2401,9 +2417,11 @@ fn test_default_min_completion_steps_fn() {
 #[test]
 fn test_default_denied_paths_fn() {
     let paths = default_denied_paths();
-    assert_eq!(paths.len(), 6);
+    assert_eq!(paths.len(), 7);
     assert!(paths.contains(&"**/.env".to_string()));
     assert!(paths.contains(&"**/.env.local".to_string()));
+    // .env.production / .env.staging etc. (red-team wave-3 finding).
+    assert!(paths.contains(&"**/.env.*".to_string()));
     assert!(paths.contains(&"**/.ssh/**".to_string()));
     assert!(paths.contains(&"**/secrets/**".to_string()));
     // .git executable-config vectors (hooks + config) are denied by default.
@@ -2509,6 +2527,8 @@ fn test_config_full_roundtrip_with_models() {
             context_length: 32768,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     models.insert(
@@ -2523,6 +2543,8 @@ fn test_config_full_roundtrip_with_models() {
             context_length: 16384,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
 
@@ -3781,6 +3803,8 @@ fn test_model_profile_supports_vision() {
         context_length: 8192,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     assert!(profile_with_vision.supports_vision());
 
@@ -3812,6 +3836,8 @@ fn test_model_profile_extra_body() {
         context_length: 8192,
         extra_body: Some(extra),
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     assert!(profile.extra_body.is_some());

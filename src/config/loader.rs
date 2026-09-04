@@ -979,6 +979,8 @@ impl Config {
                     context_length: config.context_length,
                     extra_body: config.extra_body.clone(),
                     native_function_calling: None,
+                    max_retries: None,
+                    response_timeout_floor_secs: None,
                 },
             );
         }

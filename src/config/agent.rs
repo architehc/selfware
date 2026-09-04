@@ -24,6 +24,13 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     #[serde(default = "default_step_timeout")]
     pub step_timeout_secs: u64,
+    /// Cancel a streaming request that produces NO chunks for this many
+    /// seconds (no-progress watchdog). `None` keeps the legacy behavior
+    /// (`max(step_timeout_secs, 30)`). Tune per endpoint: slow local boxes
+    /// with long prefill phases want 1200+, fast boxes want 300 — silence on
+    /// a fast box means wedged, silence on a slow box means prefill.
+    #[serde(default)]
+    pub stream_stall_timeout_secs: Option<u64>,
     #[serde(default = "default_token_budget")]
     pub token_budget: usize,
     /// Safety margin subtracted from token_budget to prevent exceeding model context limit.
@@ -113,6 +120,7 @@ impl Default for AgentConfig {
         Self {
             max_iterations: default_max_iterations(),
             step_timeout_secs: default_step_timeout(),
+            stream_stall_timeout_secs: None,
             token_budget: super::default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
             token_safety_margin: default_token_safety_margin(),
             native_function_calling: false,

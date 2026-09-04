@@ -2882,6 +2882,8 @@ async fn test_chat_with_profile_normalizes_messages() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     // Only system + tool messages (no user message) — canonicalization
@@ -2942,6 +2944,8 @@ async fn test_chat_with_profile_strips_images_for_text_only_model() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     // Send a real multimodal message — strip_images should remove the image block.
@@ -2991,6 +2995,8 @@ async fn test_chat_with_profile_context_overflow() {
         context_length: 100, // Impossibly small
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let messages = vec![
@@ -3908,6 +3914,8 @@ async fn test_chat_with_profile_honors_native_function_calling_true() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: Some(true),
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let result = client
@@ -3964,6 +3972,8 @@ async fn test_chat_with_profile_honors_native_function_calling_false() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: Some(false),
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let result = client
@@ -4020,6 +4030,8 @@ async fn test_chat_with_profile_inherits_parent_native_fc() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None, // inherit from parent
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let result = client
@@ -4084,6 +4096,8 @@ async fn test_chat_and_chat_with_profile_agree_on_tool_choice() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: Some(true),
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let _ = client
         .chat_with_profile(

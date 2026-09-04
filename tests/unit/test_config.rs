@@ -204,6 +204,7 @@ mod agent_config_tests {
         let config = AgentConfig {
             max_iterations: 50,
             step_timeout_secs: 120,
+            stream_stall_timeout_secs: None,
             token_budget: 8000,
             native_function_calling: true,
             streaming: false,

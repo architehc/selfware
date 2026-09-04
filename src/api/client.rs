@@ -774,8 +774,11 @@ impl ApiClient {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
-                            let mut stream_chunk_timeout_secs =
-                                self.config.agent.step_timeout_secs.max(30);
+                            let mut stream_chunk_timeout_secs = self
+                                .config
+                                .agent
+                                .stream_stall_timeout_secs
+                                .unwrap_or_else(|| self.config.agent.step_timeout_secs.max(30));
                             if let Some(wall) = self.config.agent.max_wall_secs {
                                 stream_chunk_timeout_secs =
                                     stream_chunk_timeout_secs.min(wall.max(1));
@@ -917,7 +920,7 @@ impl ApiClient {
     }
 
     async fn send_with_retry_inner(&self, body: &serde_json::Value) -> Result<ChatResponse> {
-        self.send_request_with_retry(body, &self.base_url, self.config.api_key.as_ref())
+        self.send_request_with_retry(body, &self.base_url, self.config.api_key.as_ref(), None)
             .await
     }
 
@@ -926,8 +929,15 @@ impl ApiClient {
         body: &serde_json::Value,
         endpoint: &str,
         api_key: Option<&crate::config::RedactedString>,
+        timeout_overrides: Option<&crate::config::ModelProfile>,
     ) -> Result<ChatResponse> {
         crate::config::api_key::assert_credential_endpoint_safe(endpoint, api_key.is_some())?;
+
+        // Per-profile overrides (None fields fall back to the parent's
+        // global retry config / adaptive-timeout floor).
+        let max_retries = timeout_overrides
+            .map(|p| p.effective_max_retries(self.retry_config.max_retries))
+            .unwrap_or(self.retry_config.max_retries);
 
         let url = format!("{}/chat/completions", endpoint);
         let mut last_error: Option<anyhow::Error> = None;
@@ -941,7 +951,7 @@ impl ApiClient {
         // in the run must not restart the budget window.
         let deadline = self.run_wall_deadline();
 
-        for attempt in 0..=self.retry_config.max_retries {
+        for attempt in 0..=max_retries {
             // Stop rather than begin another billable attempt once the
             // run-level wall-clock deadline has passed. Classified as a
             // budget stop (WallClockBudgetExceeded), not a network error, so
@@ -952,7 +962,7 @@ impl ApiClient {
             if attempt > 0 {
                 warn!(
                     "Retry attempt {}/{} after {}ms delay",
-                    attempt, self.retry_config.max_retries, delay_ms
+                    attempt, max_retries, delay_ms
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
@@ -995,6 +1005,9 @@ impl ApiClient {
             // against shutdown so Ctrl-C / SIGTERM interrupts promptly.
             let call_started = Instant::now();
             let mut response_timeout_secs = self.adaptive_response_timeout_secs();
+            if let Some(floor) = timeout_overrides.and_then(|p| p.response_timeout_floor_secs) {
+                response_timeout_secs = response_timeout_secs.max(floor);
+            }
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit).
                 let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
@@ -1021,7 +1034,7 @@ impl ApiClient {
                         "Non-streaming request timed out after {}s (attempt {}/{})",
                         response_timeout_secs,
                         attempt + 1,
-                        self.retry_config.max_retries + 1
+                        max_retries + 1
                     );
                     last_error = Some(
                         ApiError::Network(format!(
@@ -1275,8 +1288,13 @@ impl ApiClient {
             "model profile chat request",
         )?;
 
-        self.send_request_with_retry(&body, &profile.endpoint, profile.api_key.as_ref())
-            .await
+        self.send_request_with_retry(
+            &body,
+            &profile.endpoint,
+            profile.api_key.as_ref(),
+            Some(profile),
+        )
+        .await
     }
 }
 

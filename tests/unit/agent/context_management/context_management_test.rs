@@ -12,6 +12,7 @@ async fn make_test_agent(server: &MockLlmServer) -> Agent {
         agent: crate::config::AgentConfig {
             max_iterations: 4,
             step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             ..Default::default()

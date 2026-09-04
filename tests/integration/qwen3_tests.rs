@@ -36,6 +36,7 @@ fn qwen3_config() -> Config {
         agent: AgentConfig {
             max_iterations: 20,
             step_timeout_secs: 120,
+            stream_stall_timeout_secs: None,
             token_budget: 100000,
             native_function_calling: true, // Use native FC with Qwen3
             streaming: true,

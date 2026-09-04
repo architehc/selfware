@@ -69,6 +69,7 @@ fn slow_model_config() -> Config {
         agent: AgentConfig {
             max_iterations: 20, // Allow more iterations for complex tasks
             step_timeout_secs: timeout,
+            stream_stall_timeout_secs: None,
             token_budget: 100000,          // Larger token budget
             native_function_calling: true, // Use native FC when available
             streaming: true,

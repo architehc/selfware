@@ -633,6 +633,7 @@ async fn test_live_tool_dispatch_uses_models_vision_profile() {
         agent: AgentConfig {
             max_iterations: 4,
             step_timeout_secs: 90,
+            stream_stall_timeout_secs: None,
             token_budget: 4096,
             native_function_calling: true,
             streaming: false,
@@ -662,6 +663,8 @@ async fn test_live_tool_dispatch_uses_models_vision_profile() {
                 extra
             }),
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
 

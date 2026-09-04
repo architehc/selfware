@@ -171,6 +171,18 @@ pub struct ModelProfile {
     /// `src/api/tool_calling.rs`.
     #[serde(default)]
     pub native_function_calling: Option<bool>,
+    /// Per-profile retry-count override for failed requests. `None` falls
+    /// back to the parent's `retry.max_retries`. Hosted-slow and
+    /// local-flaky endpoints want different retry shapes.
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// Per-profile response-timeout floor in seconds. The response wait is
+    /// adaptive (measured endpoint speed), but before the first measurement
+    /// lands the default TPS assumption can be badly wrong for unusual
+    /// backends (e.g. hybrid CPU/GPU ktransformers); the floor protects the
+    /// cold-start window. `None` uses the global floor.
+    #[serde(default)]
+    pub response_timeout_floor_secs: Option<u64>,
 }
 
 impl ModelProfile {
@@ -186,6 +198,11 @@ impl ModelProfile {
     /// (typically the parent `Config.agent.native_function_calling`).
     pub fn effective_native_function_calling(&self, default_native: bool) -> bool {
         self.native_function_calling.unwrap_or(default_native)
+    }
+
+    /// Resolve the effective retry count for this profile.
+    pub fn effective_max_retries(&self, default_max_retries: u32) -> u32 {
+        self.max_retries.unwrap_or(default_max_retries)
     }
 }
 

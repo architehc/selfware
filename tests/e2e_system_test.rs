@@ -64,6 +64,7 @@ fn test_llm_config() -> Config {
         agent: AgentConfig {
             max_iterations: 10,
             step_timeout_secs: 120,
+            stream_stall_timeout_secs: None,
             token_budget: 50_000,
             native_function_calling: false,
             streaming: false,

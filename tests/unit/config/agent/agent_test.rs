@@ -174,6 +174,7 @@ fn test_agent_config_serde_roundtrip() {
     let cfg = AgentConfig {
         max_iterations: 42,
         step_timeout_secs: 99,
+        stream_stall_timeout_secs: None,
         token_budget: 12345,
         token_safety_margin: 4096,
         native_function_calling: true,
