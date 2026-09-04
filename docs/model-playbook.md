@@ -20,6 +20,10 @@ when a measurement changes.
 |---|---|---|
 | google/gemini-3.8-flash | **2/9** then **11/11 bankledger PERFECT** | Also 1/19 munkres, 0/15 toposort, first TB3 solve (1.0). Vero/proof champion on bank-type instances. |
 | tencent/hy4-preview | **4/9** primepy, **0/11** bankledger | Wins small-arithmetic instances, zero on ledger-style. Instance × model is decisive. |
+
+### Measured envelopes
+- **gemini-3.8-flash closes instances with <20 specs**: 11/11 (11 specs), 1/19, 2/9 — but 0/20, 0/23, 0/26, 0/27, 0/40, 0/43, 0/53. Size beats type as the predictor.
+- **OpenRouter burn at full fleet ≈ $100/h**: $200 lasted ~2h (gemini TB3-70 + ~15 probes). Paid runs need per-trial budgets or they 402 mid-wave.
 | deepseek/deepseek-v4-pro-0813 | **4/9** primepy | bankledger running. |
 | tencent/hy4-preview | running | |
 | z-ai/glm-5.3 | running | |
