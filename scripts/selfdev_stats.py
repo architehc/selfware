@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""Selfdev observability — live token/request/cost stats across every
+selfware consumer, built from the artifacts the runs already produce.
+
+Sources (no new infra, no endpoints needed):
+- Harbor trials  jobs/*/agent/selfware.txt  (llm_request_sent/response events,
+  outcome lines with tokens+cost) + jobs/*/result.json (rewards)
+- Vero runs      vero/agent_runs/*/source/agent_events.jsonl + eval reports
+- Red-team       tests/redteam/corpus/*.jsonl growth
+
+Endpoint attribution comes from each job's harbor config filename:
+  selfware-harbor.toml       -> glm/openrouter (paid)
+  selfware-harbor-local.toml -> ablit/localhost:31000
+  selfware-harbor-lan.toml   -> unc/192.168.137.1:8000
+  selfware-harbor-flash1m.toml -> flash/llm.selfware.design
+
+Usage:
+  python3 scripts/selfdev_stats.py            # one-shot report
+  python3 scripts/selfdev_stats.py --watch 30 # refresh every 30s
+  python3 scripts/selfdev_stats.py --json out.json
+"""
+
+import argparse
+import json
+import os
+import re
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+HARBOR_JOBS = Path("/home/rig/harbor-agents/jobs")
+VERO_RUNS = Path("/home/rig/vero/agent_runs")
+CORPUS = Path("/home/rig/selfware/tests/redteam/corpus")
+
+CONFIG_ENDPOINT = {
+    "selfware-harbor.toml": "glm/openrouter",
+    "selfware-harbor-local.toml": "ablit/31000",
+    "selfware-harbor-lan.toml": "unc/lan8000",
+    "selfware-harbor-flash1m.toml": "flash/design",
+}
+
+REQ_RE = re.compile(r"\[(\d\d:\d\d:\d\d)\] kind=llm_request_sent prompt_tokens=(\d+)")
+RESP_RE = re.compile(r"\[(\d\d:\d\d:\d\d)\] kind=llm_response_received .*completion_tokens=(\d+)")
+TOKENS_RE = re.compile(r"tokens: (\d+) total(?:, cost \$([\d.]+))?")
+REWARD_RE = re.compile(r"'([01]\.0)': \[(.*?)\]")
+
+
+def endpoint_of(job_dir: Path) -> str:
+    """Endpoint label from the trial config uploaded into the job."""
+    # Containers rename the uploaded config to a generic path, so filename
+    # matching is useless — attribute by the endpoint URL in the trial log.
+    cfg = os.environ.get("SELFWARE_HARBOR_CONFIG_HINT", "")
+    for name, label in CONFIG_ENDPOINT.items():
+        if name == "selfware-harbor.toml":
+            continue
+        if name in cfg:
+            return label
+    url_labels = [
+        ("openrouter.ai", "glm/openrouter"),
+        ("192.168.137.1:8000", "unc/lan8000"),
+        ("llm.selfware.design", "flash/design"),
+        ("172.17.0.1:31000", "ablit/31000"),
+        ("localhost:31000", "ablit/31000"),
+    ]
+    try:
+        for trial in sorted(job_dir.glob("*__*/agent/selfware.txt"))[:2]:
+            head = trial.read_text(errors="replace")[:20000]
+            for marker, label in url_labels:
+                if marker in head:
+                    return label
+    except OSError:
+        pass
+    return "unknown"
+
+
+def scan_trials(job_dir: Path):
+    """Per-trial token/cost/request events + rewards."""
+    model_cache = None
+    for trial in sorted(job_dir.glob("*__*/")):
+        log = trial / "agent" / "selfware.txt"
+        if not log.exists():
+            continue
+        if model_cache is None:
+            model_cache = endpoint_of(job_dir)
+        endpoint = model_cache
+        mtime = log.stat().st_mtime
+        requests = responses = 0
+        prompt_toks = completion_toks = 0
+        total_tokens = 0
+        cost = 0.0
+        first_ts = last_ts = None
+        try:
+            with log.open(errors="replace") as f:
+                for line in f:
+                    m = REQ_RE.search(line)
+                    if m:
+                        requests += 1
+                        prompt_toks += int(m.group(2))
+                        last_ts = mtime
+                        if first_ts is None:
+                            first_ts = mtime
+                    m = RESP_RE.search(line)
+                    if m:
+                        responses += 1
+                        completion_toks += int(m.group(2))
+                    m = TOKENS_RE.search(line)
+                    if m:
+                        total_tokens = max(total_tokens, int(m.group(1)))
+                        if m.group(2):
+                            cost = max(cost, float(m.group(2)))
+        except OSError:
+            continue
+        yield {
+            "endpoint": endpoint,
+            "trial": trial.name,
+            "requests": requests,
+            "responses": responses,
+            "prompt_tokens": prompt_toks,
+            "completion_tokens": completion_toks,
+            "total_tokens": total_tokens,
+            "cost": cost,
+            "mtime": mtime,
+        }
+
+
+def job_rewards(job_dir: Path):
+    try:
+        data = json.loads((job_dir / "result.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    stats = data.get("stats", {})
+    evals = stats.get("evals", {})
+    for v in evals.values():
+        return v.get("reward_stats", {}).get("reward", {})
+    return {}
+
+
+def bucket(t: float, now: float) -> str:
+    age = now - t
+    if age <= 3600:
+        return "1h"
+    if age <= 86400:
+        return "24h"
+    if age <= 7 * 86400:
+        return "7d"
+    return "older"
+
+
+def report(now: float) -> str:
+    per_ep = defaultdict(lambda: defaultdict(float))
+    rewards = defaultdict(int)
+    trials_seen = 0
+    for job_dir in sorted(HARBOR_JOBS.glob("2026-*/"), reverse=True):
+        if not job_dir.is_dir():
+            continue
+        jrewards = job_rewards(job_dir)
+        job_ep = endpoint_of(job_dir)
+        for reward, trials in jrewards.items():
+            rewards[(job_ep, reward)] += len(trials)
+        for r in scan_trials(job_dir):
+            trials_seen += 1
+            b = bucket(r["mtime"], now)
+            if b == "older":
+                continue
+            ep = r["endpoint"]
+            for b2 in {b, "24h" if b == "1h" else None, "7d"} - {None}:
+                d = per_ep[(ep, b2)]
+                d["trials"] += 1
+                d["requests"] += r["requests"]
+                d["prompt_tokens"] += r["prompt_tokens"]
+                d["completion_tokens"] += r["completion_tokens"]
+                d["total_tokens"] += r["total_tokens"]
+                d["cost"] += r["cost"]
+
+    # Vero runs
+    vero = defaultdict(int)
+    for run in sorted(VERO_RUNS.glob("*-selfware-*"), reverse=True)[:50]:
+        events = run / "source" / "agent_events.jsonl"
+        if not events.exists():
+            continue
+        age = now - events.stat().st_mtime
+        if age > 7 * 86400:
+            continue
+        try:
+            last = events.read_text(errors="replace").strip().splitlines()[-1]
+            d = json.loads(last)
+        except (OSError, json.JSONDecodeError, IndexError):
+            continue
+        name = run.name.split("-selfware-")[0]
+        if d.get("kind") == "run_end":
+            key = "finished_ok" if d.get("ok") else "finished_fail"
+            vero[key] += 1
+            rep = run / "eval" / "default" / "report.md"
+            if rep.exists():
+                m = re.search(r"Specs passed\*\*: (\d+) / (\d+)", rep.read_text())
+                if m and int(m.group(1)) > 0:
+                    vero["specs_passed_runs"] += 1
+        else:
+            vero["running"] += 1
+        vero.setdefault("by_benchmark:" + name, 0)
+        vero["by_benchmark:" + name] += 1
+
+    # Corpus growth
+    corpus_lines = 0
+    for f in CORPUS.glob("*.jsonl"):
+        if f.name.startswith("probe_"):
+            continue
+        corpus_lines += sum(1 for _ in f.open(errors="replace"))
+
+    out = []
+    out.append(f"selfdev stats — {datetime.now().strftime('%F %T')}  ({trials_seen} trials scanned)")
+    out.append("")
+    hdr = f"{'endpoint':<16} {'window':>5} {'trials':>6} {'reqs':>6} {'prompt_tok':>12} {'compl_tok':>11} {'total_tok':>13} {'cost $':>9}"
+    out.append(hdr)
+    out.append("-" * len(hdr))
+    for (ep, b), d in sorted(per_ep.items(), key=lambda x: (x[0][0], ["1h", "24h", "7d"].index(x[0][1]))):
+        out.append(
+            f"{ep:<16} {b:>5} {int(d['trials']):>6} {int(d['requests']):>6} "
+            f"{int(d['prompt_tokens']):>12,} {int(d['completion_tokens']):>11,} "
+            f"{int(d['total_tokens']):>13,} {d['cost']:>9.2f}"
+        )
+    out.append("")
+    if rewards:
+        out.append("rewards by endpoint: " + ", ".join(
+            f"{ep}={rw}×{n}" for (ep, rw), n in sorted(rewards.items())))
+        out.append("")
+    out.append(f"vero: {dict((k, v) for k, v in vero.items() if not k.startswith('by_benchmark'))}")
+    out.append(f"red-team corpus: {corpus_lines} attack cases")
+    return "\n".join(out)
+
+
+HTML_TMPL = """<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="30">
+<title>selfdev stats</title><style>
+body{background:#0d1117;color:#c9d1d9;font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:2em}
+h1{color:#58a6ff;font-size:1.2em} table{border-collapse:collapse;margin:1em 0}
+td,th{padding:3px 14px 3px 0;text-align:right} td:first-child,th:first-child{text-align:left}
+tr.hdr{color:#8b949e;border-bottom:1px solid #30363d} .sec{color:#8b949e;margin-top:1.2em}
+.good{color:#3fb950}.bad{color:#f85149} pre{white-space:pre-wrap}
+</style></head><body><h1>selfdev stats — __TS__</h1><pre>__BODY__</pre></body></html>"""
+
+
+def render_html(text: str) -> str:
+    import html as _html
+    return (HTML_TMPL
+            .replace("__TS__", datetime.now().strftime("%F %T"))
+            .replace("__BODY__", _html.escape(text)))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--watch", type=int, default=0, metavar="SECS")
+    ap.add_argument("--json", metavar="OUT")
+    ap.add_argument("--html", metavar="OUT", help="write an auto-refreshing HTML dashboard")
+    ap.add_argument("--html-loop", action="store_true", help="keep regenerating the HTML (use with --html)")
+    args = ap.parse_args()
+    while True:
+        now = time.time()
+        text = report(now)
+        print("\033[2J\033[H" + text if args.watch else text)
+        if args.json:
+            Path(args.json).write_text(text + "\n")
+        if args.html:
+            Path(args.html).write_text(render_html(text))
+        if not args.watch and not args.html_loop:
+            break
+        time.sleep(args.watch or 30)
+
+
+if __name__ == "__main__":
+    main()
