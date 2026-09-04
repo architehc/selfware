@@ -63,6 +63,10 @@ when a measurement changes.
   other** (dataset lock). Launch waves sequentially.
 - **ngrok free tier**: fine for interactive + ~3 streams; 6+ streams of agent
   traffic 400s within an hour.
+- **Environment-layer ceiling ≈ 12 concurrent docker trials per host**: the
+  -n 24 LAN wave (measured 2026-09-04) produced 57 RuntimeError + 4
+  env-start-timeouts out of 70 — docker/build contention, not KV or model.
+  Right-size waves at -n 8–12 (also the measured 78.8 t/s aggregate point).
 
 ## 5. What works (do more of)
 
