@@ -212,7 +212,24 @@ impl Agent {
             return Ok(());
         }
         const MAX_MUTATION_ZERO_EDIT_STALLS: usize = 4;
+        const WRITE_EARLY_DIRECTIVE_AT: usize = 2;
         self.mutation_gate_rejections += 1;
+        // Write-early directive: at the halfway point, before the abort, push
+        // the model to commit — every zero-score probe run (27B on vero,
+        // northcode's FAKE_COMPLETE_LOOP) read forever and never wrote. A
+        // wrong first attempt it can fix beats perfect planning.
+        if self.mutation_gate_rejections == WRITE_EARLY_DIRECTIVE_AT {
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 You have made NO edits yet on a task that requires changing files. \
+                 Stop planning and make your FIRST concrete edit NOW: pick the most \
+                 promising file and write the change, even if imperfect — a wrong \
+                 attempt you can fix after verification beats more analysis. Do NOT \
+                 answer in prose without a tool call.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
         if self.mutation_gate_rejections >= MAX_MUTATION_ZERO_EDIT_STALLS {
             bail!(
                 "FAKE_COMPLETE_LOOP: {} no-tool turns on a mutation-required task with 0 mutating \

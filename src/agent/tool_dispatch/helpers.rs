@@ -876,6 +876,8 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
         "lake build",
         "lake exe",
         "lake test",
+        // Coq (TB4 coq-block-bound used `coqc -Q . Top Main.v`).
+        "coqc",
     ];
 
     // A verification prefix only counts when it appears in a pipeline segment

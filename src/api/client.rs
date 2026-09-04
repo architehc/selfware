@@ -148,6 +148,10 @@ pub struct ApiClient {
     /// budget and the run could bill long past expiry. Shared across clones
     /// so derived clients observe the same anchor.
     wall_budget_start: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// Latched when a provider 400s on the native tool-call payload — the
+    /// session flips to XML tool calling permanently (works-with-any-model:
+    /// m3:free et al. reject native FC outright).
+    native_fc_disabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Rolling estimate of the endpoint's effective generation speed
     /// (completion tokens / wall seconds of the whole call, EMA). Drives the
     /// adaptive non-streaming response timeout so slow local CPU servers get
@@ -240,6 +244,7 @@ impl ApiClient {
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
             progress_emitter: Arc::new(crate::agent::progress::NoopProgressEmitter),
             wall_budget_start: Arc::new(std::sync::Mutex::new(None)),
+            native_fc_disabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             speed_tracker: Arc::new(std::sync::Mutex::new(ServerSpeedTracker::new())),
         })
     }
@@ -588,7 +593,7 @@ impl ApiClient {
             "stream": stream,
         });
 
-        attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
+        attach_tools_to_body(&mut body, &tools, self.effective_native_fc());
 
         // Ask for token usage in the final streaming chunk. `stream_options` is
         // STANDARD OpenAI (supported by vLLM/SGLang/llama.cpp/OpenAI/OpenRouter),
@@ -792,6 +797,19 @@ impl ApiClient {
 
                         let retry_after = Self::parse_retry_after(response.headers());
                         let text = response.text().await.unwrap_or_default();
+                        // Provider rejects the native tool-call payload:
+                        // latch XML mode for the session and retry — the
+                        // alternative is a guaranteed dead run on models
+                        // without native-FC support (m3:free case).
+                        if Self::is_tool_schema_400(status, &text)
+                            && self.config.agent.native_function_calling
+                            && self.latch_xml_fallback()
+                        {
+                            warn!(
+                                "Provider 400 on native tool calls — latching XML tool-calling mode for this session"
+                            );
+                            continue;
+                        }
                         if Self::is_retryable_status(status) && attempt < max_attempts {
                             let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
                             warn!(
@@ -833,6 +851,34 @@ impl ApiClient {
 
         // Unreachable because the loop always returns, but keeps the compiler happy.
         Err(ApiError::Network("Streaming request exhausted retries".to_string()).into())
+    }
+
+    /// Native FC for this session: config flag minus the session latch.
+    pub(crate) fn effective_native_fc(&self) -> bool {
+        self.config.agent.native_function_calling
+            && !self
+                .native_fc_disabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A 400 that plausibly means "this provider rejects the native
+    /// tool-call payload" — flip the session to XML and retry once latched.
+    pub(crate) fn is_tool_schema_400(status: reqwest::StatusCode, body: &str) -> bool {
+        if status != reqwest::StatusCode::BAD_REQUEST {
+            return false;
+        }
+        let lower = body.to_lowercase();
+        ["tool", "function", "schema", "tool_call"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+    }
+
+    /// Latch XML mode for the session. Returns true if this call did the
+    /// latching (so the request should be retried rather than failed).
+    pub(crate) fn latch_xml_fallback(&self) -> bool {
+        !self
+            .native_fc_disabled
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
@@ -1178,6 +1224,26 @@ impl ApiClient {
 
                     let status_code = status;
                     let error_text = response.text().await.unwrap_or_default();
+                    // Provider rejects the native tool-call payload: latch
+                    // XML mode for the session and retry instead of dying —
+                    // the alternative is a guaranteed dead run on models
+                    // without native-FC support (m3:free case). A 400 lands
+                    // here by default since it is not a retryable status.
+                    if Self::is_tool_schema_400(status_code, &error_text)
+                        && self.config.agent.native_function_calling
+                        && self.latch_xml_fallback()
+                    {
+                        warn!(
+                            "Provider 400 on native tool calls — latching XML tool-calling mode for this session"
+                        );
+                        last_error = Some(
+                            ApiError::Network(
+                                "native FC rejected by provider; latched XML mode".to_string(),
+                            )
+                            .into(),
+                        );
+                        continue;
+                    }
                     return Err(Self::http_status_error(
                         endpoint,
                         status_code,
