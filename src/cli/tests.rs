@@ -1405,3 +1405,99 @@ fn untrusted_repo_config_is_not_the_trust_default() {
     std::fs::write(&repo_config, "").expect("write");
     assert!(!crate::config::trust::is_config_trusted(&repo_config));
 }
+
+// ── Coverage for the pure helpers the 780k-token architecture review
+// (2026-09-02) flagged: crate::cli was the most complex module in the
+// codebase with zero inline tests at review time. ──
+
+#[test]
+fn workflow_file_kind_recognizes_swl_and_yaml() {
+    assert!(matches!(
+        workflow_file_kind(Path::new("flow.swl")),
+        Some(WorkflowFileKind::Swl)
+    ));
+    assert!(matches!(
+        workflow_file_kind(Path::new("flow.yaml")),
+        Some(WorkflowFileKind::Yaml)
+    ));
+    assert!(matches!(
+        workflow_file_kind(Path::new("flow.yml")),
+        Some(WorkflowFileKind::Yaml)
+    ));
+}
+
+#[test]
+fn workflow_file_kind_rejects_other_extensions() {
+    assert!(workflow_file_kind(Path::new("flow.toml")).is_none());
+    assert!(workflow_file_kind(Path::new("flow")).is_none());
+    assert!(workflow_file_kind(Path::new("flow.SWL")).is_none());
+}
+
+#[test]
+fn parse_workflow_inputs_parses_key_value_pairs() {
+    let inputs = parse_workflow_inputs(&[
+        "name=selfware".to_string(),
+        "count=3".to_string(),
+        "empty=".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(inputs.len(), 3);
+    assert!(inputs.contains_key("name"));
+    assert!(inputs.contains_key("empty"));
+}
+
+#[test]
+fn parse_workflow_inputs_rejects_missing_equals() {
+    assert!(parse_workflow_inputs(&["no-equals-here".to_string()]).is_err());
+}
+
+#[test]
+fn estimate_workflow_llm_cost_scales_linearly() {
+    let one = estimate_workflow_llm_cost_usd(1_000_000, 0);
+    assert!((one - 3.0).abs() < 1e-9);
+    let both = estimate_workflow_llm_cost_usd(1_000_000, 1_000_000);
+    assert!((both - 18.0).abs() < 1e-9);
+    assert_eq!(estimate_workflow_llm_cost_usd(0, 0), 0.0);
+}
+
+#[test]
+fn workflow_agent_label_extracts_swl_agent_line() {
+    assert_eq!(
+        workflow_agent_label("SWL agent: reviewer\nrest"),
+        "reviewer"
+    );
+    assert_eq!(workflow_agent_label("SWL agent:   padded  \nx"), "padded");
+    assert_eq!(workflow_agent_label("no label here"), "workflow_llm");
+    assert_eq!(workflow_agent_label("SWL agent: \nx"), "workflow_llm");
+    assert_eq!(workflow_agent_label(""), "workflow_llm");
+}
+
+#[test]
+fn resolve_preset_task_requires_task_or_preset() {
+    assert!(resolve_preset_task(None, None).is_err());
+    assert_eq!(
+        resolve_preset_task(None, Some("do the thing".to_string())).unwrap(),
+        "do the thing"
+    );
+}
+
+#[test]
+fn resolve_preset_task_rejects_unknown_preset() {
+    let err = resolve_preset_task(Some("no-such-preset-xyz".to_string()), None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown preset"),
+        "error should name the cause: {err}"
+    );
+}
+
+#[test]
+fn resolve_preset_task_renders_first_preset_prompt_renders_nonempty() {
+    let first = crate::evolve::presets::presets()
+        .into_iter()
+        .next()
+        .expect("at least one preset ships");
+    let rendered = resolve_preset_task(Some(first.id.to_string()), None).unwrap();
+    assert!(!rendered.trim().is_empty());
+}

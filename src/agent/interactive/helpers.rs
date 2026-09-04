@@ -368,3 +368,171 @@ pub(crate) fn spawn_esc_listener(
         queued,
     }
 }
+
+// Inline tests for the interactive-REPL pure helpers. The 780k-token
+// architecture review (2026-09-02) flagged agent::interactive as the
+// second-most-complex module with zero inline tests — helpers.rs is the
+// pure-function core, so it gets the first thorough coverage.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::{PendingMessage, PendingMessageOrigin};
+    use std::time::Instant;
+
+    // ── is_exit_command ──────────────────────────────────────────────
+
+    #[test]
+    fn exit_commands_recognized() {
+        for cmd in ["exit", "quit", "/exit", "/quit", "/q"] {
+            assert!(is_exit_command(cmd), "{cmd} must be an exit command");
+        }
+    }
+
+    #[test]
+    fn exit_commands_reject_lookalikes() {
+        for cmd in ["", "Exit", " exit", "exit now", "/exitall", "/qq", "quite"] {
+            assert!(!is_exit_command(cmd), "{cmd} must NOT be an exit command");
+        }
+    }
+
+    // ── looks_like_slash_command ─────────────────────────────────────
+
+    #[test]
+    fn slash_command_detected() {
+        assert!(looks_like_slash_command("/mode yolo"));
+        assert!(looks_like_slash_command("/analyze"));
+        assert!(looks_like_slash_command("/journal-entry 42"));
+        assert!(looks_like_slash_command("/under_score"));
+    }
+
+    #[test]
+    fn slash_command_rejects_paths_and_plain_text() {
+        assert!(!looks_like_slash_command("/tmp/foo.rs"));
+        assert!(!looks_like_slash_command("/"));
+        assert!(!looks_like_slash_command(""));
+        assert!(!looks_like_slash_command("no slash"));
+        assert!(!looks_like_slash_command("//comment"));
+        assert!(!looks_like_slash_command("/?"));
+    }
+
+    // ── safe_truncate ────────────────────────────────────────────────
+
+    #[test]
+    fn safe_truncate_short_strings_pass_through() {
+        assert_eq!(safe_truncate("abc", 10), "abc");
+        assert_eq!(safe_truncate("", 0), "");
+        assert_eq!(safe_truncate("abc", 3), "abc");
+    }
+
+    #[test]
+    fn safe_truncate_respects_char_boundaries() {
+        // 'é' is 2 bytes — truncating at byte 1 must back off to the boundary.
+        let s = "aéb";
+        assert_eq!(safe_truncate(s, 2), "a");
+        assert_eq!(safe_truncate(s, 3), "aé");
+        // 4-byte emoji: never split inside it.
+        let e = "x🦀y";
+        assert_eq!(safe_truncate(e, 2), "x");
+        assert_eq!(safe_truncate(e, 5), "x🦀");
+    }
+
+    // ── flatten_preview_text / preview_with_ellipsis ─────────────────
+
+    #[test]
+    fn flatten_collapses_whitespace_runs() {
+        assert_eq!(flatten_preview_text("a\nb\tc  d\re"), "a b c d e");
+        assert_eq!(flatten_preview_text("  padded  "), "padded");
+        assert_eq!(flatten_preview_text("\n\t\r "), "");
+    }
+
+    #[test]
+    fn preview_adds_ellipsis_only_when_truncated() {
+        assert_eq!(preview_with_ellipsis("short", 10), "short");
+        let long = "x".repeat(200);
+        let preview = preview_with_ellipsis(&long, 10);
+        assert!(preview.ends_with("..."));
+        assert_eq!(preview.len(), 13);
+        // Newlines flatten before truncation, so a multi-line input previews
+        // as one line.
+        let multiline = preview_with_ellipsis("line one\nline two", 8);
+        assert_eq!(multiline, "line one...");
+    }
+
+    // ── empty-message / newline stripping ────────────────────────────
+
+    #[test]
+    fn effectively_empty_detection() {
+        assert!(is_effectively_empty_message(""));
+        assert!(is_effectively_empty_message("   \n\t\r\n  "));
+        assert!(!is_effectively_empty_message(" x "));
+    }
+
+    #[test]
+    fn strip_trailing_newlines_only() {
+        assert_eq!(strip_trailing_submission_newlines("abc\r\n\r\n"), "abc");
+        assert_eq!(strip_trailing_submission_newlines("\nabc\n"), "\nabc");
+        assert_eq!(strip_trailing_submission_newlines("abc"), "abc");
+    }
+
+    // ── coalesce_pending_messages ────────────────────────────────────
+
+    fn queued(content: &str, at: Instant) -> PendingMessage {
+        PendingMessage::new(content, PendingMessageOrigin::InteractiveQueue, at)
+    }
+
+    #[test]
+    fn coalesce_merges_interactive_within_window() {
+        let t0 = Instant::now();
+        let out = coalesce_pending_messages(vec![
+            queued("hello", t0),
+            queued("world", t0 + Duration::from_millis(50)),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content, "hello\nworld");
+        // The merged message keeps the LATEST timestamp.
+        assert_eq!(out[0].queued_at, t0 + Duration::from_millis(50));
+    }
+
+    #[test]
+    fn coalesce_does_not_merge_outside_window() {
+        let t0 = Instant::now();
+        let out = coalesce_pending_messages(vec![
+            queued("a", t0),
+            queued("b", t0 + Duration::from_millis(500)),
+        ]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn coalesce_does_not_merge_across_origins() {
+        let t0 = Instant::now();
+        let out = coalesce_pending_messages(vec![
+            queued("a", t0),
+            PendingMessage::new("b", PendingMessageOrigin::ManualQueue, t0),
+        ]);
+        assert_eq!(out.len(), 2);
+        // Manual first, then interactive — still no merge.
+        let out = coalesce_pending_messages(vec![
+            PendingMessage::new("a", PendingMessageOrigin::ManualQueue, t0),
+            queued("b", t0),
+        ]);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn coalesce_drops_empty_messages() {
+        let t0 = Instant::now();
+        let out = coalesce_pending_messages(vec![
+            queued("   ", t0),
+            queued("real", t0),
+            queued("\n\t", t0),
+        ]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].content, "real");
+    }
+
+    #[test]
+    fn coalesce_empty_input_gives_empty_output() {
+        assert!(coalesce_pending_messages(Vec::new()).is_empty());
+    }
+}

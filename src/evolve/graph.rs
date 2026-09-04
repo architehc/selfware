@@ -480,6 +480,12 @@ fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {
         ".git"
             | ".selfware"
             | ".worktrees"
+            // NOTE: `scratchpad` is deliberately NOT excluded here — the
+            // sw_auto self-evolution workspace lives there and the graph
+            // must model it (test: keeps_real_source_dirs). The duplicate
+            // noise the 780k review flagged is a PACK-RENDER concern, not
+            // an inventory one; agent file-discovery does filter it
+            // (tools::introspect).
             | "target"
             | "node_modules"
             | "vendor"
