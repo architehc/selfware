@@ -27,6 +27,10 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
 max_iterations = 2000
 step_timeout_secs = 600
 max_wall_secs = 14400
+# Per-trial $ cap (kept identical to /home/rig/harbor-agents/selfware-harbor.toml):
+# measured $10-86/trial on TB4; cap stops the heavy tail instead of 402-dying
+# the whole wave when the account runs dry.
+max_cost_usd = 40.0
 # GLM 5.3 on OpenRouter supports native tool calling (the TB 3.0 leaderboard
 # ran it through Claude Code, a native-tool harness).
 native_function_calling = true
