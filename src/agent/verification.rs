@@ -671,6 +671,36 @@ impl Agent {
             || basename.contains(".spec.")
     }
 
+    /// Verifier-region paths: the test suite plus the files that define HOW
+    /// verification runs (CI configs, build/test runners). An agent editing
+    /// any of these can manufacture a passing verification — the slop gate
+    /// freezes them at grade time (vero anti-cheat template).
+    pub(crate) fn gate_path_is_verifier_region(path: &str) -> bool {
+        let lower = path.trim_matches('"').to_ascii_lowercase();
+        if Self::gate_path_is_test(&lower) {
+            return true;
+        }
+        let parts: Vec<&str> = lower.split('/').filter(|p| !p.is_empty()).collect();
+        if parts
+            .iter()
+            .any(|p| matches!(*p, ".github" | ".gitlab-ci" | ".circleci" | ".buildkite"))
+        {
+            return true;
+        }
+        let basename = parts.last().copied().unwrap_or(lower.as_str());
+        matches!(
+            basename,
+            "makefile"
+                | "justfile"
+                | "conftest.py"
+                | "pytest.ini"
+                | "tox.ini"
+                | ".gitlab-ci.yml"
+                | ".travis.yml"
+                | "azure-pipelines.yml"
+        )
+    }
+
     fn gate_path_is_source(path: &str) -> bool {
         let lower = path.trim_matches('"').to_ascii_lowercase();
         let Some(ext) = std::path::Path::new(&lower)
@@ -950,6 +980,24 @@ impl Agent {
                     "TestOnlyPatch: the current diff only modifies test files ({:?}). \
                      SWE-style repair tasks require a source-code fix. Edit the implementation file before completing.",
                     paths
+                ));
+            }
+
+            // Slop gate (vero anti-cheat template): verifier regions are
+            // frozen at grade time. A mixed diff — source fix PLUS weakened
+            // tests/CI — makes the run's verification self-awarded and
+            // meaningless. Unless the task is about tests, modified
+            // verifier-region paths invalidate completion until restored.
+            let verifier_paths: Vec<&String> = paths
+                .iter()
+                .filter(|path| Self::gate_path_is_verifier_region(path))
+                .collect();
+            if !all_test_files && !verifier_paths.is_empty() && !task_is_test_writing_task(task) {
+                return Some(format!(
+                    "VerifierTainted: the diff modifies test/CI/build files ({:?}). \
+                     Verification run against edited tests cannot be trusted. \
+                     Restore them (`git checkout -- <path>`) and verify against the original suite before completing.",
+                    verifier_paths
                 ));
             }
 

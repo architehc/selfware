@@ -918,6 +918,82 @@ mod completion_gate_tests {
             "`head notes.txt` must still count as a readback"
         );
     }
+
+    #[test]
+    fn verifier_region_classifier_covers_tests_ci_and_runners() {
+        use crate::agent::verification::Agent;
+        assert!(Agent::gate_path_is_verifier_region("tests/test_calc.py"));
+        assert!(Agent::gate_path_is_verifier_region("src/__tests__/api.js"));
+        assert!(Agent::gate_path_is_verifier_region(
+            ".github/workflows/ci.yml"
+        ));
+        assert!(Agent::gate_path_is_verifier_region("Makefile"));
+        assert!(Agent::gate_path_is_verifier_region("conftest.py"));
+        assert!(!Agent::gate_path_is_verifier_region("src/calc.py"));
+        assert!(!Agent::gate_path_is_verifier_region("deploy.sh"));
+        assert!(!Agent::gate_path_is_verifier_region("package.json"));
+    }
+
+    /// A mixed diff — source fix PLUS edited tests — manufactures a passing
+    /// verification; the gate must refuse completion until tests are restored.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_mixed_src_and_test_diff() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write("tests/test_calc.py", "def test_div():\n    assert True\n").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a source+test diff must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
+
+    /// Source-only diffs never trip the taint check.
+    #[tokio::test]
+    async fn verifier_tainted_allows_source_only_diff() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let outcome = agent.mutation_completion_gate().await;
+        assert!(
+            !outcome.as_deref().unwrap_or("").contains("VerifierTainted"),
+            "source-only diff must not be tainted, got: {outcome:?}"
+        );
+    }
+
+    /// Test-writing tasks keep their exemption when tests are the deliverable.
+    #[tokio::test]
+    async fn verifier_tainted_exempts_test_writing_task() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(
+            "tests/test_calc.py",
+            "def test_div():\n    assert 6 / 2 == 3\n",
+        )
+        .unwrap();
+
+        let agent = mutation_task_agent("Write tests for the calc module").await;
+        let outcome = agent.mutation_completion_gate().await;
+        assert!(
+            !outcome.as_deref().unwrap_or("").contains("VerifierTainted"),
+            "test-writing task must stay exempt, got: {outcome:?}"
+        );
+    }
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---
