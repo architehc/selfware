@@ -508,6 +508,23 @@ impl Agent {
             (content, reasoning)
         };
 
+        // Tag-free abliterated models: the qwen3 reasoning parser can
+        // classify the ENTIRE response as reasoning_content, leaving content
+        // empty — a loop reading only content sees a zero-turn forever
+        // (server-side analysis 2026-09-04; matches the ablit-wave "zeros").
+        // The tool-call extractor already falls back to reasoning
+        // (tool_collect.rs); promote the turn text the same way.
+        let mut content = content;
+        if content.trim().is_empty() {
+            if let Some(r) = reasoning.as_ref().filter(|r| !r.trim().is_empty()) {
+                info!(
+                    "Content empty but reasoning_content non-empty ({} chars) — promoting reasoning to content (tag-free model output)",
+                    r.len()
+                );
+                content = r.clone();
+            }
+        }
+
         // Qwen3.5 best practice: "No Thinking Content in History — historical
         // model output should only include the final output part and does not
         // need to include the thinking content."
