@@ -12,13 +12,13 @@ when a measurement changes.
 | `192.168.137.1:8000` | qwen38-uncensored | Attack generation (the best), TB sensor | 12 × 262K pool; drops ~5×/day — **opportunistic only, never the critical path**; `step_timeout_secs = 2400`, stall 1200 |
 | `llm.selfware.design` | qwen38-flash-next | Strongest local solver, VLM, 1M reviews | 1M ctx × 8 streams; **ngrok free tier caps ~3–6 agent streams** (400s under waves); stall 900 |
 | OpenRouter | z-ai/glm-5.3 | Paid heavy solver (proofs, deep TB) | Solved TB4 coq-block-bound; $55–86 per deep trial at 2000-iter budgets — needs per-trial $ caps |
-| OpenRouter | google/gemini-3.8-flash | **The vero workhorse** | First model to discharge Lean specs in our harness (2/9 primepy, 196 iters, write→build→fix). $0.75/$3.75 per M, 1M ctx, VLM |
+| OpenRouter | google/gemini-3.8-flash | **The vero workhorse** | First model to discharge Lean specs (2/9 primepy), then **11/11 bankledger perfect score** same day, first TB3 solve (1.0). $0.75/$3.75 per M, 1M ctx, VLM |
 
 ## 2. Vero (Lean 4) scoreboard
 
 | Model | primepy (9 specs) | Note |
 |---|---|---|
-| google/gemini-3.8-flash | **2/9** | Iterative cadence: ~1 lake build per write. The behavior to enforce for everyone. |
+| google/gemini-3.8-flash | **2/9** then **11/11 bankledger PERFECT** | Iterative cadence: ~1 lake build per write. Also 1/19 munkres, 0/15 toposort. First TB3 solve (1.0) same day. The vero/proof champion. |
 | tencent/hy4-preview | running | |
 | z-ai/glm-5.3 | running | |
 | meta/muse-spark-1.3-contributor | 0/9 | Never committed to writing. |
