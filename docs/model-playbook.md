@@ -18,10 +18,15 @@ when a measurement changes.
 
 | Model | primepy (9 specs) | Note |
 |---|---|---|
-| google/gemini-3.8-flash | **2/9** then **11/11 bankledger PERFECT** | Iterative cadence: ~1 lake build per write. Also 1/19 munkres, 0/15 toposort. First TB3 solve (1.0) same day. The vero/proof champion. |
+| google/gemini-3.8-flash | **2/9** then **11/11 bankledger PERFECT** | Also 1/19 munkres, 0/15 toposort, first TB3 solve (1.0). Vero/proof champion on bank-type instances. |
+| tencent/hy4-preview | **4/9** primepy, **0/11** bankledger | Wins small-arithmetic instances, zero on ledger-style. Instance × model is decisive. |
+| deepseek/deepseek-v4-pro-0813 | **4/9** primepy | bankledger running. |
 | tencent/hy4-preview | running | |
 | z-ai/glm-5.3 | running | |
 | meta/muse-spark-1.3-contributor | 0/9 | Never committed to writing. |
+| z-ai/glm-5.3 | 0/9 primepy (9/9 attempts failed) | Maximum engagement, zero correctness here — but solved TB4 coq-block-bound. Instance × model again. |
+| z-ai/glm-5.3-flash | 0/9 (2 attempts) | Engager class. |
+| qwen/qwen3.8-flash | 0/9 | Ghost class (never writes). |
 | minimax/minimax-m3:free | 0/9 | Two stacked issues: 400 on native FC (auto-fallback latches XML correctly) AND "tool call result does not follow tool call (2013)" — a history-pairing error the format flip cannot fix. Dead lane. |
 | z-ai/glm-5.2:free | 429 persistent | Free-tier upstream congestion. Dead lane. |
 | 27B locals (unc-kt, uncensored) | 0/173 across 8 instances | Reads forever, writes nothing. Not a Lean model. |
