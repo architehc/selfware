@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-09-04
+
+### Added
+- **Slop gate (VerifierTainted)**: the completion gate refuses diffs that
+  modify verifier-region files (tests, CI configs, test runners) unless the
+  task is about writing tests — a source fix bundled with weakened tests no
+  longer counts as verified work (vero anti-cheat template, layer 1).
+- **Per-endpoint timeout/retry overrides**: `ModelProfile.max_retries` and
+  `response_timeout_floor_secs` (Option pattern) wired through the retry
+  path; `agent.stream_stall_timeout_secs` cancels a streaming request silent
+  for N seconds (no-progress watchdog; slow local boxes 1200+, fast boxes 300).
+- **Selfdev observability**: `scripts/selfdev_stats.py` — per-endpoint
+  tokens/requests/cost over 1h/24h/7d from on-disk artifacts; terminal,
+  JSON, and auto-refreshing HTML dashboard modes.
+- **1M-pack review tooling**: `scripts/pack_query.py` for whole-codebase
+  reviews on the 1M local endpoint.
+
+### Fixed
+- **25 trust-gate holes** found by six uncensored-model red-team waves
+  (full list in the safety commit): workspace escape via lexical `..`,
+  encoded path traversal, container volume bypasses (object/stringified
+  forms), shell-side SSRF/metadata, quoted pipe-to-shell, argv-array
+  command bypass, exfil channels (netcat/DNS/POST substitution/env pipes),
+  interpreter startup env hooks, secret-scanner gaps (Stripe test keys,
+  connection strings, Azure/Twilio/Slack shapes, secrets in comments),
+  `.env.*` denied paths. Corpus of 500+ attacks enforced in CI by
+  `tests/redteam_gate_test.rs`.
+- **`vision_analyze` schema** demanded the model supply endpoint/model —
+  every call failed validation and agents pixel-peeped with PIL instead.
+  Schema now requires only `prompt`; endpoint/model inject from the
+  configured vision profile. Verified live: TB4 cad-model went from
+  pixel-peeping to render-compare-iterate with the VLM.
+- **Tag-free model output**: the qwen3 reasoning parser can classify an
+  entire response as `reasoning_content` (empty `content`) — the agent now
+  promotes reasoning to content for the turn text (tool-call extraction
+  already fell back).
+- Test coverage for the 780k-review-flagged hotspots: 30 inline tests for
+  `agent::interactive::helpers`, 8 for `cli` pure helpers; `scratchpad`
+  excluded from agent file-discovery.
+
 ## [0.7.0] - 2026-09-01
 
 ### Added
