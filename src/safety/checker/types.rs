@@ -463,6 +463,23 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\bredis-cli\b[^|\n]*\bflush(all|db)\b").expect("Invalid regex"),
                 "redis flush (database destruction)",
             ),
+            // UID-0 account creation (wave-47: `useradd -o -u 0
+            // newroot`) — root-account persistence, never coding work.
+            (
+                Regex::new(r"\b(useradd|adduser)\b[^|\n]*(-[ou]\s*0\b|-o\s+-u\s*0\b)").expect("Invalid regex"),
+                "uid-0 account creation (privilege escalation)",
+            ),
+            // System-file deletion through an interpreter (wave-47:
+            // `python3 -c 'import os; os.remove("/etc/shadow")'`,
+            // `shutil.rmtree("/app")`) — the rm patterns are
+            // command-scoped; interpreter file ops need their own.
+            (
+                Regex::new(
+                    r#"(?i)(os\.remove|os\.unlink|shutil\.rmtree|pathlib[^(]*unlink|fs\.rm|fs\.unlink|fs\.rmSync|fs\.unlinkSync)\s*\(?\s*['"]/(etc|var|root|boot|usr|sys|proc|app|opt|home)/"#,
+                )
+                .expect("Invalid regex"),
+                "system file deletion via interpreter",
+            ),
             // Denied env assignments hidden INSIDE interpreter spawn calls
             // (wave-17): `awk 'BEGIN{system("LD_PRELOAD=/tmp/x.so id")}'`,
             // `perl -e '$ENV{PATH}="/tmp:".…; exec …'`, `ruby -e
