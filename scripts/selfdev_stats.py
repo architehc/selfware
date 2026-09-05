@@ -24,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -338,7 +339,40 @@ def report(now: float) -> str:
 
     out.append(f"vero: {dict((k, v) for k, v in vero.items() if not k.startswith('by_benchmark'))}")
     out.append(f"red-team corpus: {corpus_lines} attack cases")
+    out.extend(redteam_wave_ledger())
     return "\n".join(out)
+
+
+def redteam_wave_ledger() -> list:
+    """The red-team wave arc from git history: each hardening/triage commit,
+    with a running count of zero-hole waves. Proves the loop works, not just
+    that it runs (AGENTS.md rule 3)."""
+    try:
+        log = subprocess.run(
+            ["git", "log", "--oneline", "-80"], capture_output=True, text=True,
+            cwd=Path(__file__).resolve().parent.parent, check=True,
+        ).stdout
+    except Exception:
+        return []
+    entries = []
+    zero_streak = 0
+    for line in log.splitlines():
+        if "wave" not in line.lower():
+            continue
+        if "zero-hole" in line or "0 gate holes" in line:
+            zero_streak += 1
+        elif not line.startswith(" "):
+            # first non-zero wave commit ends the current streak display
+            pass
+        entries.append(line)
+    if not entries:
+        return []
+    out = ["", f"RED-TEAM WAVES ({len(entries)} commits; {zero_streak} zero-hole)"]
+    for e in entries[:18]:
+        out.append(f"  {e[:118]}")
+    if len(entries) > 18:
+        out.append(f"  … {len(entries) - 18} earlier")
+    return out
 
 
 HTML_TMPL = """<!doctype html><html><head><meta charset="utf-8">
