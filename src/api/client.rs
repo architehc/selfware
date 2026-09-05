@@ -695,7 +695,7 @@ impl ApiClient {
         Ok((stream, meta))
     }
 
-    async fn chat_stream_send(&self, body: serde_json::Value) -> Result<StreamingResponse> {
+    async fn chat_stream_send(&self, mut body: serde_json::Value) -> Result<StreamingResponse> {
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
 
@@ -808,6 +808,16 @@ impl ApiClient {
                             warn!(
                                 "Provider 400 on native tool calls — latching XML tool-calling mode for this session"
                             );
+                            // The retry must not resend the rejected payload
+                            // (review finding: the loop previously reused the
+                            // unchanged body, so the "fallback" failed
+                            // identically). This turn may come back prose-only
+                            // — the NEXT turn's system prompt carries the XML
+                            // tool instructions via Agent::effective_native_fc.
+                            if let Some(obj) = body.as_object_mut() {
+                                obj.remove("tools");
+                                obj.remove("tool_choice");
+                            }
                             continue;
                         }
                         if Self::is_retryable_status(status) && attempt < max_attempts {
@@ -871,6 +881,14 @@ impl ApiClient {
         ["tool", "function", "schema", "tool_call"]
             .iter()
             .any(|marker| lower.contains(marker))
+    }
+
+    /// Whether the session has latched to XML mode (provider rejected the
+    /// native tool-call payload once). The agent consults this when building
+    /// system prompts and api_tools so latched turns use the XML path.
+    pub fn native_fc_latched(&self) -> bool {
+        self.native_fc_disabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Latch XML mode for the session. Returns true if this call did the
@@ -966,13 +984,18 @@ impl ApiClient {
     }
 
     async fn send_with_retry_inner(&self, body: &serde_json::Value) -> Result<ChatResponse> {
-        self.send_request_with_retry(body, &self.base_url, self.config.api_key.as_ref(), None)
-            .await
+        self.send_request_with_retry(
+            body.clone(),
+            &self.base_url,
+            self.config.api_key.as_ref(),
+            None,
+        )
+        .await
     }
 
     async fn send_request_with_retry(
         &self,
-        body: &serde_json::Value,
+        mut body: serde_json::Value,
         endpoint: &str,
         api_key: Option<&crate::config::RedactedString>,
         timeout_overrides: Option<&crate::config::ModelProfile>,
@@ -1069,7 +1092,7 @@ impl ApiClient {
                 }
                 r = tokio::time::timeout(
                     Duration::from_secs(response_timeout_secs),
-                    request.json(body).send(),
+                    request.json(&body).send(),
                 ) => r,
             };
 
@@ -1236,6 +1259,14 @@ impl ApiClient {
                         warn!(
                             "Provider 400 on native tool calls — latching XML tool-calling mode for this session"
                         );
+                        // Same strip as the streaming path: the retry must not
+                        // resend the rejected native payload.
+                        let mut stripped = body.clone();
+                        if let Some(obj) = stripped.as_object_mut() {
+                            obj.remove("tools");
+                            obj.remove("tool_choice");
+                        }
+                        body = stripped;
                         last_error = Some(
                             ApiError::Network(
                                 "native FC rejected by provider; latched XML mode".to_string(),
@@ -1355,7 +1386,7 @@ impl ApiClient {
         )?;
 
         self.send_request_with_retry(
-            &body,
+            body.clone(),
             &profile.endpoint,
             profile.api_key.as_ref(),
             Some(profile),

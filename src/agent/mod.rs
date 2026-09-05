@@ -929,7 +929,7 @@ Found tools become available immediately for the rest of the session."#;
         // === STATIC SECTIONS (cached across conversations) ===
         // Core identity and workflow - doesn't change between sessions
         if config.agent.native_function_calling {
-            info!("Using native function calling mode");
+            info!("Using native function calling mode (subject to per-session XML fallback latch)");
             prompt_builder.add_static(format!(
                 r#"You are Selfware, an expert software engineering AI assistant.
 
@@ -1901,9 +1901,16 @@ To call a tool, use this EXACT XML structure:
         }
     }
 
+    /// Native FC for this turn: the config flag minus the client's session
+    /// latch (a provider that 400s on the native payload flips the whole
+    /// session to XML — system prompts and api_tools must follow).
+    pub(crate) fn effective_native_fc(&self) -> bool {
+        self.config.agent.native_function_calling && !self.client.native_fc_latched()
+    }
+
     /// Get tools for API calls - returns Some(tools) if native function calling is enabled
     fn api_tools(&self) -> Option<Vec<crate::api::types::ToolDefinition>> {
-        if self.config.agent.native_function_calling {
+        if self.effective_native_fc() {
             Some(self.tools.definitions())
         } else {
             None

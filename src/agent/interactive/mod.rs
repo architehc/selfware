@@ -770,7 +770,7 @@ impl Agent {
                 );
                 println!(
                     "  Native FC:   {}",
-                    if self.config.agent.native_function_calling {
+                    if self.effective_native_fc() {
                         "yes".bright_green()
                     } else {
                         "no".bright_red()
@@ -973,7 +973,7 @@ impl Agent {
                 );
                 println!(
                     "  Native FC:   {}",
-                    if self.config.agent.native_function_calling {
+                    if self.effective_native_fc() {
                         "yes"
                     } else {
                         "no"

@@ -147,11 +147,11 @@ impl Agent {
         // Uses the unified extractor so native and text-fallback paths agree.
         let has_tool_calls = !crate::api::tool_calling::extract_tool_calls(
             &assistant_msg,
-            self.config.agent.native_function_calling,
+            self.effective_native_fc(),
         )
         .is_empty();
         let native_tool_calls = if let (true, Some(tool_calls)) = (
-            self.config.agent.native_function_calling,
+            self.effective_native_fc(),
             assistant_msg.tool_calls.as_ref(),
         ) {
             info!(
