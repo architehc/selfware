@@ -576,7 +576,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // BlockedEnvInjection error the safety tests assert on.
             (
                 Regex::new(
-                    r#"(?i)-c\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path|fpath|classpath)\s*="#,
+                    r#"(?i)-c\s+['"]?[^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path|fpath|classpath)\s*="#,
                 )
                 .expect("Invalid regex"),
                 "env injection inside sh -c payload",
