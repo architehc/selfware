@@ -343,6 +343,26 @@ impl SafetyChecker {
                 if force {
                     return Err(SelfwareError::Safety(SafetyError::BlockedForcePush));
                 }
+                // An explicit URL remote ships the whole workspace to an
+                // arbitrary endpoint (wave-60: `remote:
+                // "https://github.com/victim-org/repo"`). Named remotes
+                // (origin, upstream) are user-configured and pass.
+                if let Some(remote) = args.get("remote").and_then(|v| v.as_str()) {
+                    if remote.starts_with("http://")
+                        || remote.starts_with("https://")
+                        || remote.starts_with("ssh://")
+                        || remote.starts_with("git@")
+                        || remote.starts_with("file://")
+                    {
+                        return Err(SelfwareError::Safety(
+                            SafetyError::DangerousCommandPattern {
+                                description: format!(
+                                    "git push to an explicit URL remote (workspace exfil): {remote}"
+                                ),
+                            },
+                        ));
+                    }
+                }
                 // Only checkable here when the branch is explicit in the call --
                 // when omitted the tool pushes whatever branch is currently
                 // checked out, which GitPush::execute() itself re-checks
