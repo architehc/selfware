@@ -762,6 +762,13 @@ pub struct Agent {
     last_successful_verification_mutation_sequence: usize,
     /// Most recent failed verification summary, used by the completion gate.
     last_failed_verification_summary: Option<String>,
+    /// Mutation sequence at which the most recent verification failure was
+    /// recorded. The gate compares this against the credited success: a
+    /// failure at the SAME revision as (or after) the last pass is an
+    /// unresolved failure of the current code and overrides that pass —
+    /// "edit → build passes → tests fail → claim" must not complete
+    /// (external review of 6e231e2e, finding #2).
+    last_failed_verification_mutation_sequence: usize,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
     /// Lifetime count of successful mutating tool calls (file_write/file_edit/file_delete/etc.)
@@ -1384,6 +1391,7 @@ To call a tool, use this EXACT XML structure:
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
+            last_failed_verification_mutation_sequence: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
             total_tool_call_count: 0,
@@ -2526,6 +2534,7 @@ To call a tool, use this EXACT XML structure:
         self.mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
+        self.last_failed_verification_mutation_sequence = 0;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;

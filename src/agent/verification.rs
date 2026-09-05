@@ -940,6 +940,27 @@ impl Agent {
         if self.current_task_is_read_only() && self.mutation_sequence == 0 {
             return None;
         }
+
+        // A verification failure at the CURRENT revision overrides any pass
+        // credited at that same revision: "edit → check passes → tests fail →
+        // claim" must not complete (external review of 6e231e2e, finding #2).
+        // note_mutating_tool_call clears the summary on each new edit, so a
+        // surviving summary always refers to the current revision. This sits
+        // ABOVE the task_requires_mutation early-return: a failing verification
+        // blocks completion on any task that mutated state, however the task
+        // classifier reads it.
+        if self.mutation_sequence > 0
+            && self.last_failed_verification_mutation_sequence
+                >= self.last_successful_verification_mutation_sequence
+        {
+            if let Some(summary) = &self.last_failed_verification_summary {
+                return Some(format!(
+                    "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
+                     Fix the issue and run verification again before completing."
+                ));
+            }
+        }
+
         if !super::tool_dispatch::task_requires_mutation(self.task_context_for_classification()) {
             return None;
         }
@@ -1812,6 +1833,7 @@ impl Agent {
                         })
                         .unwrap_or_else(|| "verification failed".to_string());
                     self.last_failed_verification_summary = Some(summary);
+                    self.last_failed_verification_mutation_sequence = self.mutation_sequence;
                     spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
                         tool_name,
@@ -1829,6 +1851,7 @@ impl Agent {
                 warn!("Verification failed to run: {}", e);
                 self.last_failed_verification_summary =
                     Some(format!("verification could not run: {}", e));
+                self.last_failed_verification_mutation_sequence = self.mutation_sequence;
                 None
             }
         }

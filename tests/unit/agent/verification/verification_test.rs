@@ -843,6 +843,45 @@ mod completion_gate_tests {
         );
     }
 
+    // External review of 6e231e2e, finding #2: edit → build passes → tests
+    // fail → claim completion used to satisfy the gate. Only a SUCCESS
+    // advanced the credited sequence; a later failure at the same revision
+    // recorded a summary the gate never consulted once any pass was credited.
+    #[tokio::test]
+    async fn failed_verification_overrides_earlier_pass_at_same_revision() {
+        let mut agent = agent_with_checkpoint(vec![
+            shell_exec("cargo check", true),
+            shell_exec("cargo test", false),
+        ])
+        .await;
+        agent.note_mutating_tool_call();
+        // The check passes at the current revision…
+        agent.note_verification_outcome("shell_exec", r#"{"command":"cargo check"}"#, true, "ok");
+        // …then the tests fail at that SAME revision.
+        agent.note_verification_outcome(
+            "shell_exec",
+            r#"{"command":"cargo test"}"#,
+            false,
+            "test result: FAILED. 2 failed",
+        );
+        let result = agent.check_completion_gate().await;
+        assert!(
+            result.is_some(),
+            "a failing verification after a pass at the same revision must block completion"
+        );
+        assert!(
+            result.unwrap().contains("FailingTestsAccepted"),
+            "rejection should name the unresolved failure"
+        );
+
+        // Contrast: re-running the tests green clears the block.
+        agent.note_verification_outcome("shell_exec", r#"{"command":"cargo test"}"#, true, "ok");
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "a fresh pass after the failure must satisfy the gate"
+        );
+    }
+
     // P0 regression (b): a pipeline that masks the runner's exit code must not
     // be credited as a passing verification — `cargo test | true` reports
     // success to the agent even when the tests fail.

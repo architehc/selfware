@@ -48,6 +48,7 @@ impl Agent {
         } else if !success && tool_call_is_verification(name, args_str) {
             let preview: String = result_str.chars().take(300).collect();
             self.last_failed_verification_summary = Some(format!("{} failed: {}", name, preview));
+            self.last_failed_verification_mutation_sequence = self.mutation_sequence;
         }
     }
 
