@@ -996,8 +996,7 @@ impl SafetyChecker {
         static INDIRECT_EXPORT_SUBST: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\bexport\s+\$\(").expect("Invalid regex"));
         for part in split_shell_commands(&normalized) {
-            if INDIRECT_EXPORT.is_match(part.trim())
-                || INDIRECT_EXPORT_SUBST.is_match(part.trim())
+            if INDIRECT_EXPORT.is_match(part.trim()) || INDIRECT_EXPORT_SUBST.is_match(part.trim())
             {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
