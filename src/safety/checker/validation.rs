@@ -1282,10 +1282,16 @@ impl SafetyChecker {
         }
         // Webhook URLs are secrets AND exfil sinks: posting to a Slack
         // webhook-shape URL sends whatever the agent includes straight out.
-        // Discord webhooks are the same class (wave-32).
+        // Discord webhooks are the same class (wave-32). The /services/
+        // T…/B…/ path signature is blocked on ANY host — a lookalike domain
+        // (slack-webhook.evil.com) is the same sink in a costume (wave-57).
+        static WEBHOOK_PATH_SIG: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)/services/t[0-9a-z]{5,}/b[0-9a-z]{5,}/").expect("Invalid regex")
+        });
         if lower_url.contains("hooks.slack.com/services/")
             || lower_url.contains("discord.com/api/webhooks/")
             || lower_url.contains("discordapp.com/api/webhooks/")
+            || WEBHOOK_PATH_SIG.is_match(&lower_url)
         {
             return Err(SelfwareError::Safety(
                 SafetyError::BlockedUrlShellSubstitution,

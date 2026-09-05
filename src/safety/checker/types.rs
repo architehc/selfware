@@ -246,7 +246,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // the agent includes straight out) — shell curl deserves the
             // same treatment.
             (
-                Regex::new(r"hooks\.slack\.com/services/").expect("Invalid regex"),
+                Regex::new(r"(hooks\.slack\.com/services/|/services/t[0-9a-z]{5,}/b[0-9a-z]{5,}/)").expect("Invalid regex"),
                 "slack webhook URL in command (exfil sink)",
             ),
         ]
@@ -332,6 +332,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\$\(\s*base64\s+[^)]*/(etc|var|root)/[^)]*\)[^\n]*(curl|wget|nc|ncat)\b")
                     .expect("Invalid regex"),
                 "encoded system file posted to network (exfiltration)",
+            ),
+            // File read embedded in a network call (wave-57:
+            // \`subprocess.run(['curl', '-d',
+            // ' '.join(open('/etc/passwd').readlines()), url])\`,
+            // \`requests.post(url, data=open('/etc/…').read())\`) — the
+            // -d @/path pattern only sees literal file operands.
+            (
+                Regex::new(
+                    r#"(?i)(requests\.(post|put|patch)|subprocess\.(run|call|popen|check_output)|urlopen|fetch\s*\()\s*\([^)]*open\s*\(\s*['"]/(etc|var|root|proc|home)/"#,
+                )
+                .expect("Invalid regex"),
+                "system file read embedded in network call (exfiltration)",
             ),
             // $(env) substitution feeding a network tool (wave-20:
             // `echo $(env) | sed … | base64 -w0 | curl -d @- URL`).
@@ -610,7 +622,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             ),
             (
                 Regex::new(
-                    r"(curl|wget)\s+[^|\n]*(-d\s+@|--data(-binary|-raw)?\s+@)/(etc|root|home|var|app/\.env)",
+                    r"(curl|wget)\s+[^|\n]*(-d[\s,]+@|--data(-binary|-raw)?[\s,]+@)/(etc|root|home|var|proc|app/\.env)",
                 )
                 .expect("Invalid regex"),
                 "sensitive file posted to remote (exfiltration)",
