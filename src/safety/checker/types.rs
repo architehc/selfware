@@ -471,6 +471,24 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\benv\s+\$\w+\s").expect("Invalid regex"),
                 "env with variable assignment argument (indirect injection)",
             ),
+            // env/export with a substitution argument (wave-64:
+            // \`env $(echo -n 'LD_' 'PRELOAD=' '/tmp/v.so') ./target\`,
+            // \`export $(printf '%s=%s' 'BASH_ENV' '/tmp/rc')\`), and the
+            // declare/local twins of export.
+            (
+                Regex::new(r"\b(export|declare\s+-[a-zA-Z]*x|local\s+-[a-zA-Z]*x|env)\s+\$\(").expect("Invalid regex"),
+                "env assignment via substitution (indirect injection)",
+            ),
+            // Bare denied assignment after shell keywords (wave-64:
+            // \`if [ -z "${BASH_ENV}" ]; then BASH_ENV=/tmp/rc; fi\`) —
+            // the prefix-anchored check only sees segment starts.
+            (
+                Regex::new(
+                    r"(?i)(then|do|else|;;)\s+(export\s+)?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|gtk_modules|fpath)\s*=",
+                )
+                .expect("Invalid regex"),
+                "env injection after shell keyword",
+            ),
             // Assignment through name expansion (wave-62:
             // \`${VAR}=/tmp/lib.so ls\`, \`env ${!LD_*}=/tmp/x id\`) —
             // the variable NAME comes from an expansion, so no static
@@ -553,7 +571,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 "env injection inside spawn call",
             ),
             (
-                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path)['"]?(\}|\])"#)
+                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path)\\?['"]?(\}|\])"#)
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
             ),

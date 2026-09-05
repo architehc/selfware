@@ -987,8 +987,18 @@ impl SafetyChecker {
         // can know the name, but `export $<name>=` is itself the tell.
         static INDIRECT_EXPORT: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\bexport\s+\$\w+\s*=").expect("Invalid regex"));
+        // Substitution-built assignment (wave-64: `export $(echo -n 'LD_'
+        // 'PRELOAD=' '/tmp/v.so')`, `export $(printf '%s=%s' 'BASH_ENV'
+        // '/tmp/rc')`, `export $(cat /tmp/env.txt)`). Documented trade-off:
+        // the `export $(cat config.env)` idiom is refused too — agents load
+        // env files through the structured env map or file tools instead
+        // (AGENTS.md rule 5: the bug class, not the file).
+        static INDIRECT_EXPORT_SUBST: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\bexport\s+\$\(").expect("Invalid regex"));
         for part in split_shell_commands(&normalized) {
-            if INDIRECT_EXPORT.is_match(part.trim()) {
+            if INDIRECT_EXPORT.is_match(part.trim())
+                || INDIRECT_EXPORT_SUBST.is_match(part.trim())
+            {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
         }
