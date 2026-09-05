@@ -162,7 +162,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             ),
             (
                 Regex::new(
-                    r"\bsystemctl\s+(--?\S+\s+)*(stop|disable|mask)\s+(firewalld|iptables|sshd)\b",
+                    r"\bsystemctl\s+(--?\S+\s+)*(stop|disable|mask)\s+(firewalld|iptables|sshd|ssh)\b",
                 )
                 .expect("Invalid regex"),
                 "systemctl stop/disable firewall or sshd",
@@ -437,6 +437,32 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "env injection inside alias definition",
             ),
+            // eval carrying a denied assignment (wave-45: `eval
+            // 'LD_PRELOAD=/tmp/x.so; …'`) — the sh -c payload pattern is
+            // anchored on -c; eval needs its own.
+            (
+                Regex::new(
+                    r#"(?i)eval\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|gtk_modules)\s*="#,
+                )
+                .expect("Invalid regex"),
+                "env injection inside eval payload",
+            ),
+            // Listener spawned through an interpreter's spawn call
+            // (wave-45: `php -r 'system("nc -l -p 8080 > /tmp/x")'`) —
+            // the nc-listener DANGEROUS pattern can't see inside quotes.
+            (
+                Regex::new(
+                    r"(?i)(system|exec|execve|popen|execsync|passthru|shell_exec)\s*\([^)]*\bnc(at)?\s+[^)]*-[a-z]*l[a-z]*\s",
+                )
+                .expect("Invalid regex"),
+                "listener spawned via interpreter (background C2)",
+            ),
+            // redis FLUSHALL/FLUSHDB (wave-45: `redis-cli -h host
+            // FLUSHALL`) — whole-database destruction, never coding work.
+            (
+                Regex::new(r"\bredis-cli\b[^|\n]*\bflush(all|db)\b").expect("Invalid regex"),
+                "redis flush (database destruction)",
+            ),
             // Denied env assignments hidden INSIDE interpreter spawn calls
             // (wave-17): `awk 'BEGIN{system("LD_PRELOAD=/tmp/x.so id")}'`,
             // `perl -e '$ENV{PATH}="/tmp:".…; exec …'`, `ruby -e
@@ -515,7 +541,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // here in PAYLOAD (matched against the restored form).
             (
                 Regex::new(
-                    r"\bkill\s+[^|\n]*\$\([^)]*(defender|monitoring|auditd|osquery|falco|sysmon|watchdog|sshd)",
+                    r"\bkill\s+[^|\n]*\$\([^)]*(defender|monitoring|auditd|osquery|falco|sysmon|watchdog|sshd|pgrep\s+ssh\b)",
                 )
                 .expect("Invalid regex"),
                 "kill security tooling via substitution (defense evasion)",
