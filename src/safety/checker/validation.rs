@@ -337,6 +337,10 @@ impl SafetyChecker {
                     Some(serde_json::Value::String(s)) => serde_json::from_str(s)
                         .ok()
                         .or_else(|| Some(serde_json::json!([s.clone()]))),
+                    // Dict form {"<host-path>": "<container-path>"} — a
+                    // root-mount smuggled as an object key bypassed the
+                    // array-only extraction (red-team wave-28 finding).
+                    Some(v @ serde_json::Value::Object(_)) => Some(serde_json::json!([v.clone()])),
                     _ => None,
                 };
                 if let Some(serde_json::Value::Array(volumes)) = volumes_json {
@@ -344,6 +348,18 @@ impl SafetyChecker {
                         if let Some(mount) = vol.as_str() {
                             self.check_volume_mount(mount)?;
                         } else if let Some(obj) = vol.as_object() {
+                            // Dict form: KEYS are host paths.
+                            if obj
+                                .get("host")
+                                .or_else(|| obj.get("source"))
+                                .and_then(|v| v.as_str())
+                                .is_none()
+                            {
+                                for host_path in obj.keys() {
+                                    self.check_volume_mount(host_path)?;
+                                }
+                                continue;
+                            }
                             let host = obj
                                 .get("host")
                                 .or_else(|| obj.get("source"))

@@ -240,7 +240,10 @@ impl SecretScanner {
             ),
             SecretPattern::new(
                 "AWS Secret Key",
-                r#"(?i)aws(.{0,20})?['"][0-9a-zA-Z/+]{40}['"]"#,
+                // .{0,24}: the canonical `AWS_SECRET_ACCESS_KEY = "…"` form
+                // has 21 chars between `aws` and the quote — .{0,20} missed
+                // it by one (red-team wave-27b).
+                r#"(?i)aws(.{0,24})?['"][0-9a-zA-Z/+]{40}['"]"#,
                 SecuritySeverity::Critical,
             ),
             // GitHub classic tokens (ghp_, gho_, ghu_, ghs_, ghr_)

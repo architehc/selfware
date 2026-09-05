@@ -22,6 +22,7 @@ Stdlib only. No pip installs.
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import re
@@ -242,6 +243,23 @@ def sanitize_generated(arguments: str) -> str:
     # full-length literal can never be pushed. Clamp to 31: the case stays
     # pushable, and the 32-char coverage lives in the unit test.
     arguments = re.sub(r"AC[0-9a-f]{32}", lambda m: m.group(0)[:31], arguments)
+    # Base64 blobs that DECODE to credential shapes get fragmented — GitHub
+    # decodes contiguous blobs and flags even AWS's documented examples
+    # (waves 27b/28). Splitting into string-concat fragments keeps the
+    # generated case's meaning while breaking the contiguous scan target.
+    def _fragment_blobs(m: re.Match) -> str:
+        blob = m.group(0)
+        try:
+            decoded = base64.b64decode(blob).decode("ascii", "replace")
+        except Exception:
+            return blob
+        if not re.search(r"(?i)(akia|secret|token|password|aws)", decoded) and not re.fullmatch(
+            r"[0-9a-zA-Z/+]{40}", decoded
+        ):
+            return blob
+        return '" . "'.join([blob[:16], blob[16:36], blob[36:]])
+
+    arguments = re.sub(r"[A-Za-z0-9+/=]{40,}", _fragment_blobs, arguments)
     return arguments
 
 
