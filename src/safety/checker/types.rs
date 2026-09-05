@@ -34,8 +34,8 @@ pub(crate) struct UrlSafetyOptions {
 // quoted PAYLOADS (python -c '…', eval "…") live in
 // [`PAYLOAD_COMMAND_PATTERNS`] instead, which is matched against the
 // quote-restored form.
-pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> =
-    LazyLock::new(|| {
+pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(
+    || {
         vec![
             // rm -rf / variants (handles multiple slashes, spaces, flags, and
             // parent-dir escape to root). Flags match both -rf and
@@ -223,7 +223,8 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 "slack webhook URL in command (exfil sink)",
             ),
         ]
-    });
+    },
+);
 
 // Patterns that must inspect QUOTED payloads — the dangerous content lives
 // inside the quotes (`python3 -c "…"`, `eval "$(…)"`), so they are matched
