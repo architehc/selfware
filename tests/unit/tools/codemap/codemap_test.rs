@@ -226,6 +226,50 @@ fn test_build_code_map_serves_graph_tokens_and_edges_when_fresh() {
     assert_eq!(module.token_estimate, widget_graph_tokens);
 }
 
+/// External review of 6e231e2e, finding #6: the overlay indexed graph nodes
+/// by file path for BOTH file and symbol nodes, so a symbol node could
+/// overwrite its containing file in the map — reporting one symbol's tokens
+/// and dependencies as the whole file's. Symbol nodes must never serve a
+/// file-level lookup (NodeLayer::Symbol is excluded from file-layer queries
+/// by design).
+#[test]
+fn test_build_code_map_symbol_node_does_not_shadow_file_node() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("src")).expect("src dir");
+    std::fs::write(root.join("src/widget.rs"), "pub fn widget() {}\n").expect("write widget");
+
+    // The graph as the default builder produces it (schema v2): a file node
+    // PLUS symbol nodes that carry the SAME path. The symbol comes LAST, so
+    // a last-write-wins collect overwrites the file node with it — the exact
+    // shadowing the review reported.
+    let mut file = crate::evolve::Node::code("crate::widget", "src/widget.rs");
+    file.tokens = 333;
+    let symbol = crate::evolve::Node::symbol(
+        "crate::widget::widget_fn",
+        "crate::widget",
+        "function",
+        "src/widget.rs",
+        (1, 1),
+        7,
+    );
+    let graph = crate::evolve::Graph {
+        nodes: vec![file, symbol],
+        edges: vec![],
+    };
+    crate::evolve::OntologyStore::new(root.join(".selfware/evolve-graph.yaml"))
+        .save(&graph)
+        .expect("save graph");
+
+    let nodes = build_code_map(root, None, 1);
+    let widget = nodes.get("src/widget.rs").expect("widget.rs node present");
+    assert_eq!(
+        widget.token_estimate, 333,
+        "the file node's measured tokens must be served, not the symbol's 7"
+    );
+    assert!(!widget.live, "graph-served node must not be flagged live");
+}
+
 #[test]
 fn test_build_code_map_falls_back_live_for_missing_and_stale_files() {
     let temp = tempfile::tempdir().expect("tempdir");

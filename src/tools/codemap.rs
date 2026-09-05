@@ -326,6 +326,12 @@ impl<'g> GraphOverlay<'g> {
             .graph
             .nodes
             .iter()
+            // File-level lookups only: symbol nodes carry their containing
+            // file's path, and a last-write-wins collect lets one overwrite
+            // the file node — serving a single symbol's tokens/deps as the
+            // whole file's (external review of 6e231e2e, finding #6).
+            // NodeLayer::Symbol is excluded from file-layer queries by design.
+            .filter(|node| node.layer != crate::evolve::NodeLayer::Symbol)
             .filter_map(|node| node.path.as_deref().map(|path| (path, node)))
             .collect();
         Self {
