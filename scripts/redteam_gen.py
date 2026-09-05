@@ -246,10 +246,11 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"AC[0-9a-f]{32}", lambda m: m.group(0)[:31], arguments)
     # Mailgun-style key-<24+hex> literals (wave-35 push block) — clamp to 16.
     arguments = re.sub(r"key-[0-9a-z]{24,}", lambda m: m.group(0)[:16], arguments)
-    # Base64 blobs that DECODE to credential shapes get fragmented — GitHub
+    # Base64 blobs that DECODE to credential shapes get spliced — GitHub
     # decodes contiguous blobs and flags even AWS's documented examples
-    # (waves 27b/28). Splitting into string-concat fragments keeps the
-    # generated case's meaning while breaking the contiguous scan target.
+    # (waves 27b/28). An ellipsis splice breaks decoding (no contiguous
+    # target) without injecting quote characters that could corrupt the
+    # surrounding JSON/JS string (the wave-48 `" . "` breakage).
     def _fragment_blobs(m: re.Match) -> str:
         blob = m.group(0)
         try:
@@ -260,7 +261,7 @@ def sanitize_generated(arguments: str) -> str:
             r"[0-9a-zA-Z/+]{40}", decoded
         ):
             return blob
-        return '" . "'.join([blob[:16], blob[16:36], blob[36:]])
+        return blob[:16] + "\u2026" + blob[-8:]
 
     arguments = re.sub(r"[A-Za-z0-9+/=]{40,}", _fragment_blobs, arguments)
     return arguments
