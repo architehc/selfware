@@ -204,6 +204,14 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"169\.254\.|metadata\.google\.internal").expect("Invalid regex"),
                 "cloud metadata / link-local endpoint in command",
             ),
+            // Webhook-shaped URLs in shell commands (wave-14): the
+            // http_request TOOL blocks these (posting to one ships whatever
+            // the agent includes straight out) — shell curl deserves the
+            // same treatment.
+            (
+                Regex::new(r"hooks\.slack\.com/services/").expect("Invalid regex"),
+                "slack webhook URL in command (exfil sink)",
+            ),
         ]
     });
 
@@ -285,9 +293,35 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 "sensitive file posted to remote (exfiltration)",
             ),
             (
-                Regex::new(r"(cat|head|tail|dd)\s+[^|\n]*\|\s*base64\s*\|\s*(curl|wget|nc)\b")
+                Regex::new(r"(cat|head|tail|dd)\s+[^|\n]*\|\s*base64(\s+-[\w]+)*\s*\|\s*(curl|wget|nc)\b")
                     .expect("Invalid regex"),
                 "file encoded and piped to network tool (exfiltration)",
+            ),
+            // Secret-shaped variable contents piped to a network tool
+            // (red-team wave-14: `echo $AWS_SECRET_ACCESS_KEY | curl -d @-
+            // URL`, `echo -n $API_KEY | base64 | xargs curl …`). The `env |`
+            // pattern above only sees the literal env command. [^\n]* so
+            // intermediate stages (base64, xargs) don't break the chain.
+            (
+                Regex::new(
+                    r#"\becho\s+(-\S+\s+)*"?\$[a-z_]*(key|token|secret|password|passwd|credential)[a-z_]*"?\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b"#,
+                )
+                .expect("Invalid regex"),
+                "secret variable piped to network tool (exfiltration)",
+            ),
+            // System file as pipe source into a network tool (wave-14:
+            // `cat /etc/shadow | … | curl`, `tail /var/log/secure | curl`).
+            // The -d @/path pattern above only sees file OPERANDS, not pipe
+            // sources; requiring a network sink keeps `cat /etc/x | grep`
+            // inspection legal.
+            (
+                Regex::new(
+                    // Lazy any-prefix so flag arguments (`tail -n 50 /var/x`)
+                    // don't slip the path anchor.
+                    r"(cat|head|tail|dd)\s+[^|\n]*?/(etc|var|root)/\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b",
+                )
+                .expect("Invalid regex"),
+                "system file piped to network tool (exfiltration)",
             ),
             (
                 Regex::new(r"(nslookup|dig|host)\s+[^\n]*base64").expect("Invalid regex"),
