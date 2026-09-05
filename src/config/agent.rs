@@ -24,6 +24,13 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     #[serde(default = "default_step_timeout")]
     pub step_timeout_secs: u64,
+    /// Verify-after-every-edit cadence (the measured gemini behavior): when
+    /// on, the stale-verification rescue fires after ONE unverified edit
+    /// instead of two — the build runs and errors come back immediately
+    /// after each change. Off by default (preserves prior behavior); turn on
+    /// for proof/Lean/TB profiles where the write->build->fix loop pays.
+    #[serde(default)]
+    pub verify_after_edit: Option<bool>,
     /// Cancel a streaming request that produces NO chunks for this many
     /// seconds (no-progress watchdog). `None` keeps the legacy behavior
     /// (`max(step_timeout_secs, 30)`). Tune per endpoint: slow local boxes
@@ -120,6 +127,7 @@ impl Default for AgentConfig {
         Self {
             max_iterations: default_max_iterations(),
             step_timeout_secs: default_step_timeout(),
+            verify_after_edit: None,
             stream_stall_timeout_secs: None,
             token_budget: super::default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
             token_safety_margin: default_token_safety_margin(),

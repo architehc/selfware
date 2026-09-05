@@ -1064,7 +1064,16 @@ impl Agent {
                         || gate_msg.contains("FailingTestsAccepted"));
                 if is_stale_verification {
                     self.consecutive_stale_verification += 1;
-                    if self.consecutive_stale_verification >= 2 {
+                    // verify-after-every-edit cadence: profiles opting in get
+                    // the rescue after ONE unverified edit — the build runs
+                    // and errors come back immediately (measured as the
+                    // gemini-3.8-flash winning cadence on vero).
+                    let stale_threshold = if self.config.agent.verify_after_edit.unwrap_or(false) {
+                        1
+                    } else {
+                        2
+                    };
+                    if self.consecutive_stale_verification >= stale_threshold {
                         if let Some((tool_name, tool_args, display_cmd)) =
                             self.stale_verification_rescue_call()
                         {
