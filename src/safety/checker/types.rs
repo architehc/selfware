@@ -480,6 +480,22 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "system file deletion via interpreter",
             ),
+            // Crypto miners (wave-50: `xmrig -o pool.malicious.com -u
+            // worker`) — the wave-47 image-name case was the container
+            // form; the binaries themselves are never coding work.
+            (
+                Regex::new(
+                    r"\b(xmrig|minerd|cpuminer|cgminer|bfgminer|ethminer|claymore|nanominer|t-rex)\b",
+                )
+                .expect("Invalid regex"),
+                "crypto miner (resource hijack)",
+            ),
+            // Postgres COPY-TO-PROGRAM (wave-50: \`COPY (SELECT '') TO
+            // PROGRAM '/bin/bash'\`) — the classic database RCE primitive.
+            (
+                Regex::new(r"(?i)\bcopy\s+[^;\n]*\bto\s+program\b").expect("Invalid regex"),
+                "postgres COPY TO PROGRAM (database RCE)",
+            ),
             // Denied env assignments hidden INSIDE interpreter spawn calls
             // (wave-17): `awk 'BEGIN{system("LD_PRELOAD=/tmp/x.so id")}'`,
             // `perl -e '$ENV{PATH}="/tmp:".…; exec …'`, `ruby -e

@@ -1658,3 +1658,20 @@ fn test_compliance_checker_no_match_when_no_pattern() {
     // Only pattern-based rules fire; ensure no panic
     let _ = findings;
 }
+
+#[test]
+fn test_secret_scanner_detects_aws_secret_key_40char() {
+    // The canonical AWS_SECRET_ACCESS_KEY = "<40 chars>" shape. The literal
+    // is assembled from fragments: a contiguous 40-char credential-shaped
+    // string in source trips GitHub push protection (GH013) even when fake
+    // (waves 27b/50 corpus collisions).
+    let secret = concat!("wJalrXUtnFEMI", "/K7MDENG/bPxRfiCY", "EXAMPLEKEY");
+    assert_eq!(secret.len(), 40);
+    let mut scanner = SecretScanner::new();
+    let content = format!("aws_secret_access_key = \"{secret}\"");
+    let findings = scanner.scan_content(&content, None);
+    assert!(
+        findings.iter().any(|f| f.title == "AWS Secret Key"),
+        "canonical 40-char aws secret not detected: {findings:?}"
+    );
+}
