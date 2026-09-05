@@ -75,11 +75,26 @@ def endpoint_of(job_dir: Path) -> str:
         ("172.17.0.1:31000", "ablit/31000"),
         ("localhost:31000", "ablit/31000"),
     ]
+    # Model-name fallback: the endpoint URL only appears in the log when the
+    # key is MISSING (the config warning prints it) — a properly keyed run
+    # never logs the URL and used to fall through to "unknown", splitting
+    # GLM spend across two buckets (36 trials, $406 undercounted as of
+    # 2026-09-05). `kind=step_started ... model=<id>` lines name the model.
+    model_labels = [
+        ("z-ai/glm", "glm/openrouter"),
+        ("google/gemini", "gemini/openrouter"),
+        ("qwen38-flash-next", "flash/design"),
+        ("qwen38-unc", "unc/lan8000"),
+        ("qwen38-next", "ablit/31000"),
+    ]
     try:
         for trial in sorted(job_dir.glob("*__*/agent/selfware.txt"))[:2]:
             head = trial.read_text(errors="replace")[:20000]
             for marker, label in url_labels:
                 if marker in head:
+                    return label
+            for marker, label in model_labels:
+                if f"model={marker}" in head:
                     return label
     except OSError:
         pass
