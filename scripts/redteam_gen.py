@@ -25,6 +25,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -115,10 +116,15 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
         # Non-streaming hangs on this sglang build; accumulate SSE chunks.
         "stream": True,
     }).encode()
+    headers = {"Content-Type": "application/json"}
+    # OpenRouter requires a bearer key (gemini lane, wave-52+); local
+    # endpoints ignore the header's absence.
+    if "openrouter.ai" in endpoint:
+        headers["Authorization"] = f"Bearer {os.environ.get('OPENROUTER_API_KEY', '')}"
     req = urllib.request.Request(
         f"{endpoint}/chat/completions",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     parts = []
     with urllib.request.urlopen(req, timeout=600) as resp:
