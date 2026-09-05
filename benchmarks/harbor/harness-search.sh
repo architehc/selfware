@@ -39,10 +39,10 @@ record_candidate() {
     return 1
   fi
   python3 - "$ARCHIVE" "$id" "$parent" "$cfg" "$jobdir" <<'PYEOF'
-import json, sys, pathlib, hashlib
+import json, sys, pathlib, hashlib, subprocess
 archive, cid, parent, cfg, jobdir = sys.argv[1:6]
 jobdir = pathlib.Path(jobdir)
-rewards, traces, cost = {}, {}, 0.0
+rewards, traces, cost = {}, {}, None
 for trial in sorted(jobdir.glob("*/")):
     task = trial.name.split("__")[0]
     rw = trial / "verifier" / "reward.txt"
@@ -52,11 +52,23 @@ for trial in sorted(jobdir.glob("*/")):
     traces[task] = [str(agent_log), str(ver_out)]
 result = jobdir / "result.json"
 if result.exists():
-    cost = json.loads(result.read_text()).get("total_cost_usd") or 0.0
+    # Preserve "unknown": a missing cost is NOT $0.00 — recording 0.0 would
+    # make un-metered runs indistinguishable from free ones and silently
+    # improve every cost comparison (external review of 6e231e2e, #7).
+    raw = json.loads(result.read_text()).get("total_cost_usd")
+    cost = float(raw) if raw is not None else None
+try:
+    rev = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+except Exception:
+    rev = "unknown"
 rec = {
     "id": cid,
     "parent": parent,
     "config_sha256": hashlib.sha256(pathlib.Path(cfg).read_bytes()).hexdigest()[:16],
+    "selfware_rev": rev,
     "rewards": rewards,
     "mean_reward": sum(r for r in rewards.values() if r is not None) / max(1, len(rewards)),
     "total_cost_usd": cost,
@@ -64,7 +76,8 @@ rec = {
 }
 with open(pathlib.Path(archive) / "candidates.jsonl", "a") as f:
     f.write(json.dumps(rec) + "\n")
-print(f"recorded {cid}: mean_reward={rec['mean_reward']:.3f} cost=${cost:.2f}")
+cost_str = f"${cost:.2f}" if cost is not None else "unknown"
+print(f"recorded {cid}: mean_reward={rec['mean_reward']:.3f} cost={cost_str}")
 PYEOF
 }
 
