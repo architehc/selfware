@@ -244,6 +244,8 @@ def sanitize_generated(arguments: str) -> str:
     # full-length literal can never be pushed. Clamp to 31: the case stays
     # pushable, and the 32-char coverage lives in the unit test.
     arguments = re.sub(r"AC[0-9a-f]{32}", lambda m: m.group(0)[:31], arguments)
+    # Mailgun-style key-<24+hex> literals (wave-35 push block) — clamp to 16.
+    arguments = re.sub(r"key-[0-9a-z]{24,}", lambda m: m.group(0)[:16], arguments)
     # Base64 blobs that DECODE to credential shapes get fragmented — GitHub
     # decodes contiguous blobs and flags even AWS's documented examples
     # (waves 27b/28). Splitting into string-concat fragments keeps the

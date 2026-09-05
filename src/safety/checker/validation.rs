@@ -56,6 +56,16 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // equivalent of BASH_ENV/PYTHONSTARTUP.
     "FPATH",
     "ZDOTDIR",
+    // Shell prompt/startup hooks (wave-35): PROMPT_COMMAND runs before
+    // every prompt (bash/zsh), PHPRC + PHP_INI_SCAN_DIR relocate php.ini
+    // (auto_prepend_file class), SSH_AUTH_SOCK pointed at an attacker's
+    // socket is credential phishing (git.rs re-adds it via Command env,
+    // not shell, so blocking shell assignments costs nothing).
+    "PROMPT_COMMAND",
+    "PHPRC",
+    "PHP_INI_SCAN_DIR",
+    "PHP_AUTO_PREPEND_FILE",
+    "SSH_AUTH_SOCK",
     // Git execution vectors: agent git work goes through the git tools, not
     // env-injected helpers.
     "GIT_SSH_COMMAND",
@@ -882,9 +892,36 @@ impl SafetyChecker {
         });
         for part in split_shell_commands(&normalized) {
             let part_trimmed = part.trim();
-            if DANGEROUS_ENV_SEGMENT.is_match(part_trimmed)
+            if DANGEROUS_ENV_VARS.is_match(part_trimmed)
+                || DANGEROUS_ENV_SEGMENT.is_match(part_trimmed)
                 || DANGEROUS_ENV_CATCHALL.is_match(part_trimmed)
             {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
+        // ENV is deliberately NOT in DENIED_ENV_VARS (`ENV=production` is
+        // everyday), but the sh/bash startup-file attack lives in the same
+        // var: `ENV=/tmp/evil.sh; sh -c 'id'` (wave-35). Refuse only
+        // PATH-SHAPED values (absolute, dot-relative, home-relative) —
+        // plain identifiers like production/staging stay legal.
+        static ENV_PATH_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"(?i)(^|\||;|&&|\()\s*(export\s+)?env\s*=\s*['"]?(?://|/|\./|\.\./|~)"#)
+                .expect("Invalid regex")
+        });
+        for part in split_shell_commands(&normalized) {
+            if ENV_PATH_ASSIGNMENT.is_match(part.trim()) {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
+        // Indirect assignment through a variable NAME (wave-35:
+        // `VAR='LD_PRELOAD'; export $VAR=/tmp/exploit.so`) — no static list
+        // can know the name, but `export $<name>=` is itself the tell.
+        static INDIRECT_EXPORT: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\bexport\s+\$\w+\s*=").expect("Invalid regex"));
+        for part in split_shell_commands(&normalized) {
+            if INDIRECT_EXPORT.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
         }
