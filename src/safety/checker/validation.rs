@@ -323,6 +323,17 @@ impl SafetyChecker {
                 if !cmd.is_empty() {
                     self.check_shell_command(&cmd)?;
                 }
+                // `--privileged` is blocked in shell docker-run commands as
+                // never agent-legitimate; the structured arg deserves the
+                // same stance even though the tool currently ignores it
+                // (red-team wave-29: privileged:true + nsenter host escape).
+                if args.get("privileged").and_then(|v| v.as_bool()) == Some(true) {
+                    return Err(SelfwareError::Safety(
+                        SafetyError::DangerousCommandPattern {
+                            description: "container run with privileged: true".to_string(),
+                        },
+                    ));
+                }
                 // Check for dangerous volume mounts — both the string form
                 // ("/etc:/host") and the object form
                 // ({"host": "/etc", "container": "/host"} / docker's
