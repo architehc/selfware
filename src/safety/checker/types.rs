@@ -416,6 +416,21 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\bssh\s+[^|\n]*-(r|d)\s").expect("Invalid regex"),
                 "ssh tunnel (reverse forward / SOCKS proxy)",
             ),
+            // ssh ProxyCommand (wave-56: `ssh -o ProxyCommand='nc
+            // 198.51.100.3 22'`) — the -R/-D flag forms are covered;
+            // the option form routes through the attacker's binary.
+            (
+                Regex::new(r"(?i)\bssh\s+[^|\n]*-o\s*proxycommand").expect("Invalid regex"),
+                "ssh ProxyCommand (tunnel via option)",
+            ),
+            // Raw tty escape-sequence writes (wave-56:
+            // \`printf '\x1b]2;$(cat ~/.gitconfig)\x1b\\' > /dev/tty\`)
+            // — terminal escape exfil; agents never legitimately write
+            // raw escape sequences to the tty.
+            (
+                Regex::new(r">\s*/dev/tty").expect("Invalid regex"),
+                "raw write to /dev/tty (terminal escape channel)",
+            ),
             // Encode-command as the LEADING verb feeding a network tool
             // (wave-31: `base64 -w 0 config.xml | head -c 500 | curl …`) —
             // the encoded-pipe pattern needs cat|…|base64 adjacency.
