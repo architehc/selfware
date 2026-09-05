@@ -506,6 +506,12 @@ impl ApiClient {
         // response that callers then have to untangle. Retry once with
         // bounded reasoning (unless the user pinned reasoning keys — the
         // client must not second-guess an explicit choice), else fail typed.
+        //
+        // Metering (external review of 6e231e2e, finding #5): the exhausted
+        // attempt DID cost money — prompt processed, completion budget burned
+        // on hidden reasoning. Its usage must not vanish when `resp` is
+        // overwritten by the retry; accumulate it into the reported metadata.
+        let mut discarded_usage: Option<crate::api::types::Usage> = None;
         if reasoning_budget_exhausted(&resp).is_some() {
             if self.user_pinned_reasoning() {
                 let reasoning_chars = reasoning_budget_exhausted(&resp).unwrap_or(0);
@@ -516,6 +522,7 @@ impl ApiClient {
                  empty answer); retrying once with reasoning_effort=low"
             );
             body["reasoning_effort"] = serde_json::json!("low");
+            discarded_usage = Some(resp.usage.clone());
             resp = self.send_with_retry(&body).await?;
             if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
                 return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
@@ -531,14 +538,30 @@ impl ApiClient {
                 completion_tokens: resp.usage.completion_tokens as u32,
             });
 
+        let (mut prompt_tokens, mut completion_tokens, mut total_tokens, mut cost) = (
+            resp.usage.prompt_tokens,
+            resp.usage.completion_tokens,
+            resp.usage.total_tokens,
+            resp.usage.cost,
+        );
+        if let Some(discarded) = discarded_usage {
+            prompt_tokens += discarded.prompt_tokens;
+            completion_tokens += discarded.completion_tokens;
+            total_tokens += discarded.total_tokens;
+            cost = match (cost, discarded.cost) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, b) => a.or(b),
+            };
+        }
+
         let meta = ChatMetadata {
             request_body: body,
             elapsed_ms,
             finish_reason,
-            prompt_tokens: Some(resp.usage.prompt_tokens as u32),
-            completion_tokens: Some(resp.usage.completion_tokens as u32),
-            total_tokens: Some(resp.usage.total_tokens as u32),
-            cost: resp.usage.cost,
+            prompt_tokens: Some(prompt_tokens as u32),
+            completion_tokens: Some(completion_tokens as u32),
+            total_tokens: Some(total_tokens as u32),
+            cost,
         };
         Ok((resp, meta))
     }

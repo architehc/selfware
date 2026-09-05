@@ -1619,6 +1619,20 @@ impl Agent {
                 return None;
             }
         };
+        // Meter the audit call (external review of 6e231e2e, finding #5): the
+        // audit burns a real request every run, and discarding its usage made
+        // reported totals incomplete. Feed the session token counter and the
+        // event stream like any other model call. (The per-run
+        // `cumulative_token_usage` budget is untouched — this path is &self;
+        // an audit is one bounded call per run.)
+        crate::output::record_tokens(
+            response.usage.prompt_tokens as u64,
+            response.usage.completion_tokens as u64,
+        );
+        self.emit_event(AgentEvent::TokenUsage {
+            prompt_tokens: response.usage.prompt_tokens as u64,
+            completion_tokens: response.usage.completion_tokens as u64,
+        });
         let text = response
             .choices
             .first()
