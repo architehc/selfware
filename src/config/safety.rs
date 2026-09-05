@@ -58,6 +58,9 @@ pub fn default_denied_paths() -> Vec<String> {
         // `.env.production`, `.env.staging`, … — the same credential file in
         // a costume (red-team wave-3 finding).
         "**/.env.*".to_string(),
+        // Suffix form too: `production.env` / `db.env` — the same credential
+        // file named the other way around (wave-25).
+        "**/*.env".to_string(),
         // The .ssh DIRECTORY itself, not just its contents: `**/.ssh/**`
         // needs a component below .ssh, so file_list/file_read on the bare
         // dir (enumerate key filenames — recon) slipped past (red-team

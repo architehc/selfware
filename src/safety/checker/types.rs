@@ -192,6 +192,13 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bcrontab\s+(-\s*$|/|\.)").expect("Invalid regex"),
                 "crontab install (persistence)",
             ),
+            // `at` job scheduling (wave-25: `printf 'rm -rf …' | at now`)
+            // — crontab's sibling persistence vector; agents never
+            // legitimately schedule at-jobs.
+            (
+                Regex::new(r"(\|\s*at\s+(now|-f\b|[0-9])|\bat\s+(now|-f\b))").expect("Invalid regex"),
+                "at job scheduling (persistence)",
+            ),
             // `find … -exec rm/shred/dd` — bulk destruction with no literal
             // rm target for the classic patterns to see (wave-9 finding:
             // `find / -type d -name '*.sql' -exec rm {} \`).
