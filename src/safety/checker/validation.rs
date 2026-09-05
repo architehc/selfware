@@ -42,6 +42,15 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "NODE_OPTIONS",
     "PERL5OPT",
     "RUBYOPT",
+    // Interpreter home / load-path hijacks (red-team wave-12): same class as
+    // PYTHONPATH/RUBYLIB above — point the interpreter or package manager at
+    // attacker-controlled trees. PYTHONHOME relocates the whole stdlib,
+    // GEM_HOME/GEM_PATH relocate gem resolution, BUNDLE_GEMFILE executes an
+    // attacker-written Gemfile at bundle time.
+    "PYTHONHOME",
+    "GEM_HOME",
+    "GEM_PATH",
+    "BUNDLE_GEMFILE",
     // Git execution vectors: agent git work goes through the git tools, not
     // env-injected helpers.
     "GIT_SSH_COMMAND",
@@ -780,9 +789,11 @@ impl SafetyChecker {
         // (`export` persists it in the shell, `env` sets it for the child),
         // so they are the same injection with extra steps. The list is
         // shared with the shell_exec structured env map (DENIED_ENV_VARS).
+        // `env` may carry flags before the assignments (`env -i GEM_HOME=…`
+        // slipped past the flag-free form — red-team wave-12 finding).
         static DANGEROUS_ENV_VARS: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(&format!(
-                r"(?i)^\s*(?:(?:export|env)\s+)?({})\s*=",
+                r"(?i)^\s*(?:(?:export|env)(?:\s+-\w+)*\s+)?({})\s*=",
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
@@ -791,6 +802,22 @@ impl SafetyChecker {
         for part in split_shell_commands(&normalized) {
             let part_trimmed = part.trim();
             if DANGEROUS_ENV_VARS.is_match(part_trimmed) {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
+        // `env` segments with flag arguments in between (`env -u FOO
+        // GEM_HOME=…`) defeat the prefix-anchored form above — catch a denied
+        // assignment anywhere in an env invocation (wave-12 sibling sweep).
+        static DANGEROUS_ENV_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(&format!(
+                r"(?i)^\s*env\b.*\b({})\s*=",
+                DENIED_ENV_VARS.join("|")
+            ))
+            .expect("Invalid regex")
+        });
+        for part in split_shell_commands(&normalized) {
+            if DANGEROUS_ENV_SEGMENT.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
         }
