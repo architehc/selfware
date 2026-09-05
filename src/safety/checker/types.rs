@@ -579,6 +579,12 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\bnode\s+[^|\n]*--require[=\s]").expect("Invalid regex"),
                 "node --require preload injection",
             ),
+            // php -d auto_prepend_file (wave-58b) — the -d flag form of
+            // the PHP_AUTO_PREPEND_FILE env hijack (wave-35).
+            (
+                Regex::new(r"\bphp\s+[^|\n]*-d\s+auto_prepend_file").expect("Invalid regex"),
+                "php -d auto_prepend_file (preload injection)",
+            ),
             (
                 Regex::new(r"--inspect(-brk)?(=|\s+)0\.0\.0\.0").expect("Invalid regex"),
                 "node inspector on public bind (remote code execution)",

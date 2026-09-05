@@ -96,6 +96,13 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "PIP_EXTRA_INDEX_URL",
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
+    // Editor startup hooks (wave-58b: `VIMINIT='!cat /tmp/payload | sh'
+    // vim` runs on every vim/ex start — BASH_ENV via the editor) and
+    // compiler toolchain relocation (GCC_EXEC_PREFIX finds attacker
+    // cc1/as/ld).
+    "VIMINIT",
+    "EXINIT",
+    "GCC_EXEC_PREFIX",
     // Proxy/git-transport/prompt-expansion channels (wave-46):
     // HTTP(S)_PROXY/ALL_PROXY route every request through the attacker
     // (MITM by configuration, the CA-bundle twins); GIT_PROXY_COMMAND
