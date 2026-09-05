@@ -419,10 +419,38 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // BlockedEnvInjection error the safety tests assert on.
             (
                 Regex::new(
-                    r#"(?i)-c\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options)\s*="#,
+                    r#"(?i)-c\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path|fpath|classpath)\s*="#,
                 )
                 .expect("Invalid regex"),
                 "env injection inside sh -c payload",
+            ),
+            // Flag-based preload/instrumentation injection (wave-24) —
+            // same class as the env-var hooks but via CLI flags:
+            // `node --require=/tmp/hook.js` (CommonJS preload),
+            // `node --inspect-brk=0.0.0.0` (V8 inspector on a public bind
+            // is unauthenticated remote code execution),
+            // `java -agentpath:/tmp/lib.so` / `-Djava.ext.dirs=/tmp`
+            // (native agent / extension class loading),
+            // `git -c core.hooksPath=/tmp/hooks` (redirect hook execution
+            // out of the denied .git/hooks path).
+            (
+                Regex::new(r"\bnode\s+[^|\n]*--require[=\s]").expect("Invalid regex"),
+                "node --require preload injection",
+            ),
+            (
+                Regex::new(r"--inspect(-brk)?(=|\s+)0\.0\.0\.0").expect("Invalid regex"),
+                "node inspector on public bind (remote code execution)",
+            ),
+            (
+                Regex::new(
+                    r"(-agentpath|-agentlib|-djava\.ext\.dirs|-xbootclasspath)",
+                )
+                .expect("Invalid regex"),
+                "jvm agent/extension-path injection",
+            ),
+            (
+                Regex::new(r"core\.hookspath").expect("Invalid regex"),
+                "git core.hooksPath redirect (hook execution)",
             ),
             // Exfiltration channels (red-team wave-3 finding): local
             // sensitive data shipped to a remote endpoint from a shell

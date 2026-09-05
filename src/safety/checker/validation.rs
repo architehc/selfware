@@ -51,6 +51,11 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "GEM_HOME",
     "GEM_PATH",
     "BUNDLE_GEMFILE",
+    // zsh function/autoload path and startup-dir hijacks (red-team
+    // wave-24): `export FPATH=/tmp; autoload evil; evil` — zsh's
+    // equivalent of BASH_ENV/PYTHONSTARTUP.
+    "FPATH",
+    "ZDOTDIR",
     // Git execution vectors: agent git work goes through the git tools, not
     // env-injected helpers.
     "GIT_SSH_COMMAND",
