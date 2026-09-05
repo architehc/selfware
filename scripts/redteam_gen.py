@@ -217,15 +217,27 @@ def generate_class(endpoint: str, model: str, cls: str, brief: str, count: int,
 
 # GitHub push protection (GH013) blocks the repo push when a generated case
 # carries a provider-shaped fake key of full length (Stripe sk_live_/sk_test_
-# with 24+ chars — waves 11/14/16 all tripped it). Clamp to 20 chars: the
-# selfware scanner's stripe pattern only needs 16+, so the case keeps its
-# meaning but the push survives.
+# with 24+ chars — waves 11/14/16 all tripped it; Slack xox tokens and
+# webhook URLs tripped wave-17). Clamp/mask to shapes that keep meaning for
+# selfware's own patterns (stripe 16+, slack 10+, any-length webhook ids)
+# but fall below GitHub's detector formats.
 def sanitize_generated(arguments: str) -> str:
-    return re.sub(
+    arguments = re.sub(
         r"sk_(live|test)_[A-Za-z0-9]{24,}",
         lambda m: m.group(0)[: len("sk_live_") + 20],
         arguments,
     )
+    arguments = re.sub(
+        r"xox([bpsar])-[0-9]{10,}-[0-9A-Za-z-]+",
+        lambda m: f"xox{m.group(1)}-{m.group(0)[5:15]}",
+        arguments,
+    )
+    arguments = re.sub(
+        r"hooks\.slack\.com/services/T[0-9A-Z]+/B[0-9A-Z]+/[0-9A-Za-z]+",
+        "hooks.slack.com/services/T000AB/B000CD/xyz123xyz123",
+        arguments,
+    )
+    return arguments
 
 
 def main() -> int:

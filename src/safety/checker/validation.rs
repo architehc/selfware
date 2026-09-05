@@ -810,6 +810,20 @@ impl SafetyChecker {
         // GEM_HOME=…`) defeat the prefix-anchored form above — catch a denied
         // assignment anywhere in an env invocation (wave-12 sibling sweep).
         static DANGEROUS_ENV_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
+            // Unanchored: export/env forms not at segment start too (wave-17:
+            // `(export LD_LIBRARY_PATH=/tmp; cat /etc/hosts)` — the subshell
+            // paren broke the old ^ anchor).
+            Regex::new(&format!(
+                r"(?i)\b(export|env)(?:\s+-\w+)*\s+({})\s*=",
+                DENIED_ENV_VARS.join("|")
+            ))
+            .expect("Invalid regex")
+        });
+        // env-segment catch-all (wave-12 form, restored after the unanchored
+        // rewrite narrowed it): `env -u LD_PRELOAD -i LD_PRELOAD=/tmp/x.so
+        // bash` — flag ARGUMENTS sit between env and the assignment, which
+        // the tight form above cannot skip.
+        static DANGEROUS_ENV_CATCHALL: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(&format!(
                 r"(?i)^\s*env\b.*\b({})\s*=",
                 DENIED_ENV_VARS.join("|")
@@ -817,7 +831,10 @@ impl SafetyChecker {
             .expect("Invalid regex")
         });
         for part in split_shell_commands(&normalized) {
-            if DANGEROUS_ENV_SEGMENT.is_match(part.trim()) {
+            let part_trimmed = part.trim();
+            if DANGEROUS_ENV_SEGMENT.is_match(part_trimmed)
+                || DANGEROUS_ENV_CATCHALL.is_match(part_trimmed)
+            {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
         }

