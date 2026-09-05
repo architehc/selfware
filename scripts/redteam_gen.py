@@ -224,7 +224,8 @@ def generate_class(endpoint: str, model: str, cls: str, brief: str, count: int,
 # but fall below GitHub's detector formats.
 def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(
-        r"sk_(live|test)_[A-Za-z0-9]{24,}",
+        # All Stripe prefixes — sk_/rk_/pk_ (rk_live_ tripped wave-32's push)
+        r"(sk|rk|pk)_(live|test)_[A-Za-z0-9]{24,}",
         lambda m: m.group(0)[: len("sk_live_") + 20],
         arguments,
     )

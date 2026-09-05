@@ -1192,7 +1192,11 @@ impl SafetyChecker {
         }
         // Webhook URLs are secrets AND exfil sinks: posting to a Slack
         // webhook-shape URL sends whatever the agent includes straight out.
-        if lower_url.contains("hooks.slack.com/services/") {
+        // Discord webhooks are the same class (wave-32).
+        if lower_url.contains("hooks.slack.com/services/")
+            || lower_url.contains("discord.com/api/webhooks/")
+            || lower_url.contains("discordapp.com/api/webhooks/")
+        {
             return Err(SelfwareError::Safety(
                 SafetyError::BlockedUrlShellSubstitution,
             ));
