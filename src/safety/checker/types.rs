@@ -464,6 +464,21 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "env injection inside alias definition",
             ),
+            // env with a variable as its assignment argument (wave-62:
+            // \`VAR='LD_PRELOAD=/tmp/v.so'; env $VAR sh -c 'ls'\`) —
+            // the assignment text lives in the variable.
+            (
+                Regex::new(r"\benv\s+\$\w+\s").expect("Invalid regex"),
+                "env with variable assignment argument (indirect injection)",
+            ),
+            // Assignment through name expansion (wave-62:
+            // \`${VAR}=/tmp/lib.so ls\`, \`env ${!LD_*}=/tmp/x id\`) —
+            // the variable NAME comes from an expansion, so no static
+            // list can see it. The expansion-then-= shape is the tell.
+            (
+                Regex::new(r"\$\{!?\w+\*?\}\s*=").expect("Invalid regex"),
+                "env assignment via name expansion (indirect injection)",
+            ),
             // eval carrying a denied assignment (wave-45: `eval
             // 'LD_PRELOAD=/tmp/x.so; …'`) — the sh -c payload pattern is
             // anchored on -c; eval needs its own.
