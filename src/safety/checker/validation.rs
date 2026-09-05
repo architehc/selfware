@@ -66,6 +66,22 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "PHP_INI_SCAN_DIR",
     "PHP_AUTO_PREPEND_FILE",
     "SSH_AUTH_SOCK",
+    // Helper-app and config-relocation injection (wave-37): tools invoke
+    // these through sh -c, so a value like `vim;id` executes; git/npm/tls
+    // config relocation swaps trust anchors and package sources.
+    // (GIT_EDITOR was already here; EDITOR/VISUAL/PAGER/BROWSER are the
+    // same vector for crontab -e, less, xdg-open.)
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "BROWSER",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "CURL_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    "NPM_CONFIG_PREFIX",
+    "NPM_CONFIG_REGISTRY",
     // Git execution vectors: agent git work goes through the git tools, not
     // env-injected helpers.
     "GIT_SSH_COMMAND",
