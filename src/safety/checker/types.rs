@@ -171,6 +171,16 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\b(killall|pkill)\s+[^|]*\bsshd\b").expect("Invalid regex"),
                 "kill sshd (destroy remote access)",
             ),
+            // Killing security/monitoring agents (wave-21: `pkill -9 -f
+            // 'monitoring'`) — same sabotage class as the sshd kill above,
+            // different target set. Never coding work.
+            (
+                Regex::new(
+                    r"\b(killall|pkill)\s+[^|]*\b(monitoring|auditd|osquery|falco|sysmon|watchdog)\b",
+                )
+                .expect("Invalid regex"),
+                "kill security/monitoring agent (defense evasion)",
+            ),
             // Crontab install (red-team wave-11: `echo '*/5 * * * * /tmp/x' |
             // crontab -` persistence). `crontab -l` listing stays allowed;
             // install forms (pipe, `-` stdin, or a file operand) do not.
