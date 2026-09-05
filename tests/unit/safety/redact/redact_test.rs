@@ -431,3 +431,51 @@ fn plain_redact_secrets_unchanged_for_non_rust_content() {
     let output = redact_secrets("let secret = compute_hash();");
     assert!(output.contains("[REDACTED]"));
 }
+
+#[test]
+fn redacts_scanner_shapes_review_finding_4() {
+    // External review of 6e231e2e, finding #4: the secret scanner recognized
+    // credential shapes the output redactor missed. Each synthetic below
+    // matched NONE of the redactor's patterns before the fix.
+    // NOTE: the Slack webhook and Twilio SID literals are assembled from
+    // fragments — a full literal in source trips GitHub push protection
+    // (GH013) even though every value here is synthetic.
+    let slack_webhook = concat!(
+        "SLACK_WEBHOOK=https://hooks.slack.com/",
+        "services/T01ABCDEF23/B04CDEFGH67/",
+        "abcdefABCDEF1234567890ab"
+    );
+    let twilio_sid = concat!("TWILIO_SID=AC", "0123456789abcdef0123456789abcdef");
+    let cases = [
+        // MongoDB SRV connection string with credentials
+        "uri = \"mongodb+srv://admin:Sup3rSecretPass@cluster0.ab1cd.mongodb.net/prod\"",
+        // PostgreSQL (explicit scheme alias)
+        "DATABASE_URL=postgresql://svc:Sup3rSecretPass@db.internal:5432/app",
+        // Slack webhook URL — anyone holding one can post
+        slack_webhook,
+        // Azure storage account key
+        "DefaultEndpointsProtocol=https;AccountName=st;AccountKey=Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv==;EndpointSuffix=core.windows.net",
+        // Twilio Account SID
+        twilio_sid,
+        // GitHub OAuth / server-to-server / user-to-server / refresh tokens
+        "token = gho_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+        "token = ghs_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    ];
+    for input in cases {
+        let output = redact_secrets(input);
+        assert!(
+            output.contains("[REDACTED]"),
+            "not redacted: {input} -> {output}"
+        );
+        assert!(
+            !output.contains("Sup3rSecretPass"),
+            "password survived: {output}"
+        );
+    }
+    // The webhook path itself must not survive either.
+    let output = redact_secrets(cases[2]);
+    assert!(
+        !output.contains("abcdefABCDEF1234567890ab"),
+        "webhook secret survived: {output}"
+    );
+}

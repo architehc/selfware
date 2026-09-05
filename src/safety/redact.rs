@@ -48,8 +48,10 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // AWS credentials
             compile_pattern("aws_access_key", r#"(?i)(AKIA[A-Z0-9]{16})"#),
             compile_pattern("aws_secret_key", r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[=:]\s*["']?([a-zA-Z0-9/+=]{40})["']?"#),
-            // GitHub classic tokens (ghp_)
-            compile_pattern("github_token", r#"(ghp_[a-zA-Z0-9]{36})"#),
+            // GitHub classic tokens (ghp_, gho_, ghu_, ghs_, ghr_) — widened to
+            // match the scanner's shape (review finding #4: the scanner
+            // recognized gho_/ghu_/ghs_/ghr_ that the redactor missed)
+            compile_pattern("github_token", r#"(gh[pousr]_[a-zA-Z0-9_]{16,})"#),
             // GitHub fine-grained personal access tokens (github_pat_)
             compile_pattern("github_fine_grained_token", r#"(github_pat_[a-zA-Z0-9_]{22,})"#),
             // GitLab tokens (glpat-)
@@ -67,14 +69,23 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             compile_pattern("stripe_key", r#"(sk_live_[a-zA-Z0-9]{24,}|rk_live_[a-zA-Z0-9]{24,}|pk_live_[a-zA-Z0-9]{24,})"#),
             // Slack tokens (xoxb-, xoxp-, xoxs-, xoxa-, xoxr-)
             compile_pattern("slack_token", r#"(xox[bpsar]-[a-zA-Z0-9\-]+)"#),
+            // Slack webhook URLs — anyone holding one can post (scanner had
+            // this; the redactor missed it — review finding #4)
+            compile_pattern("slack_webhook", r#"(hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+)"#),
+            // Azure storage account keys (scanner had this; redactor missed it)
+            compile_pattern("azure_account_key", r#"(AccountKey=[A-Za-z0-9+/=]{20,})"#),
+            // Twilio Account SIDs (AC + 32 hex; scanner had this too)
+            compile_pattern("twilio_sid", r#"(AC[0-9a-f]{32})"#),
             // Generic secret/password patterns
             // Value class excludes '[' so earlier patterns' own
             // `name=[REDACTED]` replacements are never re-matched as secrets.
             compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"'\[]{6,})["']?"#),
             // Private keys
             compile_pattern("private_key", r#"-----BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----"#),
-            // Database connection strings
-            compile_pattern("db_connection", r#"(?i)(mongodb|postgres|mysql|redis)://[^\s"'<>]+"#),
+            // Database connection strings — mongodb+srv and valkey included to
+            // match the scanner's shape (review finding #4: a mongodb+srv://
+            // URL with credentials sailed through output redaction)
+            compile_pattern("db_connection", r#"(?i)(mongodb(\+srv)?|postgres|postgresql|mysql|redis|valkey)://[^\s"'<>]+"#),
             // JWT tokens - full three-part tokens
             compile_pattern("jwt", r#"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"#),
             // JWT-like base64 tokens (eyJ prefix is base64 for {"): catch partial/header-only
