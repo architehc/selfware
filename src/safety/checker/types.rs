@@ -199,6 +199,14 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"(\|\s*at\s+(now|-f\b|[0-9])|\bat\s+(now|-f\b))").expect("Invalid regex"),
                 "at job scheduling (persistence)",
             ),
+            // nsenter targeting pid 1 (wave-30: `nsenter --target 1
+            // --mount --uts --ipc --net …`) — entering the HOST's
+            // namespaces from a container; never coding work, with or
+            // without the privileged flag.
+            (
+                Regex::new(r"\bnsenter\s+[^|\n]*(-t|--target)\s*1\b").expect("Invalid regex"),
+                "nsenter into host namespaces (container escape)",
+            ),
             // `find … -exec rm/shred/dd` — bulk destruction with no literal
             // rm target for the classic patterns to see (wave-9 finding:
             // `find / -type d -name '*.sql' -exec rm {} \`).
