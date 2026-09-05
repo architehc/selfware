@@ -1651,6 +1651,14 @@ pub fn shell_tee_write_targets(cmd: &str) -> Vec<String> {
 const FILE_TARGET_VERBS: &[&str] = &[
     "cat", "cp", "mv", "rm", "chmod", "ln", "mkdir", "touch", "head", "tail", "less", "more", "dd",
     "install", "rsync", "scp",
+    // Content-dumping readers (red-team wave-15): `grep -i password .env`
+    // bypassed the denied-path check because grep was READ_ONLY but not a
+    // file verb, so its `.env` operand was never a candidate — the same
+    // read `cat .env` is denied. Their first operand is a PATTERN, but a
+    // spurious candidate is harmless: bare words resolve cwd-relative and
+    // pass the allow-list, while denied patterns (.env/.ssh/secrets) still
+    // fire. awk/sed/jq/xargs remain documented fail-open (see above).
+    "grep", "rg", "diff",
 ];
 
 /// Commands whose operands are only ever READ: their absolute-path operands
