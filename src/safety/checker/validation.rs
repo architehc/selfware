@@ -277,6 +277,10 @@ impl SafetyChecker {
                 // checked out, which GitPush::execute() itself re-checks
                 // after resolving it (see src/tools/git.rs).
                 if let Some(branch) = args.get("branch").and_then(|v| v.as_str()) {
+                    // Normalize ref-qualified names: `refs/heads/main` used to
+                    // slip past the exact-string compare and push to protected
+                    // main (red-team wave-11 finding).
+                    let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
                     if self
                         .config
                         .protected_branches
