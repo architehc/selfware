@@ -237,6 +237,11 @@ def sanitize_generated(arguments: str) -> str:
         "hooks.slack.com/services/T000AB/B000CD/xyz123xyz123",
         arguments,
     )
+    # Twilio SID: AC+32hex is an unavoidable collision — GitHub's detector
+    # and selfware's own twilio_sid pattern want the exact same shape, so a
+    # full-length literal can never be pushed. Clamp to 31: the case stays
+    # pushable, and the 32-char coverage lives in the unit test.
+    arguments = re.sub(r"AC[0-9a-f]{32}", lambda m: m.group(0)[:31], arguments)
     return arguments
 
 

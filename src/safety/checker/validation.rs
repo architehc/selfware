@@ -1676,6 +1676,10 @@ const FILE_TARGET_VERBS: &[&str] = &[
     // pass the allow-list, while denied patterns (.env/.ssh/secrets) still
     // fire. awk/sed/jq/xargs remain documented fail-open (see above).
     "grep", "rg", "diff",
+    // Encoding readers (wave-19): `base64 -w0 .env | xargs curl` — base64
+    // with a file OPERAND reads the file; not being a file verb left .env
+    // unchecked. xxd/od/hexdump are the same content channel.
+    "base64", "xxd", "od", "hexdump",
 ];
 
 /// Commands whose operands are only ever READ: their absolute-path operands
