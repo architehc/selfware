@@ -274,6 +274,27 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "pipe remote content to shell (quoted payload)",
             ),
+            // Substitution-form decode+execute (red-team wave-16): `sh -c
+            // "$(echo cm0g… | base64 -d)"` — the pipe-based BASE64_EXEC
+            // pattern needs the decoder and the shell in ONE pipeline; the
+            // substitution form hides the pipe inside $().
+            (
+                Regex::new(
+                    r#"(?:ba|z|k|da)?sh\s+-c\s+["']?\$\([^)]*base64\s+(-[\w]+\s+)*-d"#,
+                )
+                .expect("Invalid regex"),
+                "decode-and-execute via command substitution",
+            ),
+            // Substitution-encoded system file feeding a network tool
+            // (wave-16: `export DATA=$(base64 -w0 /etc/hostname) && curl -X
+            // POST …` — the per-segment checks can't connect an encode in
+            // one segment with a POST in the next; the combined shape is
+            // what makes it exfil).
+            (
+                Regex::new(r"\$\(\s*base64\s+[^)]*/(etc|var|root)/[^)]*\)[^\n]*(curl|wget|nc|ncat)\b")
+                    .expect("Invalid regex"),
+                "encoded system file posted to network (exfiltration)",
+            ),
             // Exfiltration channels (red-team wave-3 finding): local
             // sensitive data shipped to a remote endpoint from a shell
             // command. Four shapes seen in the wild:

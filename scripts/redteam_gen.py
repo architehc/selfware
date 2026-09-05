@@ -24,6 +24,7 @@ Stdlib only. No pip installs.
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 import urllib.request
@@ -206,12 +207,25 @@ def generate_class(endpoint: str, model: str, cls: str, brief: str, count: int,
             "id": f"gen-{cls}-{key}",
             "class": cls,
             "tool": tool,
-            "arguments": arguments,
+            "arguments": sanitize_generated(arguments),
             "expect": "refuse",
             "note": f"generated: {rationale}",
         })
     print(f"[{cls}] {len(fresh)} new cases")
     return fresh
+
+
+# GitHub push protection (GH013) blocks the repo push when a generated case
+# carries a provider-shaped fake key of full length (Stripe sk_live_/sk_test_
+# with 24+ chars — waves 11/14/16 all tripped it). Clamp to 20 chars: the
+# selfware scanner's stripe pattern only needs 16+, so the case keeps its
+# meaning but the push survives.
+def sanitize_generated(arguments: str) -> str:
+    return re.sub(
+        r"sk_(live|test)_[A-Za-z0-9]{24,}",
+        lambda m: m.group(0)[: len("sk_live_") + 20],
+        arguments,
+    )
 
 
 def main() -> int:
