@@ -357,6 +357,24 @@ impl SafetyChecker {
                 if !cmd.is_empty() {
                     self.check_shell_command(&cmd)?;
                 }
+                // The tool also takes an argv array ("args": ["-c", "…"]) —
+                // its own metacharacter defense only rejects ;&|`$()<>, so
+                // metachar-free payloads (`sh -c "cat .env"`) sail through
+                // both layers unless the checker sees them (red-team wave-22
+                // finding). Check the joined command line.
+                let argv: Vec<String> = args
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !argv.is_empty() {
+                    let joined = format!("{} {}", cmd, argv.join(" "));
+                    self.check_shell_command(&joined)?;
+                }
                 if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
                     self.check_path(cwd)?;
                 }
