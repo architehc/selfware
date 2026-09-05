@@ -82,6 +82,20 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "NODE_EXTRA_CA_CERTS",
     "NPM_CONFIG_PREFIX",
     "NPM_CONFIG_REGISTRY",
+    // GUI toolkit module injection (wave-38b: GTK_MODULES/QT_PLUGIN_PATH
+    // load .so from arbitrary paths — LD_PRELOAD via the toolkit), askpass
+    // phishing (SSH_ASKPASS/SUDO_ASKPASS harvest credentials; GIT_ASKPASS
+    // was already here), pip package-source swap (NPM_CONFIG_REGISTRY's
+    // twin), and interpreter-environment relocation (fake venv/conda
+    // activate scripts run attacker code).
+    "GTK_MODULES",
+    "QT_PLUGIN_PATH",
+    "SSH_ASKPASS",
+    "SUDO_ASKPASS",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
     // Git execution vectors: agent git work goes through the git tools, not
     // env-injected helpers.
     "GIT_SSH_COMMAND",

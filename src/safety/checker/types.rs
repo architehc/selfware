@@ -426,6 +426,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "encode command feeding network tool (exfiltration)",
             ),
+            // Denied env assignments hidden inside ALIAS definitions
+            // (wave-38b: `alias python='LD_PRELOAD=/tmp/p.so python'`) —
+            // the export/env-anchored checks can't see an assignment that
+            // only happens when the alias fires.
+            (
+                Regex::new(
+                    r#"(?i)alias\s+\w+=['"]?\s*(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path|gtk_modules|fpath)\s*="#,
+                )
+                .expect("Invalid regex"),
+                "env injection inside alias definition",
+            ),
             // Denied env assignments hidden INSIDE interpreter spawn calls
             // (wave-17): `awk 'BEGIN{system("LD_PRELOAD=/tmp/x.so id")}'`,
             // `perl -e '$ENV{PATH}="/tmp:".…; exec …'`, `ruby -e
