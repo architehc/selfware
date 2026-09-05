@@ -4583,3 +4583,43 @@ async fn test_streaming_response_collect_zero_events_without_done_is_error() {
 
     let _ = server.await;
 }
+
+#[test]
+fn test_per_call_stream_deadline_merges_adaptive_and_run_wall() {
+    use std::time::{Duration, Instant};
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    client.speed_tracker.lock().unwrap().record(4.0);
+    // Adaptive budget: 2048 / 4 * 2.5 = 1280s.
+    let now = Instant::now();
+
+    // No run deadline: the per-call adaptive bound applies (~1280s out).
+    let d = client.per_call_stream_deadline(None);
+    let delta = d.saturating_duration_since(now);
+    assert!(
+        (Duration::from_secs(1279)..=Duration::from_secs(1281)).contains(&delta),
+        "adaptive per-call bound expected, got {delta:?}"
+    );
+
+    // Run deadline SOONER than the adaptive bound: the run wall wins.
+    let run = now + Duration::from_secs(60);
+    let d = client.per_call_stream_deadline(Some(run));
+    assert!(
+        d.saturating_duration_since(now) <= Duration::from_secs(61),
+        "sooner run wall must win"
+    );
+
+    // Run deadline LATER than the adaptive bound: the per-call bound wins —
+    // this is the case that used to leave streams unbounded for hours.
+    let run = now + Duration::from_secs(7200);
+    let d = client.per_call_stream_deadline(Some(run));
+    let delta = d.saturating_duration_since(now);
+    assert!(
+        (Duration::from_secs(1279)..=Duration::from_secs(1281)).contains(&delta),
+        "per-call bound must win over a distant run wall, got {delta:?}"
+    );
+}

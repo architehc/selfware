@@ -291,6 +291,25 @@ impl ApiClient {
         timeout.min(CEILING_SECS)
     }
 
+    /// Absolute deadline bounding ONE streaming response body.
+    ///
+    /// The streaming path previously had no per-call bound: `step_timeout_secs`
+    /// applies only to tool execution, and the chunk-stall watchdog resets on
+    /// every received chunk, so a model streaming an endless monologue (bytes
+    /// flowing, no tool call, no end) was stopped only by the run-level wall
+    /// clock — hours. Observed: a cad-model visual trial sat in a single
+    /// 2h streamed "analysis" step on the 31000 endpoint (2026-09-05). The
+    /// per-call bound reuses the non-streaming path's adaptive budget
+    /// (max_tokens / measured tps × safety, floored, capped at 2h) and is
+    /// merged with the run-level wall deadline — whichever comes first wins.
+    pub(crate) fn per_call_stream_deadline(&self, run_deadline: Option<Instant>) -> Instant {
+        let per_call = Instant::now() + Duration::from_secs(self.adaptive_response_timeout_secs());
+        match run_deadline {
+            Some(d) => d.min(per_call),
+            None => per_call,
+        }
+    }
+
     /// Return a reference to the underlying [`Config`](crate::config::Config).
     pub fn config(&self) -> &crate::config::Config {
         &self.config
@@ -814,7 +833,7 @@ impl ApiClient {
                             return Ok(StreamingResponse::new(
                                 response,
                                 Duration::from_secs(stream_chunk_timeout_secs),
-                                deadline,
+                                Some(self.per_call_stream_deadline(deadline)),
                             ));
                         }
 

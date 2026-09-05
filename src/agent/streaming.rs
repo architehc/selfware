@@ -327,6 +327,9 @@ impl Agent {
         let mut captured_completion_tokens: Option<u32> = None;
         let mut captured_total_tokens: Option<u32> = None;
         let mut captured_cost: Option<f64> = None;
+        // Whole-call timer: request_meta.elapsed_ms measures time-to-headers
+        // for streaming, so the speed sample below needs its own clock.
+        let stream_started = std::time::Instant::now();
 
         let mut rx = stream.into_channel().await;
         let mut content = String::new();
@@ -640,6 +643,20 @@ impl Agent {
                 .unwrap_or_else(|| "stream_end".into()),
             completion_tokens: captured_completion_tokens.unwrap_or(0),
         });
+
+        // Feed the endpoint's measured effective speed into the client's
+        // adaptive timeout. Non-streaming calls already do this (client.rs);
+        // streaming calls were invisible to the tracker, so streaming-only
+        // endpoints kept the conservative 3 t/s presumption and a 2h per-call
+        // ceiling instead of a measured one.
+        let stream_elapsed_secs = stream_started.elapsed().as_secs_f64();
+        if stream_elapsed_secs > 0.0 && captured_completion_tokens.unwrap_or(0) > 0 {
+            self.client
+                .speed_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(captured_completion_tokens.unwrap_or(0) as f64 / stream_elapsed_secs);
+        }
 
         if let Some(slot) = meta_out {
             *slot = crate::api::types::ChatMetadata {
