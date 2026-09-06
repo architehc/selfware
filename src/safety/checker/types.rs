@@ -861,7 +861,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // stays legal.
             (
                 Regex::new(
-                    r#"(?i)find\s+[^|\n]*-name\s+['"]?[^'"\s|]*\.(pem|key|crt|p12|pfx)['"]?[^|\n]*\|\s*[^|\n]*(xargs|cat|base64|xxd)\b"#,
+                    r#"(?i)find\s+[^|\n]*-name\s+['"]?[^'"\s|]*\.(pem|key|crt|p12|pfx)['"]?[^|\n]*(\|[^|\n]*)*\|\s*[^|\n]*(xargs|cat|base64|xxd)\b"#,
                 )
                 .expect("Invalid regex"),
                 "credential-file harvest by extension piped to reader",
@@ -1148,10 +1148,19 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 // wave-75 slipped PERL5LIB/RUBYOPT/RUBYLIB through because
                 // only the wave-17 names were listed here (AGENTS.md rule
                 // 5: the bug class, not the file). `path` stays last so the
-                // longer *path names win the alternation.
-                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
+                // longer *path names win the alternation. Bare ENV{…} is
+                // perl's %ENV access without the sigil (wave-158).
+                Regex::new(r#"(?i)(\$?env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
+            ),
+            // export with a quoted-substitution argument (red-team
+            // wave-158: \`export "$(echo LD_PRELOAD)=\"$(echo /tmp/q.so)\"\`)
+            // — INDIRECT_EXPORT_SUBST needs the substitution right after
+            // export; the quote breaks the adjacency.
+            (
+                Regex::new(r#"\bexport\s+['"]?\$\("#).expect("Invalid regex"),
+                "export with quoted-substitution argument (injection)",
             ),
             // Denied name written through ANY dict bracket (red-team
             // wave-135: \`e['LD_PRELOAD']='/tmp/lib.so';

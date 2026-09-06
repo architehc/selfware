@@ -1004,9 +1004,10 @@ impl SafetyChecker {
             // (red-team wave-78: `readonly PATH=/tmp:$PATH`). `local` is
             // deliberately excluded — function-scope PATH customization is a
             // legitimate shell idiom and bare `local` outside functions is a
-            // no-op error anyway.
+            // no-op error anyway. Quotes around the NAME are tolerated
+            // (wave-158: `export "LD_PRELOAD"="/tmp/c.so"`).
             Regex::new(&format!(
-                r"(?i)^\s*(?:(?:export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+)?({})\s*=",
+                r#"(?i)^\s*(?:(?:export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+)?['"]?({})['"]?\s*="#,
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
@@ -1045,7 +1046,7 @@ impl SafetyChecker {
             // `(export LD_LIBRARY_PATH=/tmp; cat /etc/hosts)` — the subshell
             // paren broke the old ^ anchor).
             Regex::new(&format!(
-                r"(?i)\b(export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+({})\s*=",
+                r#"(?i)\b(export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+['"]?({})['"]?\s*="#,
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
