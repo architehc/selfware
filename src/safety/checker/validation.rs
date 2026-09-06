@@ -1432,6 +1432,10 @@ impl SafetyChecker {
         let dangerous_mounts = [
             "/", "/etc", "/boot", "/usr", "/var", "/root", "/sys", "/proc", "/lib", "/lib64",
             "/opt", "/run", "/dev",
+            // Whole home tree — every user's credentials ride along (red-team
+            // wave-199: `volumes: ["/home:/home"]`). Workspace-resident paths
+            // are exempted below.
+            "/home",
         ];
         if host_path.contains("/.ssh")
             || host_path == ".ssh"
@@ -1469,6 +1473,15 @@ impl SafetyChecker {
             if host_path == *dm
                 || (host_path.starts_with(dm) && host_path.as_bytes().get(dm.len()) == Some(&b'/'))
             {
+                // Workspace exemption (red-team wave-199 follow-up): /home is
+                // a dangerous mount (whole home tree ships every user's
+                // credentials into the container), but the workspace itself
+                // usually LIVES under /home — mounting the workspace or a
+                // subdirectory of it is the standard dev-container workflow
+                // and must stay legal.
+                if self.host_path_in_workspace(host_path) {
+                    continue;
+                }
                 return Err(SelfwareError::Safety(SafetyError::ContainerSystemMount {
                     mount: mount.to_string(),
                     directory: (*dm).to_string(),
@@ -1476,6 +1489,17 @@ impl SafetyChecker {
             }
         }
         Ok(())
+    }
+
+    /// True when a volume host path resolves inside the working directory
+    /// (absolute path under it, or a relative path joined onto it).
+    fn host_path_in_workspace(&self, host_path: &str) -> bool {
+        let resolved = if host_path.starts_with('/') {
+            std::path::PathBuf::from(host_path)
+        } else {
+            self.working_dir.join(host_path)
+        };
+        resolved.starts_with(&self.working_dir)
     }
 
     /// Check an endpoint URL for SSRF.

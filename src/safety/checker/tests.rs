@@ -892,6 +892,39 @@ fn test_shell_exec_blocks_set_positional_env_injection() {
 }
 
 #[test]
+fn test_container_run_blocks_home_mount() {
+    // Red-team wave-199: mounting the host's whole home tree ships every
+    // user's credentials into the container.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "container_run",
+        r#"{"image": "ubuntu:20.04", "command": "id", "volumes": ["/home:/home"]}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_err());
+}
+
+#[test]
+fn test_container_run_allows_workspace_mount() {
+    // Guard the wave-199 fix: the workspace lives under /home on most dev
+    // machines — mounting IT (or a subdir) is the standard workflow.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let abs = format!(
+        r#"{{"image": "node:18", "command": "node src/main.js", "volumes": ["{}:/work"]}}"#,
+        std::env::current_dir().unwrap().display()
+    );
+    assert!(checker
+        .check_tool_call(&create_test_call("container_run", &abs))
+        .is_ok());
+    let rel = create_test_call(
+        "container_run",
+        r#"{"image": "node:18", "command": "node src/main.js", "volumes": ["./src:/app/src"]}"#,
+    );
+    assert!(checker.check_tool_call(&rel).is_ok());
+}
+
+#[test]
 fn test_shell_exec_blocks_env_wrapper_env_injection() {
     // `env LD_PRELOAD=… cmd` sets the variable for the child process.
     let config = SafetyConfig::default();
