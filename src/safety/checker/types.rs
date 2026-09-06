@@ -571,6 +571,19 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "file content into env via substitution (injection)",
             ),
+            // Decode-chain into env (red-team wave-82: \`export
+            // AWS_ACCESS_KEY_ID=$(echo -n 'AKIA' | base64 -d)\`) — the
+            // pattern above needs the read/encode command FIRST inside the
+            // substitution; a leading echo/printf hides the decoder deeper
+            // in the pipeline. Encode-only pipelines (base64 without -d)
+            // stay legal.
+            (
+                Regex::new(
+                    r"(?i)\b(export|declare\s+-[a-z]*x|local\s+-[a-z]*x|env|readonly|typeset)\s+\w+\s*=\s*\$\([^)]*\b(base64\s+-[dd]\b|xxd\s+-r|openssl\s+(enc|base64)\s+[^)]*-d\b)",
+                )
+                .expect("Invalid regex"),
+                "decode-chain into env via substitution (injection)",
+            ),
             // Bare denied assignment after shell keywords (wave-64:
             // \`if [ -z "${BASH_ENV}" ]; then BASH_ENV=/tmp/rc; fi\`) —
             // the prefix-anchored check only sees segment starts.

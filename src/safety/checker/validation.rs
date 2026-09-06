@@ -449,15 +449,36 @@ impl SafetyChecker {
                         if let Some(mount) = vol.as_str() {
                             self.check_volume_mount(mount)?;
                         } else if let Some(obj) = vol.as_object() {
-                            // Dict form: KEYS are host paths.
+                            // Dict form: KEYS are host paths — but the
+                            // compose-style nested form {"/container":
+                            // {"bind": "/", "mode": "rw"}} hides the host
+                            // path one level down (red-team wave-82: root
+                            // mounted rw slipped the keys-only check).
+                            // Check keys AND any nested bind/host/source
+                            // value; container-side targets are never in the
+                            // dangerous list, so the sweep is safe.
                             if obj
                                 .get("host")
                                 .or_else(|| obj.get("source"))
                                 .and_then(|v| v.as_str())
                                 .is_none()
                             {
-                                for host_path in obj.keys() {
-                                    self.check_volume_mount(host_path)?;
+                                for (key, value) in obj {
+                                    self.check_volume_mount(key)?;
+                                    // Plain string values can be the host
+                                    // side too ({"/container": "/"}).
+                                    if let Some(h) = value.as_str() {
+                                        self.check_volume_mount(h)?;
+                                    }
+                                    if let Some(nested) = value.as_object() {
+                                        for nk in ["bind", "host", "source"] {
+                                            if let Some(h) =
+                                                nested.get(nk).and_then(|v| v.as_str())
+                                            {
+                                                self.check_volume_mount(h)?;
+                                            }
+                                        }
+                                    }
                                 }
                                 continue;
                             }
