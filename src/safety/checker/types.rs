@@ -157,6 +157,28 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "decoded substitution in command position (decode-execute)",
             ),
+            // Substitution AS the segment command, nothing else needed
+            // (red-team wave-114: \`$(echo 'Y3VybC…' | base64 -d)\` — the
+            // whole decoded string executes; the pattern above requires
+            // trailing flags).
+            (
+                Regex::new(
+                    r"(?:^|\|\s*|;\s*|&&\s*)\s*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b[^)]*\)",
+                )
+                .expect("Invalid regex"),
+                "decoded substitution as segment command (decode-execute)",
+            ),
+            // Decode-assignment then variable execution (red-team wave-114:
+            // \`cmd=$(echo 'cm0g…' | base64 -d) ; $cmd\`) — the decoded
+            // payload is invisible to the variable-verb pattern (P5 sees
+            // only the base64 text).
+            (
+                Regex::new(
+                    r"\b\w+\s*=\s*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b[^)]*\)\s*;[^|\n]*\$\w",
+                )
+                .expect("Invalid regex"),
+                "decode-assignment then variable execution (decode-execute)",
+            ),
             // Denied env assignment after a SUBSTITUTED command word
             // (red-team wave-94: `"$(which env)" LD_PRELOAD=/tmp/s.so ls`)
             // — the env-anchored checks need a literal env/export keyword;
@@ -387,6 +409,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "decode-and-execute via command substitution",
+            ),
+            // Decode-substitution ANYWHERE inside a -c payload (red-team
+            // wave-114: \`bash -c 'cmd=$(echo … | base64 -d); $cmd'\`) —
+            // the wave-16 form needs the substitution right after the -c
+            // quote; an assignment prefix breaks the adjacency.
+            (
+                Regex::new(
+                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b"#,
+                )
+                .expect("Invalid regex"),
+                "decode-substitution inside -c payload (decode-execute)",
             ),
             // Substitution-encoded system file feeding a network tool
             // (wave-16: `export DATA=$(base64 -w0 /etc/hostname) && curl -X
