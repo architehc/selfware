@@ -1037,7 +1037,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // config['path'] assignments are everyday.
             (
                 Regex::new(
-                    r"(?i)\w+\[\\?['"](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs)\\?['"]\]\s*=",
+                    r#"(?i)\w+\[\\?['"](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs)\\?['"]\]\s*="#,
                 )
                 .expect("Invalid regex"),
                 "denied env write through dict bracket (injection)",
