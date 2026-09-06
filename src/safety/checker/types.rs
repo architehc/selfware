@@ -51,6 +51,27 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"rm\s+(--?[a-z-]+\s+)*(/\*?|\.\.(/\.\.)+/?)").expect("Invalid regex"),
                 "rm -rf / or ../../.. (destructive deletion)",
             ),
+            // IFS/positional-glue rm with an absolute target (red-team
+            // wave-122: \`rm$IFS$1rf$IFS$1/data\` — expands to rm with an
+            // absolute operand; the spaced rm pattern needs literal
+            // whitespace after rm). Workspace-relative IFS forms stay
+            // legal (wave-73 stance).
+            (
+                Regex::new(r"(?i)\brm(\$\{?ifs\}?\$\w?)+[^|\n]*?/").expect("Invalid regex"),
+                "IFS-glued rm with absolute target (destructive deletion)",
+            ),
+            // Credential-shaped reads ABOVE the workspace root (red-team
+            // wave-123: \`cat ../../.aws/credentials\`) — shell paths are
+            // pattern-checked (no chroot), and ../.. escapes to the parent
+            // tree. Blocking only credential-shaped targets; plain
+            // \`cat ../../Makefile\` build work stays legal.
+            (
+                Regex::new(
+                    r"(?i)\b(cat|head|tail|dd|less|more)\s+[^|\n]*\.\./\.\./[^|\n]*(\.env\b|credential|secret|\.pem|\.key|id_rsa|\.aws|\.ssh|\.gnupg|\.kube|\.docker)",
+                )
+                .expect("Invalid regex"),
+                "credential-shaped read above workspace root",
+            ),
             // mkfs - format filesystem. Requires a /dev/ block-device target
             // so text searches (`grep -rn "mkfs" src/`) don't false-positive.
             (
