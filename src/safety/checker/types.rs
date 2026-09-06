@@ -136,6 +136,20 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                     .expect("Invalid regex"),
                 "pipe into shell interpreter (execute generated content)",
             ),
+            // Decoded substitution AS the command (red-team wave-91:
+            // \`$(echo 'cm0=' | base64 -d)${IFS}-rf${IFS}./data\`) — the
+            // wave-16 pattern needs sh -c; here the decoded string itself
+            // takes command position, so the payload is invisible to every
+            // command-anchored check. Requiring flags right after the
+            // substitution keeps decoded-ARGUMENT uses (cat $(…base64 -d))
+            // legal. Masked form suffices: the structure is unquoted.
+            (
+                Regex::new(
+                    r"\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b[^)]*\)\s*(\$\{?ifs\}?\s*)?-\w",
+                )
+                .expect("Invalid regex"),
+                "decoded substitution in command position (decode-execute)",
+            ),
             // nc (netcat) reverse shells
             (
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
