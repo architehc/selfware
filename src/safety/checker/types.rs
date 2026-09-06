@@ -470,7 +470,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // only happens when the alias fires.
             (
                 Regex::new(
-                    r#"(?i)alias\s+\w+=['"]?\s*(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path|gtk_modules|fpath)\s*="#,
+                    r#"(?i)alias\s+\w+=['"]?\s*(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|perl5lib|perllib|rubylib|rubyopt|path|gtk_modules|fpath)\s*="#,
                 )
                 .expect("Invalid regex"),
                 "env injection inside alias definition",
@@ -656,7 +656,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 // only the wave-17 names were listed here (AGENTS.md rule
                 // 5: the bug class, not the file). `path` stays last so the
                 // longer *path names win the alternation.
-                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
+                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
             ),
@@ -667,7 +667,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // equality comparisons (=== / ==) legal.
             (
                 Regex::new(
-                    r"(?i)process\.env\.(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|pythonhome|node_options|node_path|perl5lib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|ifs|path)\s*=\s*[^=]",
+                    r"(?i)process\.env\.(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|ifs|path)\s*=\s*[^=]",
                 )
                 .expect("Invalid regex"),
                 "process.env dot-form write (injection)",

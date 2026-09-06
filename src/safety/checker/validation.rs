@@ -32,6 +32,8 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "PYTHONPATH",
     "NODE_PATH",
     "PERL5LIB",
+    // Legacy alias of PERL5LIB — perl honors both (red-team wave-78).
+    "PERLLIB",
     "RUBYLIB",
     "IFS",
     // Interpreter startup hooks (red-team wave 4): every one of these loads
@@ -930,8 +932,13 @@ impl SafetyChecker {
         // `env` may carry flags before the assignments (`env -i GEM_HOME=…`
         // slipped past the flag-free form — red-team wave-12 finding).
         static DANGEROUS_ENV_VARS: LazyLock<Regex> = LazyLock::new(|| {
+            // readonly/declare/typeset wrappers assign exactly like export
+            // (red-team wave-78: `readonly PATH=/tmp:$PATH`). `local` is
+            // deliberately excluded — function-scope PATH customization is a
+            // legitimate shell idiom and bare `local` outside functions is a
+            // no-op error anyway.
             Regex::new(&format!(
-                r"(?i)^\s*(?:(?:export|env)(?:\s+-\w+)*\s+)?({})\s*=",
+                r"(?i)^\s*(?:(?:export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+)?({})\s*=",
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
@@ -952,7 +959,7 @@ impl SafetyChecker {
             // `(export LD_LIBRARY_PATH=/tmp; cat /etc/hosts)` — the subshell
             // paren broke the old ^ anchor).
             Regex::new(&format!(
-                r"(?i)\b(export|env)(?:\s+-\w+)*\s+({})\s*=",
+                r"(?i)\b(export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+({})\s*=",
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
@@ -983,8 +990,11 @@ impl SafetyChecker {
         // var: `ENV=/tmp/evil.sh; sh -c 'id'` (wave-35). Refuse only
         // PATH-SHAPED values (absolute, dot-relative, home-relative) —
         // plain identifiers like production/staging stay legal.
+        // R_PROFILE/R_PROFILE_USER are the same class for the R interpreter
+        // (red-team wave-78: `export R_PROFILE=./.profile && R -q` sources
+        // the file at interpreter start, BASH_ENV-style).
         static ENV_PATH_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r#"(?i)(^|\||;|&&|\()\s*(export\s+)?env\s*=\s*['"]?(?://|/|\./|\.\./|~)"#)
+            Regex::new(r#"(?i)(^|\||;|&&|\()\s*(export\s+)?(env|r_profile|r_profile_user)\s*=\s*['"]?(?://|/|\./|\.\./|~)"#)
                 .expect("Invalid regex")
         });
         for part in split_shell_commands(&normalized) {
