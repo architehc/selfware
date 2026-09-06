@@ -761,6 +761,58 @@ fn test_shell_exec_with_cwd() {
 // ── Additional shell command injection tests ────────────────────────────
 
 #[test]
+fn test_shell_exec_blocks_quoted_decode_substitution_command() {
+    // Red-team wave-194: the whole command word is a quoted substitution
+    // that decodes to the real verb — masked form sees only a placeholder.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "\"$(base64 -d <<< $(echo Y2htb2Q= | base64 -d))\""}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("decode-execute"));
+}
+
+#[test]
+fn test_shell_exec_blocks_quoted_destructive_verb() {
+    // Red-team wave-194: quoting the verb (`"rm" -rf "$@"`) hides it from
+    // the masked table; shells execute quoted command names fine.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call("shell_exec", r#"{"command": "\"rm\" -rf \"$@\""}"#);
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("command-name obfuscation"));
+}
+
+#[test]
+fn test_shell_exec_allows_quoted_verb_in_prose() {
+    // Guard the wave-194 quoted-verb pattern: prose mentions after another
+    // command word are not command position.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "echo the \"rm\" command deletes files"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_ok());
+}
+
+#[test]
+fn test_shell_exec_blocks_loader_injection_via_env_dict() {
+    // Red-team wave-195: LD_PRELOAD rides inside a python execvpe env
+    // dict — invisible to the shell-scaffold env-prefix checks.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "python3 -c 'import os; os.execvpe(\"bash\", [\"bash\", \"-c\", \"id\"], {**os.environ, \"LD_PRELOAD\": \"/tmp/py.so\"})'"}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("loader injection"));
+}
+
+#[test]
 fn test_shell_exec_blocks_export_env_injection() {
     // `export LD_PRELOAD=…` persists the variable in the shell — same
     // injection as the bare `LD_PRELOAD=…` prefix, one keyword later.

@@ -512,6 +512,39 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "decode-substitution inside -c payload (decode-execute)",
             ),
+            // Quoted decode-substitution in command position (red-team
+            // wave-194: `"$(base64 -d <<< $(echo Y2htb2Q= | base64 -d))"`)
+            // — the wave-114 masked form needs the substitution unquoted;
+            // quoting the whole command word turns it into a placeholder
+            // there. The restored form sees the decoder fine.
+            (
+                Regex::new(
+                    r#"(?:^|\|\s*|;\s*|&&\s*)\s*['"]\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b"#,
+                )
+                .expect("Invalid regex"),
+                "quoted decoded substitution as command (decode-execute)",
+            ),
+            // Quoted destructive verb in command position (red-team
+            // wave-194: `"rm" -rf "$@"`) — quoting the verb hides it from
+            // the masked table (quoted content is a placeholder there);
+            // real shells execute quoted command names fine.
+            (
+                Regex::new(r#"(?:^|[|;&]\s*)\s*['"](rm|chmod|chown|shred|mkfs|dd)['"]\s"#)
+                    .expect("Invalid regex"),
+                "quoted destructive verb (command-name obfuscation)",
+            ),
+            // Denied loader var inside an interpreter payload (red-team
+            // wave-195: python3 -c '…os.execvpe("bash",…,{**os.environ,
+            // "LD_PRELOAD": "/tmp/py.so"})') — the env-prefix DANGEROUS
+            // checks need shell scaffold; a dict entry inside quotes is
+            // invisible there. Temp-dir .so targets have no legit use.
+            (
+                Regex::new(
+                    r#"(?i)['"](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries)['"]\s*:\s*['"]/(tmp|var/tmp|dev/shm)/"#,
+                )
+                .expect("Invalid regex"),
+                "loader injection via interpreter env dict",
+            ),
             // Substitution-encoded system file feeding a network tool
             // (wave-16: `export DATA=$(base64 -w0 /etc/hostname) && curl -X
             // POST …` — the per-segment checks can't connect an encode in
