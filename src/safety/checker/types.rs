@@ -263,6 +263,26 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bxargs\s+((-\S+|\x00\x01[0-9]+\x00)\s+)*env\b").expect("Invalid regex"),
                 "env driven by xargs (bulk env injection)",
             ),
+            // Mass truncation into a substitution target (red-team wave-205:
+            // \`cat /dev/null > $(find / -name '*.log' 2>/dev/null)\`) —
+            // anti-forensic log wiping across the whole filesystem. Single-
+            // file truncation (`cat /dev/null > app.log`) stays legal; the
+            // substitution is what makes it mass-destructive.
+            (
+                Regex::new(r"\b(cat\s+/dev/null|:)\s*>\s*\$\(\s*(find|ls)\b").expect("Invalid regex"),
+                "mass truncation via substitution target (log wiping)",
+            ),
+            // Fully variable-assembled command execution (red-team wave-205:
+            // \`V=rm; W=rf; X=/; ${V} -${W} ${X}\`) — verb, flag, and target
+            // all arrive as single-char variable expansions so no literal
+            // dangerous verb ever appears. The dash-flag variable is the
+            // precision anchor: legit scripts expand ${CC} ${CFLAGS}, not
+            // -${W}.
+            (
+                Regex::new(r"(?:^|;\s*)\$\{\w+\}\s+-\$\{\w+\}(\s+\$?\{\w+\})*\s*$")
+                    .expect("Invalid regex"),
+                "fully variable-assembled command execution (verb obfuscation)",
+            ),
             // Denied env assignment via positional parameters (red-team
             // wave-197: \`set -- LD_PRELOAD=/tmp/m.so; exec $@\`) — the
             // export/env checks anchor on their keywords; set -- smuggles
@@ -546,6 +566,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r#"(?:^|[|;&]\s*)\s*['"](rm|chmod|chown|shred|mkfs|dd)['"]\s"#)
                     .expect("Invalid regex"),
                 "quoted destructive verb (command-name obfuscation)",
+            ),
+            // Destructive payload inside an alias definition (red-team
+            // wave-205: `alias rm='rm -rf /'; rm`) — the masked table sees
+            // only `alias rm=PLACEHOLDER`; the restored form exposes the
+            // redefinition. An alias CONTAINING rm -rf/mkfs/shred is itself
+            // the weapon regardless of the alias name.
+            (
+                Regex::new(r#"\balias\s+\w+\s*=\s*['"][^'"]*\b(rm\s+-[a-z]*r[a-z]*f|mkfs|shred|dd\s+if=)"#)
+                    .expect("Invalid regex"),
+                "destructive payload inside alias definition",
             ),
             // Denied loader var inside an interpreter payload (red-team
             // wave-195: python3 -c '…os.execvpe("bash",…,{**os.environ,
