@@ -1020,10 +1020,12 @@ impl SafetyChecker {
         // env-segment catch-all (wave-12 form, restored after the unanchored
         // rewrite narrowed it): `env -u LD_PRELOAD -i LD_PRELOAD=/tmp/x.so
         // bash` — flag ARGUMENTS sit between env and the assignment, which
-        // the tight form above cannot skip.
+        // the tight form above cannot skip. nohup/timeout/stdbuf/nice
+        // prefixes wrap the whole thing (red-team wave-99: `nohup env -u
+        // PATH -u LD_PRELOAD LD_PRELOAD=./lib.so ./daemon &`).
         static DANGEROUS_ENV_CATCHALL: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(&format!(
-                r"(?i)^\s*env\b.*\b({})\s*=",
+                r"(?i)^\s*(nohup\s+|timeout\s+\S+\s+|stdbuf\s+\S+\s+|nice\s+(-\S+\s+)?)*env\b.*\b({})\s*=",
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
