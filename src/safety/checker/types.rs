@@ -333,6 +333,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\beval\s+[^;&\n]*\b(curl|wget|nc)\b").expect("Invalid regex"),
                 "eval with network tool",
             ),
+            // xargs driving sh -c that carries the export (red-team
+            // wave-108: `env | cut -d= -f1 | xargs -I {} sh -c 'export
+            // {}=/tmp/{}'`) — the direct-form DANGEROUS pattern needs xargs
+            // to invoke export itself; the quoted -c payload is only
+            // visible here in the restored form.
+            (
+                Regex::new(
+                    r#"(?i)\bxargs\s+[^|\n]*\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\bexport\b"#,
+                )
+                .expect("Invalid regex"),
+                "export inside xargs-driven sh -c (bulk env injection)",
+            ),
             // Reverse-shell payload inside a quoted one-liner (red-team
             // wave-11: `python3 -c 'import socket,…;s.connect((…));os.dup2…;
             // subprocess.call(["/bin/sh","-i"])'`). socket+connect+dup2 in a
@@ -734,10 +746,12 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // `node -e "execSync('rm -rf /')"`) — the masked rm pattern
             // cannot see quoted payloads, and the wave-45 spawn pattern is
             // nc-specific. Absolute targets only, mirroring the rm stance:
-            // system("./cleanup.sh") stays legal.
+            // system("./cleanup.sh") stays legal. List-form argv (wave-108:
+            // `system("rm", "-rf", "/tmp/x")`, `subprocess.call(["rm",
+            // "-rf", "/tmp/x"])`) — comma-separated flags between quotes.
             (
                 Regex::new(
-                    r"(?i)(system|execve|popen|execsync|passthru|shell_exec|os\.system|subprocess\.[a-z_]+|spawnSync)\s*\(\s*[^\n)]*\brm\s+(-[a-z]+\s+)*/",
+                    r#"(?i)(system|execve|popen|execsync|passthru|shell_exec|os\.system|subprocess\.[a-z_]+|spawnSync)\s*\(\s*[^\n)]*\brm(['"]?\s*,\s*['"]?-[a-z]+['"]?\s*,\s*['"]?/|\s+(-[a-z]+\s+)*/)"#,
                 )
                 .expect("Invalid regex"),
                 "destruction inside interpreter spawn call",
@@ -753,6 +767,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "absolute destruction inside -c payload",
+            ),
+            // Device-level destruction inside a -c payload (red-team
+            // wave-109: \`/bin/sh -c 'dd if=/dev/zero of=/dev/sda'\`) — the
+            // rm sibling above is verb-specific; dd-to-device, mkfs, and
+            // shred of absolute targets share the same masked-invisibility.
+            (
+                Regex::new(
+                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
+                )
+                .expect("Invalid regex"),
+                "device-level destruction inside -c payload",
             ),
             // Pipe-to-shell inside a -c payload (red-team wave-99: `bash -c
             // 'echo rm -rf / | sh'`) — the any-pipe-to-shell DANGEROUS

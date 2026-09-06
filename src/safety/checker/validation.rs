@@ -990,7 +990,7 @@ impl SafetyChecker {
             .expect("Invalid regex")
         });
 
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             let part_trimmed = part.trim();
             if DANGEROUS_ENV_VARS.is_match(part_trimmed) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
@@ -1009,7 +1009,7 @@ impl SafetyChecker {
             ))
             .expect("Invalid regex")
         });
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             if DANGEROUS_ENV_CHAIN.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
@@ -1041,7 +1041,7 @@ impl SafetyChecker {
             ))
             .expect("Invalid regex")
         });
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             let part_trimmed = part.trim();
             if DANGEROUS_ENV_VARS.is_match(part_trimmed)
                 || DANGEROUS_ENV_SEGMENT.is_match(part_trimmed)
@@ -1063,7 +1063,7 @@ impl SafetyChecker {
             Regex::new(r#"(?i)(^|\||;|&&|\()\s*(export\s+)?(env|r_profile|r_profile_user)\s*=\s*['"]?(?://|/|\./|\.\./|~)"#)
                 .expect("Invalid regex")
         });
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             if ENV_PATH_ASSIGNMENT.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
@@ -1078,7 +1078,7 @@ impl SafetyChecker {
         static GIT_CONFIG_NUMBERED: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"(?i)\bgit_config_(key|value)_\d+\s*=").expect("Invalid regex")
         });
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             if GIT_CONFIG_NUMBERED.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
@@ -1094,7 +1094,7 @@ impl SafetyChecker {
         // (AGENTS.md rule 5: the bug class, not the file).
         static INDIRECT_EXPORT_SUBST: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\bexport\s+\$\(").expect("Invalid regex"));
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             if INDIRECT_EXPORT.is_match(part.trim()) || INDIRECT_EXPORT_SUBST.is_match(part.trim())
             {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
@@ -1108,7 +1108,7 @@ impl SafetyChecker {
         static PS_SUBST_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"(?i)\b(ps1|ps2|ps4)\s*=\s*[^;&|]*(\$\(|`)").expect("Invalid regex")
         });
-        for part in split_shell_commands(&normalized) {
+        for part in split_shell_pipeline(&normalized) {
             if PS_SUBST_ASSIGNMENT.is_match(part.trim()) {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
