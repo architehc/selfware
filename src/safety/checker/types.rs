@@ -553,6 +553,13 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\benv\s+\$\w+\s*=").expect("Invalid regex"),
                 "env with variable-assignment name (indirect injection)",
             ),
+            // env fed by positional parameters (red-team wave-102: \`set --
+            // LD_PRELOAD=/tmp/x; env "$@" ls\`) — $@/$* expand to the
+            // assignment at runtime, invisible to every static check.
+            (
+                Regex::new(r#"\benv\s+['"]?\$[@*]"#).expect("Invalid regex"),
+                "env with positional-parameter argument (indirect injection)",
+            ),
             // Denied env assignment quoted as data and smuggled through a
             // second command (red-team wave-73: \`xargs -d '\n' -a <(echo
             // 'LD_PRELOAD=/tmp/lib.so') env\`) — the masked form hides the

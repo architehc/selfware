@@ -57,6 +57,10 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "GEM_HOME",
     "GEM_PATH",
     "BUNDLE_GEMFILE",
+    // Java's twin of the load-path class above (red-team wave-102:
+    // `export CLASSPATH=/tmp/evil.jar:$CLASSPATH; java Main`) — agents pass
+    // classpaths via java -cp, not the environment.
+    "CLASSPATH",
     // zsh function/autoload path and startup-dir hijacks (red-team
     // wave-24): `export FPATH=/tmp; autoload evil; evil` — zsh's
     // equivalent of BASH_ENV/PYTHONSTARTUP.
