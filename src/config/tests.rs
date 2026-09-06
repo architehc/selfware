@@ -2417,13 +2417,19 @@ fn test_default_min_completion_steps_fn() {
 #[test]
 fn test_default_denied_paths_fn() {
     let paths = default_denied_paths();
-    assert_eq!(paths.len(), 7);
+    assert_eq!(paths.len(), 10);
     assert!(paths.contains(&"**/.env".to_string()));
     assert!(paths.contains(&"**/.env.local".to_string()));
     // .env.production / .env.staging etc. (red-team wave-3 finding).
     assert!(paths.contains(&"**/.env.*".to_string()));
+    // Suffix form: production.env / db.env (wave-25).
+    assert!(paths.contains(&"**/*.env".to_string()));
     assert!(paths.contains(&"**/.ssh/**".to_string()));
+    // Bare .ssh dir itself (wave-11 recon finding).
+    assert!(paths.contains(&"**/.ssh".to_string()));
     assert!(paths.contains(&"**/secrets/**".to_string()));
+    // Bare secrets dir too.
+    assert!(paths.contains(&"**/secrets".to_string()));
     // .git executable-config vectors (hooks + config) are denied by default.
     assert!(paths.contains(&"**/.git/hooks/**".to_string()));
     assert!(paths.contains(&"**/.git/config".to_string()));
