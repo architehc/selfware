@@ -968,9 +968,12 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // URL`, `echo -n $API_KEY | base64 | xargs curl …`). The `env |`
             // pattern above only sees the literal env command. [^\n]* so
             // intermediate stages (base64, xargs) don't break the chain.
+            // `pass` covers PASS/PASSWORD/PASSWD/DB_PASS; database_url/
+            // db_url/dsn are connection strings with embedded credentials
+            // (red-team wave-101: $DATABASE_URL, $DB_PASS).
             (
                 Regex::new(
-                    r#"\becho\s+(-\S+\s+)*"?\$[a-z_]*(key|token|secret|password|passwd|credential)[a-z_]*"?\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b"#,
+                    r#"\becho\s+(-\S+\s+)*"?\$[a-z_]*(key|token|secret|pass|credential|database_url|db_url|dsn)[a-z_]*"?\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b"#,
                 )
                 .expect("Invalid regex"),
                 "secret variable piped to network tool (exfiltration)",
