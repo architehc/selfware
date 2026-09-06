@@ -1075,6 +1075,21 @@ fn test_shell_exec_allows_echo_var_eq() {
 }
 
 #[test]
+fn test_process_start_blocks_netcat_spelled_out() {
+    // Red-team wave-210: the listener/reverse-shell patterns matched
+    // nc/ncat but not the full `netcat` spelling. Swept through every
+    // network-tool group.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "process_start",
+        r#"{"command": "netcat -lvp 4444", "background": true}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("netcat listener"));
+}
+
+#[test]
 fn test_shell_exec_blocks_env_pipe_xargs_sh_dns() {
     // Red-team wave-208: env hex-chunked into DNS TXT queries riding an
     // xargs-driven sh -c payload.
