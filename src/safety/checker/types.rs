@@ -201,6 +201,13 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bxargs\s+(-\S+\s+)*export\b").expect("Invalid regex"),
                 "export driven by xargs (bulk env injection)",
             ),
+            // env driven by xargs (red-team wave-117: \`cat /tmp/payload |
+            // xargs -0 env -i ./app\`) — the export form's twin: payload
+            // lines become env assignments for the child.
+            (
+                Regex::new(r"\bxargs\s+(-\S+\s+)*env\s+-").expect("Invalid regex"),
+                "env driven by xargs (bulk env injection)",
+            ),
             // nc (netcat) reverse shells
             (
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
@@ -944,6 +951,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
+            ),
+            // perl Env-module array/scalar assignment (red-team wave-117:
+            // \`use Env qw(@LD_PRELOAD); @LD_PRELOAD = ("/tmp/lib.so")\`) —
+            // the env-table pattern knows $ENV{…} but not the tied-array
+            // form. Quoted perl payloads are only visible here in the
+            // restored form.
+            (
+                Regex::new(
+                    r"(?i)[@\$](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|perl5lib|perllib|rubylib|rubyopt|ifs|path)\s*=",
+                )
+                .expect("Invalid regex"),
+                "denied env assignment via perl Env module (injection)",
             ),
             // Dot-form interpreter env write (red-team wave-75:
             // \`node -e "process.env.PATH='/tmp:'+…"\`) — the bracket-form

@@ -52,6 +52,10 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // JAVACMD='/bin/bash' runs bash on every java call) — GIT_EXEC_PATH
     // class. JAVA_HOME stays allowed (everyday JDK selection).
     "JAVACMD",
+    // .NET startup hooks load a managed dll at process start (red-team
+    // wave-117: DOTNET_STARTUP_HOOKS=/tmp/hook.dll) — the .NET twin of
+    // PYTHONSTARTUP/NODE_OPTIONS.
+    "DOTNET_STARTUP_HOOKS",
     // Interpreter home / load-path hijacks (red-team wave-12): same class as
     // PYTHONPATH/RUBYLIB above — point the interpreter or package manager at
     // attacker-controlled trees. PYTHONHOME relocates the whole stdlib,
