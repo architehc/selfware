@@ -502,12 +502,39 @@ impl SafetyChecker {
                 if !cmd.is_empty() {
                     self.check_shell_command(&cmd)?;
                 }
+                // argv array form ("command": "sh", "args": ["-c", payload])
+                // — the payload rides a separate key the command string
+                // never sees (red-team wave-228: nmap and ssh-key injection
+                // hidden in args[]). Same stance as the wave-22
+                // process_start fix: check the joined command line.
+                if let Some(argv) = args.get("args").and_then(|v| v.as_array()) {
+                    let joined = argv
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !joined.is_empty() {
+                        self.check_shell_command(&format!("{cmd} {joined}"))?;
+                    }
+                }
             }
             "container_run" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 let cmd = command_arg_string(&args);
                 if !cmd.is_empty() {
                     self.check_shell_command(&cmd)?;
+                }
+                // argv array form — same gap as container_exec above
+                // (red-team wave-228).
+                if let Some(argv) = args.get("args").and_then(|v| v.as_array()) {
+                    let joined = argv
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if !joined.is_empty() {
+                        self.check_shell_command(&format!("{cmd} {joined}"))?;
+                    }
                 }
                 // `--privileged` is blocked in shell docker-run commands as
                 // never agent-legitimate; the structured arg deserves the

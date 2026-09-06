@@ -166,9 +166,11 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // verification pipelines (`curl -sL file | shasum -a 256 -c -`,
             // `sha256sum`) don't false-positive, and the `(\|[^|]*)*`
             // middle closes the tee evasion (`curl url | tee x | sh`) for
-            // both curl and wget.
+            // both curl and wget. node/deno/bun are the script-interpreter
+            // twins — `curl x | node` executes remote JS exactly like
+            // `| sh` (red-team wave-227).
             (
-                Regex::new(r"(curl|wget)\s+[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da|fi)?sh(?:\s|$)")
+                Regex::new(r"(curl|wget)\s+[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:(?:ba|z|k|da|fi)?sh|node|deno|bun)(?:\s|$)")
                     .expect("Invalid regex"),
                 "pipe remote content to shell",
             ),
@@ -816,7 +818,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // encode-then-network patterns assumed encode-first ordering.
             (
                 Regex::new(
-                    r"(?i)(curl|wget)\s+[^|\n]*\$\(\s*(base64|cat|env)\b[^)]*(/(etc|var|root|proc|home|app/(config|secrets))|~/\.(ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc|config/gcloud))",
+                    r"(?i)(curl|wget)\s+[^|\n]*\$\(\s*(base64|cat|env)\b[^)]*(/(etc|var|root|proc|home|app/(config|secrets))|~/\.(ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc|config/gcloud)|(^|[\s(/])\s*\.env\b)",
                 )
                 .expect("Invalid regex"),
                 "encoded sensitive path in request URL (exfiltration)",
@@ -1283,6 +1285,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "absolute destruction inside -c payload",
+            ),
+            // Computed payload inside -c (red-team wave-228: \`sh -c
+            // "$(printf '%s' 'rm -rf /tmp')"\`) — the pattern above needs rm
+            // in the quote span; a nested substitution hides it behind
+            // inner quotes. The substitution-carrying-rm shape is the tell.
+            (
+                Regex::new(
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+["']?\$\([^)]*\brm\s+(-[a-z]+\s+)*(/|~)"#,
+                )
+                .expect("Invalid regex"),
+                "computed absolute destruction inside -c payload",
             ),
             // Device-level destruction inside a -c payload (red-team
             // wave-109: \`/bin/sh -c 'dd if=/dev/zero of=/dev/sda'\`) — the
