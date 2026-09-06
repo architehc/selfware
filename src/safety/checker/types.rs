@@ -454,7 +454,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // encode-then-network patterns assumed encode-first ordering.
             (
                 Regex::new(
-                    r"(?i)(curl|wget)\s+[^|\n]*\$\(\s*(base64|cat|env)\b[^)]*/(etc|var|root|proc|home|app/(config|secrets))",
+                    r"(?i)(curl|wget)\s+[^|\n]*\$\(\s*(base64|cat|env)\b[^)]*(/(etc|var|root|proc|home|app/(config|secrets))|~/\.(ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc|config/gcloud))",
                 )
                 .expect("Invalid regex"),
                 "encoded sensitive path in request URL (exfiltration)",
@@ -732,13 +732,25 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // wave-86: \`bash -c 'nc -l -p 4444 -e /bin/bash'\`) — the
             // DANGEROUS nc patterns match the masked form, so a quoted -c
             // payload is invisible to them; the function-call pattern above
-            // only knows interpreter spawn APIs, not shells.
+            // only knows interpreter spawn APIs, not shells. The middle
+            // group is OPTIONAL (wave-111: \`nohup nc -e /bin/sh …\` has no
+            // host token between nc and the flag).
             (
                 Regex::new(
-                    r#"(?i)\b(bash|sh|zsh|dash|ksh|eval)\s+(-\w+\s+)*['"][^'"]*\bnc(at)?\s+[^'"]*\s-[a-z]*(e|l)[a-z]*(\s|['"])"#,
+                    r#"(?i)\b(bash|sh|zsh|dash|ksh|eval)\s+(-\w+\s+)*['"][^'"]*\bnc(at)?(\s+[^'"]*?)?\s-[a-z]*(e|l)[a-z]*(\s|['"])"#,
                 )
                 .expect("Invalid regex"),
                 "netcat exec/listener inside shell -c payload",
+            ),
+            // nsenter hidden in a quoted -c payload (red-team wave-111:
+            // \`/bin/sh -c 'nsenter -t 1 -m umount /proc'\`) — the masked
+            // wave-30 pattern cannot see it inside quotes.
+            (
+                Regex::new(
+                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\bnsenter\s+[^'"]*(-t|--target)\s*1\b"#,
+                )
+                .expect("Invalid regex"),
+                "nsenter inside -c payload (container escape)",
             ),
             // Destruction hidden inside interpreter spawn calls (red-team
             // wave-99: `awk 'BEGIN{system("rm -rf /")}'`, `perl -e
