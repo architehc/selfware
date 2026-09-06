@@ -1752,7 +1752,15 @@ fn normalize_shell_command_impl(cmd: &str, restore_quotes: bool) -> String {
     while j < result_bytes.len() {
         if result_bytes[j] == b'\\' && j + 1 < result_bytes.len() {
             let next = result_bytes[j + 1];
-            if next.is_ascii_alphanumeric() || next == b'_' || next == b'-' || next == b'/' {
+            // Backslash before space also drops the backslash (keeping the
+            // space): `r\m\ -rf\ /tmp/x` deslashes to `rm -rf /tmp/x`
+            // (wave-180), while `r\ m` stays two words `r m` (inert).
+            if next.is_ascii_alphanumeric()
+                || next == b'_'
+                || next == b'-'
+                || next == b'/'
+                || next == b' '
+            {
                 j += 1;
                 continue;
             }

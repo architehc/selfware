@@ -55,10 +55,41 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // wave-122: \`rm$IFS$1rf$IFS$1/data\` — expands to rm with an
             // absolute operand; the spaced rm pattern needs literal
             // whitespace after rm). Workspace-relative IFS forms stay
-            // legal (wave-73 stance).
+            // legal (wave-73 stance). Verb list generalized (wave-180:
+            // shred/dd/mkfs take the same glue).
             (
-                Regex::new(r"(?i)\brm(\$\{?ifs\}?\$\w?)+[^|\n]*?/").expect("Invalid regex"),
-                "IFS-glued rm with absolute target (destructive deletion)",
+                Regex::new(
+                    r"(?i)\b(rm|shred|mkfs)(\$\{?ifs\}?(\$\w)?[\w-]{0,8})+([^\w.]/|/)",
+                )
+                .expect("Invalid regex"),
+                "IFS-glued destructive verb with absolute target",
+            ),
+            // iptables rule dropping/rejecting SSH specifically (red-team
+            // wave-180: \`iptables -A INPUT -p tcp --dport 22 -j DROP\`) —
+            // the wave-11 flush pattern doesn't see additive lockout rules.
+            (
+                Regex::new(
+                    r"(?i)\biptables\s+[^|\n]*--dport\s+22\b[^|\n]*-j\s+(DROP|REJECT)\b",
+                )
+                .expect("Invalid regex"),
+                "iptables rule dropping SSH (lockout)",
+            ),
+            // Write to sudoers (red-team wave-180: \`echo 'user ALL=(ALL)
+            // NOPASSWD: ALL' | tee /etc/sudoers.d/agent\`) — privilege
+            // persistence; any redirect/tee into the sudoers tree.
+            (
+                Regex::new(r"(?i)(>{1,2}\s*|tee\s+(-\S+\s+)*)/etc/sudoers\b").expect("Invalid regex"),
+                "write to sudoers (privilege persistence)",
+            ),
+            // Pipe into an ssh-wrapped shell (red-team wave-180: \`echo
+            // 'rm -rf /tmp/test' | ssh localhost bash\`) — the wave-81
+            // form needs the interpreter right after the pipe.
+            (
+                Regex::new(
+                    r"\|\s*ssh\s+\S+\s+(/(bin|usr/bin|usr/local/bin)/)?(bash|zsh|ksh|csh|tcsh|dash|ash|sh)(?:\s|$)",
+                )
+                .expect("Invalid regex"),
+                "pipe into ssh-wrapped shell (execute generated content)",
             ),
             // Credential-shaped reads ABOVE the workspace root (red-team
             // wave-123: \`cat ../../.aws/credentials\`) — shell paths are
@@ -861,7 +892,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // stays legal.
             (
                 Regex::new(
-                    r#"(?i)find\s+[^|\n]*-name\s+['"]?[^'"\s|]*\.(pem|key|crt|p12|pfx)['"]?[^|\n]*(\|[^|\n]*)*\|\s*[^|\n]*(xargs|cat|base64|xxd)\b"#,
+                    r#"(?i)find\s+[^|\n]*-name\s+['"]?([^'"\s|]*\.(pem|key|crt|p12|pfx|env)|id_(rsa|dsa|ed25519|ecdsa))['"]?[^|\n]*(\|[^|\n]*)*\|\s*[^|\n]*(xargs|cat|base64|xxd)\b"#,
                 )
                 .expect("Invalid regex"),
                 "credential-file harvest by extension piped to reader",
@@ -1063,7 +1094,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // assembly class and quarantine as probes instead.
             (
                 Regex::new(
-                    r#"(?i)\b(env\s+)?\w+\s*=\s*\$\(\s*[a-z ]*['"]?(rm|dd|mkfs|shred)['"]?\s*\)\s*;\s*[^|\n]*\$\w|\b(env\s+)?\w+\s*=\s*['"]?(rm|dd|mkfs|shred)['"]?[\s;][^|\n]*\$\w"#,
+                    r#"(?i)\b(env\s+)?\w+\s*=\s*\$\(\s*[a-z ]*['"]?(rm|dd|mkfs|shred)\b[^)]*\)\s*;\s*[^|\n]*\$\w|\b(env\s+)?\w+\s*=\s*['"]?(rm|dd|mkfs|shred)['"]?[\s;][^|\n]*\$\w"#,
                 )
                 .expect("Invalid regex"),
                 "dangerous verb assigned then executed via variable",
@@ -1362,7 +1393,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     // literal newline inside a quoted arg can't shield the
                     // downstream curl (wave-17's printf case; wave-20's
                     // `tr -d '\n'` chains).
-                    r"(cat|head|tail|dd|ls|find|grep|rg)\s+[^|\n]*?/(etc|var|root|home|app/(\.env|config|secrets))(/\S*)?[^|\n]*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat|dig|nslookup|host)\b",
+                    r"(cat|head|tail|dd|ls|find|grep|rg)\s+[^|\n]*?/(etc|var|root|home|app/(\.env|config|secrets))(/\S*)?[^|\n]*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat|dig|nslookup|host|mail)\b",
                 )
                 .expect("Invalid regex"),
                 "system file piped to network tool (exfiltration)",
