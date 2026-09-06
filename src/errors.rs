@@ -296,6 +296,11 @@ pub enum SafetyError {
     ContainerSshMount { mount: String },
 
     #[error(
+        "Dangerous container volume mount blocked: {mount} (mounts host credential directory)"
+    )]
+    ContainerCredentialMount { mount: String },
+
+    #[error(
         "Dangerous container volume mount blocked: {mount} (mounts system directory {directory})"
     )]
     ContainerSystemMount { mount: String, directory: String },

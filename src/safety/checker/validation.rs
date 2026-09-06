@@ -1288,7 +1288,7 @@ impl SafetyChecker {
         let host_path = mount.split(':').next().unwrap_or("");
         let dangerous_mounts = [
             "/", "/etc", "/boot", "/usr", "/var", "/root", "/sys", "/proc", "/lib", "/lib64",
-            "/opt", "/run",
+            "/opt", "/run", "/dev",
         ];
         if host_path.contains("/.ssh")
             || host_path == ".ssh"
@@ -1298,6 +1298,29 @@ impl SafetyChecker {
             return Err(SelfwareError::Safety(SafetyError::ContainerSshMount {
                 mount: mount.to_string(),
             }));
+        }
+        // Credential directories are the .ssh class (red-team wave-76:
+        // `/home/user/.aws:/root/.aws` ships host cloud credentials into the
+        // container). Same stance for every cloud/tooling credential home.
+        const CREDENTIAL_DIRS: &[&str] = &[
+            "/.aws",
+            "/.gnupg",
+            "/.azure",
+            "/.kube",
+            "/.config/gcloud",
+            "/.docker",
+        ];
+        if CREDENTIAL_DIRS.iter().any(|d| {
+            host_path.contains(d)
+                || host_path == d.trim_start_matches('/')
+                || host_path.starts_with(&format!("~{d}/"))
+                || host_path == format!("~{d}")
+        }) {
+            return Err(SelfwareError::Safety(
+                SafetyError::ContainerCredentialMount {
+                    mount: mount.to_string(),
+                },
+            ));
         }
         for dm in &dangerous_mounts {
             if host_path == *dm
