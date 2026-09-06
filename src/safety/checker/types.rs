@@ -651,9 +651,26 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 "env injection inside spawn call",
             ),
             (
-                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|path)\\?['"]?(\}|\])"#)
+                // Name list mirrors DENIED_ENV_VARS (validation.rs) —
+                // wave-75 slipped PERL5LIB/RUBYOPT/RUBYLIB through because
+                // only the wave-17 names were listed here (AGENTS.md rule
+                // 5: the bug class, not the file). `path` stays last so the
+                // longer *path names win the alternation.
+                Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
+            ),
+            // Dot-form interpreter env write (red-team wave-75:
+            // \`node -e "process.env.PATH='/tmp:'+…"\`) — the bracket-form
+            // pattern above needs a closing ]/}; node's process.env.X
+            // assigns through a dot. `=` not followed by another `=` keeps
+            // equality comparisons (=== / ==) legal.
+            (
+                Regex::new(
+                    r"(?i)process\.env\.(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|pythonhome|node_options|node_path|perl5lib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|ifs|path)\s*=\s*[^=]",
+                )
+                .expect("Invalid regex"),
+                "process.env dot-form write (injection)",
             ),
             // ${VAR:=value} assignment expansion on a denied var (wave-17:
             // `bash -c 'echo ${BASH_ENV:=/tmp/b.sh}'` — the := form ASSIGNS
