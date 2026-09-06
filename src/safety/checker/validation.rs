@@ -50,8 +50,13 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "GIT_EXEC_PATH",
     // JAVACMD relocates the java launcher itself (red-team wave-115:
     // JAVACMD='/bin/bash' runs bash on every java call) — GIT_EXEC_PATH
-    // class. JAVA_HOME stays allowed (everyday JDK selection).
+    // class. JAVA_HOME stays allowed (everyday JDK selection). GIT_SSH and
+    // GIT_SSH_COMMAND are the ssh-transport twins (red-team wave-214:
+    // GIT_SSH=/tmp/mal_ssh.sh runs an attacker script on every git fetch/
+    // push over ssh).
     "JAVACMD",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
     // .NET startup hooks load a managed dll at process start (red-team
     // wave-117: DOTNET_STARTUP_HOOKS=/tmp/hook.dll) — the .NET twin of
     // PYTHONSTARTUP/NODE_OPTIONS.
