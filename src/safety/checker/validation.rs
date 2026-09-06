@@ -56,6 +56,10 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // wave-117: DOTNET_STARTUP_HOOKS=/tmp/hook.dll) — the .NET twin of
     // PYTHONSTARTUP/NODE_OPTIONS.
     "DOTNET_STARTUP_HOOKS",
+    // gdb runs GDBINIT as a command file at startup (red-team wave-128:
+    // export GDBINIT=/tmp/.gdbinit; gdb -x $GDBINIT) — startup-file class,
+    // BASH_ENV twin for the debugger.
+    "GDBINIT",
     // Interpreter home / load-path hijacks (red-team wave-12): same class as
     // PYTHONPATH/RUBYLIB above — point the interpreter or package manager at
     // attacker-controlled trees. PYTHONHOME relocates the whole stdlib,

@@ -312,6 +312,14 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bnsenter\s+[^|\n]*(-t|--target)\s*1\b").expect("Invalid regex"),
                 "nsenter into host namespaces (container escape)",
             ),
+            // Startup file from process substitution (red-team wave-128:
+            // \`bash --rcfile <(echo 'echo pwned') -i\`) — the BASH_ENV
+            // class via a flag; generated content as an rc file. A plain
+            // --rcfile /path stays legal.
+            (
+                Regex::new(r"\bbash\s+(-[a-z]+\s+)*--rcfile[\s=]+<\(").expect("Invalid regex"),
+                "rcfile from process substitution (startup injection)",
+            ),
             // Network scanners (wave-32: `nmap -sV 192.168.1.0/24`) —
             // active network reconnaissance, never coding work.
             (
@@ -468,7 +476,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // -d @/path pattern only sees literal file operands.
             (
                 Regex::new(
-                    r#"(?i)(requests\.(post|put|patch)|subprocess\.(run|call|popen|check_output)|urlopen|fetch\s*\(|sendall|sendto)\s*\([^)]*open\s*\(\s*['"]/(etc|var|root|proc|home)/"#,
+                    r#"(?i)(requests\.(post|put|patch)|subprocess\.(run|call|popen|check_output)|urlopen|fetch\s*\(|sendall|sendto|\.send)\s*\([\s\S]{0,200}?open\s*\(\s*['"]/(etc|var|root|proc|home)/"#,
                 )
                 .expect("Invalid regex"),
                 "system file read embedded in network call (exfiltration)",
@@ -567,8 +575,11 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // `cat /proc/net/tcp | xxd -p | curl …`) — the system-file
             // pattern covered etc/var/root only.
             (
+                // Bounded [\s\S] span: a JSON-\n newline inside a quoted
+                // arg (tr -d '\n') must not shield the downstream curl
+                // (red-team wave-128 — the [^\n]* form let it through).
                 Regex::new(
-                    r"(cat|head|tail|dd)\s+[^|\n]*?/proc/\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat|dig|nslookup|host)\b",
+                    r"(cat|head|tail|dd)\s+[^|\n]*?/proc/\S*\s*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat|dig|nslookup|host)\b",
                 )
                 .expect("Invalid regex"),
                 "/proc read piped to network tool (exfiltration)",
