@@ -124,6 +124,18 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"curl\s+.*\|\s*(?:ba|z)?sh(?:\s|$)").expect("Invalid regex"),
                 "curl | sh",
             ),
+            // ANY source piped into a shell interpreter (red-team wave-81:
+            // `echo 'echo hi' | zsh`, `… | busybox -ash`) — the download/
+            // decode-anchored forms above only see their own sources; piping
+            // generated content into an interpreter is execution regardless
+            // of the source. No standing benign shell_exec case uses the
+            // shape (corpus-verified; file CONTENT mentioning `curl|sh` is
+            // out of scope by design).
+            (
+                Regex::new(r"\|\s*(busybox\s+)?-?(bash|zsh|ksh|csh|tcsh|dash|ash|sh)(?:\s|$)")
+                    .expect("Invalid regex"),
+                "pipe into shell interpreter (execute generated content)",
+            ),
             // nc (netcat) reverse shells
             (
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
