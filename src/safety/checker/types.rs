@@ -223,10 +223,11 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // Decode-assignment then variable execution (red-team wave-114:
             // \`cmd=$(echo 'cm0g…' | base64 -d) ; $cmd\`) — the decoded
             // payload is invisible to the variable-verb pattern (P5 sees
-            // only the base64 text).
+            // only the base64 text). Chain operators beyond ; covered too
+            // (wave-211: \`b64=$(…) && $b64\`).
             (
                 Regex::new(
-                    r"\b\w+\s*=\s*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b[^)]*\)\s*;[^|\n]*\$\w",
+                    r"\b\w+\s*=\s*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b[^)]*\)\s*(;|&&|\|\|)[^|\n]*\$\w",
                 )
                 .expect("Invalid regex"),
                 "decode-assignment then variable execution (decode-execute)",
@@ -301,11 +302,14 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // Fully variable-assembled command execution (red-team wave-205:
             // \`V=rm; W=rf; X=/; ${V} -${W} ${X}\`) — verb, flag, and target
             // all arrive as single-char variable expansions so no literal
-            // dangerous verb ever appears. The dash-flag variable is the
-            // precision anchor: legit scripts expand ${CC} ${CFLAGS}, not
-            // -${W}.
+            // dangerous verb ever appears. Single-char verb is the
+            // precision anchor (legit scripts expand ${CC} ${CFLAGS}, and
+            // ${X} -a with a LITERAL flag is a benign control); every
+            // argument must be an expansion too. The dash may ride INSIDE
+            // the flag var (wave-211: \`x=rm; y=-rf; z=/tmp/evil;
+            // ${x} ${y} ${z}\`).
             (
-                Regex::new(r"(?:^|;\s*)\$\{\w+\}\s+-\$\{\w+\}(\s+\$?\{\w+\})*\s*$")
+                Regex::new(r"(?:^|;\s*)\$\{\w\}(\s+-?\$\{?\w+\}?)+\s*$")
                     .expect("Invalid regex"),
                 "fully variable-assembled command execution (verb obfuscation)",
             ),

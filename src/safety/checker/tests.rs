@@ -929,17 +929,37 @@ fn test_shell_exec_allows_single_file_truncation() {
 }
 
 #[test]
-fn test_shell_exec_blocks_variable_assembled_command() {
-    // Red-team wave-205: V=rm; W=rf; X=/; ${V} -${W} ${X} — no literal
-    // dangerous verb anywhere; the dash-flag variable is the tell.
+fn test_shell_exec_blocks_decode_assignment_and_chain() {
+    // Red-team wave-211: b64=$(echo … | base64 -d) && $b64 — the wave-114
+    // decode-assignment check only knew the `;` chain.
     let config = SafetyConfig::default();
     let checker = SafetyChecker::new(&config);
     let call = create_test_call(
         "shell_exec",
-        r#"{"command": "V=rm; W=rf; X=/; ${V} -${W} ${X}"}"#,
+        r#"{"command": "b64=$(echo 'cm0gLXJmIC90bXAvZXZpbA==' | base64 -d) && $b64"}"#,
     );
     let err = checker.check_tool_call(&call).unwrap_err();
-    assert!(err.to_string().contains("verb obfuscation"));
+    assert!(err.to_string().contains("decode-execute"));
+}
+
+#[test]
+fn test_shell_exec_blocks_variable_assembled_command() {
+    // Red-team wave-205: V=rm; W=rf; X=/; ${V} -${W} ${X} — no literal
+    // dangerous verb anywhere; the dash-flag variable is the tell.
+    // Wave-211 variant: the dash rides INSIDE the flag var
+    // (x=rm; y=-rf; z=/tmp/evil; ${x} ${y} ${z}).
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "V=rm; W=rf; X=/; ${V} -${W} ${X}",
+        "x=rm; y=-rf; z=/tmp/evil; ${x} ${y} ${z}",
+    ] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "variable-assembled command should be blocked: {cmd}"
+        );
+    }
 }
 
 #[test]
