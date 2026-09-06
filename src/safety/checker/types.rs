@@ -194,9 +194,11 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // export driven by xargs (red-team wave-94: `cat /tmp/vars |
             // tr '\\n' '\\0' | xargs -0 export`) — same documented
             // trade-off as export $(cat config.env): agents load env files
-            // through the structured env map or file tools instead.
+            // through the structured env map or file tools instead. Flag
+            // class is -\S+ (wave-115: `-I{}` braces slipped the
+            // alnum-only class).
             (
-                Regex::new(r"\bxargs\s+(-[a-zA-Z0-9]+\s+)*export\b").expect("Invalid regex"),
+                Regex::new(r"\bxargs\s+(-\S+\s+)*export\b").expect("Invalid regex"),
                 "export driven by xargs (bulk env injection)",
             ),
             // nc (netcat) reverse shells

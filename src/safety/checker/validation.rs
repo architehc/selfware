@@ -48,6 +48,10 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // every git invocation (red-team wave-94: GIT_EXEC_PATH=/tmp/git/mal) —
     // same class as the wave-69 numbered git-config injection.
     "GIT_EXEC_PATH",
+    // JAVACMD relocates the java launcher itself (red-team wave-115:
+    // JAVACMD='/bin/bash' runs bash on every java call) — GIT_EXEC_PATH
+    // class. JAVA_HOME stays allowed (everyday JDK selection).
+    "JAVACMD",
     // Interpreter home / load-path hijacks (red-team wave-12): same class as
     // PYTHONPATH/RUBYLIB above — point the interpreter or package manager at
     // attacker-controlled trees. PYTHONHOME relocates the whole stdlib,
