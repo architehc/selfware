@@ -48,7 +48,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // (`rm ../sibling-file`, `rm -rf ../old-build`) are everyday
             // usage and are NOT matched here.
             (
-                Regex::new(r"rm\s+(--?[a-z-]+\s+)*(/\*?|\.\.(/\.\.)+/?)").expect("Invalid regex"),
+                Regex::new(r#"rm\s+(--?[a-z-]+\s+)*(/\*?|~([/\s;'")]|$)|\.\.(/\.\.)+/?)"#).expect("Invalid regex"),
                 "rm -rf / or ../../.. (destructive deletion)",
             ),
             // IFS/positional-glue rm with an absolute target (red-team
@@ -996,7 +996,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 // "rm", "-rf", "/x"` list form); concat form (wave-137:
                 // `os.system('rm' + ' -rf /usr/bin/backup')`).
                 Regex::new(
-                    r#"(?i)(system|execve|exec|popen|execsync|passthru|shell_exec|os\.system|subprocess\.[a-z_]+|spawnSync)\s*\(?\s*[^\n)]*\brm(['"]?\s*,\s*['"]?-[a-z]+['"]?\s*,\s*['"]?/|['"]?\s*\+\s*['"]\s*-[a-z]+\s+/|\s+(-[a-z]+\s+)*/)"#,
+                    r#"(?i)(system|execve|exec|popen|execsync|passthru|shell_exec|os\.system|subprocess\.[a-z_]+|spawnSync)\s*\(?\s*[^\n)]*\brm(['"]?\s*,\s*['"]?-[a-z]+['"]?\s*,\s*['"]?/|['"]?\s*\+\s*['"]\s*-[a-z]+\s+/|\s+(-[a-z]+\s+)*(/|~([/\s;'")]|$)))"#,
                 )
                 .expect("Invalid regex"),
                 "destruction inside interpreter spawn call",
@@ -1018,7 +1018,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // numeric-looking argument and does not match the quote shape.
             (
                 Regex::new(
-                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)\s+-c\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*/"#,
+                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*(/|~([/\s;'")]|$))"#,
                 )
                 .expect("Invalid regex"),
                 "absolute destruction inside -c payload",
@@ -1029,7 +1029,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // shred of absolute targets share the same masked-invisibility.
             (
                 Regex::new(
-                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
+                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
                 )
                 .expect("Invalid regex"),
                 "device-level destruction inside -c payload",

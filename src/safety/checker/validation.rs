@@ -377,6 +377,35 @@ impl SafetyChecker {
                 if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
                     self.check_path(cwd)?;
                 }
+                // The structured env map is an injection channel (red-team
+                // wave-164: `sh -c '${CMD}'` with env {"CMD": "rm -rf
+                // /var/log"}) — the payload never appears in the command
+                // text. Denied NAMES are refused outright; vars the command
+                // REFERENCES ($VAR or ${VAR}) are EXPANDED with their values
+                // and the result is shell-checked — checking values
+                // one-by-one misses arg-fragment splits (`${C} ${D}` =
+                // `dd if=… of=/dev/sda`, `${V}${IFS}${W}${IFS}${X}` =
+                // `rm -rf /tmp`).
+                if let Some(env) = args.get("env").and_then(|v| v.as_object()) {
+                    let mut expanded = cmd.clone();
+                    let mut referenced = false;
+                    for (name, value) in env {
+                        if DENIED_ENV_VARS.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+                            return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+                        }
+                        if let Some(val) = value.as_str() {
+                            let braced = format!("${{{name}}}");
+                            let bare = format!("${name}");
+                            if expanded.contains(&braced) || expanded.contains(&bare) {
+                                referenced = true;
+                                expanded = expanded.replace(&braced, val).replace(&bare, val);
+                            }
+                        }
+                    }
+                    if referenced {
+                        self.check_shell_command(&expanded)?;
+                    }
+                }
             }
             "git_commit" | "git_checkpoint" => {
                 // Git operations are generally safe
