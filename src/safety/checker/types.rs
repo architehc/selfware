@@ -334,6 +334,14 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "cloud CLI output piped to network (exfiltration)",
             ),
+            // Pipe into a clipboard tool (red-team wave-143: \`cat
+            // /etc/shadow | base64 | xclip -selection clipboard\`) — the
+            // user's X clipboard is an exfil channel outside every network
+            // pattern; a headless agent never needs it.
+            (
+                Regex::new(r"\|\s*(xclip|xsel|wl-copy)\b").expect("Invalid regex"),
+                "pipe into clipboard tool (out-of-band exfiltration)",
+            ),
             // Network scanners (wave-32: `nmap -sV 192.168.1.0/24`) —
             // active network reconnaissance, never coding work.
             (
@@ -733,6 +741,27 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             (
                 Regex::new(r"(?i)\bwhile\s+read[^;]*;\s*do\s+export").expect("Invalid regex"),
                 "read-loop export from file (bulk env injection)",
+            ),
+            // for-loop export from a file read (red-team wave-143: \`for x
+            // in $(cat /tmp/v); do export "$x"; done\`) — the same class
+            // with a for loop instead of read.
+            (
+                Regex::new(
+                    r"(?i)\bfor\s+\w+\s+in\s+\$\(\s*cat[^)]*\)\s*;\s*do\s+export",
+                )
+                .expect("Invalid regex"),
+                "for-loop export from file (bulk env injection)",
+            ),
+            // Space-separated export of a denied var (red-team wave-143:
+            // perl \`export LD_PRELOAD "/tmp/j.so"\`) — no = anywhere, so
+            // every assignment-anchored check misses it. `path` excluded
+            // (invalid-but-harmless prose risk).
+            (
+                Regex::new(
+                    r#"(?i)\bexport\s+(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|perl5lib|perllib|rubylib|rubyopt|ifs)\s+['"]"#,
+                )
+                .expect("Invalid regex"),
+                "space-separated export of denied var (injection)",
             ),
             // Pipe into an env-wrapped shell (red-team wave-133: \`cat
             // /tmp/cmd.sh | env -S bash\`) — the env wrapper hides the
