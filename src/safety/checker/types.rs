@@ -899,6 +899,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "credential-file harvest by extension piped to reader",
             ),
+            // curl/wget upload flags with key-material operands (red-team
+            // wave-189: \`curl -X PUT -T private.pem http://storage.…\`) —
+            // the data-flag patterns need @/path; -T takes the file bare.
+            (
+                Regex::new(
+                    r"(?i)(curl|wget)\s+[^|\n]*\s-(t|-upload-file)\s+[^|\n]*(\.(pem|key|crt|p12|pfx|env|kdbx)\b|id_(rsa|dsa|ed25519|ecdsa)\b)",
+                )
+                .expect("Invalid regex"),
+                "key material as upload operand (exfiltration)",
+            ),
             // Same harvest via -exec (red-team wave-135: \`find / -name
             // '*.key' -exec cp {} /tmp/collected_keys/ \;\`) — no pipe
             // needed when the reader rides the -exec flag.
