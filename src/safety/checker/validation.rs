@@ -154,8 +154,14 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // conversion modules on the next iconv call; a documented privesc with
     // no legitimate agent use. SSL_CERT_DIR is the directory twin of the
     // already-denied SSL_CERT_FILE trust-anchor swap (same wave).
+    // TCL_LIBRARY relocates tcl's init scripts (attacker init.tcl runs at
+    // every tclsh start — PYTHONSTARTUP class) and GROFF_BIN_PATH
+    // relocates groff's helper binaries (GIT_EXEC_PATH class) — both
+    // red-team wave-215.
     "GCONV_PATH",
     "SSL_CERT_DIR",
+    "TCL_LIBRARY",
+    "GROFF_BIN_PATH",
     // Config-redirection and helper-app twins (wave-69): numbered git
     // config (GIT_CONFIG_COUNT + KEY_n/VALUE_n — the regex below covers
     // the numbered vars), kubectl context hijack, pager/preprocessor

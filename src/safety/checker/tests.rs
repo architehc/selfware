@@ -929,6 +929,24 @@ fn test_shell_exec_allows_single_file_truncation() {
 }
 
 #[test]
+fn test_shell_exec_blocks_tcl_groff_relocation() {
+    // Red-team wave-215: TCL_LIBRARY runs an attacker init.tcl at every
+    // tclsh start; GROFF_BIN_PATH relocates groff's helper binaries.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "TCL_LIBRARY=/tmp tclsh -c 'puts hi'",
+        "GROFF_BIN_PATH=/tmp groff -Tascii -",
+    ] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "should be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
 fn test_shell_exec_blocks_git_ssh_relocation() {
     // Red-team wave-214: GIT_SSH/GIT_SSH_COMMAND run an attacker script on
     // every git ssh operation — GIT_EXEC_PATH class.
