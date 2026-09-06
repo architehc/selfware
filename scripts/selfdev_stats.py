@@ -342,8 +342,14 @@ def report(now: float) -> str:
         out.append("")
     rates, last_seen = scan_rates(now)
     if rates:
+        # Model annotations per endpoint (fleet identity at a glance).
+        MODEL_LABELS = {
+            "ablit/31000": "qwen38-unc-27B",
+            "unc/lan8000": "qwen38-heretic",
+            "flash/design": "qwen38-flash-next",
+        }
         out.append("LIVE RATES (tok/s in/out by endpoint)")
-        hdr2 = f"{'endpoint':<16}" + "".join(f"  {w:>11}" for w, _ in RATE_WINDOWS) + f"  {'last':>9}" 
+        hdr2 = f"{'endpoint':<16}{'model':<20}" + "".join(f"  {w:>11}" for w, _ in RATE_WINDOWS) + f"  {'last':>9}" 
         out.append(hdr2)
         out.append("-" * len(hdr2))
         for ep in sorted(rates):
@@ -354,7 +360,8 @@ def report(now: float) -> str:
                 # total tok/s into 24h calc below
             age = now - last_seen.get(ep, 0) if last_seen.get(ep) else None
             last = "—" if age is None else (f"{int(age)}s" if age < 90 else f"{int(age//60)}m")
-            out.append(f"{ep:<16}" + "  ".join(f"{c:>11}" for c in cells) + f"  {last:>9}")
+            model = MODEL_LABELS.get(ep, "")
+            out.append(f"{ep:<16}{model:<20}" + "  ".join(f"{c:>11}" for c in cells) + f"  {last:>9}")
         # fleet totals
         fleet_bits = []
         for ep in sorted(rates):
