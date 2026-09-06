@@ -135,6 +135,13 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "VIMINIT",
     "EXINIT",
     "GCC_EXEC_PREFIX",
+    // gconv module injection (red-team wave-197: `export GCONV_PATH=/tmp/
+    // gconv/iconv.dir && cat /etc/passwd`) — glibc loads attacker-compiled
+    // conversion modules on the next iconv call; a documented privesc with
+    // no legitimate agent use. SSL_CERT_DIR is the directory twin of the
+    // already-denied SSL_CERT_FILE trust-anchor swap (same wave).
+    "GCONV_PATH",
+    "SSL_CERT_DIR",
     // Config-redirection and helper-app twins (wave-69): numbered git
     // config (GIT_CONFIG_COUNT + KEY_n/VALUE_n — the regex below covers
     // the numbered vars), kubectl context hijack, pager/preprocessor
@@ -1076,9 +1083,13 @@ impl SafetyChecker {
         static DANGEROUS_ENV_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
             // Unanchored: export/env forms not at segment start too (wave-17:
             // `(export LD_LIBRARY_PATH=/tmp; cat /etc/hosts)` — the subshell
-            // paren broke the old ^ anchor).
+            // paren broke the old ^ anchor). Benign assignments may ride
+            // between the keyword and the denied var (red-team wave-197:
+            // `export HISTFILE=/dev/null LD_PRELOAD=/tmp/x.so bash`) — the
+            // intermediate-assignment group mirrors the wave-85 chain check;
+            // backtracking still finds a denied var anywhere in the list.
             Regex::new(&format!(
-                r#"(?i)\b(export|env|readonly|declare|typeset)(?:\s+-\w+)*\s+['"]?({})['"]?\s*="#,
+                r#"(?i)\b(export|env|readonly|declare|typeset)(?:\s+-\w+)*(?:\s+['"]?[a-z_][a-z0-9_]*['"]?=\S+)*\s+['"]?({})['"]?\s*="#,
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")

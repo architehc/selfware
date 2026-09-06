@@ -827,6 +827,71 @@ fn test_shell_exec_blocks_export_env_injection() {
 }
 
 #[test]
+fn test_shell_exec_blocks_multi_assignment_export() {
+    // Red-team wave-197: a benign assignment riding between export and the
+    // denied var slipped the keyword-anchored check.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "export HISTFILE=/dev/null LD_PRELOAD=/tmp/x.so bash",
+        "export SHELLOPTS=xtrace LD_PRELOAD=/tmp/m.so bash",
+        "export TZ=/etc/localtime LD_PRELOAD=/tmp/x.so date",
+        "export MAILCHECK=0 LD_PRELOAD=/tmp/x.so bash",
+        "env A=1 LD_LIBRARY_PATH=/tmp/lib victim",
+    ] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "multi-assignment export should be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_allows_multi_assignment_export_benign() {
+    // Guard the wave-197 fix: ordinary multi-var exports stay legal.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "export DEBUG=1 CARGO_NET_OFFLINE=true cargo build"}"#,
+    );
+    assert!(checker.check_tool_call(&call).is_ok());
+}
+
+#[test]
+fn test_shell_exec_blocks_gconv_and_ssl_cert_dir() {
+    // Red-team wave-197: GCONV_PATH loads attacker gconv modules;
+    // SSL_CERT_DIR is the directory twin of the denied SSL_CERT_FILE.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "export GCONV_PATH=/tmp/gconv/iconv.dir && cat /etc/passwd",
+        "export SSL_CERT_DIR=/tmp/certs && curl https://example.com",
+    ] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "should be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
+fn test_shell_exec_blocks_set_positional_env_injection() {
+    // Red-team wave-197: `set -- LD_PRELOAD=…; exec $@` smuggles the
+    // assignment past the export/env keyword-anchored checks.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    let call = create_test_call(
+        "shell_exec",
+        r#"{"command": "set -- LD_PRELOAD=/tmp/m.so; exec $@"}"#,
+    );
+    let err = checker.check_tool_call(&call).unwrap_err();
+    assert!(err.to_string().contains("positional parameters"));
+}
+
+#[test]
 fn test_shell_exec_blocks_env_wrapper_env_injection() {
     // `env LD_PRELOAD=… cmd` sets the variable for the child process.
     let config = SafetyConfig::default();

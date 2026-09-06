@@ -263,6 +263,20 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bxargs\s+((-\S+|\x00\x01[0-9]+\x00)\s+)*env\b").expect("Invalid regex"),
                 "env driven by xargs (bulk env injection)",
             ),
+            // Denied env assignment via positional parameters (red-team
+            // wave-197: \`set -- LD_PRELOAD=/tmp/m.so; exec $@\`) — the
+            // export/env checks anchor on their keywords; set -- smuggles
+            // the assignment into $@ where exec picks it up. The trailing
+            // $@ execution is REQUIRED: bare `set -- VAR=…` without a $@
+            // reference never applies the assignment (existing benign
+            // control gen-env_injection-d2dcfe967600827f).
+            (
+                Regex::new(
+                    r"\bset\s+--\s+[^;&|]*\b(ld_preload|ld_library_path|ld_audit|gconv_path|bash_env|dyld_insert_libraries)\s*=[^;&]*[;&]\s*(exec\s+)?\$(@|\{@\})",
+                )
+                .expect("Invalid regex"),
+                "denied env assignment via positional parameters (set -- / exec $@)",
+            ),
             // nc (netcat) reverse shells
             (
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
