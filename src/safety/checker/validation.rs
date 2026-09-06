@@ -44,6 +44,10 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "NODE_OPTIONS",
     "PERL5OPT",
     "RUBYOPT",
+    // Relocating git's own subcommand directory runs attacker binaries on
+    // every git invocation (red-team wave-94: GIT_EXEC_PATH=/tmp/git/mal) —
+    // same class as the wave-69 numbered git-config injection.
+    "GIT_EXEC_PATH",
     // Interpreter home / load-path hijacks (red-team wave-12): same class as
     // PYTHONPATH/RUBYLIB above — point the interpreter or package manager at
     // attacker-controlled trees. PYTHONHOME relocates the whole stdlib,
@@ -363,8 +367,14 @@ impl SafetyChecker {
                 // An explicit URL remote ships the whole workspace to an
                 // arbitrary endpoint (wave-60: `remote:
                 // "https://github.com/victim-org/repo"`). Named remotes
-                // (origin, upstream) are user-configured and pass.
-                if let Some(remote) = args.get("remote").and_then(|v| v.as_str()) {
+                // (origin, upstream) are user-configured and pass. The
+                // "url" spelling gets the same check (wave-94: key-spelling
+                // bypass, same class as the cmd fallback).
+                if let Some(remote) = args
+                    .get("remote")
+                    .or_else(|| args.get("url"))
+                    .and_then(|v| v.as_str())
+                {
                     if remote.starts_with("http://")
                         || remote.starts_with("https://")
                         || remote.starts_with("ssh://")

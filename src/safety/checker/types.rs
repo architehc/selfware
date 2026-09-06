@@ -150,6 +150,26 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "decoded substitution in command position (decode-execute)",
             ),
+            // Denied env assignment after a SUBSTITUTED command word
+            // (red-team wave-94: `"$(which env)" LD_PRELOAD=/tmp/s.so ls`)
+            // — the env-anchored checks need a literal env/export keyword;
+            // here the command word itself is a substitution (masked as a
+            // placeholder) and the assignment rides in prefix position.
+            (
+                Regex::new(
+                    r"(?:^|\|\s*|;\s*|&&\s*|\(\s*)(\x00\x01[0-9]+\x00|\$\([^)]*\))\s+(?i:(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|ifs|path))\s*=",
+                )
+                .expect("Invalid regex"),
+                "denied env assignment after substituted command word",
+            ),
+            // export driven by xargs (red-team wave-94: `cat /tmp/vars |
+            // tr '\\n' '\\0' | xargs -0 export`) — same documented
+            // trade-off as export $(cat config.env): agents load env files
+            // through the structured env map or file tools instead.
+            (
+                Regex::new(r"\bxargs\s+(-[a-zA-Z0-9]+\s+)*export\b").expect("Invalid regex"),
+                "export driven by xargs (bulk env injection)",
+            ),
             // nc (netcat) reverse shells
             (
                 Regex::new(r"\bnc\s+.*-e\s+(/bin/)?(sh|bash)").expect("Invalid regex"),
@@ -496,7 +516,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // only happens when the alias fires.
             (
                 Regex::new(
-                    r#"(?i)alias\s+\w+=['"]?\s*(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|perl5lib|perllib|rubylib|rubyopt|path|gtk_modules|fpath)\s*="#,
+                    r#"(?i)alias\s+\w+=['"]?\s*(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|perl5lib|perllib|rubylib|rubyopt|path|gtk_modules|fpath|ifs)\s*="#,
                 )
                 .expect("Invalid regex"),
                 "env injection inside alias definition",
@@ -524,7 +544,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // (corpus benign: \`echo $((0x10)) LD_PRELOAD=/tmp/lib.so\`).
             (
                 Regex::new(
-                    r#"(?i)['"](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonstartup|node_options|gtk_modules)\s*=\s*['"]?[/~.]"#,
+                    r#"(?i)['"](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonstartup|node_options|gtk_modules|ifs)\s*=\s*['"]?[/~.]"#,
                 )
                 .expect("Invalid regex"),
                 "denied env assignment quoted as data (indirect injection)",
@@ -551,6 +571,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "archiver env option injection (GZIP/TAR_OPTIONS-style)",
+            ),
+            // Compiler flag injection via build env vars (red-team
+            // wave-94: `export CFLAGS="-include /tmp/evil.h"; make`) —
+            // -include/-imacros force-includes attacker headers into every
+            // compilation unit. Ordinary -I/-L/-O flags stay legal
+            // (wave-78 stance).
+            (
+                Regex::new(
+                    r#"(?i)\b(cflags|cxxflags|cppflags)\s*=\s*['"]?[^'";|\n]*?-(include|imacros)\s"#,
+                )
+                .expect("Invalid regex"),
+                "compiler flag injection via build env (CFLAGS -include)",
             ),
             // Credential-file harvesting by extension (red-team wave-73:
             // \`find / -name '*.pem' -o -name '*.key' | xargs cat\`) — the
