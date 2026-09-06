@@ -782,6 +782,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "pipe into env-wrapped shell (execute generated content)",
             ),
+            // Pipe into an xargs-wrapped shell (red-team wave-156: \`echo
+            // 'rm -rf /tmp/target' | xargs -t sh\`) — same wrapper class
+            // with xargs doing the hiding.
+            (
+                Regex::new(
+                    r"\|\s*xargs\s+(-\S+\s+)*(/(bin|usr/bin|usr/local/bin)/)?(bash|zsh|ksh|csh|tcsh|dash|ash|sh)(?:\s|$)",
+                )
+                .expect("Invalid regex"),
+                "pipe into xargs-wrapped shell (execute generated content)",
+            ),
             // Denied env assignment quoted as data and smuggled through a
             // second command (red-team wave-73: \`xargs -d '\n' -a <(echo
             // 'LD_PRELOAD=/tmp/lib.so') env\`) — the masked form hides the
