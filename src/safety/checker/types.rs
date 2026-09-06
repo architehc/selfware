@@ -1154,6 +1154,24 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
             ),
+            // perl %ENV write with a COMPUTED key (red-team wave-171:
+            // \`$ENV{$e}=$v; exec "cat", "/etc/shadow"\`) — the table
+            // pattern needs a literal name. Assignment form only; reads
+            // (\`$ENV{$key}\` alone) stay legal.
+            (
+                Regex::new(r"(?i)\$ENV\{\$\w+\}\s*=").expect("Invalid regex"),
+                "interpreter env-table write with computed key (injection)",
+            ),
+            // sudo with a sensitive verb (red-team wave-171: \`sudo -u root
+            // cat /etc/shadow\`) — privilege escalation into credential
+            // access. sudo ls/make/apt stays legal.
+            (
+                Regex::new(
+                    r"(?i)\bsudo\s+(-\S+\s+)*(cat|less|more|tail|head|dd|base64|xxd|od|hexdump|cp|chmod|chown|rm|sh|bash|env|vi|nano|less)\b",
+                )
+                .expect("Invalid regex"),
+                "sudo with sensitive verb (privilege escalation)",
+            ),
             // export with a quoted-substitution argument (red-team
             // wave-158: \`export "$(echo LD_PRELOAD)=\"$(echo /tmp/q.so)\"\`)
             // — INDIRECT_EXPORT_SUBST needs the substitution right after
