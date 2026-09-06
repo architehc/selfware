@@ -176,7 +176,10 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
                 continue
             if chunk.get("usage"):
                 usage = chunk["usage"]
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
+            # Usage/keepalive chunks carry "choices": [] — indexing blind
+            # kills the whole wave (wave-97/99: "list index out of range").
+            choices = chunk.get("choices") or []
+            delta = choices[0].get("delta", {}) if choices else {}
             if delta.get("content"):
                 parts.append(delta["content"])
     text = "".join(parts)
