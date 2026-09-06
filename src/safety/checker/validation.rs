@@ -135,6 +135,15 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "VIMINIT",
     "EXINIT",
     "GCC_EXEC_PREFIX",
+    // Go/Rust package-source and credential relocation (red-team wave-206):
+    // GOPROXY is the PIP_INDEX_URL/NPM_CONFIG_REGISTRY twin (module source
+    // swap), GOSUMDB=off disables module checksum verification, and
+    // CARGO_HOME relocation makes cargo read an attacker-planted
+    // credentials.toml — the GEM_HOME class. Agents set these via project
+    // config files, not the environment.
+    "GOPROXY",
+    "GOSUMDB",
+    "CARGO_HOME",
     // gconv module injection (red-team wave-197: `export GCONV_PATH=/tmp/
     // gconv/iconv.dir && cat /etc/passwd`) — glibc loads attacker-compiled
     // conversion modules on the next iconv call; a documented privesc with
