@@ -1088,6 +1088,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\$\{!?\w+\*?\}\s*=").expect("Invalid regex"),
                 "env assignment via name expansion (indirect injection)",
             ),
+            // Unbraced concatenated name expansion (red-team wave-207:
+            // \`P=LD; Q=PRELOAD; export $P$Q=$R\` — $P$Q spells LD_PRELOAD)
+            // — the wave-62 pattern needs braces. Anchored on assignment
+            // position (export/env/segment start) so `echo $A=$B` debug
+            // prints stay legal.
+            (
+                Regex::new(r"(?:^|[;&|]\s*|\b(?:export|env|readonly|declare|typeset)\s+)\$\w+(\$\w+)*\s*=")
+                    .expect("Invalid regex"),
+                "env assignment via concatenated name expansion (indirect injection)",
+            ),
             // eval carrying a denied assignment (wave-45: `eval
             // 'LD_PRELOAD=/tmp/x.so; …'`) — the sh -c payload pattern is
             // anchored on -c; eval needs its own.
