@@ -61,6 +61,13 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // `export CLASSPATH=/tmp/evil.jar:$CLASSPATH; java Main`) — agents pass
     // classpaths via java -cp, not the environment.
     "CLASSPATH",
+    // Compiler include-path hijacks (red-team wave-104:
+    // C_INCLUDE_PATH=/tmp/include) — the env-var twin of the wave-94
+    // CFLAGS -include injection; agents pass -I via build files.
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH",
     // zsh function/autoload path and startup-dir hijacks (red-team
     // wave-24): `export FPATH=/tmp; autoload evil; evil` — zsh's
     // equivalent of BASH_ENV/PYTHONSTARTUP.

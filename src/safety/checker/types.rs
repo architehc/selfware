@@ -106,7 +106,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // middle closes the tee evasion (`curl url | tee x | sh`) for
             // both curl and wget.
             (
-                Regex::new(r"(curl|wget)\s+[^|]*(\|[^|]*)*\|\s*(?:ba|z|k|da)?sh(?:\s|$)")
+                Regex::new(r"(curl|wget)\s+[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da)?sh(?:\s|$)")
                     .expect("Invalid regex"),
                 "pipe remote content to shell",
             ),
@@ -115,13 +115,13 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // (the literal-O form never matched — the generic pipe-to-shell
             // pattern above was what actually caught these).
             (
-                Regex::new(r"wget\s+(-[a-z]+\s+)*-[oO]\s*-\[^|]*\|\s*(?:ba)?sh(?:\s|$)")
+                Regex::new(r"wget\s+(-[a-z]+\s+)*-[oO]\s*-\[^|]*\|\s*(?:/(?:usr/)?bin/)?(?:ba)?sh(?:\s|$)")
                     .expect("Invalid regex"),
                 "wget -O- | sh",
             ),
             // curl with execution flag (same shell-word boundary as above)
             (
-                Regex::new(r"curl\s+.*\|\s*(?:ba|z)?sh(?:\s|$)").expect("Invalid regex"),
+                Regex::new(r"curl\s+.*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z)?sh(?:\s|$)").expect("Invalid regex"),
                 "curl | sh",
             ),
             // ANY source piped into a shell interpreter (red-team wave-81:
@@ -132,7 +132,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // shape (corpus-verified; file CONTENT mentioning `curl|sh` is
             // out of scope by design).
             (
-                Regex::new(r"\|\s*(busybox\s+)?-?(bash|zsh|ksh|csh|tcsh|dash|ash|sh)(?:\s|$)")
+                Regex::new(r"\|\s*(busybox\s+)?-?(/(bin|usr/bin|usr/local/bin)/)?(bash|zsh|ksh|csh|tcsh|dash|ash|sh)(?:\s|$)")
                     .expect("Invalid regex"),
                 "pipe into shell interpreter (execute generated content)",
             ),
@@ -360,7 +360,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(
                     // `-…O` as a class for the same lowercase-normalization
                     // reason as the wget -O- pattern above.
-                    r#"(curl|wget)\s+[^|"']*(https?://|-[a-zA-Z]*[oO])[^|]*(\|[^|]*)*\|\s*(?:ba|z|k|da)?sh(?:\s|$|['")\]};])"#,
+                    r#"(curl|wget)\s+[^|"']*(https?://|-[a-zA-Z]*[oO])[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da)?sh(?:\s|$|['")\]};])"#,
                 )
                 .expect("Invalid regex"),
                 "pipe remote content to shell (quoted payload)",
@@ -1114,7 +1114,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
 // word must be followed by whitespace or end-of-string so checksum tools
 // (`shasum`, `sha256sum`) after a decode pipe don't false-positive.
 pub(crate) static BASE64_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(base64\s+(-[a-z]+\s+)*(-d|--decode)|base64\s+-d|--decode\s+<|base64\s+<<<).*\|\s*((?:ba|z)?sh|perl|python[0-9.]*|exec|ruby)(\s|$)"#)
+    Regex::new(r#"(base64\s+(-[a-z]+\s+)*(-d|--decode)|base64\s+-d|--decode\s+<|base64\s+<<<).*\|\s*((?:/(?:usr/)?bin/)?(?:ba|z)?sh|perl|python[0-9.]*|exec|ruby)(\s|$)"#)
         .expect("Invalid regex")
 });
 
