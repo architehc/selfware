@@ -493,6 +493,7 @@ impl SafetyChecker {
                             if obj
                                 .get("host")
                                 .or_else(|| obj.get("source"))
+                                .or_else(|| obj.get("src"))
                                 .and_then(|v| v.as_str())
                                 .is_none()
                             {
@@ -504,7 +505,7 @@ impl SafetyChecker {
                                         self.check_volume_mount(h)?;
                                     }
                                     if let Some(nested) = value.as_object() {
-                                        for nk in ["bind", "host", "source"] {
+                                        for nk in ["bind", "host", "source", "src"] {
                                             if let Some(h) =
                                                 nested.get(nk).and_then(|v| v.as_str())
                                             {
@@ -518,6 +519,7 @@ impl SafetyChecker {
                             let host = obj
                                 .get("host")
                                 .or_else(|| obj.get("source"))
+                                .or_else(|| obj.get("src"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("");
                             if !host.is_empty() {
