@@ -583,13 +583,15 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             ),
             // env encoded to a file that a later segment posts (red-team
             // wave-138: \`env | base64 > /tmp/x && curl -d @/tmp/x …\`) —
-            // the two-stage file-mediated form of the pipe class.
+            // the two-stage file-mediated form of the pipe class. The
+            // encoder is OPTIONAL (wave-184: \`env > /tmp/x && curl -d
+            // @/tmp/x\`, sed/tr-staged variants).
             (
                 Regex::new(
-                    r"(?i)\benv\s*\|\s*(base64|xxd|od|hexdump)\s*>\s*\S+\s*&&\s*[^|\n]*(curl|wget|nc|ncat)",
+                    r"(?i)\benv\s*(\|\s*[\s\S]{0,120})?>\s*\S+\s*&&\s*[^|\n]*(curl|wget|nc|ncat|dig|nslookup|host)\b",
                 )
                 .expect("Invalid regex"),
-                "env encoded to file then posted (exfiltration)",
+                "env staged to file then posted (exfiltration)",
             ),
             // $(cat /system/file) substitution feeding a network tool
             // (wave-17: `printf '%s' $(cat /etc/issue) | sed … | curl`).
