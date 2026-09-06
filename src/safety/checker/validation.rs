@@ -163,7 +163,11 @@ static EVAL_SUBSTITUTION_PROGRAM: LazyLock<Regex> =
 /// ["/bin/sh", "-c", "..."]). The array form previously skipped the shell
 /// check entirely because only `as_str()` was consulted (red-team finding).
 fn command_arg_string(args: &serde_json::Value) -> String {
-    match args.get("command") {
+    // "command" is the tool-schema key; fall back to "cmd" so a near-miss
+    // key still gets checked instead of sailing through unexamined
+    // (red-team wave-88: redis-cli flushall hidden behind "cmd").
+    let value = args.get("command").or_else(|| args.get("cmd"));
+    match value {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(items)) => items
             .iter()
