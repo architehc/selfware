@@ -171,9 +171,12 @@ def scan_rates(now: float):
     """Per-endpoint tok/s (in/out) over rolling windows, from recent trial logs.
 
     Anchors each log's event timestamps to the file's mtime (container clocks
-    differ; rates only need within-file consistency).
+    differ; rates only need within-file consistency). Also returns per-endpoint
+    last-seen timestamps so quiet-but-active periods (slow models between
+    completions) don't read as dead.
     """
     rates = defaultdict(lambda: {w: [0, 0] for w, _ in RATE_WINDOWS})
+    last_seen = {}
     # Red-team generator telemetry (all endpoints, incl. LAN + design which
     # run outside harbor jobs and otherwise never appear in live rates).
     usage_log = Path("/home/rig/selfdev/redteam_usage.jsonl")
@@ -187,6 +190,7 @@ def scan_rates(now: float):
                         continue
                     ts = rec.get("ts", 0)
                     ep = rec.get("ep", "other/?")
+                    last_seen[ep] = max(last_seen.get(ep, 0), ts)
                     for w, secs in RATE_WINDOWS:
                         if now - ts <= secs:
                             rates[ep][w][0] += int(rec.get("prompt_tokens", 0))
@@ -194,7 +198,7 @@ def scan_rates(now: float):
         except OSError:
             pass
     if not HARBOR_JOBS.exists():
-        return rates
+        return rates, last_seen
     for log in HARBOR_JOBS.glob("2026-*/*__*/agent/selfware.txt"):
         try:
             mtime = log.stat().st_mtime
@@ -226,9 +230,10 @@ def scan_rates(now: float):
                         for w, secs in RATE_WINDOWS:
                             if now - ts <= secs:
                                 rates[ep][w][1] += int(m.group(2))
+                        last_seen[ep] = max(last_seen.get(ep, 0), ts)
         except OSError:
             continue
-    return rates
+    return rates, last_seen
 
 
 def bucket(t: float, now: float) -> str:
@@ -335,10 +340,10 @@ def report(now: float) -> str:
         out.append("rewards by endpoint: " + ", ".join(
             f"{ep}={rw}×{n}" for (ep, rw), n in sorted(rewards.items())))
         out.append("")
-    rates = scan_rates(now)
+    rates, last_seen = scan_rates(now)
     if rates:
         out.append("LIVE RATES (tok/s in/out by endpoint)")
-        hdr2 = f"{'endpoint':<16}" + "".join(f"  {w:>11}" for w, _ in RATE_WINDOWS)
+        hdr2 = f"{'endpoint':<16}" + "".join(f"  {w:>11}" for w, _ in RATE_WINDOWS) + f"  {'last':>9}" 
         out.append(hdr2)
         out.append("-" * len(hdr2))
         for ep in sorted(rates):
@@ -347,7 +352,9 @@ def report(now: float) -> str:
                 i, o = rates[ep][w]
                 cells.append(f"{i//secs:>5}/{o//secs:<5}")
                 # total tok/s into 24h calc below
-            out.append(f"{ep:<16}" + "  ".join(f"{c:>11}" for c in cells))
+            age = now - last_seen.get(ep, 0) if last_seen.get(ep) else None
+            last = "—" if age is None else (f"{int(age)}s" if age < 90 else f"{int(age//60)}m")
+            out.append(f"{ep:<16}" + "  ".join(f"{c:>11}" for c in cells) + f"  {last:>9}")
         # fleet totals
         fleet_bits = []
         for ep in sorted(rates):
