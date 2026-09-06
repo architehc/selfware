@@ -280,6 +280,13 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"\bcat\s+/dev/zero\s*>").expect("Invalid regex"),
                 "disk-fill bomb (/dev/zero redirect)",
             ),
+            // --no-preserve-root exists for exactly one purpose: deleting
+            // / (red-team wave-213: \`rm -rf * --no-preserve-root\`) — never
+            // agent-legitimate regardless of the target.
+            (
+                Regex::new(r"--no-preserve-root").expect("Invalid regex"),
+                "rm --no-preserve-root (root deletion protection bypass)",
+            ),
             // find from filesystem root piped to xargs rm (red-team
             // wave-206: \`find / -perm -4000 -type f | xargs rm\`) — mass
             // deletion sweep (here: every SUID binary). Workspace-scoped
