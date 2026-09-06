@@ -80,6 +80,9 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "C_INCLUDE_PATH",
     "CPLUS_INCLUDE_PATH",
     "OBJC_INCLUDE_PATH",
+    // The link-time twin of the same class (red-team wave-185:
+    // LIBRARY_PATH=/tmp/lib) — gcc/ld searches it for -L paths.
+    "LIBRARY_PATH",
     // zsh function/autoload path and startup-dir hijacks (red-team
     // wave-24): `export FPATH=/tmp; autoload evil; evil` — zsh's
     // equivalent of BASH_ENV/PYTHONSTARTUP.
