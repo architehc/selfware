@@ -402,7 +402,7 @@ def redteam_wave_ledger() -> list:
 
 
 HTML_TMPL = """<!doctype html><html><head><meta charset="utf-8">
-<meta http-equiv="refresh" content="30">
+<script>setTimeout(()=>location.reload(),30000)</script>
 <title>selfdev stats</title><style>
 body{background:#0d1117;color:#c9d1d9;font:14px/1.45 ui-monospace,Menlo,Consolas,monospace;margin:2em}
 h1{color:#58a6ff;font-size:1.2em} table{border-collapse:collapse;margin:1em 0}
