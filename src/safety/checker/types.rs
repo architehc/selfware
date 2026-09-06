@@ -757,6 +757,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "credential-file harvest by extension piped to reader",
             ),
+            // Same harvest via -exec (red-team wave-135: \`find / -name
+            // '*.key' -exec cp {} /tmp/collected_keys/ \;\`) — no pipe
+            // needed when the reader rides the -exec flag.
+            (
+                Regex::new(
+                    r#"(?i)find\s+[^|\n]*-name\s+['"]?[^'"\s|]*\.(pem|key|crt|p12|pfx|env)['"]?[^|\n]*-exec\s+(cp|cat|base64|xxd|tar|gzip|zip)\b"#,
+                )
+                .expect("Invalid regex"),
+                "credential-file harvest by extension via -exec",
+            ),
             // env/export with a substitution argument (wave-64:
             // \`env $(echo -n 'LD_' 'PRELOAD=' '/tmp/v.so') ./target\`,
             // \`export $(printf '%s=%s' 'BASH_ENV' '/tmp/rc')\`), and the
@@ -1019,6 +1029,28 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r#"(?i)(\$env\{|environ\[|env\[)\\?['"]?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs|path)\\?['"]?(\}|\])"#)
                     .expect("Invalid regex"),
                 "interpreter env-table write (injection)",
+            ),
+            // Denied name written through ANY dict bracket (red-team
+            // wave-135: \`e['LD_PRELOAD']='/tmp/lib.so';
+            // subprocess.call(['ls'], env=e)\`) — the form above anchors
+            // on the dict being NAMED environ/env. Bare `path` excluded:
+            // config['path'] assignments are everyday.
+            (
+                Regex::new(
+                    r"(?i)\w+\[\\?['"](ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|dyld_library_path|bash_env|pythonpath|pythonstartup|pythoninspect|pythonhome|node_options|node_path|perl5lib|perllib|perl5opt|rubylib|rubyopt|gem_home|gem_path|bundle_gemfile|fpath|zdotdir|ifs)\\?['"]\]\s*=",
+                )
+                .expect("Invalid regex"),
+                "denied env write through dict bracket (injection)",
+            ),
+            // zsh/csh setenv form (red-team wave-135: \`zsh -c "setenv
+            // LD_PRELOAD /tmp/m.so; id"\`) — no = anywhere, so every
+            // assignment-anchored check misses it.
+            (
+                Regex::new(
+                    r"(?i)\bsetenv\s+(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|perl5lib|perllib|rubylib|rubyopt|ifs|path)\s",
+                )
+                .expect("Invalid regex"),
+                "denied env assignment via setenv (injection)",
             ),
             // perl Env-module array/scalar assignment (red-team wave-117:
             // \`use Env qw(@LD_PRELOAD); @LD_PRELOAD = ("/tmp/lib.so")\`) —

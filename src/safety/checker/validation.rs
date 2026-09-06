@@ -474,6 +474,14 @@ impl SafetyChecker {
                     Some(v @ serde_json::Value::Array(_)) => Some(v.clone()),
                     Some(serde_json::Value::String(s)) => serde_json::from_str(s)
                         .ok()
+                        // A stringified JSON OBJECT parses fine — wrap it
+                        // like the direct object form (red-team wave-135:
+                        // "{\"/\": {\"bind\": \"/\"}}" mounted host root
+                        // past the array-only check).
+                        .map(|v| match v {
+                            v @ serde_json::Value::Array(_) => v,
+                            other => serde_json::json!([other]),
+                        })
                         .or_else(|| Some(serde_json::json!([s.clone()]))),
                     // Dict form {"<host-path>": "<container-path>"} — a
                     // root-mount smuggled as an object key bypassed the
