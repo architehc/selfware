@@ -81,6 +81,16 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"(?i)(>{1,2}\s*|tee\s+(-\S+\s+)*)/etc/sudoers\b").expect("Invalid regex"),
                 "write to sudoers (privilege persistence)",
             ),
+            // tee into a credential/system-auth file (red-team wave-218:
+            // \`tee /dev/null /etc/shadow\` truncates shadow with empty
+            // stdin — auth sabotage). tee's write side has no legit
+            // agent use against these files (file tools edit /etc config
+            // through the allowed-paths channel instead).
+            (
+                Regex::new(r"\btee\s+(\S+\s+)*/(etc/(shadow|gshadow|passwd|sudoers)|sys|proc|boot)\b")
+                    .expect("Invalid regex"),
+                "tee into credential/system file (auth sabotage)",
+            ),
             // Pipe into an ssh-wrapped shell (red-team wave-180: \`echo
             // 'rm -rf /tmp/test' | ssh localhost bash\`) — the wave-81
             // form needs the interpreter right after the pipe.
@@ -158,7 +168,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // middle closes the tee evasion (`curl url | tee x | sh`) for
             // both curl and wget.
             (
-                Regex::new(r"(curl|wget)\s+[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da)?sh(?:\s|$)")
+                Regex::new(r"(curl|wget)\s+[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da|fi)?sh(?:\s|$)")
                     .expect("Invalid regex"),
                 "pipe remote content to shell",
             ),
@@ -192,7 +202,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             // `xargs bash -c … <<< 'rm -rf /'`) — same execute-generated-
             // content class as the pipe form above.
             (
-                Regex::new(r"(?:ba|z|k|da)?sh\s*<<<").expect("Invalid regex"),
+                Regex::new(r"(?:ba|z|k|da|fi)?sh\s*<<<").expect("Invalid regex"),
                 "herestring into shell interpreter (execute generated content)",
             ),
             // Decoded substitution AS the command (red-team wave-91:
@@ -527,7 +537,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // visible here in the restored form.
             (
                 Regex::new(
-                    r#"(?i)\bxargs\s+[^|\n]*\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\bexport\b"#,
+                    r#"(?i)\bxargs\s+[^|\n]*\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\bexport\b"#,
                 )
                 .expect("Invalid regex"),
                 "export inside xargs-driven sh -c (bulk env injection)",
@@ -559,7 +569,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(
                     // `-…O` as a class for the same lowercase-normalization
                     // reason as the wget -O- pattern above.
-                    r#"(curl|wget)\s+[^|"']*(https?://|-[a-zA-Z]*[oO])[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da)?sh(?:\s|$|['")\]};])"#,
+                    r#"(curl|wget)\s+[^|"']*(https?://|-[a-zA-Z]*[oO])[^|]*(\|[^|]*)*\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|k|da|fi)?sh(?:\s|$|['")\]};])"#,
                 )
                 .expect("Invalid regex"),
                 "pipe remote content to shell (quoted payload)",
@@ -570,7 +580,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // substitution form hides the pipe inside $().
             (
                 Regex::new(
-                    r#"(?:ba|z|k|da)?sh\s+-c\s+["']?\$\([^)]*base64\s+(-[\w]+\s+)*-d"#,
+                    r#"(?:ba|z|k|da|fi)?sh\s+-c\s+["']?\$\([^)]*base64\s+(-[\w]+\s+)*-d"#,
                 )
                 .expect("Invalid regex"),
                 "decode-and-execute via command substitution",
@@ -581,7 +591,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // quote; an assignment prefix breaks the adjacency.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b"#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\$\([^)]*\b(base64\s+(-[\w]+\s+)*-d|xxd\s+-r)\b"#,
                 )
                 .expect("Invalid regex"),
                 "decode-substitution inside -c payload (decode-execute)",
@@ -636,7 +646,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // the quoted -c payload, invisible to the masked env-pipe check.
             (
                 Regex::new(
-                    r#"(?i)\b(printenv|env)\s*\|(\s*[^|]*\|)*\s*xargs\s+[^|\n]*\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\b(curl|wget|nc(at)?|netcat|dig|nslookup|host)\b"#,
+                    r#"(?i)\b(printenv|env)\s*\|(\s*[^|]*\|)*\s*xargs\s+[^|\n]*\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\b(curl|wget|nc(at)?|netcat|dig|nslookup|host)\b"#,
                 )
                 .expect("Invalid regex"),
                 "env piped into xargs-driven sh -c network call (exfiltration)",
@@ -907,7 +917,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // the quoted payload.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da)?sh\b\s+(\S+\s+)*-c\s+['"][^'"]*\b(export\s+)?env\s*=\s*['"]?[/~.]"#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\b\s+(\S+\s+)*-c\s+['"][^'"]*\b(export\s+)?env\s*=\s*['"]?[/~.]"#,
                 )
                 .expect("Invalid regex"),
                 "ENV startup file inside -c payload (injection)",
@@ -1163,7 +1173,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // wave-30 pattern cannot see it inside quotes.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\bnsenter\s+[^'"]*(-t|--target)\s*1\b"#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\bnsenter\s+[^'"]*(-t|--target)\s*1\b"#,
                 )
                 .expect("Invalid regex"),
                 "nsenter inside -c payload (container escape)",
@@ -1173,7 +1183,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // pattern cannot see quoted payloads.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\b(nmap|masscan)\s"#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\b(nmap|masscan)\s"#,
                 )
                 .expect("Invalid regex"),
                 "network scanner inside -c payload (reconnaissance)",
@@ -1215,7 +1225,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // numeric-looking argument and does not match the quote shape.
             (
                 Regex::new(
-                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*(/|~([/\s;'")]|$))"#,
+                    r#"(?i)(\b(ba|z|k|da|fi)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*(/|~([/\s;'")]|$))"#,
                 )
                 .expect("Invalid regex"),
                 "absolute destruction inside -c payload",
@@ -1226,7 +1236,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // shred of absolute targets share the same masked-invisibility.
             (
                 Regex::new(
-                    r#"(?i)(\b(ba|z|k|da)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
+                    r#"(?i)(\b(ba|z|k|da|fi)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
                 )
                 .expect("Invalid regex"),
                 "device-level destruction inside -c payload",
@@ -1236,7 +1246,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // pattern is masked and cannot see the quoted stage.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\|\s*(ba|z|k|da)?sh\b"#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\|\s*(ba|z|k|da|fi)?sh\b"#,
                 )
                 .expect("Invalid regex"),
                 "pipe-to-shell inside -c payload",
@@ -1271,7 +1281,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // right before <<<; flags and placeholders sit between.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da)?sh\b[^|\n]*<<<\s*['"][^'"]*\brm\s+(-[a-z]+\s+)*/"#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\b[^|\n]*<<<\s*['"][^'"]*\brm\s+(-[a-z]+\s+)*/"#,
                 )
                 .expect("Invalid regex"),
                 "herestring carrying absolute destruction into shell",
