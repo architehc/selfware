@@ -99,6 +99,37 @@ SYSTEM = (
 )
 
 
+USAGE_LOG = Path("/home/rig/selfdev/redteam_usage.jsonl")
+
+
+def _ep_label(endpoint: str, model: str) -> str:
+    if "localhost:31000" in endpoint or "172.17.0.1:31000" in endpoint:
+        return "ablit/31000"
+    if "192.168.137.1:8000" in endpoint:
+        return "unc/lan8000"
+    if "llm.selfware.design" in endpoint:
+        return "flash/design"
+    if "openrouter.ai" in endpoint:
+        return f"or/{model}"
+    return f"other/{endpoint.split('//')[-1].split('/')[0]}"
+
+
+def _log_usage(endpoint: str, model: str, usage: dict, est_prompt: int, est_compl: int):
+    rec = {
+        "ts": time.time(),
+        "ep": _ep_label(endpoint, model),
+        "model": model,
+        "prompt_tokens": int(usage.get("prompt_tokens") or est_prompt),
+        "completion_tokens": int(usage.get("completion_tokens") or est_compl),
+    }
+    try:
+        USAGE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with USAGE_LOG.open("a") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
 def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
     body = json.dumps({
         "model": model,
@@ -115,6 +146,9 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
         "chat_template_kwargs": {"enable_thinking": False},
         # Non-streaming hangs on this sglang build; accumulate SSE chunks.
         "stream": True,
+        # Ask the server for a final usage chunk so the observability board
+        # gets real token counts (falls back to len/4 estimates).
+        "stream_options": {"include_usage": True},
     }).encode()
     headers = {"Content-Type": "application/json"}
     # OpenRouter requires a bearer key (gemini lane, wave-52+); local
@@ -127,6 +161,7 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
         headers=headers,
     )
     parts = []
+    usage: dict = {}
     with urllib.request.urlopen(req, timeout=600) as resp:
         for raw in resp:
             line = raw.decode("utf-8", "replace").strip()
@@ -139,10 +174,16 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
                 chunk = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            if chunk.get("usage"):
+                usage = chunk["usage"]
             delta = chunk.get("choices", [{}])[0].get("delta", {})
             if delta.get("content"):
                 parts.append(delta["content"])
-    return "".join(parts)
+    text = "".join(parts)
+    _log_usage(endpoint, model, usage,
+               est_prompt=(len(SYSTEM) + len(prompt)) // 4,
+               est_compl=len(text) // 4)
+    return text
 
 
 def norm_key(tool: str, arguments: str) -> str:

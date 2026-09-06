@@ -174,6 +174,25 @@ def scan_rates(now: float):
     differ; rates only need within-file consistency).
     """
     rates = defaultdict(lambda: {w: [0, 0] for w, _ in RATE_WINDOWS})
+    # Red-team generator telemetry (all endpoints, incl. LAN + design which
+    # run outside harbor jobs and otherwise never appear in live rates).
+    usage_log = Path("/home/rig/selfdev/redteam_usage.jsonl")
+    if usage_log.exists():
+        try:
+            with usage_log.open(errors="replace") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = rec.get("ts", 0)
+                    ep = rec.get("ep", "other/?")
+                    for w, secs in RATE_WINDOWS:
+                        if now - ts <= secs:
+                            rates[ep][w][0] += int(rec.get("prompt_tokens", 0))
+                            rates[ep][w][1] += int(rec.get("completion_tokens", 0))
+        except OSError:
+            pass
     if not HARBOR_JOBS.exists():
         return rates
     for log in HARBOR_JOBS.glob("2026-*/*__*/agent/selfware.txt"):
