@@ -103,6 +103,17 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "VIMINIT",
     "EXINIT",
     "GCC_EXEC_PREFIX",
+    // Config-redirection and helper-app twins (wave-69): numbered git
+    // config (GIT_CONFIG_COUNT + KEY_n/VALUE_n — the regex below covers
+    // the numbered vars), kubectl context hijack, pager/preprocessor
+    // execution (PAGER's family), and the third JVM-options twin.
+    "GIT_CONFIG_COUNT",
+    "KUBECONFIG",
+    "MANPAGER",
+    "LESSCLOSE",
+    "LESSOPEN",
+    "JAVA_OPTS",
+    "JDK_JAVA_OPTIONS",
     // Proxy/git-transport/prompt-expansion channels (wave-46):
     // HTTP(S)_PROXY/ALL_PROXY route every request through the attacker
     // (MITM by configuration, the CA-bundle twins); GIT_PROXY_COMMAND
@@ -985,6 +996,18 @@ impl SafetyChecker {
         // Indirect assignment through a variable NAME (wave-35:
         // `VAR='LD_PRELOAD'; export $VAR=/tmp/exploit.so`) — no static list
         // can know the name, but `export $<name>=` is itself the tell.
+        // Numbered git config injection (wave-69: GIT_CONFIG_KEY_0=
+        // core.editor + GIT_CONFIG_VALUE_0=<payload>) — the exact-match
+        // list cannot wildcard the numbering.
+        static GIT_CONFIG_NUMBERED: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)\bgit_config_(key|value)_\d+\s*=").expect("Invalid regex")
+        });
+        for part in split_shell_commands(&normalized) {
+            if GIT_CONFIG_NUMBERED.is_match(part.trim()) {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
         static INDIRECT_EXPORT: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\bexport\s+\$\w+\s*=").expect("Invalid regex"));
         // Substitution-built assignment (wave-64: `export $(echo -n 'LD_'

@@ -490,6 +490,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\b(export|declare\s+-[a-zA-Z]*x|local\s+-[a-zA-Z]*x|env)\s+\$\(").expect("Invalid regex"),
                 "env assignment via substitution (indirect injection)",
             ),
+            // Export whose VALUE is a file read (wave-69:
+            // \`export AWS_ACCESS_KEY_ID=$(cat /tmp/creds)\`) — the
+            // substitution-built NAME forms are covered; this is the
+            // file-content-into-env form. Computing substitutions
+            // ($(date), $(basename …)) pass.
+            (
+                Regex::new(
+                    r"(?i)\b(export|declare\s+-[a-z]*x|local\s+-[a-z]*x|env)\s+\w+\s*=\s*\$\(\s*(cat|base64|xxd|od|hexdump)\s",
+                )
+                .expect("Invalid regex"),
+                "file content into env via substitution (injection)",
+            ),
             // Bare denied assignment after shell keywords (wave-64:
             // \`if [ -z "${BASH_ENV}" ]; then BASH_ENV=/tmp/rc; fi\`) —
             // the prefix-anchored check only sees segment starts.
