@@ -224,9 +224,12 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             ),
             // env driven by xargs (red-team wave-117: \`cat /tmp/payload |
             // xargs -0 env -i ./app\`) — the export form's twin: payload
-            // lines become env assignments for the child.
+            // lines become env assignments for the child. Bare env too
+            // (wave-140: \`echo LD_PRELOAD=/tmp/x.so | xargs -d ' ' env\`)
+            // — same documented trade-off as xargs-export: agents set env
+            // directly, not through xargs.
             (
-                Regex::new(r"\bxargs\s+(-\S+\s+)*env\s+-").expect("Invalid regex"),
+                Regex::new(r"\bxargs\s+((-\S+|\x00\x01[0-9]+\x00)\s+)*env\b").expect("Invalid regex"),
                 "env driven by xargs (bulk env injection)",
             ),
             // nc (netcat) reverse shells
@@ -319,6 +322,17 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
             (
                 Regex::new(r"\bbash\s+(-[a-z]+\s+)*--rcfile[\s=]+<\(").expect("Invalid regex"),
                 "rcfile from process substitution (startup injection)",
+            ),
+            // Cloud CLI output piped to a network tool (red-team wave-140:
+            // \`aws sts get-caller-identity | curl -d @- …\`) — cloud
+            // identity/config exfil; the harness has no legitimate cloud
+            // work, so the whole shape is refused.
+            (
+                Regex::new(
+                    r"(?i)\b(aws|gcloud|az)\s+\S[^|\n]*\|\s*[^|\n]*(curl|wget|nc|ncat|dig|nslookup|host)\b",
+                )
+                .expect("Invalid regex"),
+                "cloud CLI output piped to network (exfiltration)",
             ),
             // Network scanners (wave-32: `nmap -sV 192.168.1.0/24`) —
             // active network reconnaissance, never coding work.
