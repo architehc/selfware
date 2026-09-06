@@ -972,6 +972,24 @@ impl SafetyChecker {
             }
         }
 
+        // Assignment CHAINS (red-team wave-85: `PYTHONHASHSEED=0
+        // LD_LIBRARY_PATH=/tmp ls -l`) — the anchored check above only sees
+        // the FIRST assignment of a simple command; a denied var in second
+        // or later prefix position slips. Anchoring on the chain keeps
+        // `echo LD_PRELOAD=/tmp/x` prose legal (echo is not an assignment).
+        static DANGEROUS_ENV_CHAIN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(&format!(
+                r"(?i)^\s*(?:[a-z_][a-z0-9_]*=\S+\s+)+({})\s*=",
+                DENIED_ENV_VARS.join("|")
+            ))
+            .expect("Invalid regex")
+        });
+        for part in split_shell_commands(&normalized) {
+            if DANGEROUS_ENV_CHAIN.is_match(part.trim()) {
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
         // `env` segments with flag arguments in between (`env -u FOO
         // GEM_HOME=…`) defeat the prefix-anchored form above — catch a denied
         // assignment anywhere in an env invocation (wave-12 sibling sweep).

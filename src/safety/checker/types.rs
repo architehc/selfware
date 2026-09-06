@@ -566,7 +566,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // ($(date), $(basename …)) pass.
             (
                 Regex::new(
-                    r"(?i)\b(export|declare\s+-[a-z]*x|local\s+-[a-z]*x|env)\s+\w+\s*=\s*\$\(\s*(cat|base64|xxd|od|hexdump)\s",
+                    r"(?i)\b(export|declare\s+-[a-z]*x|local\s+-[a-z]*x|env)\s+\w+\s*=\s*\$\(\s*(cat|base64|xxd|od|hexdump|nc|ncat)\s",
                 )
                 .expect("Invalid regex"),
                 "file content into env via substitution (injection)",
@@ -621,6 +621,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "listener spawned via interpreter (background C2)",
+            ),
+            // nc exec/listener hidden in a sh -c / eval payload (red-team
+            // wave-86: \`bash -c 'nc -l -p 4444 -e /bin/bash'\`) — the
+            // DANGEROUS nc patterns match the masked form, so a quoted -c
+            // payload is invisible to them; the function-call pattern above
+            // only knows interpreter spawn APIs, not shells.
+            (
+                Regex::new(
+                    r#"(?i)\b(bash|sh|zsh|dash|ksh|eval)\s+(-\w+\s+)*['"][^'"]*\bnc(at)?\s+[^'"]*\s-[a-z]*(e|l)[a-z]*(\s|['"])"#,
+                )
+                .expect("Invalid regex"),
+                "netcat exec/listener inside shell -c payload",
             ),
             // redis FLUSHALL/FLUSHDB (wave-45: `redis-cli -h host
             // FLUSHALL`) — whole-database destruction, never coding work.
