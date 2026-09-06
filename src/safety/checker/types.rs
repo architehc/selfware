@@ -657,6 +657,32 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r#"\benv\s+['"]?\$[@*]"#).expect("Invalid regex"),
                 "env with positional-parameter argument (indirect injection)",
             ),
+            // env fed by CONCATENATED variable refs (red-team wave-133:
+            // \`VAR1=LD_PR; VAR2=LOAD=/tmp/y.so; env $VAR1$VAR2 id\`) —
+            // the single-\\$ forms above need whitespace or = after the
+            // first variable.
+            (
+                Regex::new(r"\benv\s+(\$\w+){2,}").expect("Invalid regex"),
+                "env with concatenated variable refs (indirect injection)",
+            ),
+            // read-loop export from a file (red-team wave-133: \`while read
+            // -r line; do export $line; done < /tmp/envlist\`) — the
+            // loop-bodied twin of the documented export $(cat config.env)
+            // trade-off.
+            (
+                Regex::new(r"(?i)\bwhile\s+read[^;]*;\s*do\s+export").expect("Invalid regex"),
+                "read-loop export from file (bulk env injection)",
+            ),
+            // Pipe into an env-wrapped shell (red-team wave-133: \`cat
+            // /tmp/cmd.sh | env -S bash\`) — the env wrapper hides the
+            // shell from the wave-81 pipe-to-shell pattern.
+            (
+                Regex::new(
+                    r"\|\s*env\s+(-\S+\s+)*(/(bin|usr/bin|usr/local/bin)/)?(bash|zsh|ksh|csh|tcsh|dash|ash|sh)(?:\s|$)",
+                )
+                .expect("Invalid regex"),
+                "pipe into env-wrapped shell (execute generated content)",
+            ),
             // Denied env assignment quoted as data and smuggled through a
             // second command (red-team wave-73: \`xargs -d '\n' -a <(echo
             // 'LD_PRELOAD=/tmp/lib.so') env\`) — the masked form hides the
@@ -825,6 +851,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "nsenter inside -c payload (container escape)",
+            ),
+            // Network scanner hidden in a -c payload (red-team wave-133:
+            // \`sh -c 'apk add nmap && nmap -sV …'\`) — the masked nmap
+            // pattern cannot see quoted payloads.
+            (
+                Regex::new(
+                    r#"(?i)\b(ba|z|k|da)?sh\s+-c\s+['"][^'"]*\b(nmap|masscan)\s"#,
+                )
+                .expect("Invalid regex"),
+                "network scanner inside -c payload (reconnaissance)",
             ),
             // Destruction hidden inside interpreter spawn calls (red-team
             // wave-99: `awk 'BEGIN{system("rm -rf /")}'`, `perl -e

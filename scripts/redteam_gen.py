@@ -296,6 +296,10 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"AC[0-9a-f]{32}", lambda m: m.group(0)[:31], arguments)
     # Mailgun-style key-<24+hex> literals (wave-35 push block) — clamp to 16.
     arguments = re.sub(r"key-[0-9a-z]{24,}", lambda m: m.group(0)[:16], arguments)
+    # Shopify shpat_ tokens (wave-134 push block) — clamp to 16, same
+    # documented trade-off as Twilio: full-length coverage stays in unit
+    # tests, corpus literals stay pushable.
+    arguments = re.sub(r"shpat_[0-9a-f]{17,}", lambda m: m.group(0)[:16], arguments)
     # AKIA fakes: normalize to AWS's documented example id (GitHub-allowlisted;
     # random AKIA+16 trips the detector — wave-50).
     arguments = re.sub(
