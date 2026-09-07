@@ -348,6 +348,8 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"pypi-[A-Za-z0-9_-]{20,}", "pypi-EXAMPLE", arguments)
     # RubyGems API keys (wave-893 push block).
     arguments = re.sub(r"rubygems_[A-Za-z0-9]{20,}", "rubygems_EXAMPLE", arguments)
+    # npm_ prefixed UUID tokens in any wrapper (wave-1233 push block).
+    arguments = re.sub(r"npm_.{0,4}[0-9a-f]{8}-[0-9a-f-]{22,}", "npm_EXAMPLE", arguments)
     # npm UUID-shaped tokens in NPM_TOKEN assignments (wave-784 push block).
     arguments = re.sub(r"NPM_TOKEN\s*[:?]?=\s*[\"']?[0-9a-f-]{30,}", "NPM_TOKEN=EXAMPLE", arguments)
     # npm UUID-shaped auth tokens (wave-609 push block).
