@@ -302,6 +302,9 @@ def sanitize_generated(arguments: str) -> str:
     # custom-app, shpcn_ shared-secret et al.) trips the same detector
     # (wave-210 push block).
     arguments = re.sub(r"shp[a-z]{2}_[0-9a-f]{17,}", lambda m: m.group(0)[:16], arguments)
+    # HubSpot private-app tokens (wave-257 push block) — clamp to the
+    # documented example form.
+    arguments = re.sub(r"pat-na1-[0-9a-f-]{10,}", "pat-na1-EXAMPLE", arguments)
     # AKIA fakes: normalize to AWS's documented example id (GitHub-allowlisted;
     # random AKIA+16 trips the detector — wave-50).
     arguments = re.sub(

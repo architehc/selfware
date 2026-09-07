@@ -145,10 +145,13 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // swap), GOSUMDB=off disables module checksum verification, and
     // CARGO_HOME relocation makes cargo read an attacker-planted
     // credentials.toml — the GEM_HOME class. Agents set these via project
-    // config files, not the environment.
+    // config files, not the environment. GOROOT relocates the whole Go
+    // toolchain (red-team wave-233: GOROOT=/tmp/.go runs attacker std lib
+    // code on every go invocation — the PYTHONHOME twin).
     "GOPROXY",
     "GOSUMDB",
     "CARGO_HOME",
+    "GOROOT",
     // gconv module injection (red-team wave-197: `export GCONV_PATH=/tmp/
     // gconv/iconv.dir && cat /etc/passwd`) — glibc loads attacker-compiled
     // conversion modules on the next iconv call; a documented privesc with
