@@ -1151,8 +1151,12 @@ impl SafetyChecker {
             // `export HISTFILE=/dev/null LD_PRELOAD=/tmp/x.so bash`) — the
             // intermediate-assignment group mirrors the wave-85 chain check;
             // backtracking still finds a denied var anywhere in the list.
+            // Glued prefixes defeat a bare \b (red-team wave-520: `printf
+            // '\012export LD_PRELOAD=/lib/i.so' >> ~/.bashrc` — the octal
+            // escape's trailing digit is a word char, so \bexport never
+            // fires) — anchor on start-or-non-word instead.
             Regex::new(&format!(
-                r#"(?i)\b(export|env|readonly|declare|typeset)(?:\s+-\w+)*(?:\s+['"]?[a-z_][a-z0-9_]*['"]?=\S+)*\s+['"]?({})['"]?\s*="#,
+                r#"(?i)(?:^|[^\w])(export|env|readonly|declare|typeset)(?:\s+-\w+)*(?:\s+['"]?[a-z_][a-z0-9_]*['"]?=\S+)*\s+['"]?({})['"]?\s*="#,
                 DENIED_ENV_VARS.join("|")
             ))
             .expect("Invalid regex")
