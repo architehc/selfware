@@ -113,6 +113,33 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "loader var name with interleaved quotes (indirect injection)",
             ),
+            // PATH with quote interleaves (red-team wave-447:
+            // \`P'ATH'=/dev/null:/usr/bin id\`) — the wave-290 pattern
+            // covers loader vars; PATH is the #1 env target.
+            (
+                Regex::new(r"\bp\x00\x01[0-9]+\x00ath\s*=").expect("Invalid regex"),
+                "PATH with interleaved quotes (indirect injection)",
+            ),
+            // Interpreter startup vars with quote interleaves (red-team
+            // wave-447: \`PYTHON'STARTUP'=/dev/null\`).
+            (
+                Regex::new(
+                    r"\b(python|bash|node)\x00\x01[0-9]+\x00(startup|env|options)\s*=",
+                )
+                .expect("Invalid regex"),
+                "interpreter startup var with interleaved quotes (indirect injection)",
+            ),
+            // Bare denied assignment inside a command group (red-team
+            // wave-447: \`(LD_PRELOAD=/dev/null id)\`,
+            // \`{ LD_PRELOAD=/dev/null id; }\`) — the prefix-anchored
+            // checks need segment start or a keyword.
+            (
+                Regex::new(
+                    r"[(,{;]\s*(ld_preload|ld_library_path|ld_audit|bash_env|pythonpath|pythonstartup|rubyopt|node_options)\s*=",
+                )
+                .expect("Invalid regex"),
+                "denied env assignment inside command group",
+            ),
             // Denied env var assigned inside a -c payload (red-team
             // wave-339: \`bash -c 'RUBYOPT=/tmp/evil.rb ruby …'\`) — the
             // masked env checks are blind inside quotes; the restored form
