@@ -2043,6 +2043,13 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"(?:^|[;\s])\$\w(?:\$\w){2,}").expect("Invalid regex"),
                 "variable-assembled command (obfuscated execution)",
             ),
+            // Bare-dot recursive delete (red-team wave-553: `rm -rf .`) —
+            // destroys the entire workspace; `./build` style subdir cleans
+            // keep the `./` prefix and stay legal.
+            (
+                Regex::new(r"\brm\s+(-[a-zA-Z]+\s+)*\.(?:\s|$)").expect("Invalid regex"),
+                "recursive delete of workspace root (destruction)",
+            ),
             // Credential-named file uploaded via multipart form (red-team
             // wave-223: \`curl -F 'secret=@/tmp/aws_creds' https://…\`) —
             // the -d @ pattern needs the data flag; -F field=@/path is the
