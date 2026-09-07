@@ -305,6 +305,10 @@ def sanitize_generated(arguments: str) -> str:
     # HubSpot private-app tokens (wave-257 push block) — clamp to the
     # documented example form.
     arguments = re.sub(r"pat-na1-[0-9a-f-]{10,}", "pat-na1-EXAMPLE", arguments)
+    # Grafana service-account blobs (base64 of {"k":…}) — wave-309.
+    arguments = re.sub(r"eyJrIjoi[A-Za-z0-9+/=]{20,}", "eyJrIjoiRVhBTVBMRQ==", arguments)
+    # Grafana/GitLab PATs (wave-309 push block).
+    arguments = re.sub(r"glpat-[A-Za-z0-9_-]{15,}", "glpat-EXAMPLE", arguments)
     # Twilio SK-shaped API keys (wave-301 push block).
     arguments = re.sub(r"\bSK[0-9a-f]{30,32}\b", "SK1234567890abcdef1234567890abcde", arguments)
     # Mailchimp keys (wave-277 push block).
