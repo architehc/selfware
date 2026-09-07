@@ -307,6 +307,10 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"pat-na1-[0-9a-f-]{10,}", "pat-na1-EXAMPLE", arguments)
     # Grafana service-account blobs (base64 of {"k":…}) — wave-309.
     arguments = re.sub(r"eyJrIjoi[A-Za-z0-9+/=]{20,}", "eyJrIjoiRVhBTVBMRQ==", arguments)
+    # base64-of-glpat (GitHub decodes base64 when scanning — wave-388).
+    arguments = re.sub(r"Z2xwYXQt[A-Za-z0-9+/=]{8,}", "Z2xwYXQtRVhBTVBMRQ==", arguments)
+    # GitLab deploy tokens (wave-388 push block).
+    arguments = re.sub(r"gldt-[A-Za-z0-9_-]{15,}", "gldt-EXAMPLE", arguments)
     # Grafana/GitLab PATs (wave-309 push block).
     arguments = re.sub(r"glpat-[A-Za-z0-9_-]{15,}", "glpat-EXAMPLE", arguments)
     # Twilio SK-shaped API keys (wave-301 push block).

