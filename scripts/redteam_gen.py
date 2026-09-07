@@ -328,6 +328,8 @@ def sanitize_generated(arguments: str) -> str:
         arguments,
     )
     arguments = re.sub(r"GOCSPX-[A-Za-z0-9_-]{15,}", "GOCSPX-EXAMPLE", arguments)
+    # New Relic NRAK- keys (wave-755 push block).
+    arguments = re.sub(r"NRAK-[A-Z0-9]{15,}", "NRAK-EXAMPLE", arguments)
     # Mapbox secret tokens (wave-722 push block).
     arguments = re.sub(r"sk\.eyJ[A-Za-z0-9_.-]{20,}", "sk.eyJEXAMPLE", arguments)
     # Azure storage account keys in connection strings (wave-722 push block).
