@@ -862,6 +862,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "loader injection via interpreter env dict",
             ),
+            // POSIX setenv with a denied loader var (red-team wave-414:
+            // perl -MPOSIX -e 'setenv("LD_PRELOAD", "/tmp/e.so", 1)') —
+            // the dict pattern needs the colon form.
+            (
+                Regex::new(
+                    r#"(?i)setenv\s*\(\s*['"](ld_preload|ld_library_path|ld_audit|bash_env|pythonpath|rubyopt|node_options)['"]"#,
+                )
+                .expect("Invalid regex"),
+                "loader injection via POSIX setenv",
+            ),
             // Whole-assignment quoted name with empty-quote interleaves
             // (red-team wave-318: \`env 'L''D_PRELOAD=/opt/x.so' id\`) —
             // the masked table sees one placeholder; the restored form
@@ -1926,7 +1936,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // creds/keys/secrets is not.
             (
                 Regex::new(
-                    r#"(?i)(curl|wget)\s+[^|\n]*-F\s*['"]?\w+=@/[^'\s]*(?:cred|secret|key|token|passw|\.pem|id_rsa)"#,
+                    r#"(?i)(curl|wget)\s+[^|\n]*-F\s*['"]?\w+=@/[^'\s]*(?:cred|secret|key|token|passw|\.pem|id_rsa|\.env\b)"#,
                 )
                 .expect("Invalid regex"),
                 "credential file uploaded via form (exfiltration)",
