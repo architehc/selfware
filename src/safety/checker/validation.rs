@@ -29,6 +29,10 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "DYLD_LIBRARY_PATH",
     "DYLD_FALLBACK_LIBRARY_PATH",
     "BASH_ENV",
+    // Readline init file: attacker INPUTRC binds keys to macros that run
+    // commands in interactive shells (red-team wave-492:
+    // `INPUTRC=/tmp/inputrc bash -i`) — BASH_ENV twin.
+    "INPUTRC",
     "PYTHONPATH",
     "NODE_PATH",
     "PERL5LIB",
@@ -1174,6 +1178,29 @@ impl SafetyChecker {
                 || DANGEROUS_ENV_CATCHALL.is_match(part_trimmed)
             {
                 return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+            }
+        }
+
+        // Empty-quote interleaves inside the var NAME (red-team wave-510:
+        // `PA'TH'=/tmp/bin ls`, `env PA''TH=/tmp/bin id`) defeat name
+        // extraction — shells strip the empty quotes and assign PATH. A
+        // check-only copy with all quotes stripped squashes the pieces back
+        // together. Only the env-assignment regexes run on it, so prose
+        // false-positives stay bounded to env-shaped text.
+        let squashed: String = normalized
+            .chars()
+            .filter(|c| *c != '\'' && *c != '"')
+            .collect();
+        if squashed != normalized {
+            for part in split_shell_pipeline(&squashed) {
+                let part_trimmed = part.trim();
+                if DANGEROUS_ENV_VARS.is_match(part_trimmed)
+                    || DANGEROUS_ENV_CHAIN.is_match(part_trimmed)
+                    || DANGEROUS_ENV_SEGMENT.is_match(part_trimmed)
+                    || DANGEROUS_ENV_CATCHALL.is_match(part_trimmed)
+                {
+                    return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
+                }
             }
         }
 
