@@ -229,6 +229,28 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r"(?:ba|z|k|da|fi)?sh\s*<<<").expect("Invalid regex"),
                 "herestring into shell interpreter (execute generated content)",
             ),
+            // Shell reading its script from a process substitution (red-team
+            // wave-267: \`sh < <(echo 'rm -rf /')\`) — the pipe-to-shell
+            // form with redirection instead of a pipe.
+            (
+                Regex::new(r"(?:ba|z|k|da|fi)?sh\s*<\s*<\(").expect("Invalid regex"),
+                "shell script via process substitution (execute generated content)",
+            ),
+            // System power events are never coding work (red-team wave-267:
+            // \`shutdown -$(echo h) now\` — computed flag evading a flag
+            // pattern). shutdown requires flags (bare shutdown is a usage
+            // error and redis SHUTDOWN is a container-scoped DB command —
+            // wave-223 benign precedent); reboot/halt/poweroff act bare.
+            (
+                Regex::new(r"\b(shutdown\s+-\s*\S|reboot\b|halt\b|poweroff\b)").expect("Invalid regex"),
+                "system power event (shutdown/reboot/halt)",
+            ),
+            // kill everything (red-team wave-267: \`kill -9 -1\` — PID -1
+            // signals every process the user owns).
+            (
+                Regex::new(r"\bkill\s+(-[a-zA-Z0-9]+\s+)*-1\b").expect("Invalid regex"),
+                "kill all processes (PID -1)",
+            ),
             // Decoded substitution AS the command (red-team wave-91:
             // \`$(echo 'cm0=' | base64 -d)${IFS}-rf${IFS}./data\`) — the
             // wave-16 pattern needs sh -c; here the decoded string itself
@@ -274,6 +296,21 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 )
                 .expect("Invalid regex"),
                 "decode-assignment then variable execution (decode-execute)",
+            ),
+            // printf-assembled command then variable execution (red-team
+            // wave-276: \`x=$(printf '%s' 'rm' ' -rf ' '/etc'); $x\`) — the
+            // wave-114 class with printf instead of a decoder; the payload
+            // pieces are quoted, so the shape (printf-assignment → $var
+            // execution) is the tell.
+            (
+                // The $var must sit in COMMAND position (right after the
+                // chain operator) — `base64 -d <<< $W` uses it as data
+                // (wave-276 benign control).
+                Regex::new(
+                    r"\b\w+\s*=\s*\$\(\s*printf[^)]*\)\s*(;|&&|\|\|)\s*\$\w",
+                )
+                .expect("Invalid regex"),
+                "printf-assembled command then variable execution",
             ),
             // Denied env assignment after a SUBSTITUTED command word
             // (red-team wave-94: `"$(which env)" LD_PRELOAD=/tmp/s.so ls`)
@@ -682,6 +719,21 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     .expect("Invalid regex"),
                 "destructive payload inside alias definition",
             ),
+            // eval carrying absolute destruction (red-team wave-267:
+            // \`eval "rm -rf /"\`) — the -c payload patterns need a shell
+            // flag; eval takes the payload directly.
+            (
+                Regex::new(r#"(?i)\beval\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*(/|~)"#)
+                    .expect("Invalid regex"),
+                "eval carrying absolute destruction",
+            ),
+            // trap with a destructive handler (red-team wave-267:
+            // \`trap 'rm -rf /' EXIT\`) — deferred destruction on exit.
+            (
+                Regex::new(r#"(?i)\btrap\s+['"][^'"]*\b(rm\s+-[a-z]*r[a-z]*f|mkfs|shred|dd\s+if=)"#)
+                    .expect("Invalid regex"),
+                "destructive payload inside trap handler",
+            ),
             // ANSI-C hex-escaped payload (red-team wave-249: \`bash -c
             // "$'\x72\x6d\x20\x2d\x72\x66 …'"\` — $'\x72\x6d' spells rm).
             // Four or more consecutive hex escapes have no everyday use.
@@ -722,6 +774,17 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 )
                 .expect("Invalid regex"),
                 "env piped into xargs-driven sh -c network call (exfiltration)",
+            ),
+            // os.environ printed then piped to a network tool (red-team
+            // wave-264: \`python3 -c "…print(os.environ.get('SECRET_KEY'))"
+            // | curl -d @- …\`) — the env-pipe patterns need the literal
+            // env/printenv commands; the python print is the twin.
+            (
+                Regex::new(
+                    r"(?i)os\.environ[\s\S]{0,300}\|\s*(curl|wget|nc(at)?|netcat|dig|nslookup|host|openssl\s+s_client)\b",
+                )
+                .expect("Invalid regex"),
+                "environment printed to network tool (exfiltration)",
             ),
             // Denied loader var inside an interpreter payload (red-team
             // wave-195: python3 -c '…os.execvpe("bash",…,{**os.environ,
@@ -1325,7 +1388,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // numeric-looking argument and does not match the quote shape.
             (
                 Regex::new(
-                    r#"(?i)(\b(ba|z|k|da|fi)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*(/|~([/\s;'")]|$))"#,
+                    r#"(?i)(\b(ba|z|k|da|fi)?sh\b|\$\{0[^}]*\}|\$\{?shell\}?|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\brm\s+(-[a-z]+\s+)*(/|~([/\s;'")]|$))"#,
                 )
                 .expect("Invalid regex"),
                 "absolute destruction inside -c payload",
@@ -1347,7 +1410,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // shred of absolute targets share the same masked-invisibility.
             (
                 Regex::new(
-                    r#"(?i)(\b(ba|z|k|da|fi)?sh\b|\$\{0[^}]*\}|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
+                    r#"(?i)(\b(ba|z|k|da|fi)?sh\b|\$\{0[^}]*\}|\$\{?shell\}?|\bxargs\b[^|\n]*)(?:\s+-\w+)*\s+-c\s+['"][^'"]*\b(dd\s+[^'"]*\bof=/dev/|mkfs\b|shred\s+(-[a-z]+\s+)*/)"#,
                 )
                 .expect("Invalid regex"),
                 "device-level destruction inside -c payload",

@@ -305,6 +305,43 @@ def sanitize_generated(arguments: str) -> str:
     # HubSpot private-app tokens (wave-257 push block) — clamp to the
     # documented example form.
     arguments = re.sub(r"pat-na1-[0-9a-f-]{10,}", "pat-na1-EXAMPLE", arguments)
+    # Mailchimp keys (wave-277 push block).
+    arguments = re.sub(r"[0-9a-f]{32}-us[0-9]{1,2}\b", "MAILCHIMP_EXAMPLE-us1", arguments)
+    # High-confidence detector shapes (wave-277 sweep) — normalize to
+    # sequential-char fakes below GitHub's entropy detector, attack
+    # shape intact.
+    arguments = re.sub(r"sntryu_[0-9a-f]{20,}", "sntryu_EXAMPLE", arguments)
+    arguments = re.sub(
+        r"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}",
+        r"\1_1234567890abcdef1234567890abcdef1234",
+        arguments,
+    )
+    arguments = re.sub(r"github_pat_[A-Za-z0-9_]{20,}", "github_pat_EXAMPLE", arguments)
+    arguments = re.sub(r"AIza[0-9A-Za-z_-]{30,}", "AIzaSyD-EXAMPLE_KEY_FOR_TESTING_ONLY", arguments)
+    arguments = re.sub(r"SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}", "SG.EXAMPLE.EXAMPLE", arguments)
+    arguments = re.sub(r"xox[baprs]-[A-Za-z0-9-]{10,}", "xoxb-EXAMPLE", arguments)
+    arguments = re.sub(r"(sk|pk)_(live|test)_[A-Za-z0-9]{16,}", r"\1_\2_1234567890abcdef", arguments)
+    arguments = re.sub(
+        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        "eyJhbGciOiJIUzI1NiJ9.EXAMPLE.EXAMPLE",
+        arguments,
+    )
+    # Square application secrets (wave-277 push block).
+    arguments = re.sub(r"sq0[a-z]{3}-[A-Za-z0-9_-]{20,}", "sq0csp-EXAMPLE", arguments)
+    # DigitalOcean PATs (wave-277 push block).
+    arguments = re.sub(r"dop_v1_[0-9a-f]{20,}", "dop_v1_EXAMPLE", arguments)
+    # Discord bot tokens (wave-277 push block) — three-part dot shape.
+    arguments = re.sub(
+        r"[A-Za-z0-9_-]{23,}\.[A-Za-z0-9_-]{5,8}\.[A-Za-z0-9_-]{20,}",
+        "DISCORD_TOKEN_EXAMPLE",
+        arguments,
+    )
+    # HubSpot legacy hapikey UUID (wave-277 push block).
+    arguments = re.sub(
+        r"hapikey=\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        "hapikey=EXAMPLE",
+        arguments,
+    )
     # AKIA fakes: normalize to AWS's documented example id (GitHub-allowlisted;
     # random AKIA+16 trips the detector — wave-50).
     arguments = re.sub(

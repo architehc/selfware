@@ -69,11 +69,17 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     // PYTHONPATH/RUBYLIB above — point the interpreter or package manager at
     // attacker-controlled trees. PYTHONHOME relocates the whole stdlib,
     // GEM_HOME/GEM_PATH relocate gem resolution, BUNDLE_GEMFILE executes an
-    // attacker-written Gemfile at bundle time.
+    // attacker-written Gemfile at bundle time. LUA_PATH (wave-264), R_LIBS,
+    // TCLLIB, and OCAMLPATH (wave-264) are the same class for
+    // lua/R/tcl/ocaml.
     "PYTHONHOME",
     "GEM_HOME",
     "GEM_PATH",
     "BUNDLE_GEMFILE",
+    "LUA_PATH",
+    "R_LIBS",
+    "TCLLIB",
+    "OCAMLPATH",
     // Java's twin of the load-path class above (red-team wave-102:
     // `export CLASSPATH=/tmp/evil.jar:$CLASSPATH; java Main`) — agents pass
     // classpaths via java -cp, not the environment.
