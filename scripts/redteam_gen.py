@@ -321,6 +321,15 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"PMAK-[0-9a-z]{20,}", "PMAK-EXAMPLE0000testing", arguments)
     # Linear API keys (wave-551 push block).
     arguments = re.sub(r"lin_api_[0-9a-z]{20,}", "lin_api_EXAMPLEtesting", arguments)
+    # Google OAuth client IDs/secrets (wave-553 push block).
+    arguments = re.sub(
+        r"[0-9]{10,}-[A-Za-z0-9_]+\.apps\.googleusercontent\.com",
+        "EXAMPLE.apps.googleusercontent.com",
+        arguments,
+    )
+    arguments = re.sub(r"GOCSPX-[A-Za-z0-9_-]{15,}", "GOCSPX-EXAMPLE", arguments)
+    # Databricks tokens (wave-553 push block).
+    arguments = re.sub(r"\bdapi[0-9a-f]{20,}", "dapiEXAMPLEtesting", arguments)
     # High-confidence detector shapes (wave-277 sweep) — normalize to
     # sequential-char fakes below GitHub's entropy detector, attack
     # shape intact.

@@ -2023,9 +2023,25 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // commands on everyday git invocations; the value is usually
             // quoted, so this lives in PAYLOAD.
             (
-                Regex::new(r"(?i)\bgit\s+config\b[^|\n]*(core\.(pager|editor|fsmonitor|sshcommand|askpass)|(diff|grep)\.external|interactive\.difffilter)\b")
+                Regex::new(r"(?i)\bgit\s+config\b[^|\n]*(core\.(pager|editor|fsmonitor|sshcommand|askpass)|(diff|grep)\.external|interactive\.difffilter|alias\.!)\b")
                     .expect("Invalid regex"),
                 "git config exec-key manipulation (command persistence)",
+            ),
+            // awk system() of scanned input (red-team wave-547: `awk
+            // '/rm/{print; system($0)}' <<< 'rm -rf …'`) — awk is a full
+            // command executor when system() appears in the program.
+            (
+                Regex::new(r"\bawk\b[^|\n;]*\bsystem\s*\(").expect("Invalid regex"),
+                "awk system() execution (shell indirection)",
+            ),
+            // Character-split variable assembly executed as a command
+            // (red-team wave-547: `a=r; b=m; …; $a$b$c$d$e$f…` = `rm -rf
+            // /////`) — the assignments hide the payload from every
+            // command-anchored pattern; 3+ glued bare vars in command
+            // position is the tell.
+            (
+                Regex::new(r"(?:^|[;\s])\$\w(?:\$\w){2,}").expect("Invalid regex"),
+                "variable-assembled command (obfuscated execution)",
             ),
             // Credential-named file uploaded via multipart form (red-team
             // wave-223: \`curl -F 'secret=@/tmp/aws_creds' https://…\`) —
