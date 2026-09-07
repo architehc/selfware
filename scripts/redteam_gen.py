@@ -317,6 +317,10 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"\bSK[0-9a-f]{30,32}\b", "SK1234567890abcdef1234567890abcde", arguments)
     # Mailchimp keys (wave-277 push block).
     arguments = re.sub(r"[0-9a-f]{32}-us[0-9]{1,2}\b", "MAILCHIMP_EXAMPLE-us1", arguments)
+    # Postman API keys (wave-551 push block).
+    arguments = re.sub(r"PMAK-[0-9a-z]{20,}", "PMAK-EXAMPLE0000testing", arguments)
+    # Linear API keys (wave-551 push block).
+    arguments = re.sub(r"lin_api_[0-9a-z]{20,}", "lin_api_EXAMPLEtesting", arguments)
     # High-confidence detector shapes (wave-277 sweep) — normalize to
     # sequential-char fakes below GitHub's entropy detector, attack
     # shape intact.
