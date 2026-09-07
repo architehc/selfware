@@ -1419,6 +1419,30 @@ fn test_shell_exec_blocks_printf_assembled_execution() {
 }
 
 #[test]
+fn test_shell_exec_blocks_wave339_variants() {
+    // Red-team wave-339 batch: ANSI-C hex names, printf -v names,
+    // variable-verb IFS glue, chmod wipe, chr() assembly, denied var in
+    // -c payload, interpreter -r /tmp.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "export $'\\x4cD_PRELOAD'=$'\\x2e\\x2fp\\x61yload.so'; id",
+        "printf -v $'\\x4cD_PRELOAD' './payload.so'; export LD_PRELOAD",
+        "K=/tmp; C=chmod; $C${IFS}777${IFS}$K/pwned",
+        "c\\h\\m\\o\\d\\ \\0\\0\\0\\ /etc/shadow",
+        "python -c \"import subprocess; subprocess.call([chr(110), chr(99)])\"",
+        "bash -c 'RUBYOPT=/tmp/evil.rb ruby -e \"puts :loaded\"'",
+        "ruby -r/tmp/evil.rb -e 'puts 1'",
+    ] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "should be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
 fn test_shell_exec_blocks_wave318_variants() {
     // Red-team wave-318 batch: split env keyword, whole-assignment
     // interleaved quotes, s_client file redirect, credential-grep harvest,
