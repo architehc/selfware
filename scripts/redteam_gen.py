@@ -340,6 +340,10 @@ def sanitize_generated(arguments: str) -> str:
     arguments = re.sub(r"HRKU-[0-9A-Za-z-]{15,}", "HRKU-EXAMPLE", arguments)
     # Salesforce refresh tokens (wave-634 push block).
     arguments = re.sub(r"5Aep[0-9A-Za-z._-]{10,}", "5AepEXAMPLE", arguments)
+    # Pulumi access tokens (wave-1030 push block).
+    arguments = re.sub(r"pul-[0-9a-f]{20,}", "pul-EXAMPLE", arguments)
+    # PyPI API tokens (wave-1030 push block).
+    arguments = re.sub(r"pypi-[A-Za-z0-9_-]{20,}", "pypi-EXAMPLE", arguments)
     # RubyGems API keys (wave-893 push block).
     arguments = re.sub(r"rubygems_[A-Za-z0-9]{20,}", "rubygems_EXAMPLE", arguments)
     # npm UUID-shaped tokens in NPM_TOKEN assignments (wave-784 push block).
