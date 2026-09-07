@@ -1421,6 +1421,30 @@ fn test_shell_exec_blocks_printf_assembled_execution() {
 }
 
 #[test]
+fn test_shell_exec_blocks_wave397_variants() {
+    // Red-team wave-397 batch: braced name pieces, array subscripts,
+    // -c payload with inner quotes, eval backslash-underscore,
+    // python/perl concat env names.
+    let config = SafetyConfig::default();
+    let checker = SafetyChecker::new(&config);
+    for cmd in [
+        "export ${L}D${_}P${R}ELOAD=./evil.so; echo $LD_PRELOAD",
+        "declare -A map; map[LD_PRELOAD]=./evil.so; export ${map[LD_PRELOAD]}",
+        "sh -c 'export LD_P\"RELOAD=/tmp/x.so; /bin/sh'",
+        "eval \"export LD\\_PRELOAD=./bad.so\"",
+        "export ${0:0:2}D${0:1:1}_PRELOAD=./bad.so",
+        "python3 -c \"import os; os.environ['LD'+'P'+'R'+'E'+'L'+'O'+'A'+'D']='./bad.so'\"",
+        "perl -e '$ENV{LD_ . PRELOAD} = \"./bad.so\"; exec \"/bin/sh\"'",
+    ] {
+        let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "should be blocked: {cmd}"
+        );
+    }
+}
+
+#[test]
 fn test_shell_exec_blocks_wave339_variants() {
     // Red-team wave-339 batch: ANSI-C hex names, printf -v names,
     // variable-verb IFS glue, chmod wipe, chr() assembly, denied var in

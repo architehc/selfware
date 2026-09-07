@@ -877,10 +877,27 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // sees the assignment.
             (
                 Regex::new(
-                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|bash_env|pythonpath|pythonstartup|rubyopt|node_options|perl5lib|perl5opt|gtk_modules|fpath)\s*="#,
+                    r#"(?i)\b(ba|z|k|da|fi)?sh\s+-c\s+['"][^']*\b(ld_preload|ld_library_path|ld_audit|bash_env|pythonpath|pythonstartup|rubyopt|node_options|perl5lib|perl5opt|gtk_modules|fpath)\s*="#,
                 )
                 .expect("Invalid regex"),
                 "denied env assignment inside -c payload",
+            ),
+            // Concatenated env name in an interpreter subscript (red-team
+            // wave-397: os.environ['LD'+'P'+…] = './bad.so',
+            // perl $ENV{LD_ . PRELOAD}) — no literal denied name.
+            (
+                Regex::new(
+                    r"(?i)os\.environ\s*\[\s*('?[a-z]+'?\s*\+\s*){2,}",
+                )
+                .expect("Invalid regex"),
+                "env var name assembled by string concatenation (indirect injection)",
+            ),
+            (
+                Regex::new(
+                    r"\$ENV\{\s*[a-z_]+\s*\.\s*[a-z_]+\s*\}",
+                )
+                .expect("Invalid regex"),
+                "env var name assembled by perl concatenation (indirect injection)",
             ),
             // The env/export keyword itself split by empty quotes (red-team
             // wave-339: \`ruby -r/tmp/evil.rb …\`) — RUBYOPT via flag.
@@ -1431,12 +1448,34 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                     .expect("Invalid regex"),
                 "env assignment via concatenated name expansion (indirect injection)",
             ),
+            // Braced expansion pieces inside the assignment name (red-team
+            // wave-397: export ${L}D${_}P${R}ELOAD=…,
+            // export ${0:0:2}D${0:1:1}_PRELOAD=…) — wave-207 needs
+            // unbraced $VAR pieces, wave-62 needs the whole name in one
+            // brace. Any brace-expansion inside the name is the assembly.
+            (
+                Regex::new(
+                    r"(?:^|[;&|]\s*|\b(?:export|env|readonly|declare|typeset)\s+)(\$\{[^}]*\}|\$\w+|\w)*\$\{[^}]*\}(\$\{[^}]*\}|\$\w+|\w)*\s*=",
+                )
+                .expect("Invalid regex"),
+                "env assignment via braced name pieces (indirect injection)",
+            ),
+            // Denied var as an array subscript (red-team wave-397:
+            // declare -A map; map[LD_PRELOAD]=./evil.so) — the
+            // name-anchored checks see map[…], not the denied name.
+            (
+                Regex::new(
+                    r"(?i)\$\{?\w*\[(ld_preload|ld_library_path|ld_audit|bash_env|pythonpath|pythonstartup|rubyopt|node_options)\]",
+                )
+                .expect("Invalid regex"),
+                "denied env var as array subscript (indirect injection)",
+            ),
             // eval carrying a denied assignment (wave-45: `eval
             // 'LD_PRELOAD=/tmp/x.so; …'`) — the sh -c payload pattern is
             // anchored on -c; eval needs its own.
             (
                 Regex::new(
-                    r#"(?i)eval\s+['"][^'"]*\b(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|gtk_modules)\s*="#,
+                    r#"(?i)eval\s+['"][^'"]*\b(ld_?\\?_?preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|gtk_modules)\s*="#,
                 )
                 .expect("Invalid regex"),
                 "env injection inside eval payload",
