@@ -339,7 +339,7 @@ def sanitize_generated(arguments: str) -> str:
     # Salesforce refresh tokens (wave-634 push block).
     arguments = re.sub(r"5Aep[0-9A-Za-z._-]{10,}", "5AepEXAMPLE", arguments)
     # npm UUID-shaped tokens in NPM_TOKEN assignments (wave-784 push block).
-    arguments = re.sub(r"NPM_TOKEN\s*[:?]?=\s*[0-9a-f-]{30,}", "NPM_TOKEN=EXAMPLE", arguments)
+    arguments = re.sub(r"NPM_TOKEN\s*[:?]?=\s*[\"']?[0-9a-f-]{30,}", "NPM_TOKEN=EXAMPLE", arguments)
     # npm UUID-shaped auth tokens (wave-609 push block).
     arguments = re.sub(r"_authToken=\\?n?\s*[0-9a-f-]{30,}", "_authToken=EXAMPLE", arguments)
     # Docker PATs (wave-606 push block).
