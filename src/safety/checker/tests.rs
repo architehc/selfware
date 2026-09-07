@@ -1288,6 +1288,8 @@ fn test_shell_exec_blocks_package_source_relocation() {
         "export CARGO_HOME=/tmp/cargo; cargo build",
         // wave-233: GOROOT relocates the whole Go toolchain (PYTHONHOME twin)
         "export GOROOT=/tmp/.go && go run main.go",
+        // wave-346: DOTNET_ROOT relocates the .NET runtime (GOROOT twin)
+        "DOTNET_ROOT=/tmp/dotnet_env dotnet run",
     ] {
         let call = create_test_call("shell_exec", &format!(r#"{{"command": "{cmd}"}}"#));
         assert!(

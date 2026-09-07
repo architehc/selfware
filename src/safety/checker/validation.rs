@@ -158,6 +158,9 @@ pub(crate) const DENIED_ENV_VARS: &[&str] = &[
     "GOSUMDB",
     "CARGO_HOME",
     "GOROOT",
+    // DOTNET_ROOT relocates the .NET runtime itself (red-team wave-346:
+    // DOTNET_ROOT=/tmp/dotnet_env dotnet run — the GOROOT twin).
+    "DOTNET_ROOT",
     // gconv module injection (red-team wave-197: `export GCONV_PATH=/tmp/
     // gconv/iconv.dir && cat /etc/passwd`) — glibc loads attacker-compiled
     // conversion modules on the next iconv call; a documented privesc with
