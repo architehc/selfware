@@ -86,6 +86,17 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "loader var name assembled from expansions (indirect injection)",
             ),
+            // Denied loader var name with quote placeholders interleaved
+            // (red-team wave-290: \`LD_PRE''LOAD=…\`, \`LD_AUD''IT=…\`) —
+            // the wave-249 pattern only handled splits before the
+            // underscore; any non-space interleave is the same assembly.
+            (
+                Regex::new(
+                    r"\b(ld|dyld)[a-z_]{0,20}\x00\x01[0-9]+\x00([a-z_]|\x00\x01[0-9]+\x00){0,20}\s*=",
+                )
+                .expect("Invalid regex"),
+                "loader var name with interleaved quotes (indirect injection)",
+            ),
             // iptables rule dropping/rejecting SSH specifically (red-team
             // wave-180: \`iptables -A INPUT -p tcp --dport 22 -j DROP\`) —
             // the wave-11 flush pattern doesn't see additive lockout rules.
@@ -1274,10 +1285,20 @@ pub(crate) static PAYLOAD_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>>
             // the prefix-anchored check only sees segment starts.
             (
                 Regex::new(
-                    r"(?i)(then|do|else|;;)\s+(export\s+)?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|gtk_modules|fpath)\s*=",
+                    r"(?i)(then|do|else|;;|[a-z]\s\))\s+(export\s+)?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options|gtk_modules|fpath)\s*=",
                 )
                 .expect("Invalid regex"),
                 "env injection after shell keyword",
+            ),
+            // IFS-whitespace around a denied assignment (red-team
+            // wave-290: \`${IFS}LD_PRELOAD=${IFS}/tmp/x.so …\`) — the
+            // anchored checks expect literal whitespace.
+            (
+                Regex::new(
+                    r"(?i)(\$\{?ifs(:[0-9:]+)?\}?\s*)+(export\s+|env\s+)?(ld_preload|ld_library_path|ld_audit|dyld_insert_libraries|bash_env|pythonpath|pythonstartup|node_options)\s*=",
+                )
+                .expect("Invalid regex"),
+                "denied env assignment via IFS whitespace (indirect injection)",
             ),
             // Assignment through name expansion (wave-62:
             // \`${VAR}=/tmp/lib.so ls\`, \`env ${!LD_*}=/tmp/x id\`) —

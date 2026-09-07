@@ -305,6 +305,8 @@ def sanitize_generated(arguments: str) -> str:
     # HubSpot private-app tokens (wave-257 push block) — clamp to the
     # documented example form.
     arguments = re.sub(r"pat-na1-[0-9a-f-]{10,}", "pat-na1-EXAMPLE", arguments)
+    # Twilio SK-shaped API keys (wave-301 push block).
+    arguments = re.sub(r"\bSK[0-9a-f]{30,32}\b", "SK1234567890abcdef1234567890abcde", arguments)
     # Mailchimp keys (wave-277 push block).
     arguments = re.sub(r"[0-9a-f]{32}-us[0-9]{1,2}\b", "MAILCHIMP_EXAMPLE-us1", arguments)
     # High-confidence detector shapes (wave-277 sweep) — normalize to
