@@ -328,6 +328,8 @@ def sanitize_generated(arguments: str) -> str:
         arguments,
     )
     arguments = re.sub(r"GOCSPX-[A-Za-z0-9_-]{15,}", "GOCSPX-EXAMPLE", arguments)
+    # Docker PATs (wave-606 push block).
+    arguments = re.sub(r"dckr_pat_[A-Za-z0-9_-]{15,}", "dckr_pat_EXAMPLE", arguments)
     # Asana PATs id/id:hex (wave-579 push block).
     arguments = re.sub(r"[0-9]+/[0-9]{10,}:[0-9a-f]{20,}", "1/0000:EXAMPLE", arguments)
     # Databricks tokens (wave-553 push block).
