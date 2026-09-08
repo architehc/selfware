@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.3] - 2026-09-08
+
+### Added
+- **Multi-ecosystem stale-verification rescue**: the auto-rescue after a
+  source edit detects the repo's own verifier (lake, cargo, pytest, npm,
+  go) instead of assuming `cargo_check`.
+- **Red-team triage fleet**: `scripts/redteam_triage.py` pre-classifies the
+  probe backlog with the local fleet before human triage; endpoint scripts
+  raised to a 64k output ceiling.
+- **Rig developer loops**: `docs/rig-developer-loops.md` (three-endpoint
+  funnel, seven loops, capacity plan) and `scripts/fleet_probe.py`
+  (generation-level probe: first-token latency, decode t/s, parallel-stream
+  knee → `fleet.json` for the loops to read).
+
+### Fixed
+- **Budgets from TOML now apply**: the CLI no longer overwrites
+  `max_wall_secs` / `max_cost_usd` / `max_budget_tokens` with `None` when
+  the flag is absent (harbor's per-trial caps had never applied).
+- **`denied_paths` unions with the default** instead of replacing it, so
+  configs written by `unpack` / `auto-config` and the harbor profiles keep
+  the red-team patterns.
+- **Model-profile matching** tolerates provider-prefixed ids
+  (`qwen/qwen3.6-27b`) and no longer collapses the conversation window to
+  2k tokens on an unknown id.
+- **Verification credit**: `cargo test 2>&1` and other redirect forms are
+  credited (shell tokenizer no longer splits on the `&` in `2>&1`); credit
+  requires an authoritative runner exit; info-only and echoed-script runs
+  are rejected; the verification ledger persists across resume.
+- **Edit evidence** comes from the durable mutation ledger, not the
+  compressible message history; `patch_apply` / `file_multi_edit` /
+  `file_fim_edit` count as writes for gates and best-snapshot restore.
+- **Best snapshot**: identity, isolation, and complete restore (review F3).
+- **API client**: wall-budget anchor resets per task, sentinel knob values
+  are rejected by validation, error-status body reads have a deadline,
+  backoff never sleeps past the wall deadline, per-profile
+  `max_retries` / `response_timeout_floor_secs` are wired on the real
+  request paths.
+- **Think-block stripping** preserves answer text around and between
+  blocks; recovery hints truncate on char boundaries (no panic on
+  multibyte stderr).
+- **Leak check** latches per code snapshot, not per task.
+- **Workflows**: tool steps route through the safety gate and failures
+  propagate; SWL runtime executes declared step semantics; failed swarm
+  phases no longer report overall success.
+- **Checkpoint loss** is an explicit recovery state, not a successful
+  resume; `.rs` extension no longer confers trust on tool results; shell
+  drain deadline and streamed HTTP body cap.
+- **Benchmarks**: harness search cannot promote incomplete evidence;
+  pass@1 uses a frozen pre-evaluation selection; fleet gate telemetry never
+  reports a fake zero.
+- **Release CI** binds manual-release artifacts to the tagged commit.
+
+### Security
+- Checker hardening and corpus integrity reset; 74 red-team corpus waves
+  since 0.7.2 with dozens of gate holes closed (env-name assembly, exfil
+  channels, obfuscation, interpreter-wrapped tools, workspace
+  self-destruction); gate green at 106,675 cases.
+
 ## [0.7.2] - 2026-09-04
 
 ### Added
@@ -333,7 +391,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Protected paths system
 - Git force push prevention
 
-[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/architehc/selfware/compare/v0.7.3...HEAD
+[0.7.3]: https://github.com/architehc/selfware/compare/v0.7.2...v0.7.3
 [0.7.0]: https://github.com/architehc/selfware/compare/v0.6.8-beta.1...v0.7.0
 [0.6.8-beta.1]: https://github.com/architehc/selfware/compare/v0.6.7...v0.6.8-beta.1
 [0.6.7]: https://github.com/architehc/selfware/compare/v0.6.6...v0.6.7
