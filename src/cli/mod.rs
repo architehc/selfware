@@ -234,42 +234,85 @@ fn build_workflow_tool_handler(
 
     // Build the registry with the same safety config used elsewhere in the CLI.
     let registry = Arc::new(ToolRegistry::with_safety_config(Some(safety_config)));
+    // The registry's execute_any is raw dispatch; the POLICY decision belongs
+    // here at the front door. Build the same central checker the main agent
+    // uses so a call rejected in chat is rejected in a workflow (review
+    // finding: workflow tool steps bypassed the primary safety gate).
+    let checker = Arc::new(crate::safety::checker::SafetyChecker::new(safety_config));
 
     Box::new(move |tool_name: &str, args: &HashMap<String, String>| {
         let registry = Arc::clone(&registry);
+        let checker = Arc::clone(&checker);
+        let tool_name = tool_name.to_string();
+        let args = args.clone();
 
-        // Convert HashMap<String, String> → serde_json::Value::Object
-        let mut json_map = serde_json::Map::new();
-        for (k, v) in args {
-            // Try to parse each value as JSON first (so numbers/bools/arrays
-            // pass through correctly); fall back to a plain string.
-            let parsed = serde_json::from_str::<serde_json::Value>(v)
-                .unwrap_or(serde_json::Value::String(v.clone()));
-            json_map.insert(k.clone(), parsed);
-        }
-        let input = serde_json::Value::Object(json_map);
-
-        tracing::info!(
-            tool = %tool_name,
-            args = ?input,
-            "workflow tool_handler dispatching to ToolRegistry"
-        );
-
-        // Bridge sync → async. block_in_place is safe on the multi-thread
-        // runtime (the default for Selfware) and avoids the
-        // "cannot block_on within async" panic.
-        let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async move { registry.execute_any(tool_name, input).await })
-        });
-
-        match result {
-            Ok(value) => Ok(value.to_string()),
-            Err(err) => {
-                tracing::warn!(tool = %tool_name, error = %err, "workflow tool execution failed");
-                Err(err)
+        Box::pin(async move {
+            // Convert HashMap<String, String> → serde_json::Value::Object
+            let mut json_map = serde_json::Map::new();
+            for (k, v) in &args {
+                // Try to parse each value as JSON first (so numbers/bools/arrays
+                // pass through correctly); fall back to a plain string.
+                let parsed = serde_json::from_str::<serde_json::Value>(v)
+                    .unwrap_or(serde_json::Value::String(v.clone()));
+                json_map.insert(k.clone(), parsed);
             }
-        }
+            let input = serde_json::Value::Object(json_map);
+
+            // Central safety gate — identical to the main agent's check.
+            let call = crate::api::types::ToolCall {
+                id: format!("workflow-{tool_name}"),
+                call_type: "function".to_string(),
+                function: crate::api::types::ToolFunction {
+                    name: tool_name.clone(),
+                    arguments: input.to_string(),
+                },
+            };
+            if let Err(e) = checker.check_tool_call(&call) {
+                tracing::warn!(tool = %tool_name, error = %e, "workflow tool step blocked by safety policy");
+                return Err(e.into());
+            }
+
+            tracing::info!(
+                tool = %tool_name,
+                args = ?input,
+                "workflow tool_handler dispatching to ToolRegistry"
+            );
+
+            // Native async dispatch — no block_in_place bridge, so the
+            // workflow's select! timeout can actually preempt this step.
+            let result = registry.execute_any(&tool_name, input).await;
+
+            match result {
+                Ok(value) => {
+                    // A Rust Ok means "the tool returned a response", not "the
+                    // requested operation succeeded". shell_exec encodes process
+                    // failure in the payload (`{"exit_code": 7, …}`); other tools
+                    // report `success: false`. Interpret both so a failed
+                    // operation fails the workflow step (review finding: tool
+                    // failures were reported as completed steps).
+                    if let Some(code) = value.get("exit_code").and_then(|v| v.as_i64()) {
+                        if code != 0 {
+                            let stderr = value.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+                            return Err(anyhow::anyhow!(
+                                "tool '{tool_name}' exited with code {code}: {stderr}"
+                            ));
+                        }
+                    }
+                    if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
+                        let err = value
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        return Err(anyhow::anyhow!("tool '{tool_name}' failed: {err}"));
+                    }
+                    Ok(value.to_string())
+                }
+                Err(err) => {
+                    tracing::warn!(tool = %tool_name, error = %err, "workflow tool execution failed");
+                    Err(err)
+                }
+            }
+        })
     })
 }
 

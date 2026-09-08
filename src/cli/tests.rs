@@ -1501,3 +1501,42 @@ fn resolve_preset_task_renders_first_preset_prompt_renders_nonempty() {
     let rendered = resolve_preset_task(Some(first.id.to_string()), None).unwrap();
     assert!(!rendered.trim().is_empty());
 }
+
+// ── workflow tool handler: safety gate + outcome interpretation (review
+// findings P1-1/P1-3: workflow tool steps bypassed the central safety gate,
+// and a tool's structured failure was reported as a completed step) ──
+
+fn workflow_args(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workflow_tool_handler_applies_central_safety_gate() {
+    let handler = build_workflow_tool_handler(&crate::config::SafetyConfig::default());
+    // A command the main agent's checker refuses must be refused here too.
+    let blocked = handler("shell_exec", &workflow_args(&[("command", "rm -rf /")])).await;
+    assert!(
+        blocked.is_err(),
+        "workflow tool step must honor the central safety gate"
+    );
+    // A harmless command still executes.
+    let allowed = handler("shell_exec", &workflow_args(&[("command", "echo hi")])).await;
+    assert!(allowed.is_ok(), "harmless command must pass: {allowed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workflow_tool_handler_fails_step_on_nonzero_exit() {
+    let handler = build_workflow_tool_handler(&crate::config::SafetyConfig::default());
+    // shell_exec encodes process failure in the JSON payload; the step must
+    // fail, not complete with a structured error string.
+    let failed = handler("shell_exec", &workflow_args(&[("command", "exit 7")])).await;
+    assert!(
+        failed.is_err(),
+        "nonzero exit inside tool payload must fail the step: {failed:?}"
+    );
+    let ok = handler("shell_exec", &workflow_args(&[("command", "echo ok")])).await;
+    assert!(ok.is_ok(), "zero exit must pass: {ok:?}");
+}
