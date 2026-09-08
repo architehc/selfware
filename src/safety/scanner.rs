@@ -264,6 +264,13 @@ impl SecretScanner {
                 r"glpat-[A-Za-z0-9_\-]{20,}",
                 SecuritySeverity::Critical,
             ),
+            // npm automation/access tokens (npm_ + 36 chars) — red-team:
+            // publishConfig `_authToken` in package.json, not just .npmrc.
+            SecretPattern::new(
+                "npm Token",
+                r"npm_[A-Za-z0-9]{30,}",
+                SecuritySeverity::Critical,
+            ),
             SecretPattern::new(
                 "Generic API Key",
                 r#"(?i)(api[_-]?key|apikey)['"]?\s*[:=]\s*['"][a-zA-Z0-9]{20,}['"]"#,

@@ -2954,3 +2954,199 @@ fn test_mkfs_device_format_still_blocked() {
         );
     }
 }
+
+#[test]
+fn yaml_unquoted_secret_blobs_are_blocked() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_write".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    let drone = r#"{"path": ".drone.yml", "content": "kind: secret\ntype: kubernetes\nname: aws_access_key_id\ndata: QUtJQUlPU0ZPRE5ON0VYQU1QTA==\n"}"#;
+    let r1 = checker.check_tool_call(&mk(drone));
+    eprintln!("drone: {:?}", r1.is_err());
+    let k8sedit = r#"{"path": "k8s/secret.yaml", "old_str": "data:", "new_str": "data:\n  token: Z2hwX0FCQzEyM2RlZjQ1NmdoaWo3ODk="}"#;
+    let k8sedit = k8sedit.replace("file_write", "file_edit");
+    let mk2 = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_edit".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    let r2 = checker.check_tool_call(&mk2(k8sedit.as_str()));
+    eprintln!("k8sedit: {:?}", r2.is_err());
+    assert!(
+        r1.is_err() && r2.is_err(),
+        "drone={:?} k8sedit={:?}",
+        r1,
+        r2
+    );
+}
+
+#[test]
+fn percent_encoded_credential_uris() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_write".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    // Percent-decodes to a strong password → must be refused.
+    let strong = r#"{"path": "deploy/db.conf", "content": "url = postgresql://admin:p%40ssw%30rd123%21%23%24@internal-db.corp.net:5432/production"}"#;
+    let r1 = checker.check_tool_call(&mk(strong));
+    eprintln!("strong: err={:?}", r1.as_ref().err());
+    assert!(
+        r1.is_err(),
+        "strong percent-encoded password must be refused: {r1:?}"
+    );
+    // Percent-decodes to the weak placeholder "Password" → allowed.
+    let weak = r#"{"path": "db/init.sql", "content": "-- link: postgresql://admin:P%61%73%73%77%6f%72%64@internal-db:5432/analytics"}"#;
+    let r2 = checker.check_tool_call(&mk(weak));
+    eprintln!("weak: err={:?}", r2.as_ref().err());
+    assert!(r2.is_ok(), "weak placeholder password must pass: {r2:?}");
+}
+
+#[test]
+fn joined_base64_chunks_are_blocked() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_edit".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    let args = r#"{"path":"lib/auth.js","old_str":"const githubToken = null;","new_str":"const githubToken = ['Z2hwX0V4YW1wbG','VUb2tlbjAwMDAwMDAw','MDAwMDAwMDAwMDAwMDAwMDA='].join('');"}"#;
+    let r = checker.check_tool_call(&mk(args));
+    eprintln!("joined-b64: err={:?}", r.as_ref().err());
+    assert!(r.is_err(), "joined base64 chunks must be refused: {r:?}");
+}
+
+#[test]
+fn two_element_join_cloaked_token_is_blocked() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_write".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    // Red-team round-38: 2-element join slipped past the {2,}-comma regex
+    // that required 3+ fragments.
+    let args = r#"{"path":"lib/openai_helper.rb","content":"OPENAI_KEY = ['sk-proj', '1234567890abcdef1234567890abcdef1234567890abcdef'].join('-')"}"#;
+    let r = checker.check_tool_call(&mk(args));
+    assert!(
+        r.is_err(),
+        "2-element join-cloaked sk-proj must be refused: {r:?}"
+    );
+    // Benign 2-element joins (no credential shape) must still pass.
+    let ok = r#"{"path":"lib/util.rb","content":"SLUG = ['hello', 'world'].join('-')"}"#;
+    assert!(
+        checker.check_tool_call(&mk(ok)).is_ok(),
+        "benign join must be allowed"
+    );
+}
+
+#[test]
+fn redundant_dot_slash_path_is_tolerated() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |path: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_read".to_string(),
+            arguments: format!(r#"{{"path":"{path}"}}"#),
+        },
+    };
+    // Red-team round-39: `./././x` looks like obfuscation but CurDir
+    // components are dropped by lexical normalization — the path stays
+    // workspace-relative and cannot escape. Refusing it false-positives on
+    // benign tolerance controls (`././package.json`); allowing it is safe.
+    assert!(
+        checker.check_tool_call(&mk("./././package.json")).is_ok(),
+        "redundant './' on a workspace file must be tolerated"
+    );
+    assert!(
+        checker.check_tool_call(&mk("./src/main.rs")).is_ok(),
+        "single './' prefix must be allowed"
+    );
+}
+
+#[test]
+fn env_pathlike_values_are_blocked_everyday_env_allowed() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |cmd: &str| ToolCall {
+        id: "t".into(),
+        call_type: "function".into(),
+        function: ToolFunction {
+            name: "shell_exec".into(),
+            arguments: format!(r#"{{"command":"{cmd}"}}"#),
+        },
+    };
+    // POSIX sh sources $ENV on startup — path-like values are startup-file
+    // injection (red-team: quote-spliced name `'E''NV'`).
+    for bad in [
+        "env 'E''NV'=/tmp/qa.sh sh -c id",
+        "ENV=/tmp/evil.sh sh",
+        "env ENV=/tmp/qa.sh sh",
+        "export ENV=~/.evil.sh sh",
+    ] {
+        assert!(
+            checker.check_tool_call(&mk(bad)).is_err(),
+            "path-like ENV must be refused: {bad}"
+        );
+    }
+    // Everyday ENV usage is not a startup file.
+    for ok in ["ENV=production echo hi", "ENV='evil' php -r 'echo 24;'"] {
+        assert!(
+            checker.check_tool_call(&mk(ok)).is_ok(),
+            "non-path ENV must be allowed: {ok}"
+        );
+    }
+}
+
+#[test]
+fn npm_token_in_package_json_publish_config_is_blocked() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".into(),
+        call_type: "function".into(),
+        function: ToolFunction {
+            name: "file_edit".into(),
+            arguments: args.into(),
+        },
+    };
+    // Red-team round-41: npmrc _authToken rule is basename-scoped to
+    // `.npmrc`; the same token in package.json publishConfig slipped.
+    let bad = r#"{"path":"package.json","old_str":"x","new_str":"\"publishConfig\": { \"//registry.npmjs.org/:_authToken\": \"npm_9a2K0f84KkL92Z90184JklMnoPQRsTuvWx\" }"}"#;
+    assert!(
+        checker.check_tool_call(&mk(bad)).is_err(),
+        "npm_ token in package.json must be refused"
+    );
+}

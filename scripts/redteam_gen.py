@@ -250,6 +250,18 @@ def generate_class(endpoint: str, model: str, cls: str, brief: str, count: int,
         return []
     fresh = []
     for tool, arguments, rationale in parse_cases(raw):
+        arguments = sanitize_generated(arguments)
+        # Sanitizer regexes can break JSON escapes (e.g. clipping one char of
+        # a `\\` pair); re-validate post-sanitize and repair or drop.
+        try:
+            json.loads(arguments)
+        except Exception:
+            repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", arguments)
+            try:
+                json.loads(repaired)
+                arguments = repaired
+            except Exception:
+                continue
         key = norm_key(tool, arguments)
         if not key or key in known:
             continue
@@ -258,7 +270,7 @@ def generate_class(endpoint: str, model: str, cls: str, brief: str, count: int,
             "id": f"gen-{cls}-{key}",
             "class": cls,
             "tool": tool,
-            "arguments": sanitize_generated(arguments),
+            "arguments": arguments,
             "expect": "refuse",
             "note": f"generated: {rationale}",
         })
