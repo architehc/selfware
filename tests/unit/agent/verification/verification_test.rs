@@ -1033,6 +1033,122 @@ mod completion_gate_tests {
             "test-writing task must stay exempt, got: {outcome:?}"
         );
     }
+
+    /// Finding 12 (a): an ordinary bug-fix task that adds a NEW test file
+    /// alongside the source fix completes — additive test changes do not
+    /// require the test-writing phrase classifier.
+    #[tokio::test]
+    async fn verifier_tainted_allows_source_fix_plus_new_test_file() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(
+            "tests/test_calc_regression.py",
+            "def test_div_int():\n    assert 7 // 2 == 3\n",
+        )
+        .unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let outcome = agent.mutation_completion_gate().await;
+        assert!(
+            outcome.is_none(),
+            "source fix + new regression test file must complete, got: {outcome:?}"
+        );
+    }
+
+    /// Finding 12 (a, insertion variant): a new test CASE appended to an
+    /// existing test file is purely additive (no `-` lines) and completes.
+    #[tokio::test]
+    async fn verifier_tainted_allows_source_fix_plus_appended_test_case() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(
+            "tests/test_calc.py",
+            "def test_div():\n    pass\n\n\ndef test_div_int():\n    assert 7 // 2 == 3\n",
+        )
+        .unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let outcome = agent.mutation_completion_gate().await;
+        assert!(
+            outcome.is_none(),
+            "source fix + appended test case must complete, got: {outcome:?}"
+        );
+    }
+
+    /// Finding 12 (b): weakening an existing assertion rewrites a `-` line
+    /// and keeps the strict rejection, whatever the task says.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_weakened_assertion() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            (
+                "tests/test_calc.py",
+                "def test_div():\n    assert 6 / 2 == 3\n",
+            ),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write("tests/test_calc.py", "def test_div():\n    assert True\n").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a weakened assertion must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
+
+    /// Finding 12 (c): deleting a test file is never additive and keeps the
+    /// strict rejection.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_removed_test_file() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::remove_file("tests/test_calc.py").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a removed test file must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
+
+    /// CI/build-runner edits define HOW verification runs, so they are never
+    /// additive-exempt — even an insertion-only CI change stays rejected.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_additive_ci_edit() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            (".github/workflows/ci.yml", "on: push\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(".github/workflows/ci.yml", "on: push\n  pull_request\n").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a CI edit must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---

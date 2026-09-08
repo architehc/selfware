@@ -701,6 +701,49 @@ impl Agent {
         )
     }
 
+    /// Verifier-region paths whose working-tree changes are NOT purely
+    /// additive test content (external review finding 12).
+    ///
+    /// A test path counts as additive when `git diff HEAD -- <path>` carries
+    /// no removed lines: an untracked new test file yields an empty diff, and
+    /// an existing test file passes only when every hunk inserts lines (a new
+    /// test function/case added alongside a source fix). Any `-` content
+    /// line — removed or rewritten assertions, deleted fixtures — keeps the
+    /// strict rejection, as does any change to CI/build-runner files, which
+    /// define HOW verification runs and are never additive-exempt. When the
+    /// diff cannot be obtained at all, the path cannot be proven additive and
+    /// is conservatively treated as tainted.
+    async fn non_additive_verifier_changes(verifier_paths: &[&String]) -> Vec<String> {
+        let root = super::current_project_root();
+        let mut tainted = Vec::new();
+        for path in verifier_paths {
+            if !Self::gate_path_is_test(path) {
+                tainted.push((*path).clone());
+                continue;
+            }
+            // Async process spawn — see diff_paths_for_completion_gate.
+            let output = tokio::process::Command::new("git")
+                .args(["diff", "HEAD", "--", path])
+                .current_dir(&root)
+                .output()
+                .await;
+            let non_additive = match output {
+                Ok(out) if out.status.success() => {
+                    let diff = String::from_utf8_lossy(&out.stdout);
+                    diff.lines().any(|line| {
+                        (line.starts_with('-') && !line.starts_with("---"))
+                            || line.starts_with("Binary files")
+                    })
+                }
+                _ => true,
+            };
+            if non_additive {
+                tainted.push((*path).clone());
+            }
+        }
+        tainted
+    }
+
     fn gate_path_is_source(path: &str) -> bool {
         let lower = path.trim_matches('"').to_ascii_lowercase();
         let Some(ext) = std::path::Path::new(&lower)
@@ -973,10 +1016,14 @@ impl Agent {
             // Fall back to paths from commits created during this run before
             // declaring the diff empty — otherwise committed work is refused
             // forever as EmptyDiff.
+            let mut from_committed_fallback = false;
             let paths = if paths.is_empty() {
-                self.committed_paths_for_completion_gate()
+                let committed = self
+                    .committed_paths_for_completion_gate()
                     .await
-                    .unwrap_or(paths)
+                    .unwrap_or(paths);
+                from_committed_fallback = !committed.is_empty();
+                committed
             } else {
                 paths
             };
@@ -1009,17 +1056,35 @@ impl Agent {
             // tests/CI — makes the run's verification self-awarded and
             // meaningless. Unless the task is about tests, modified
             // verifier-region paths invalidate completion until restored.
+            //
+            // ADDITIVE test changes are exempt (external review finding 12):
+            // a regression test added next to a source fix — a new test file,
+            // or hunks that only insert lines into an existing test file —
+            // does not taint verification, so it is allowed for any task.
+            // Removed/rewritten test lines, deleted fixtures, and CI/build
+            // edits keep the strict rejection (AGENTS.md rule 2).
             let verifier_paths: Vec<&String> = paths
                 .iter()
                 .filter(|path| Self::gate_path_is_verifier_region(path))
                 .collect();
             if !all_test_files && !verifier_paths.is_empty() && !task_is_test_writing_task(task) {
-                return Some(format!(
-                    "VerifierTainted: the diff modifies test/CI/build files ({:?}). \
-                     Verification run against edited tests cannot be trusted. \
-                     Restore them (`git checkout -- <path>`) and verify against the original suite before completing.",
-                    verifier_paths
-                ));
+                let tainted: Vec<String> = if from_committed_fallback {
+                    // Once the work is committed, `git diff HEAD` is empty, so
+                    // no diff evidence remains to prove a test change additive.
+                    // Conservative encoding: keep the strict rejection for
+                    // every verifier-region path in the committed-work case.
+                    verifier_paths.iter().map(|path| (*path).clone()).collect()
+                } else {
+                    Self::non_additive_verifier_changes(&verifier_paths).await
+                };
+                if !tainted.is_empty() {
+                    return Some(format!(
+                        "VerifierTainted: the diff modifies or removes existing test/CI/build content ({tainted:?}). \
+                         Verification run against edited tests cannot be trusted. \
+                         Restore them (`git checkout -- <path>`) and verify against the original suite before completing. \
+                         Adding NEW tests next to a source fix is allowed and does not trip this gate."
+                    ));
+                }
             }
 
             // The supported-source list exists for SWE-bench repair tasks. When
