@@ -886,65 +886,112 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     // credited `echo cargo test` as a real verification run (AGENTS.md rule
     // 3: honest status over optimistic success).
     //
-    // Exit-code masking: a runner whose pipeline masks its exit status
-    // (`cargo test | true`, `pytest || true`, `pytest || echo done`) must NOT
-    // be credited — the failing exit never reaches the agent, so the run is
-    // indistinguishable from a pass. Only an UNMASKED runner segment counts.
+    // Verification CREDIT requires the runner's exit status to be
+    // authoritative for the command's final status (review finding:
+    // `cargo test; true`, `cargo test || echo done`, and `true || cargo test`
+    // earned credit while failing or never executing). The command may still
+    // EXECUTE — this gate only decides what the ledger may trust.
     let segments = shell_segments_with_operators(&normalized);
     segments.iter().enumerate().any(|(i, (_op, segment))| {
         segment_starts_with_verification_runner(segment, &verification_prefixes)
-            && !segment_exit_is_masked(&segments[i + 1..])
-    }) || shell_command_runs_test_script(&normalized)
+            && runner_status_is_authoritative(&segments, i)
+    }) || script_runner_status_is_authoritative(&segments, &normalized)
 }
 
-/// Split a shell command into pipeline segments, recording the operator run
-/// that introduced each segment. `("", "cargo test")` is the leading segment;
-/// `("&&", " pytest")` follows an `&&` chain. Consecutive delimiter characters
-/// collapse into one operator run, so `||` stays distinguishable from `|`.
-fn shell_segments_with_operators(command: &str) -> Vec<(&str, &str)> {
-    const DELIMS: &[char] = &['&', ';', '|', '(', ')', '\n'];
-    let mut segments: Vec<(&str, &str)> = Vec::new();
-    let mut seg_start = 0usize;
-    let mut op = "";
-    let mut rest = command.char_indices().peekable();
-    while let Some((i, c)) = rest.next() {
-        if !DELIMS.contains(&c) {
-            continue;
-        }
-        segments.push((op, &command[seg_start..i]));
-        let op_begin = i;
-        while let Some(&(_, c)) = rest.peek() {
-            if DELIMS.contains(&c) {
-                rest.next();
-            } else {
-                break;
-            }
-        }
-        let end = rest.peek().map(|(j, _)| *j).unwrap_or(command.len());
-        op = &command[op_begin..end];
-        seg_start = end;
-    }
-    segments.push((op, &command[seg_start..]));
-    segments
-}
-
-/// Does the operator run following a runner segment mask the runner's exit
-/// code? `| true` swallows a pipeline's status, and `|| true` / `|| echo …`
-/// replace a failing status with a passing one. `&&` and `;` propagate the
-/// real exit status, so they are not masks. `following` holds the segments
-/// after the runner; only the immediately-following segment's operator and
-/// first word decide.
-fn segment_exit_is_masked(following: &[(&str, &str)]) -> bool {
-    let Some((op, segment)) = following.first() else {
+/// Does the runner segment's exit status determine the command's final
+/// status? A preceding `||` can skip the runner outright (`true || cargo
+/// test` exits 0 without running the test), and every operator after the
+/// runner must be `&&` — the only connector under which overall success
+/// implies the runner succeeded. `;` hands the final status to whatever runs
+/// last (`cargo test; true`), `|` to the last pipeline stage (`cargo test |
+/// true`), and `||` to the recovery command (`cargo test || echo done`).
+fn runner_status_is_authoritative(segments: &[(String, String)], runner_idx: usize) -> bool {
+    // The connector reaching the runner (stored on the runner's own entry)
+    // plus any earlier connector: a `||` anywhere before the runner can skip
+    // it entirely (`true || cargo test` exits 0 without running anything).
+    if segments[..=runner_idx]
+        .iter()
+        .any(|(op, _)| op.contains("||"))
+    {
         return false;
-    };
-    match *op {
-        // Any pipe replaces the runner's own exit status with the last
-        // stage's — `cargo test | true` always "passes".
-        "|" => true,
-        "||" => matches!(first_shell_word(segment), Some("true") | Some("echo")),
-        _ => false,
     }
+    segments[runner_idx + 1..]
+        .iter()
+        .all(|(op, _)| op.trim() == "&&")
+}
+
+/// Script-interpreter fallback (`python3 -c 'assert …'`, `node test_x.js`,
+/// `./test_x.py`) with the same authority requirement: every connector must
+/// be `&&`, so overall success implies every segment — including the test
+/// script — actually ran and passed. A masked or skipped assertion is not
+/// evidence (review finding: the fallback sat outside the masking check).
+fn script_runner_status_is_authoritative(segments: &[(String, String)], command: &str) -> bool {
+    let all_authoritative = segments
+        .iter()
+        .all(|(op, _)| op.is_empty() || op.trim() == "&&");
+    all_authoritative && shell_command_runs_test_script(command)
+}
+
+/// Split a shell command into segments at top-level connectors (`&&`, `||`,
+/// `;`, `|`, background `&`, newlines), tracking single/double quotes so
+/// connectors inside quoted code (`python3 -c "assert add(2, 2) == 4"; true`)
+/// don't shred the analysis. Returns (operator_before, segment) pairs; the
+/// first segment's operator is empty. Parens and subshells are left in the
+/// segment text — only the status-connecting operators matter here.
+fn shell_segments_with_operators(command: &str) -> Vec<(String, String)> {
+    let mut segments: Vec<(String, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut pending_op = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = command.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+                cur.push(c);
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                cur.push(c);
+            }
+            '\\' if in_double || (!in_single && !in_double) => {
+                cur.push(c);
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            '&' if !in_single && !in_double => {
+                if chars.peek() == Some(&'&') {
+                    chars.next();
+                    segments.push((std::mem::take(&mut pending_op), std::mem::take(&mut cur)));
+                    pending_op = "&&".to_string();
+                } else {
+                    // Background: the runner detaches; final status belongs to
+                    // whatever follows — same authority stance as `;`.
+                    segments.push((std::mem::take(&mut pending_op), std::mem::take(&mut cur)));
+                    pending_op = ";".to_string();
+                }
+            }
+            '|' if !in_single && !in_double => {
+                let op = if chars.peek() == Some(&'|') {
+                    chars.next();
+                    "||"
+                } else {
+                    "|"
+                };
+                segments.push((std::mem::take(&mut pending_op), std::mem::take(&mut cur)));
+                pending_op = op.to_string();
+            }
+            ';' | '\n' if !in_single && !in_double => {
+                segments.push((std::mem::take(&mut pending_op), std::mem::take(&mut cur)));
+                pending_op = ";".to_string();
+            }
+            _ => cur.push(c),
+        }
+    }
+    segments.push((pending_op, cur));
+    segments
 }
 
 /// First shell word of a pipeline segment, skipping leading `sudo`, `env`,
