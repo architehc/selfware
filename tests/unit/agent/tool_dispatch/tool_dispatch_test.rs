@@ -85,6 +85,44 @@ fn test_shell_verification_requires_runner_as_first_word() {
 }
 
 #[test]
+fn test_shell_verification_rejects_info_only_invocations() {
+    // External review finding: `pytest --version` runs no tests but earned
+    // verification credit via the runner prefix. Info-flag-only invocations
+    // are not evidence.
+    assert!(!shell_command_is_verification("pytest --version"));
+    assert!(!shell_command_is_verification("pytest --help"));
+    assert!(!shell_command_is_verification("go test -h"));
+    assert!(!shell_command_is_verification("cargo test --version"));
+    assert!(!shell_command_is_verification("npm test -- --version"));
+    // Real runs with actual targets/flags still count.
+    assert!(shell_command_is_verification("pytest --version -x tests/"));
+    assert!(shell_command_is_verification("pytest -q"));
+    assert!(shell_command_is_verification("go test ./..."));
+}
+
+#[test]
+fn test_shell_verification_rejects_echoed_script_text() {
+    // External review finding: `echo python3 -c 'assert …'` PRINTS a script
+    // invocation — the whole-command scan saw interpreter+assert text and
+    // credited it. Detection is now scoped per segment with the interpreter
+    // in command position.
+    assert!(!shell_command_is_verification(
+        "echo python3 -c 'assert True'"
+    ));
+    assert!(!shell_command_is_verification(
+        "echo 'python3 -c \"assert add(2,2)==4\"'"
+    ));
+    assert!(!shell_command_is_verification("printf python3 test_x.py"));
+    // Real script executions still count.
+    assert!(shell_command_is_verification("python3 -c 'assert True'"));
+    assert!(shell_command_is_verification("python3 test_calc.py"));
+    assert!(shell_command_is_verification("./test_api.py"));
+    assert!(shell_command_is_verification(
+        "python3 -c \"assert add(2, 2) == 4\""
+    ));
+}
+
+#[test]
 fn test_shell_verification_rejects_exit_code_masks() {
     // P0 regression: a pipeline that masks the runner's exit code must not be
     // credited as verification — `cargo test | true` and `pytest || echo done`

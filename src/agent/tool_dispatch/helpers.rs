@@ -893,9 +893,14 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     // EXECUTE — this gate only decides what the ledger may trust.
     let segments = shell_segments_with_operators(&normalized);
     segments.iter().enumerate().any(|(i, (_op, segment))| {
-        segment_starts_with_verification_runner(segment, &verification_prefixes)
-            && runner_status_is_authoritative(&segments, i)
-    }) || script_runner_status_is_authoritative(&segments, &normalized)
+        match segment_verification_prefix(segment, &verification_prefixes) {
+            Some(prefix) => {
+                !segment_is_info_only_invocation(segment, prefix)
+                    && runner_status_is_authoritative(&segments, i)
+            }
+            None => false,
+        }
+    }) || script_runner_status_is_authoritative(&segments)
 }
 
 /// Does the runner segment's exit status determine the command's final
@@ -925,11 +930,37 @@ fn runner_status_is_authoritative(segments: &[(String, String)], runner_idx: usi
 /// be `&&`, so overall success implies every segment — including the test
 /// script — actually ran and passed. A masked or skipped assertion is not
 /// evidence (review finding: the fallback sat outside the masking check).
-fn script_runner_status_is_authoritative(segments: &[(String, String)], command: &str) -> bool {
+/// Detection is scoped per segment with the interpreter in COMMAND position:
+/// scanning the whole command credited prose like `echo python3 -c 'assert
+/// …'` — the echo prints the text, nothing executes (external review
+/// finding).
+fn script_runner_status_is_authoritative(segments: &[(String, String)]) -> bool {
     let all_authoritative = segments
         .iter()
         .all(|(op, _)| op.is_empty() || op.trim() == "&&");
-    all_authoritative && shell_command_runs_test_script(command)
+    all_authoritative
+        && segments
+            .iter()
+            .any(|(_, segment)| segment_runs_test_script(segment))
+}
+
+/// Does this single segment execute a test script, with the interpreter (or
+/// a direct `./test_x.py`-style path) as its first shell word?
+fn segment_runs_test_script(segment: &str) -> bool {
+    let Some(word) = first_shell_word(segment) else {
+        return false;
+    };
+    let basename = word.rsplit('/').next().unwrap_or(word);
+    let is_interpreter = basename.starts_with("python")
+        || basename.starts_with("pypy")
+        || matches!(
+            basename,
+            "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php" | "bash" | "sh"
+        );
+    if is_interpreter {
+        return shell_command_runs_test_script(segment);
+    }
+    (word.starts_with("./") || word.starts_with('/')) && Agent::gate_path_is_test(word)
 }
 
 /// Split a shell command into segments at top-level connectors (`&&`, `||`,
@@ -1019,24 +1050,58 @@ pub(crate) fn first_shell_word(segment: &str) -> Option<&str> {
 }
 
 /// Does this pipeline segment invoke a recognized verification runner as its
-/// first shell word? The runner set is derived from `verification_prefixes`
-/// (first token of each prefix); the existing boundary matching then decides
-/// whether the full prefix (e.g. `cargo test`, not `cargo add`) is present.
-/// Segments that merely PRINT a runner command (`echo`, `printf`, `true`,
-/// `exit`) never count.
-fn segment_starts_with_verification_runner(segment: &str, prefixes: &[&str]) -> bool {
-    let Some(word) = first_shell_word(segment) else {
-        return false;
-    };
+/// first shell word? Returns the matched prefix. The runner set is derived
+/// from `verification_prefixes` (first token of each prefix); the existing
+/// boundary matching then decides whether the full prefix (e.g. `cargo
+/// test`, not `cargo add`) is present. Segments that merely PRINT a runner
+/// command (`echo`, `printf`, `true`, `exit`) never count.
+fn segment_verification_prefix<'p>(segment: &str, prefixes: &[&'p str]) -> Option<&'p str> {
+    let word = first_shell_word(segment)?;
     let basename = word.rsplit('/').next().unwrap_or(word);
     if matches!(basename, "echo" | "printf" | "true" | "exit") {
-        return false;
+        return None;
     }
-    prefixes.iter().any(|prefix| {
+    prefixes.iter().copied().find(|prefix| {
         let runner = prefix.split_whitespace().next().unwrap_or(prefix);
         let runner_basename = runner.rsplit('/').next().unwrap_or(runner);
         basename == runner_basename && command_contains_at_boundary(segment, prefix)
     })
+}
+
+/// Info-only runner invocations run no tests: `pytest --version`,
+/// `go test -h`, `cargo test --help` (external review finding —
+/// `pytest --version` earned verification credit). Everything after the
+/// matched runner prefix must be info flags for this to apply; a lone `--`
+/// separator is ignored (`npm test -- --version`).
+fn segment_is_info_only_invocation(segment: &str, prefix: &str) -> bool {
+    const INFO_FLAGS: &[&str] = &[
+        "--version",
+        "-V",
+        "--help",
+        "-h",
+        "version",
+        "help",
+        "--collect-only",
+        "--list",
+        "--markers",
+        "--fixtures",
+    ];
+    let Some(at) = segment.find(prefix) else {
+        return false;
+    };
+    let rest = &segment[at + prefix.len()..];
+    let mut saw_info_flag = false;
+    for tok in rest.split_whitespace() {
+        if tok == "--" {
+            continue;
+        }
+        if INFO_FLAGS.contains(&tok) {
+            saw_info_flag = true;
+        } else {
+            return false;
+        }
+    }
+    saw_info_flag
 }
 
 /// True when the command's FIRST shell word (after optional `sudo` / `env` /
