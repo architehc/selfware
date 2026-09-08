@@ -302,6 +302,67 @@ fn cli_trailing_max_budget_flags_after_run() {
     assert_eq!(cli.max_cost_usd, Some(0.5));
 }
 
+// ── apply_cli_limit_overrides tests ──
+// Regression: the CLI used to write clap's `None` over the loaded config, so
+// budgets set only in selfware.toml never applied (a TOML-only
+// `max_wall_secs = 1` ran until externally killed).
+
+#[test]
+fn cli_limit_overrides_toml_budget_survives_without_flags() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "run", "x"]).unwrap();
+    let mut config = Config::default();
+    config.agent.max_budget_tokens = Some(50_000);
+    config.agent.max_wall_secs = Some(120);
+    config.agent.max_cost_usd = Some(0.5);
+
+    apply_cli_limit_overrides(&cli, &mut config);
+
+    assert_eq!(config.agent.max_budget_tokens, Some(50_000));
+    assert_eq!(config.agent.max_wall_secs, Some(120));
+    assert_eq!(config.agent.max_cost_usd, Some(0.5));
+}
+
+#[test]
+fn cli_limit_overrides_flags_beat_toml() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "run",
+        "x",
+        "--max-budget-tokens",
+        "1000",
+        "--max-wall-secs",
+        "1",
+        "--max-cost-usd",
+        "0.25",
+    ])
+    .unwrap();
+    let mut config = Config::default();
+    config.agent.max_budget_tokens = Some(50_000);
+    config.agent.max_wall_secs = Some(120);
+    config.agent.max_cost_usd = Some(0.5);
+
+    apply_cli_limit_overrides(&cli, &mut config);
+
+    assert_eq!(config.agent.max_budget_tokens, Some(1000));
+    assert_eq!(config.agent.max_wall_secs, Some(1));
+    assert_eq!(config.agent.max_cost_usd, Some(0.25));
+}
+
+#[test]
+fn cli_limit_overrides_unset_everywhere_stays_none() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "run", "x"]).unwrap();
+    let mut config = Config::default();
+
+    apply_cli_limit_overrides(&cli, &mut config);
+
+    assert_eq!(config.agent.max_budget_tokens, None);
+    assert_eq!(config.agent.max_wall_secs, None);
+    assert_eq!(config.agent.max_cost_usd, None);
+}
+
 #[test]
 fn cli_hidden_dev_commands_still_parse() {
     // Hidden from --help but still functional.

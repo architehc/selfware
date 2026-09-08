@@ -9,6 +9,10 @@ use super::types::default_true;
 pub struct SafetyConfig {
     #[serde(default = "default_allowed_paths")]
     pub allowed_paths: Vec<String>,
+    /// Denylist semantics: an explicit `denied_paths` key in a config file can
+    /// only ADD restrictions — `Config::load` unions it with
+    /// [`default_denied_paths`] (see `union_with_default_denied_paths`), so the
+    /// built-in credential/.git protections cannot be removed by config.
     #[serde(default = "default_denied_paths")]
     pub denied_paths: Vec<String>,
     #[serde(default = "default_protected_branches")]
@@ -78,9 +82,42 @@ pub fn default_denied_paths() -> Vec<String> {
         "**/.git/config".to_string(),
     ]
 }
+
+/// Union an explicit (config-file) `denied_paths` list with the built-in
+/// defaults: denylist semantics — explicit entries can only ADD restrictions,
+/// never remove the safety defaults. Without this, an explicit key REPLACES
+/// the default list (serde field semantics), so a stale generated config with
+/// the old 3-entry list (`**/.env`, `**/secrets/**`, `**/.ssh/**`) silently
+/// re-exposed `.env.production`, bare `secrets/`, `db.env` and `.git/config`
+/// (red-team review finding). Defaults come first so their relative order —
+/// and the doc comments grouping them — stay stable; explicit entries keep
+/// their own order after, de-duplicated.
+pub fn union_with_default_denied_paths(explicit: Vec<String>) -> Vec<String> {
+    let mut merged = default_denied_paths();
+    for pattern in explicit {
+        if !merged.contains(&pattern) {
+            merged.push(pattern);
+        }
+    }
+    merged
+}
+
+/// The default `denied_paths` rendered as a TOML array literal, for generated
+/// configs (unpack / auto-config). Emitting the full current list keeps the
+/// file on disk in sync with the effective policy instead of freezing a stale
+/// subset into every generated config.
+pub fn default_denied_paths_toml() -> String {
+    let entries: Vec<String> = default_denied_paths()
+        .iter()
+        .map(|p| format!("\"{}\"", p))
+        .collect();
+    format!("[{}]", entries.join(", "))
+}
+
 pub fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string()]
 }
+
 pub fn default_require_confirmation() -> Vec<String> {
     vec![
         "git_push".to_string(),

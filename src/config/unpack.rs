@@ -19,7 +19,7 @@ use llmfit_core::{
 };
 use tracing::warn;
 
-use crate::config::{auto_config::AutoConfigurator, Config};
+use crate::config::{auto_config::AutoConfigurator, default_denied_paths_toml, Config};
 
 /// Information about a discovered local model endpoint.
 #[derive(Debug, Clone)]
@@ -707,7 +707,7 @@ temperature = {}
 
 [safety]
 allowed_paths = ["./**", "/tmp/**"]
-denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+denied_paths = {}
 protected_branches = ["main"]
 
 [agent]
@@ -722,6 +722,7 @@ step_timeout_secs = {}
         config.max_tokens,
         config.context_length,
         config.temperature,
+        default_denied_paths_toml(),
         config.agent.native_function_calling,
         config.agent.streaming,
         config.agent.token_budget,

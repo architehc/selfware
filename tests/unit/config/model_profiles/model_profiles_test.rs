@@ -79,6 +79,55 @@ fn match_profile_returns_none_for_unknown_model() {
 }
 
 #[test]
+fn pattern_matches_provider_prefixed_id_via_last_segment() {
+    // OpenRouter-style `vendor/model` ids: the anchored profile glob must
+    // match the model name after the namespace prefix.
+    assert!(pattern_matches_model("qwen3.6-*", "qwen/qwen3.6-27b"));
+    // Multiple prefixes still resolve to the final segment.
+    assert!(pattern_matches_model(
+        "qwen3.6-*",
+        "openrouter/qwen/qwen3.6-27b"
+    ));
+    // The full-id attempt keeps working for patterns that already span it.
+    assert!(pattern_matches_model("*glm-5.2*", "z-ai/glm-5.2"));
+    // A prefix alone must not conjure a match: the tail is not qwen3.6.
+    assert!(!pattern_matches_model("qwen3.6-*", "qwen/qwen3.5-27b"));
+    // Trailing slash leaves an empty tail — no match beyond the full id.
+    assert!(!pattern_matches_model("qwen3.6-*", "models/qwen3.6-27b/"));
+}
+
+#[test]
+fn pattern_matches_path_qualified_local_id_via_last_segment() {
+    // Local sglang/vLLM ids are serving paths; a sensible glob on the
+    // directory basename must match.
+    assert!(pattern_matches_model(
+        "qwen38-*",
+        "/home/rig/models/qwen38-unc-kt"
+    ));
+    assert!(pattern_matches_model(
+        "qwen3.6-*",
+        "/home/rig/models/qwen3.6-27b"
+    ));
+}
+
+#[test]
+fn match_profile_picks_qwen36_for_provider_prefixed_and_path_ids() {
+    assert_eq!(
+        match_profile("qwen/qwen3.6-27b").map(|p| p.name),
+        Some("qwen3.6")
+    );
+    assert_eq!(
+        match_profile("/home/rig/models/qwen3.6-27b").map(|p| p.name),
+        Some("qwen3.6")
+    );
+    // Case-insensitivity applies to the tail segment too.
+    assert_eq!(
+        match_profile("Qwen/Qwen3.6-27B").map(|p| p.name),
+        Some("qwen3.6")
+    );
+}
+
+#[test]
 fn qwen36_profile_carries_required_extra_body_keys() {
     let p = match_profile("qwen3.6-27b").expect("should match");
     let obj = p.extra_body.as_object().expect("object");

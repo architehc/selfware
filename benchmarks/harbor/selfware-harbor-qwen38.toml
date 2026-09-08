@@ -19,7 +19,7 @@ reasoning_effort = "medium"
 [safety]
 # Task containers work in /app; the adapter cds there before launch.
 allowed_paths = ["./**"]
-denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+denied_paths = ["**/.env", "**/.env.local", "**/.env.*", "**/*.env", "**/.ssh", "**/.ssh/**", "**/secrets", "**/secrets/**", "**/.git/hooks/**", "**/.git/config"]
 
 [agent]
 # Terminal-Bench tasks are long-horizon (agent timeout 3600s): generous

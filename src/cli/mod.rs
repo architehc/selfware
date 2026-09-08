@@ -508,6 +508,27 @@ fn should_print_garden_banner(quiet: bool, output_format: HeadlessOutputFormat) 
     )
 }
 
+/// Merge the headless limit flags onto the loaded config.
+///
+/// A flag only wins when it was actually passed: clap leaves the `Option` at
+/// `None` when the flag is absent, and writing that `None` over the config
+/// would silently erase budgets set in `selfware.toml` (a TOML-only
+/// `max_wall_secs = 60` never applied until this guard was added).
+fn apply_cli_limit_overrides(cli: &Cli, config: &mut Config) {
+    if let Some(max_turns) = cli.max_turns {
+        config.agent.max_iterations = max_turns;
+    }
+    if let Some(max_budget_tokens) = cli.max_budget_tokens {
+        config.agent.max_budget_tokens = Some(max_budget_tokens);
+    }
+    if let Some(max_wall_secs) = cli.max_wall_secs {
+        config.agent.max_wall_secs = Some(max_wall_secs);
+    }
+    if let Some(max_cost_usd) = cli.max_cost_usd {
+        config.agent.max_cost_usd = Some(max_cost_usd);
+    }
+}
+
 /// Why the interactive TUI cannot launch, or `None` when it can.
 ///
 /// The default no-subcommand launch opens the TUI dashboard, which needs a
@@ -649,12 +670,7 @@ pub async fn run() -> Result<()> {
     }
 
     // ── Wire headless limit flags into config ──
-    if let Some(max_turns) = cli.max_turns {
-        config.agent.max_iterations = max_turns;
-    }
-    config.agent.max_budget_tokens = cli.max_budget_tokens;
-    config.agent.max_wall_secs = cli.max_wall_secs;
-    config.agent.max_cost_usd = cli.max_cost_usd;
+    apply_cli_limit_overrides(&cli, &mut config);
 
     // ── Validate config and exit if requested ──
     if cli.validate_config {
@@ -4010,7 +4026,7 @@ temperature = {}
 
 [safety]
 allowed_paths = ["./**", "/tmp/**"]
-denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+denied_paths = {}
 protected_branches = ["main"]
 
 [agent]
@@ -4031,6 +4047,7 @@ max_recovery_attempts = 3
                     detected_config.max_tokens,
                     detected_config.context_length,
                     detected_config.temperature,
+                    crate::config::default_denied_paths_toml(),
                     detected_config.agent.native_function_calling,
                     detected_config.agent.streaming,
                     detected_config.agent.token_budget,

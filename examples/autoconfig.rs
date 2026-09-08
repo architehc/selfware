@@ -253,7 +253,10 @@ fn generate_toml(info: &EndpointInfo) -> String {
 
     toml.push_str("[safety]\n");
     toml.push_str("allowed_paths = [\"./**\", \"/tmp/**\"]\n");
-    toml.push_str("denied_paths = [\"**/.env\", \"**/secrets/**\", \"**/.ssh/**\"]\n");
+    toml.push_str(&format!(
+        "denied_paths = {}\n",
+        selfware::config::default_denied_paths_toml()
+    ));
     toml.push_str("protected_branches = [\"main\"]\n\n");
 
     toml.push_str("[agent]\n");

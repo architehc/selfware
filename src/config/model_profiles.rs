@@ -32,7 +32,11 @@ pub struct ModelDefaultsProfile {
     /// Stable identifier for diagnostics (e.g. `"qwen3.6"`).
     pub name: &'static str,
     /// Glob pattern matched against `config.model` (case-insensitive).
-    /// Supports `*` and `?` wildcards.
+    /// Supports `*` and `?` wildcards.  Matching tries the full model id
+    /// AND its last `/`-separated segment, so an anchored pattern like
+    /// `qwen3.6-*` also matches provider-prefixed (`qwen/qwen3.6-27b`) and
+    /// path-qualified local (`/home/rig/models/qwen3.6-27b`) ids — see
+    /// [`pattern_matches_model`].
     pub pattern: &'static str,
     pub native_function_calling: Option<bool>,
     pub streaming: Option<bool>,
@@ -205,11 +209,33 @@ fn glob_matches_inner(pat: &[u8], s: &[u8]) -> bool {
     i == pat.len()
 }
 
+/// Match a model id against a profile `pattern`, trying the full id AND its
+/// last `/`-separated segment.
+///
+/// Model ids arrive in several shapes:
+/// - bare:                 `qwen3.6-27b`
+/// - provider-prefixed:    `qwen/qwen3.6-27b` (OpenRouter-style `vendor/model`)
+/// - path-qualified local: `/home/rig/models/qwen3.6-27b` (sglang/vLLM serve dir)
+///
+/// Anchored profile globs describe the *model name*, not the routing prefix
+/// or the serving directory, so after trying the full id we retry against
+/// the substring after the final `/`.  Deterministic: same glob engine,
+/// fixed two-candidate list, first success wins.  No regex is introduced.
+pub fn pattern_matches_model(pattern: &str, model: &str) -> bool {
+    if glob_matches(pattern, model) {
+        return true;
+    }
+    match model.rsplit_once('/') {
+        Some((_, tail)) if !tail.is_empty() => glob_matches(pattern, tail),
+        _ => false,
+    }
+}
+
 /// Find the first built-in profile whose pattern matches `model`.
 pub fn match_profile(model: &str) -> Option<ModelDefaultsProfile> {
     builtin_profiles()
         .into_iter()
-        .find(|p| glob_matches(p.pattern, model))
+        .find(|p| pattern_matches_model(p.pattern, model))
 }
 
 /// Apply `profile`'s defaults to `config` for any field the user did not
