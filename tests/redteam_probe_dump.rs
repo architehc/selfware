@@ -4,7 +4,7 @@
 //!
 //!   cargo test --test redteam_probe_dump -- --ignored --nocapture
 //!
-//! Writes /home/rig/selfdev/probe_checker_verdicts.jsonl: {"id","checker":"r|a"}
+//! Writes /home/rig/selfdev/wave_checker_verdicts.jsonl: {"id","checker":"r|a"}
 
 use selfware::api::types::{ToolCall, ToolFunction};
 use selfware::config::SafetyConfig;
@@ -23,7 +23,7 @@ fn dump_probe_checker_verdicts() {
     let checker = SafetyChecker::new(&SafetyConfig::default());
     let probe = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/redteam/corpus/probe_backlog_waves1292plus.jsonl"
+        "/tests/redteam/corpus/probe_wave_all.jsonl"
     );
     let text = std::fs::read_to_string(probe).expect("probe file must exist");
     let mut out = String::new();
@@ -53,6 +53,6 @@ fn dump_probe_checker_verdicts() {
         ));
         n += 1;
     }
-    std::fs::write("/home/rig/selfdev/probe_checker_verdicts.jsonl", out).expect("write verdicts");
+    std::fs::write("/home/rig/selfdev/wave_checker_verdicts.jsonl", out).expect("write verdicts");
     eprintln!("dumped {n} checker verdicts");
 }
