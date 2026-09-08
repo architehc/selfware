@@ -701,6 +701,49 @@ impl Agent {
         )
     }
 
+    /// Verifier-region paths whose working-tree changes are NOT purely
+    /// additive test content (external review finding 12).
+    ///
+    /// A test path counts as additive when `git diff HEAD -- <path>` carries
+    /// no removed lines: an untracked new test file yields an empty diff, and
+    /// an existing test file passes only when every hunk inserts lines (a new
+    /// test function/case added alongside a source fix). Any `-` content
+    /// line — removed or rewritten assertions, deleted fixtures — keeps the
+    /// strict rejection, as does any change to CI/build-runner files, which
+    /// define HOW verification runs and are never additive-exempt. When the
+    /// diff cannot be obtained at all, the path cannot be proven additive and
+    /// is conservatively treated as tainted.
+    async fn non_additive_verifier_changes(verifier_paths: &[&String]) -> Vec<String> {
+        let root = super::current_project_root();
+        let mut tainted = Vec::new();
+        for path in verifier_paths {
+            if !Self::gate_path_is_test(path) {
+                tainted.push((*path).clone());
+                continue;
+            }
+            // Async process spawn — see diff_paths_for_completion_gate.
+            let output = tokio::process::Command::new("git")
+                .args(["diff", "HEAD", "--", path])
+                .current_dir(&root)
+                .output()
+                .await;
+            let non_additive = match output {
+                Ok(out) if out.status.success() => {
+                    let diff = String::from_utf8_lossy(&out.stdout);
+                    diff.lines().any(|line| {
+                        (line.starts_with('-') && !line.starts_with("---"))
+                            || line.starts_with("Binary files")
+                    })
+                }
+                _ => true,
+            };
+            if non_additive {
+                tainted.push((*path).clone());
+            }
+        }
+        tainted
+    }
+
     fn gate_path_is_source(path: &str) -> bool {
         let lower = path.trim_matches('"').to_ascii_lowercase();
         let Some(ext) = std::path::Path::new(&lower)
@@ -973,10 +1016,14 @@ impl Agent {
             // Fall back to paths from commits created during this run before
             // declaring the diff empty — otherwise committed work is refused
             // forever as EmptyDiff.
+            let mut from_committed_fallback = false;
             let paths = if paths.is_empty() {
-                self.committed_paths_for_completion_gate()
+                let committed = self
+                    .committed_paths_for_completion_gate()
                     .await
-                    .unwrap_or(paths)
+                    .unwrap_or(paths);
+                from_committed_fallback = !committed.is_empty();
+                committed
             } else {
                 paths
             };
@@ -1009,17 +1056,35 @@ impl Agent {
             // tests/CI — makes the run's verification self-awarded and
             // meaningless. Unless the task is about tests, modified
             // verifier-region paths invalidate completion until restored.
+            //
+            // ADDITIVE test changes are exempt (external review finding 12):
+            // a regression test added next to a source fix — a new test file,
+            // or hunks that only insert lines into an existing test file —
+            // does not taint verification, so it is allowed for any task.
+            // Removed/rewritten test lines, deleted fixtures, and CI/build
+            // edits keep the strict rejection (AGENTS.md rule 2).
             let verifier_paths: Vec<&String> = paths
                 .iter()
                 .filter(|path| Self::gate_path_is_verifier_region(path))
                 .collect();
             if !all_test_files && !verifier_paths.is_empty() && !task_is_test_writing_task(task) {
-                return Some(format!(
-                    "VerifierTainted: the diff modifies test/CI/build files ({:?}). \
-                     Verification run against edited tests cannot be trusted. \
-                     Restore them (`git checkout -- <path>`) and verify against the original suite before completing.",
-                    verifier_paths
-                ));
+                let tainted: Vec<String> = if from_committed_fallback {
+                    // Once the work is committed, `git diff HEAD` is empty, so
+                    // no diff evidence remains to prove a test change additive.
+                    // Conservative encoding: keep the strict rejection for
+                    // every verifier-region path in the committed-work case.
+                    verifier_paths.iter().map(|path| (*path).clone()).collect()
+                } else {
+                    Self::non_additive_verifier_changes(&verifier_paths).await
+                };
+                if !tainted.is_empty() {
+                    return Some(format!(
+                        "VerifierTainted: the diff modifies or removes existing test/CI/build content ({tainted:?}). \
+                         Verification run against edited tests cannot be trusted. \
+                         Restore them (`git checkout -- <path>`) and verify against the original suite before completing. \
+                         Adding NEW tests next to a source fix is allowed and does not trip this gate."
+                    ));
+                }
             }
 
             // The supported-source list exists for SWE-bench repair tasks. When
@@ -1295,13 +1360,20 @@ impl Agent {
         // were written at all. This catches the "context insufficient" early-quit
         // pattern where the model gives a text-only answer without doing any work.
         if !is_read_only && self.completion_requires_verification() {
-            let has_any_file_write = self
-                .messages
-                .iter()
-                .filter(|m| m.role == "assistant")
-                .filter_map(|m| m.tool_calls.as_ref())
-                .flatten()
-                .any(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"));
+            // The durable ledger is the primary evidence: compression rewrites
+            // self.messages, so a message-only scan rejects long tasks whose
+            // edits scrolled out of the compressed history (review finding #4).
+            // The message scan stays as a fallback and must count every
+            // file-writing tool — patch_apply, file_multi_edit and
+            // file_fim_edit are writes too, not just file_edit/file_write.
+            let has_any_file_write = self.has_written_any_file
+                || self
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "assistant")
+                    .filter_map(|m| m.tool_calls.as_ref())
+                    .flatten()
+                    .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name));
 
             if !has_any_file_write {
                 let task_desc = self
@@ -1369,17 +1441,27 @@ impl Agent {
             }
         }
 
-        // Leak check (deterministic, once per task): census-discovered
-        // sensitive identifiers must not appear in files changed this run —
-        // the sourcemap private-* failure class, caught with zero model calls.
+        // Leak check (deterministic, once per mutation snapshot):
+        // census-discovered sensitive identifiers must not appear in files
+        // changed this run — the sourcemap private-* failure class, caught
+        // with zero model calls. The latch is the mutation sequence the last
+        // scan covered, NOT a global once-per-task bool: re-completing at the
+        // same snapshot skips the rescan (so a model that justified a hit is
+        // not re-blocked and the gate cannot livelock), but any mutation
+        // after a scan — e.g. a rebuild that embeds a census identifier —
+        // advances the sequence and the new snapshot is scanned on the next
+        // completion attempt (review finding #13).
         if !is_read_only
-            && !self
-                .leak_check_done
+            && self
+                .leak_check_scanned_mutation_sequence
                 .load(std::sync::atomic::Ordering::Relaxed)
+                != self.mutation_sequence
             && !self.input_census_suspicious.is_empty()
         {
-            self.leak_check_done
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // Capture the sequence BEFORE the scan and store it after: a
+            // mutation landing mid-scan leaves the stored sequence stale, so
+            // the next evaluation rescans rather than trusting a partial read.
+            let scanned_sequence = self.mutation_sequence;
             let root = super::current_project_root();
             // Git-less task roots (benchmark containers) return no diff —
             // fall back to the conventional output dirs, where generated
@@ -1390,9 +1472,11 @@ impl Agent {
                 &self.input_census_suspicious,
                 &outputs,
             );
+            self.leak_check_scanned_mutation_sequence
+                .store(scanned_sequence, std::sync::atomic::Ordering::Relaxed);
             if !hits.is_empty() {
                 return Some(format!(
-                    "LEAK CHECK — completion blocked (fires once per task). Output artifacts \
+                    "LEAK CHECK — completion blocked (fires once per code snapshot). Output artifacts \
                      contain input-side sensitive identifiers:\n{}\n\
                      Remove each leak (or state precisely why the identifier is safe to \
                      publish), then complete.",
@@ -1592,11 +1676,12 @@ impl Agent {
             .map(|cp| {
                 cp.tool_calls
                     .iter()
-                    .filter(|tc| matches!(tc.tool_name.as_str(), "file_edit" | "file_write"))
-                    .filter_map(|tc| {
+                    .filter(|tc| super::tool_dispatch::tool_call_writes_file(&tc.tool_name))
+                    .flat_map(|tc| {
                         serde_json::from_str::<serde_json::Value>(&tc.arguments)
                             .ok()
-                            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                            .map(|args| written_paths(&tc.tool_name, &args))
+                            .unwrap_or_default()
                     })
                     .collect()
             })
@@ -1699,7 +1784,9 @@ impl Agent {
     /// Detect when the agent only edited test files without modifying source code.
     /// This catches a common failure pattern where models write tests instead of fixes.
     fn validate_workflow_edits(&self) -> Option<String> {
-        // Scan message history for successful file_edit/file_write tool results
+        // Scan message history for successful file-writing tool results
+        // (every file-writing tool counts — file_edit/file_write plus
+        // file_fim_edit, file_multi_edit and patch_apply).
         // This is more reliable than checkpoints since messages are always up-to-date
         let edited_files: Vec<String> = self
             .messages
@@ -1707,14 +1794,12 @@ impl Agent {
             .filter(|m| m.role == "assistant")
             .filter_map(|m| m.tool_calls.as_ref())
             .flatten()
-            .filter(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"))
-            .filter_map(|tc| {
+            .filter(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name))
+            .flat_map(|tc| {
                 serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                     .ok()
-                    .and_then(|v| {
-                        v.get("path")
-                            .and_then(|p| p.as_str().map(|s| s.to_string()))
-                    })
+                    .map(|args| written_paths(&tc.function.name, &args))
+                    .unwrap_or_default()
             })
             .collect();
 
@@ -2194,11 +2279,13 @@ fn evidence_is_valid(
         .skip(created_call_count.min(cp.tool_calls.len()))
         .any(|tc| {
             tc.success
-                && matches!(tc.tool_name.as_str(), "file_edit" | "file_write")
+                && super::tool_dispatch::tool_call_writes_file(&tc.tool_name)
                 && serde_json::from_str::<serde_json::Value>(&tc.arguments)
                     .ok()
-                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-                    .is_some_and(|path| !path.is_empty() && evidence.contains(&path))
+                    .map(|args| written_paths(&tc.tool_name, &args))
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|path| !path.is_empty() && evidence.contains(path))
         })
 }
 

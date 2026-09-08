@@ -187,6 +187,7 @@ fn reconstruct_result_from_disk(
         has_test_edit: false,
         syntax_check_passed: false,
         candidate_num: 0,
+        official_resolved: None,
     })
 }
 
@@ -260,6 +261,13 @@ struct PerRunResult {
     syntax_check_passed: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
     candidate_num: u32,
+    /// Official Docker eval outcome for THIS run's own patch, when the
+    /// per-candidate official evaluation ran.  Recorded for every candidate
+    /// (not just the promoted one) so reporting can separate first-sample,
+    /// frozen-selection, and oracle-best-of-k resolution.  `None` = not
+    /// officially evaluated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    official_resolved: Option<bool>,
 }
 
 /// Create a fresh manifest pre-populated with every trial in `Planned` state.
@@ -918,6 +926,7 @@ fn record_boot_failure(
         has_test_edit: false,
         syntax_check_passed: false,
         candidate_num: 0,
+        official_resolved: None,
     };
     write_json_atomic(&trial_dir.join("result.json"), &result)?;
     Ok(result)
@@ -984,6 +993,7 @@ fn run_one_candidate(
             has_test_edit: false,
             syntax_check_passed: false,
             candidate_num: candidate,
+            official_resolved: None,
         });
     }
 
@@ -1020,6 +1030,7 @@ fn run_one_candidate(
             has_test_edit: false,
             syntax_check_passed: false,
             candidate_num: candidate,
+            official_resolved: None,
         };
         write_json_atomic(&candidate_dir.join("result.json"), &result)?;
         return Ok(result);
@@ -1155,6 +1166,7 @@ fn run_one_candidate(
         has_test_edit,
         syntax_check_passed,
         candidate_num: candidate,
+        official_resolved: None,
     };
     write_json_atomic(&candidate_dir.join("result.json"), &result)?;
     eprintln!(
@@ -1171,7 +1183,8 @@ fn run_one_candidate(
 }
 
 /// Run one or more candidates for a single (quant, instance, trial).
-/// Returns `(selected_best, vec_of_all_candidate_results)`.
+/// Returns `(frozen_selection, vec_of_all_candidate_results)` — the first
+/// element is the pre-evaluation frozen selection that gets promoted.
 fn run_one(
     opts: &SwebenchProOpts,
     spec: &QuantSpec,
@@ -1227,6 +1240,7 @@ fn run_one(
             has_test_edit: false,
             syntax_check_passed: false,
             candidate_num: 0,
+            official_resolved: None,
         };
         return Ok((synthetic, vec![]));
     }
@@ -1267,20 +1281,25 @@ fn run_one(
             has_test_edit: false,
             syntax_check_passed: false,
             candidate_num: 0,
+            official_resolved: None,
         };
         write_json_atomic(&trial_dir.join("result.json"), &synthetic)?;
         return Ok((synthetic, candidate_results));
     }
 
-    // When official eval is enabled with multiple candidates, run the Docker
-    // evaluator against every candidate patch so selection is based on actual
-    // pass rates instead of proxy metrics.
+    // Freeze the deployable selection BEFORE any official evaluation: the
+    // promoted patch is chosen by a pre-declared proxy selector that never
+    // sees official labels, so pass@1 cannot be inflated by evaluating every
+    // candidate and promoting the winner.
+    let best = select_frozen_candidate(&candidate_results).clone();
+
+    // Official evaluation of every candidate produces oracle data for
+    // REPORTING ONLY.  Nothing below may influence which patch is promoted.
     let mut official_metrics: BTreeMap<u32, OfficialEvalMetrics> = BTreeMap::new();
     if opts.official_eval && opts.candidates > 1 {
-        for c in &candidate_results {
-            let eval_dir = trial_dir
-                .join(format!("candidate_{}", c.candidate_num))
-                .join("eval");
+        for c in candidate_results.iter_mut() {
+            let c_dir = trial_dir.join(format!("candidate_{}", c.candidate_num));
+            let eval_dir = c_dir.join("eval");
             match evaluate_single_pred(opts, &c.pred_path, inst, &eval_dir) {
                 Ok(m) => {
                     eprintln!(
@@ -1292,7 +1311,11 @@ fn run_one(
                         m.pass_to_pass_total,
                         m.overall_pass
                     );
+                    c.official_resolved = Some(m.overall_pass);
                     official_metrics.insert(c.candidate_num, m);
+                    // Persist the label so resume + aggregate see per-candidate
+                    // official outcomes, not just the promoted one.
+                    write_json_atomic(&c_dir.join("result.json"), c)?;
                 }
                 Err(e) => {
                     eprintln!(
@@ -1304,11 +1327,19 @@ fn run_one(
         }
     }
 
-    // Honest selection: prefer official metrics when available, else proxy metrics.
-    let best = select_best_candidate(&candidate_results, &official_metrics);
     let best_metrics = official_metrics.get(&best.candidate_num).cloned();
 
-    // Promote best candidate patch to trial-level pred.
+    // Oracle diagnostic: report which candidate WOULD have won if selection
+    // were allowed to peek at official labels.  Never promoted.
+    let oracle = select_oracle_candidate(&candidate_results, &official_metrics);
+    if oracle.candidate_num != best.candidate_num {
+        eprintln!(
+            "    note: oracle best-of-k would pick candidate {}; frozen selection stays candidate {}",
+            oracle.candidate_num, best.candidate_num
+        );
+    }
+
+    // Promote the frozen selection's patch to trial-level pred.
     std::fs::copy(&best.pred_path, &trial_pred)?;
 
     let synthetic = PerRunResult {
@@ -1328,13 +1359,14 @@ fn run_one(
         has_test_edit: best.has_test_edit,
         syntax_check_passed: best.syntax_check_passed,
         candidate_num: 0,
+        official_resolved: best_metrics.as_ref().map(|m| m.overall_pass),
     };
     write_json_atomic(&trial_dir.join("result.json"), &synthetic)?;
     if let Some(metrics) = best_metrics {
         merge_official_metrics_into_result(&trial_dir.join("result.json"), &metrics)?;
     }
     eprintln!(
-        "    selected candidate {} → {} ({} lines)",
+        "    promoted frozen candidate {} → {} ({} lines)",
         best.candidate_num,
         trial_pred
             .file_name()
@@ -1390,12 +1422,39 @@ fn cmp_official_metrics(a: &OfficialEvalMetrics, b: &OfficialEvalMetrics) -> std
         .then_with(|| a.overall_pass.cmp(&b.overall_pass))
 }
 
-/// Pick the best candidate.
+/// The pre-declared deployable selector: uses **only** information available
+/// before official evaluation and never inspects `OfficialEvalMetrics`, so
+/// changing hidden labels cannot change the selection.  Must stay criteria-
+/// compatible with `candidate::CandidatePool::select_frozen`.
 ///
-/// When at least one candidate has official-eval data and at least one
-/// fail-to-pass test was passed, use those real metrics.  Otherwise fall back
-/// to the existing proxy-metric ordering.
-fn select_best_candidate<'a>(
+/// Criteria (in order of priority):
+/// 1. Non-empty source diff + no test edits.
+/// 2. Smaller diff (fewer lines changed).
+/// 3. Passes cheap syntax checks.
+/// 4. Earliest candidate (deterministic tie-break).
+fn select_frozen_candidate(candidates: &[PerRunResult]) -> &PerRunResult {
+    candidates
+        .iter()
+        .max_by(|a, b| {
+            let a_good = a.has_source_edit && !a.has_test_edit;
+            let b_good = b.has_source_edit && !b.has_test_edit;
+            a_good
+                .cmp(&b_good)
+                .then_with(|| b.patch_lines.cmp(&a.patch_lines))
+                .then_with(|| a.syntax_check_passed.cmp(&b.syntax_check_passed))
+                .then_with(|| b.candidate_num.cmp(&a.candidate_num))
+        })
+        .unwrap()
+}
+
+/// Oracle best-of-k selector — **peeks at official metrics**.
+///
+/// Retained for diagnostics/reporting only (the old promotion behaviour,
+/// renamed honestly); the deployable selection comes from
+/// [`select_frozen_candidate`].  When at least one candidate has official-eval
+/// data and at least one fail-to-pass test was passed, ranking uses those real
+/// metrics.  Otherwise it falls back to the proxy-metric ordering.
+fn select_oracle_candidate<'a>(
     candidates: &'a [PerRunResult],
     metrics: &BTreeMap<u32, OfficialEvalMetrics>,
 ) -> &'a PerRunResult {
@@ -1840,11 +1899,20 @@ struct AggregateEntry {
     f2p_p2p_passed: bool,
     resolved: bool,
     official_resolution_rate: f64,
-    /// `pass@1` — did the honestly-selected best candidate resolve?
+    /// First-sample resolution — did the first generated sample resolve?
+    /// This is the k=1 baseline, reported separately from pass@1.
+    first_sample_resolved: bool,
+    /// `pass@1` — did the FROZEN (pre-evaluation) selection resolve?  The
+    /// selection never sees official labels, so this is the deployable
+    /// success rate.
     pass_at_1: bool,
     /// `pass@k` oracle — did any candidate resolve?  Labelled as upper bound
     /// in the report-level metadata.
     pass_at_k_oracle: bool,
+    /// Total candidates in the pool for this pair (selected + raw samples).
+    n_candidates: usize,
+    /// Total wall-clock seconds spent on all candidates for this pair.
+    candidates_wall_secs: f64,
     #[serde(skip_serializing_if = "String::is_empty")]
     eval_error: String,
 }
@@ -1856,7 +1924,10 @@ struct AggregateReport {
     attempted_patch_rate: f64,
     official_eval_completed: bool,
     official_resolution_rate: f64,
-    /// `pass@1` — single best candidate per instance (honest selection).
+    /// First-sample resolution rate — k=1 baseline (first generated sample).
+    first_sample_resolution_rate: f64,
+    /// `pass@1` — official resolution rate of the FROZEN pre-evaluation
+    /// selection per instance.  The selector never sees official labels.
     pass_at_1_rate: f64,
     /// `pass@k` oracle — best of k candidates.  **Upper bound**: may be
     /// proxy-based when official eval was not run on all candidates.
@@ -1898,6 +1969,7 @@ fn write_aggregate(
     }
 
     let mut entries = Vec::new();
+    let mut first_sample_resolved_count = 0usize;
     let mut pass_at_1_count = 0usize;
     let mut pass_at_k_oracle_count = 0usize;
     let mut pass_at_k_oracle_is_proxy = false;
@@ -1963,19 +2035,26 @@ fn write_aggregate(
             .iter()
             .map(|r| {
                 let patch = std::fs::read_to_string(&r.pred_path).unwrap_or_default();
-                let oe = match (official_eval, evaluated_run) {
-                    (Some(_), Some(evaluated))
-                        if evaluated.trial == r.trial
-                            && evaluated.candidate_num == r.candidate_num =>
-                    {
-                        Some(OfficialEvalResult {
-                            resolved: official.resolved,
-                        })
-                    }
-                    _ => None,
-                };
+                // Prefer the per-candidate label recorded at generation time;
+                // fall back to the trial-level official eval map (which only
+                // covers the promoted frozen selection) for older result files.
+                let oe = r
+                    .official_resolved
+                    .map(|resolved| OfficialEvalResult { resolved })
+                    .or(match (official_eval, evaluated_run) {
+                        (Some(_), Some(evaluated))
+                            if evaluated.trial == r.trial
+                                && evaluated.candidate_num == r.candidate_num =>
+                        {
+                            Some(OfficialEvalResult {
+                                resolved: official.resolved,
+                            })
+                        }
+                        _ => None,
+                    });
                 Candidate {
                     trial: r.trial,
+                    candidate_num: r.candidate_num,
                     patch,
                     patch_bytes: r.patch_bytes,
                     patch_lines: r.patch_lines,
@@ -1987,11 +2066,17 @@ fn write_aggregate(
                 }
             })
             .collect();
+        let n_candidates = candidates.len();
+        let candidates_wall_secs: f64 = group_runs.iter().map(|r| r.wall_secs).sum();
         let pool = CandidatePool::new(candidates);
+        let first_sample_resolved = pool.first_sample_resolved();
         let pass_at_1 = pool.pass_at_1();
         let pass_at_k_oracle = pool.pass_at_k_oracle();
         if pass_at_k_oracle && !pool.has_any_official_eval() {
             pass_at_k_oracle_is_proxy = true;
+        }
+        if first_sample_resolved {
+            first_sample_resolved_count += 1;
         }
         if pass_at_1 {
             pass_at_1_count += 1;
@@ -2018,8 +2103,11 @@ fn write_aggregate(
             f2p_p2p_passed: official.f2p_p2p_passed,
             resolved: official.resolved,
             official_resolution_rate: if official.resolved { 1.0 } else { 0.0 },
+            first_sample_resolved,
             pass_at_1,
             pass_at_k_oracle,
+            n_candidates,
+            candidates_wall_secs,
             eval_error: official.eval_error,
         });
     }
@@ -2056,6 +2144,7 @@ fn write_aggregate(
         attempted_patch_rate,
         official_eval_completed,
         official_resolution_rate,
+        first_sample_resolution_rate: first_sample_resolved_count as f64 / n_instances as f64,
         pass_at_1_rate: pass_at_1_count as f64 / n_instances as f64,
         pass_at_k_oracle_rate: pass_at_k_oracle_count as f64 / n_instances as f64,
         pass_at_k_oracle_is_proxy,

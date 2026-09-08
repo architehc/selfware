@@ -4134,6 +4134,16 @@ def main() -> int:
 
     failures = 0
     if args.workers > 1:
+        if args.workers > 12:
+            # Measured host limit (docs/model-playbook.md): >12 concurrent
+            # Docker sandboxes produced extreme I/O contention — 57/70
+            # RuntimeErrors. The model fleet can take far more streams than
+            # the Docker daemon can take containers; decouple the two.
+            logger.warning(
+                "--workers=%d exceeds the measured safe container ceiling (12); "
+                "expect Docker daemon contention — see docs/model-playbook.md",
+                args.workers,
+            )
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             future_to_instance = {
                 executor.submit(process_instance, instance, args, config_path, logger): instance

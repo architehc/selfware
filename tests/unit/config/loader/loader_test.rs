@@ -1261,7 +1261,16 @@ fn test_load_full_config_all_sections() {
 
     // Safety
     assert_eq!(config.safety.allowed_paths, vec!["/safe/**"]);
-    assert_eq!(config.safety.denied_paths, vec!["/danger/**"]);
+    // denied_paths is a denylist: the explicit entry is ADDED to the built-in
+    // defaults, it does not replace them.
+    assert!(config
+        .safety
+        .denied_paths
+        .contains(&"/danger/**".to_string()));
+    assert!(config
+        .safety
+        .denied_paths
+        .contains(&"**/.env.*".to_string()));
 
     // UI
     assert_eq!(config.ui.theme, "ocean");
@@ -1278,6 +1287,66 @@ fn test_load_full_config_all_sections() {
 
     // Default model profile synthesized
     assert!(config.models.contains_key("default"));
+}
+
+// =========================================================================
+// Config::load — denied_paths denylist union (red-team regression)
+// =========================================================================
+
+/// Regression: a config file carrying the STALE 3-entry `denied_paths` list
+/// (as emitted by old unpack / auto-config / harbor TOMLs) must not re-expose
+/// the built-in denied paths — explicit entries can only ADD restrictions.
+#[test]
+fn test_load_denied_paths_union_keeps_defaults() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "test"
+
+        [safety]
+        allowed_paths = ["./**"]
+        denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/vault/**"]
+        "#,
+        "denylist_union.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+
+    // Every built-in default survives the explicit (stale) list...
+    for default in crate::config::default_denied_paths() {
+        assert!(
+            config.safety.denied_paths.contains(&default),
+            "default denied_paths entry '{}' must survive an explicit key",
+            default
+        );
+    }
+    // ...and the custom entry is added on top.
+    assert!(config
+        .safety
+        .denied_paths
+        .contains(&"**/vault/**".to_string()));
+
+    // Behavior-level: the paths the stale 3-entry list re-exposed stay denied,
+    // and so does the explicitly added custom path.
+    let cwd = std::env::current_dir().unwrap();
+    let validator = crate::safety::path_validator::PathValidator::new(&config.safety, cwd);
+    for p in [
+        ".env.production",
+        "secrets",
+        "db.env",
+        ".git/config",
+        "vault/master.key",
+    ] {
+        let err = validator
+            .validate(p)
+            .expect_err(&format!("path '{}' must be denied", p));
+        assert!(
+            err.to_string().contains("denied pattern"),
+            "path '{}' must be denied by a denied_paths glob, got: {}",
+            p,
+            err
+        );
+    }
 }
 
 // =========================================================================
@@ -2272,6 +2341,51 @@ fn test_profile_matched_model_keeps_default_context_length() {
         config.context_length,
         default_context_length(),
         "profile-recognized models keep the built-in context default"
+    );
+}
+
+#[test]
+fn test_provider_prefixed_profile_match_skips_unknown_model_fallback() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "qwen/qwen3.6-27b"
+        "#,
+        "prefixed_matched_model.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert_eq!(
+        config.matched_profile.as_deref(),
+        Some("qwen3.6"),
+        "provider-prefixed id must match the qwen3.6 profile via its last segment"
+    );
+    assert_eq!(
+        config.context_length,
+        default_context_length(),
+        "a profile match must not trigger the 32k unknown-model fallback"
+    );
+}
+
+#[test]
+fn test_path_qualified_unknown_model_gets_fallback() {
+    let _guard = clear_env();
+    let (_dir, path) = write_temp_config(
+        r#"
+        endpoint = "http://localhost:8000/v1"
+        model = "/home/rig/models/qwen38-unc-kt"
+        "#,
+        "path_unknown_model.toml",
+    );
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    assert!(
+        config.matched_profile.is_none(),
+        "no built-in profile covers qwen38-unc-kt"
+    );
+    assert_eq!(
+        config.context_length,
+        crate::config::UNKNOWN_MODEL_CONTEXT_LENGTH,
+        "truly unknown path-qualified id gets the documented 32k fallback"
     );
 }
 

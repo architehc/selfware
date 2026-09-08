@@ -632,8 +632,13 @@ pub struct Agent {
     /// leak check against files changed this run.
     input_census_suspicious: Vec<String>,
     /// Completion-time leak-check latch (census suspicious identifiers vs
-    /// changed files). Fires at most once per task.
-    leak_check_done: std::sync::atomic::AtomicBool,
+    /// changed files): the mutation sequence the most recent scan covered.
+    /// `usize::MAX` = never scanned. Re-completing at the SAME sequence skips
+    /// the rescan (a model that justified a hit is not re-blocked); any
+    /// mutation after a scan produces a new snapshot that is scanned on the
+    /// next completion attempt (review finding #13 — a global once-per-task
+    /// bool let a later rebuild leak a census identifier unchecked).
+    leak_check_scanned_mutation_sequence: std::sync::atomic::AtomicUsize,
     /// Consecutive dependency-install failures since the last successful
     /// install (dependency firewall). Interleaved successful non-install
     /// commands deliberately do NOT reset it — the spiral pattern includes
@@ -1348,7 +1353,7 @@ To call a tool, use this EXACT XML structure:
             requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
             input_census_note: None,
             input_census_suspicious: Vec::new(),
-            leak_check_done: std::sync::atomic::AtomicBool::new(false),
+            leak_check_scanned_mutation_sequence: std::sync::atomic::AtomicUsize::new(usize::MAX),
             failed_install_streak: 0,
             best_snapshot: best_snapshot::AgentSnapshot::default(),
             commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),

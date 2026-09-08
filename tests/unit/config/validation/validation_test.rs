@@ -809,3 +809,92 @@ fn max_tokens_error_before_context_length() {
         "context_length error should not appear when max_tokens fails first, got: {err}"
     );
 }
+
+// ──────────────────────────────────────────────
+// Sentinel values that crash or disable the API client (review finding #9)
+// ──────────────────────────────────────────────
+
+#[test]
+fn max_wall_secs_rejects_sentinel_overflow() {
+    // u64::MAX panics on `Instant + Duration` at the first billable request.
+    let mut cfg = valid_config();
+    cfg.agent.max_wall_secs = Some(u64::MAX);
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("max_wall_secs"),
+        "u64::MAX must be rejected, got: {err}"
+    );
+
+    // Sane budgets still pass (None = disabled, 1h = ordinary).
+    let mut cfg = valid_config();
+    cfg.agent.max_wall_secs = None;
+    assert!(cfg.validate().is_ok(), "no budget should validate");
+    let mut cfg = valid_config();
+    cfg.agent.max_wall_secs = Some(3600);
+    assert!(cfg.validate().is_ok(), "a 1h budget should validate");
+}
+
+#[test]
+fn stream_stall_timeout_rejects_zero() {
+    // 0 would time out every stream on the first chunk wait — every
+    // streamed request fails and the retry loop re-bills it.
+    let mut cfg = valid_config();
+    cfg.agent.stream_stall_timeout_secs = Some(0);
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("stream_stall_timeout_secs"),
+        "0 must be rejected, got: {err}"
+    );
+
+    let mut cfg = valid_config();
+    cfg.agent.stream_stall_timeout_secs = Some(300);
+    assert!(cfg.validate().is_ok(), "a positive stall timeout validates");
+    let mut cfg = valid_config();
+    cfg.agent.stream_stall_timeout_secs = None;
+    assert!(cfg.validate().is_ok(), "unset keeps the legacy default");
+}
+
+#[test]
+fn max_retries_rejects_sentinel_overflow() {
+    // u32::MAX overflows `max_retries + 1` (debug panic; release wraps to
+    // zero attempts).
+    let mut cfg = valid_config();
+    cfg.retry.max_retries = u32::MAX;
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("max_retries"),
+        "u32::MAX must be rejected, got: {err}"
+    );
+
+    let mut cfg = valid_config();
+    cfg.retry.max_retries = 10;
+    assert!(cfg.validate().is_ok(), "an ordinary retry count validates");
+}
+
+#[test]
+fn profile_max_retries_rejects_sentinel_overflow() {
+    // The per-profile override feeds the same `max_retries + 1` arithmetic
+    // on both chat paths — same overflow class, same rejection.
+    let mut cfg = valid_config();
+    cfg.models.insert(
+        "default".to_string(),
+        crate::config::ModelProfile {
+            endpoint: cfg.endpoint.clone(),
+            model: cfg.model.clone(),
+            api_key: None,
+            max_tokens: cfg.max_tokens,
+            temperature: cfg.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: cfg.context_length,
+            extra_body: None,
+            native_function_calling: None,
+            max_retries: Some(u32::MAX),
+            response_timeout_floor_secs: None,
+        },
+    );
+    let err = cfg.validate().unwrap_err().to_string();
+    assert!(
+        err.contains("models.default.max_retries"),
+        "profile u32::MAX must be rejected, got: {err}"
+    );
+}

@@ -300,7 +300,13 @@ impl AutoConfigurator {
         println!();
         println!("[safety]");
         println!("allowed_paths = [\"./**\", \"/tmp/**\"]");
-        println!("denied_paths = [\"**/.env\", \"**/secrets/**\", \"**/.ssh/**\"]");
+        // Emit the full current default list (single source of truth:
+        // `default_denied_paths_toml`), not a frozen subset — a stale 3-entry
+        // list in a generated config used to REPLACE the stronger defaults.
+        println!(
+            "denied_paths = {}",
+            crate::config::default_denied_paths_toml()
+        );
         println!("protected_branches = [\"main\"]");
         println!();
         println!("[agent]");

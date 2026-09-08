@@ -260,6 +260,7 @@ fn nonzero_agent_exit_with_patch_is_patch_captured() {
         has_test_edit: false,
         syntax_check_passed: true,
         candidate_num: 0,
+        official_resolved: None,
     };
 
     let (state, error) = trial_state_from_result(&result);
@@ -391,6 +392,7 @@ fn best_runs_skips_candidates_and_prefers_earliest_trial() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 0,
+            official_resolved: None,
         },
         // A later non-candidate run with a larger patch should not be
         // selected just because it has more lines.
@@ -411,6 +413,7 @@ fn best_runs_skips_candidates_and_prefers_earliest_trial() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 0,
+            official_resolved: None,
         },
         PerRunResult {
             instance_id: "i1".into(),
@@ -429,6 +432,7 @@ fn best_runs_skips_candidates_and_prefers_earliest_trial() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 2,
+            official_resolved: None,
         },
     ];
     let best = best_runs_by_quant_instance(&runs);
@@ -466,6 +470,7 @@ fn write_aggregate_pass_at_1_vs_pass_at_k() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 0,
+            official_resolved: None,
         },
         // Candidate 1: smaller diff, no test edits, syntax ok
         PerRunResult {
@@ -485,6 +490,7 @@ fn write_aggregate_pass_at_1_vs_pass_at_k() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 1,
+            official_resolved: None,
         },
         // Candidate 2: has test edit
         PerRunResult {
@@ -504,6 +510,7 @@ fn write_aggregate_pass_at_1_vs_pass_at_k() {
             has_test_edit: true,
             syntax_check_passed: true,
             candidate_num: 2,
+            official_resolved: None,
         },
     ];
 
@@ -530,10 +537,69 @@ fn write_aggregate_pass_at_1_vs_pass_at_k() {
 
     // Entry-level checks
     let entry = &agg["entries"][0];
+    assert_eq!(entry["first_sample_resolved"], false);
     assert_eq!(entry["pass_at_1"], false);
     assert_eq!(entry["pass_at_k_oracle"], true);
+    assert_eq!(entry["n_candidates"], 3);
+    assert_eq!(entry["candidates_wall_secs"], 3.0);
+    assert_eq!(agg["first_sample_resolution_rate"], 0.0);
     // attempted_patch_rate should be based on selected results only
     assert_eq!(entry["attempted_patch_rate"], 1.0);
+}
+
+/// Regression (a)+(b)+(c) at the aggregate level: per-candidate official
+/// labels must not change which run counts as the (frozen) selection.
+/// A failed selected candidate plus a successful alternative stays
+/// pass@1=false / oracle=true; flipping the labels flips pass@1 but never
+/// the selection.
+#[test]
+fn write_aggregate_frozen_selection_invariant_to_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sel.pred"), "selected\n").unwrap();
+    std::fs::write(dir.path().join("c1.pred"), "candidate1\n").unwrap();
+
+    let build_runs = |selected_resolved: bool, candidate_resolved: bool| {
+        let mut selected = make_candidate_result(0, false);
+        selected.pred_path = dir.path().join("sel.pred");
+        selected.patch_lines = 5; // frozen pick: smallest good diff
+        selected.official_resolved = Some(selected_resolved);
+        let mut c1 = make_candidate_result(1, false);
+        c1.pred_path = dir.path().join("c1.pred");
+        c1.patch_lines = 10;
+        c1.official_resolved = Some(candidate_resolved);
+        vec![selected, c1]
+    };
+
+    // Selected fails, alternative resolves: pass@1 stays false.
+    write_aggregate(dir.path(), &build_runs(false, true), None).unwrap();
+    let agg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("aggregate.json")).unwrap()).unwrap();
+    let entry = &agg["entries"][0];
+    assert_eq!(entry["pass_at_1"], false, "pass@1 = frozen selection only");
+    assert_eq!(
+        entry["first_sample_resolved"], true,
+        "first sample (candidate 1) resolved"
+    );
+    assert_eq!(
+        entry["pass_at_k_oracle"], true,
+        "oracle best-of-k still computed"
+    );
+    assert_eq!(entry["n_candidates"], 2);
+    assert_eq!(agg["pass_at_1_rate"], 0.0);
+    assert_eq!(agg["first_sample_resolution_rate"], 1.0);
+    assert_eq!(agg["pass_at_k_oracle_rate"], 1.0);
+    assert_eq!(agg["pass_at_k_oracle_is_proxy"], false);
+
+    // Flip the labels: the frozen selection is the same run, so pass@1
+    // flips with ITS label — proving the metric tracks the frozen
+    // selection, not the best label in the pool.
+    write_aggregate(dir.path(), &build_runs(true, false), None).unwrap();
+    let agg: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("aggregate.json")).unwrap()).unwrap();
+    let entry = &agg["entries"][0];
+    assert_eq!(entry["pass_at_1"], true);
+    assert_eq!(entry["first_sample_resolved"], false);
+    assert_eq!(entry["pass_at_k_oracle"], true);
 }
 
 #[test]
@@ -560,6 +626,7 @@ fn write_aggregate_does_not_proxy_pass_at_k_when_official_eval_failed() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 0,
+            official_resolved: None,
         },
         PerRunResult {
             instance_id: "i1".into(),
@@ -578,6 +645,7 @@ fn write_aggregate_does_not_proxy_pass_at_k_when_official_eval_failed() {
             has_test_edit: false,
             syntax_check_passed: true,
             candidate_num: 1,
+            official_resolved: None,
         },
     ];
 
@@ -680,11 +748,60 @@ fn make_candidate_result(candidate_num: u32, has_test_edit: bool) -> PerRunResul
         has_test_edit,
         syntax_check_passed: true,
         candidate_num,
+        official_resolved: None,
     }
 }
 
 #[test]
-fn select_best_candidate_prefers_higher_f2p_rate() {
+fn select_frozen_candidate_ignores_official_metrics() {
+    // Regression (a) at the runner level: the frozen selection is made from
+    // proxy signals only, so handing it official metrics must not be possible
+    // and changing hidden labels cannot alter it.
+    let c1 = make_candidate_result(1, false); // 10 lines
+    let mut c2 = make_candidate_result(2, false);
+    c2.patch_lines = 5; // smaller diff -> frozen pick
+    c2.patch_bytes = 50;
+    let candidates = vec![c1, c2];
+    let frozen = select_frozen_candidate(&candidates);
+    assert_eq!(frozen.candidate_num, 2);
+
+    // Even when official metrics say candidate 1 resolved and candidate 2
+    // did not, the frozen pick stays candidate 2 (selection happens BEFORE
+    // evaluation; this documents that select_frozen_candidate has no metrics
+    // input at all).
+    let mut metrics = BTreeMap::new();
+    metrics.insert(
+        1,
+        OfficialEvalMetrics {
+            fail_to_pass_passed: 2,
+            fail_to_pass_total: 2,
+            pass_to_pass_passed: 1,
+            pass_to_pass_total: 1,
+            overall_pass: true,
+        },
+    );
+    metrics.insert(2, OfficialEvalMetrics::default());
+    assert_eq!(select_frozen_candidate(&candidates).candidate_num, 2);
+    // The oracle selector, by contrast, follows the labels.
+    assert_eq!(
+        select_oracle_candidate(&candidates, &metrics).candidate_num,
+        1
+    );
+}
+
+#[test]
+fn select_frozen_candidate_prefers_source_no_test_edit_then_smaller_diff() {
+    let c1 = make_candidate_result(1, true); // has test edit -> worse
+    let mut c2 = make_candidate_result(2, false);
+    c2.patch_lines = 20;
+    let mut c3 = make_candidate_result(3, false);
+    c3.patch_lines = 5;
+    let candidates = vec![c1, c2, c3];
+    assert_eq!(select_frozen_candidate(&candidates).candidate_num, 3);
+}
+
+#[test]
+fn select_oracle_candidate_prefers_higher_f2p_rate() {
     let c1 = make_candidate_result(1, false);
     let c2 = make_candidate_result(2, false);
     let candidates = vec![c1, c2];
@@ -709,12 +826,12 @@ fn select_best_candidate_prefers_higher_f2p_rate() {
             overall_pass: true,
         },
     );
-    let best = select_best_candidate(&candidates, &metrics);
+    let best = select_oracle_candidate(&candidates, &metrics);
     assert_eq!(best.candidate_num, 2);
 }
 
 #[test]
-fn select_best_candidate_tiebreaks_p2p_then_overall() {
+fn select_oracle_candidate_tiebreaks_p2p_then_overall() {
     let c1 = make_candidate_result(1, false);
     let c2 = make_candidate_result(2, false);
     let candidates = vec![c1, c2];
@@ -740,12 +857,12 @@ fn select_best_candidate_tiebreaks_p2p_then_overall() {
             overall_pass: true,
         },
     );
-    let best = select_best_candidate(&candidates, &metrics);
+    let best = select_oracle_candidate(&candidates, &metrics);
     assert_eq!(best.candidate_num, 2);
 }
 
 #[test]
-fn select_best_candidate_falls_back_to_proxy_when_no_f2p_passed() {
+fn select_oracle_candidate_falls_back_to_proxy_when_no_f2p_passed() {
     let mut c1 = make_candidate_result(1, false);
     c1.syntax_check_passed = false;
     let c2 = make_candidate_result(2, true); // has test edit -> worse proxy
@@ -772,7 +889,7 @@ fn select_best_candidate_falls_back_to_proxy_when_no_f2p_passed() {
             overall_pass: false,
         },
     );
-    let best = select_best_candidate(&candidates, &metrics);
+    let best = select_oracle_candidate(&candidates, &metrics);
     // Proxy ordering picks c1 because it has no test edit, even though c2
     // has a better pass-to-pass rate.
     assert_eq!(best.candidate_num, 1);

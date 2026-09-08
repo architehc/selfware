@@ -2465,3 +2465,238 @@ async fn shell_passthrough_marks_truncation_and_exit_codes() {
     );
     server.stop().await;
 }
+
+// =========================================================================
+// Swarm phase orchestration (review finding 16): a failed phase must not
+// become overall success, and dependent phases must be blocked.
+// =========================================================================
+
+/// Queue the standard swarm pipeline and return (role, task_id) pairs in
+/// execution (priority) order.
+fn queue_standard_swarm_phases() -> (Vec<SwarmPhase>, Swarm, Vec<(AgentRole, String)>) {
+    let phases = swarm_phases();
+    let mut swarm = create_dev_swarm();
+    let mut task_ids = Vec::new();
+    for phase in &phases {
+        let task = SwarmTask::new(format!("{}: test task", phase.description))
+            .with_role(phase.role)
+            .with_priority(phase.priority);
+        task_ids.push((phase.role, task.id.clone()));
+        swarm.queue_task(task).unwrap();
+    }
+    (phases, swarm, task_ids)
+}
+
+/// Extract the role name the phase prompt assigns ("acting as the X in a
+/// development swarm").
+fn prompt_role(prompt: &str) -> String {
+    prompt
+        .split("acting as the ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .unwrap_or("?")
+        .to_string()
+}
+
+#[tokio::test]
+async fn swarm_coder_failure_blocks_dependents_and_fails_verdict() {
+    use crate::orchestration::swarm::TaskStatus;
+
+    let (phases, mut swarm, task_ids) = queue_standard_swarm_phases();
+    let status_of = |swarm: &Swarm, role: AgentRole| {
+        let id = &task_ids.iter().find(|(r, _)| *r == role).unwrap().1;
+        swarm.get_task(id).unwrap().status
+    };
+
+    // Script: the Coder phase fails; every other phase would succeed.
+    let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ran_exec = std::sync::Arc::clone(&ran);
+    let outcomes = run_swarm_phases(&mut (), &mut swarm, &phases, move |_, prompt| {
+        let ran = std::sync::Arc::clone(&ran_exec);
+        Box::pin(async move {
+            let role = prompt_role(&prompt);
+            ran.lock().unwrap().push(role.clone());
+            if role == "Coder" {
+                Err(anyhow::anyhow!("coder boom"))
+            } else {
+                Ok(())
+            }
+        })
+    })
+    .await;
+
+    // (a) Failed phase recorded with evidence; dependents blocked, not run.
+    assert_eq!(
+        outcomes,
+        vec![
+            (AgentRole::Architect, PhaseOutcome::Success),
+            (
+                AgentRole::Coder,
+                PhaseOutcome::Failed("coder boom".to_string())
+            ),
+            (
+                AgentRole::Tester,
+                PhaseOutcome::Blocked {
+                    dependency: AgentRole::Coder
+                }
+            ),
+            (
+                AgentRole::Reviewer,
+                PhaseOutcome::Blocked {
+                    dependency: AgentRole::Coder
+                }
+            ),
+        ]
+    );
+
+    // (c) Only Architect and Coder actually executed; Tester and Reviewer
+    // were blocked because their input phase failed.
+    assert_eq!(
+        *ran.lock().unwrap(),
+        vec!["Architect".to_string(), "Coder".to_string()]
+    );
+
+    // (a) The verdict is an error naming the failed phase with evidence and
+    // the blocked phases — never a green success.
+    let verdict = swarm_verdict(&phases, &outcomes)
+        .expect_err("a failed phase must not produce an Ok verdict");
+    assert!(
+        verdict.contains("phase 'Coder' FAILED: coder boom"),
+        "verdict names the failed phase with evidence: {verdict}"
+    );
+    assert!(
+        verdict.contains("phase 'Tester' BLOCKED"),
+        "verdict names the blocked dependent: {verdict}"
+    );
+    assert!(
+        verdict.contains("phase 'Reviewer' BLOCKED"),
+        "verdict names the blocked dependent: {verdict}"
+    );
+
+    // Swarm-side task states reflect reality: failed phase is Failed (with
+    // evidence retained), blocked phases are settled (not left active),
+    // and the successful phase is Completed.
+    assert_eq!(
+        status_of(&swarm, AgentRole::Architect),
+        TaskStatus::Completed
+    );
+    assert_eq!(status_of(&swarm, AgentRole::Coder), TaskStatus::Failed);
+    assert_eq!(status_of(&swarm, AgentRole::Tester), TaskStatus::Failed);
+    assert_eq!(status_of(&swarm, AgentRole::Reviewer), TaskStatus::Failed);
+
+    let coder_id = &task_ids
+        .iter()
+        .find(|(r, _)| *r == AgentRole::Coder)
+        .unwrap()
+        .1;
+    let coder_task = swarm.get_task(coder_id).unwrap();
+    assert!(
+        coder_task
+            .results
+            .values()
+            .any(|r| r.contains("coder boom")),
+        "failure evidence retained in the swarm task"
+    );
+    assert_eq!(coder_task.failed_results().len(), 1);
+}
+
+#[tokio::test]
+async fn swarm_all_phases_succeed_gives_ok_verdict() {
+    use crate::orchestration::swarm::TaskStatus;
+
+    let (phases, mut swarm, task_ids) = queue_standard_swarm_phases();
+
+    let outcomes = run_swarm_phases(&mut (), &mut swarm, &phases, |_, _prompt| {
+        Box::pin(async move { Ok(()) })
+    })
+    .await;
+
+    // (b) All phases ran and succeeded.
+    assert_eq!(outcomes.len(), phases.len());
+    assert!(
+        outcomes.iter().all(|(_, o)| *o == PhaseOutcome::Success),
+        "all phases succeed: {outcomes:?}"
+    );
+    assert!(swarm_verdict(&phases, &outcomes).is_ok());
+
+    for (role, id) in &task_ids {
+        assert_eq!(
+            swarm.get_task(id).unwrap().status,
+            TaskStatus::Completed,
+            "phase {role:?} must be Completed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn swarm_architect_failure_blocks_whole_pipeline() {
+    let (phases, mut swarm, _task_ids) = queue_standard_swarm_phases();
+
+    let ran = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ran_exec = std::sync::Arc::clone(&ran);
+    let outcomes = run_swarm_phases(&mut (), &mut swarm, &phases, move |_, prompt| {
+        let ran = std::sync::Arc::clone(&ran_exec);
+        Box::pin(async move {
+            let role = prompt_role(&prompt);
+            ran.lock().unwrap().push(role.clone());
+            if role == "Architect" {
+                Err(anyhow::anyhow!("design boom"))
+            } else {
+                Ok(())
+            }
+        })
+    })
+    .await;
+
+    // Coder depends on Architect, so it is blocked; Tester and Reviewer are
+    // blocked transitively via Coder. Only the Architect phase ran.
+    assert_eq!(*ran.lock().unwrap(), vec!["Architect".to_string()]);
+    assert_eq!(
+        outcomes,
+        vec![
+            (
+                AgentRole::Architect,
+                PhaseOutcome::Failed("design boom".to_string())
+            ),
+            (
+                AgentRole::Coder,
+                PhaseOutcome::Blocked {
+                    dependency: AgentRole::Architect
+                }
+            ),
+            (
+                AgentRole::Tester,
+                PhaseOutcome::Blocked {
+                    dependency: AgentRole::Coder
+                }
+            ),
+            (
+                AgentRole::Reviewer,
+                PhaseOutcome::Blocked {
+                    dependency: AgentRole::Coder
+                }
+            ),
+        ]
+    );
+
+    let verdict =
+        swarm_verdict(&phases, &outcomes).expect_err("a failed first phase must fail the verdict");
+    assert!(verdict.contains("phase 'Architect' FAILED: design boom"));
+    assert!(verdict.contains("phase 'Coder' BLOCKED"));
+}
+
+#[test]
+fn swarm_verdict_flags_phases_that_never_ran() {
+    let phases = swarm_phases();
+    // Only the architect reported; everything else is missing entirely.
+    let outcomes = vec![(AgentRole::Architect, PhaseOutcome::Success)];
+    let verdict =
+        swarm_verdict(&phases, &outcomes).expect_err("phases that never ran must fail the verdict");
+    assert!(verdict.contains("phase 'Coder' DID NOT RUN"), "{verdict}");
+    assert!(verdict.contains("phase 'Tester' DID NOT RUN"), "{verdict}");
+    assert!(
+        verdict.contains("phase 'Reviewer' DID NOT RUN"),
+        "{verdict}"
+    );
+    assert!(!verdict.contains("Architect"), "{verdict}");
+}

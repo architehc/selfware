@@ -56,6 +56,36 @@ SELFWARE_TEMPERATURE=0.5 selfware --max-turns 20 run "..."
 Run `selfware config show` to print the effective configuration annotated
 with the source (default / TOML / env / CLI) of every value.
 
+### Model-defaults profiles and the unknown-model fallback
+
+Layer 2 matches the configured `model` against built-in glob patterns
+(`qwen3.6-*`, `*glm-5.2*`, `claude-*`, `gpt-*`, ...). Matching is
+case-insensitive and tries the full model id **and** its last `/`-separated
+segment, so provider-prefixed ids (`qwen/qwen3.6-27b`) and path-qualified
+local ids (`/home/rig/models/qwen3.6-27b`, as served by sglang/vLLM) match
+the same profile as the bare name.
+
+When **no** profile matches and `context_length` is not set explicitly, the
+loader does NOT keep the 1M built-in default (that value describes the
+shipped default model; applied to an arbitrary local model it derives a
+budget that overflows the real window). Instead it assumes a conservative
+**32,768-token** context and logs a prominent `UNKNOWN MODEL` warning. With
+the stock `max_tokens` this leaves only the 2,048-token conversation floor —
+functional, but heavily degraded.
+
+Set `context_length` explicitly per profile to the model's real context
+window (the value you pass to vLLM `--max-model-len` or the sglang
+equivalent), either top-level or in each `[models.*]` section:
+
+```toml
+model = "/home/rig/models/qwen38-unc-kt"
+context_length = 32768   # real window of the served model
+```
+
+`selfware autoconfig` / `unpack` detect the real value from the endpoint's
+`/models` and write it for you. An explicit `context_length` always wins
+over the fallback.
+
 ## Top-Level Settings
 
 ```toml
@@ -159,13 +189,15 @@ require_verification_before_completion = true
 # Default: ["./**"]
 allowed_paths = ["./**"]
 
-# Glob patterns for paths the agent must never touch
-# Default: ["**/.env", "**/.env.local", "**/.ssh/**", "**/secrets/**"]
+# Glob patterns for paths the agent must never touch.
+# Denylist semantics: entries here are UNIONED with the built-in defaults at
+# load time — an explicit key can only ADD restrictions, never remove the
+# safety defaults. Default (always in effect):
+#   ["**/.env", "**/.env.local", "**/.env.*", "**/*.env", "**/.ssh",
+#    "**/.ssh/**", "**/secrets", "**/secrets/**",
+#    "**/.git/hooks/**", "**/.git/config"]
 denied_paths = [
-    "**/.env",
-    "**/.env.local",
-    "**/.ssh/**",
-    "**/secrets/**",
+    "**/vault/**",  # example: an extra deny-glob added to the defaults
 ]
 
 # Git branches that cannot be pushed to directly
@@ -446,7 +478,7 @@ Profile fields:
 - `max_tokens` -- max response tokens (default: 65536)
 - `temperature` -- sampling temperature (default: 1.0)
 - `modalities` -- `["text"]` or `["text", "vision"]` (default: `["text"]`)
-- `context_length` -- context window in tokens (default: 1048576)
+- `context_length` -- context window in tokens (default: 1048576; falls back to 32768 with a loud warning when the model matches no built-in profile — set it explicitly per profile)
 - `extra_body` -- per-profile extra request fields
 
 ## `[resources]` -- Resource Limits

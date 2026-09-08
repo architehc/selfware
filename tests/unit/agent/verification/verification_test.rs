@@ -480,6 +480,83 @@ mod completion_gate_tests {
         );
     }
 
+    // Review finding #4 regression: the "not written ANY files" gate must
+    // trust the durable `has_written_any_file` ledger over the message
+    // history. Compression rewrites self.messages, so a long task whose
+    // file_write/file_edit calls scrolled out of the compressed history was
+    // rejected as "not written ANY files" even though the write happened.
+    #[tokio::test]
+    async fn no_files_written_gate_trusts_ledger_when_messages_compressed_away() {
+        let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a / b\n")]);
+        // The source edit the agent made earlier in the run.
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b if b else 0\n").unwrap();
+
+        let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        // The write and the passing verification both happened — then
+        // compression rewrote the message history and the edit's tool call
+        // scrolled away. The ledger is the only surviving write evidence.
+        agent.has_written_any_file = true;
+        if let Some(cp) = agent.current_checkpoint.as_mut() {
+            cp.log_tool_call(shell_exec("pytest tests/", true));
+        }
+
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "the durable write ledger must satisfy the no-files-written gate \
+             even when the edit scrolled out of the compressed messages"
+        );
+    }
+
+    // Review finding #4 regression (tool coverage): the no-files-written
+    // gate's message-history fallback counted only file_edit/file_write.
+    // Edits made via patch_apply, file_multi_edit or file_fim_edit are
+    // writes and must satisfy the gate even when the ledger was not set.
+    #[tokio::test]
+    async fn no_files_written_gate_counts_patch_multi_and_fim_edits() {
+        for (tool_name, arguments) in [
+            (
+                "patch_apply",
+                r#"{"diff":"--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-x\n+y\n"}"#,
+            ),
+            (
+                "file_multi_edit",
+                r#"{"edits":[{"path":"calc.py","old_str":"x","new_str":"y"}]}"#,
+            ),
+            ("file_fim_edit", r#"{"path":"calc.py"}"#),
+        ] {
+            let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a / b\n")]);
+            std::fs::write("calc.py", "def div(a, b):\n    return a / b if b else 0\n").unwrap();
+
+            let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+            // Ledger deliberately left false: the message-history fallback
+            // must recognize the write on its own.
+            agent.has_written_any_file = false;
+            agent.messages.push(crate::api::types::Message {
+                role: "assistant".to_string(),
+                content: crate::api::types::MessageContent::Text(String::new()),
+                reasoning_content: None,
+                tool_calls: Some(vec![crate::api::types::ToolCall {
+                    id: "tc_write".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::api::types::ToolFunction {
+                        name: tool_name.to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            });
+            if let Some(cp) = agent.current_checkpoint.as_mut() {
+                cp.log_tool_call(shell_exec("pytest tests/", true));
+            }
+
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "an edit via {tool_name} must count as a file write for the no-files-written gate"
+            );
+        }
+    }
+
     // Regression: a READ-ONLY review whose answer legitimately quotes code
     // must be allowed to complete. Before the read-only guard, the code in
     // the answer tripped `contains_unwritten_code`, the gate demanded a
@@ -1031,6 +1108,224 @@ mod completion_gate_tests {
         assert!(
             !outcome.as_deref().unwrap_or("").contains("VerifierTainted"),
             "test-writing task must stay exempt, got: {outcome:?}"
+        );
+    }
+
+    /// Finding 12 (a): an ordinary bug-fix task that adds a NEW test file
+    /// alongside the source fix completes — additive test changes do not
+    /// require the test-writing phrase classifier.
+    #[tokio::test]
+    async fn verifier_tainted_allows_source_fix_plus_new_test_file() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(
+            "tests/test_calc_regression.py",
+            "def test_div_int():\n    assert 7 // 2 == 3\n",
+        )
+        .unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let outcome = agent.mutation_completion_gate().await;
+        assert!(
+            outcome.is_none(),
+            "source fix + new regression test file must complete, got: {outcome:?}"
+        );
+    }
+
+    /// Finding 12 (a, insertion variant): a new test CASE appended to an
+    /// existing test file is purely additive (no `-` lines) and completes.
+    #[tokio::test]
+    async fn verifier_tainted_allows_source_fix_plus_appended_test_case() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(
+            "tests/test_calc.py",
+            "def test_div():\n    pass\n\n\ndef test_div_int():\n    assert 7 // 2 == 3\n",
+        )
+        .unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let outcome = agent.mutation_completion_gate().await;
+        assert!(
+            outcome.is_none(),
+            "source fix + appended test case must complete, got: {outcome:?}"
+        );
+    }
+
+    /// Finding 12 (b): weakening an existing assertion rewrites a `-` line
+    /// and keeps the strict rejection, whatever the task says.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_weakened_assertion() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            (
+                "tests/test_calc.py",
+                "def test_div():\n    assert 6 / 2 == 3\n",
+            ),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write("tests/test_calc.py", "def test_div():\n    assert True\n").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a weakened assertion must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
+
+    /// Finding 12 (c): deleting a test file is never additive and keeps the
+    /// strict rejection.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_removed_test_file() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    pass\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::remove_file("tests/test_calc.py").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a removed test file must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
+
+    /// CI/build-runner edits define HOW verification runs, so they are never
+    /// additive-exempt — even an insertion-only CI change stays rejected.
+    #[tokio::test]
+    async fn verifier_tainted_rejects_additive_ci_edit() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            (".github/workflows/ci.yml", "on: push\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(".github/workflows/ci.yml", "on: push\n  pull_request\n").unwrap();
+
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let message = agent
+            .mutation_completion_gate()
+            .await
+            .expect("a CI edit must be refused as VerifierTainted");
+        assert!(
+            message.contains("VerifierTainted"),
+            "expected VerifierTainted, got: {message}"
+        );
+    }
+
+    // Review finding #13, regression (a): the FIRST gate-reaching snapshot is
+    // scanned — a census-discovered identifier in a changed file blocks
+    // completion with zero model calls.
+    #[tokio::test]
+    async fn leak_check_scans_first_gate_reaching_snapshot() {
+        let (_dir, _guard) = git_repo(&[("src/main.py", "print('ok')\n")]);
+        std::fs::create_dir_all("dist").unwrap();
+        std::fs::write(
+            "dist/bundle.js",
+            "module.exports = require('private-internal-module');\n",
+        )
+        .unwrap();
+
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.input_census_suspicious = vec!["private-internal-module".to_string()];
+
+        let msg = agent
+            .check_completion_gate()
+            .await
+            .expect("a census identifier in the changed files must block completion");
+        assert!(msg.contains("LEAK CHECK"), "got: {msg}");
+        assert!(msg.contains("private-internal-module"), "got: {msg}");
+    }
+
+    // Review finding #13, regression (b): the latch keys on the mutation
+    // sequence, not a global once-per-task bool. A clean first snapshot
+    // passes; a LATER rebuild (sequence advanced) that embeds a census
+    // identifier is a DISTINCT snapshot and is scanned on the next
+    // completion attempt. Under the old bool latch this second scan never
+    // ran and the leak completed unchecked.
+    #[tokio::test]
+    async fn leak_check_rescans_distinct_snapshot_after_mutation() {
+        let (_dir, _guard) = git_repo(&[("src/main.py", "print('ok')\n")]);
+        std::fs::create_dir_all("dist").unwrap();
+        std::fs::write("dist/bundle.js", "module.exports = require('./public');\n").unwrap();
+
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.input_census_suspicious = vec!["private-internal-module".to_string()];
+
+        // First snapshot: clean — the gate passes and records the scanned
+        // sequence (0).
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "a clean first snapshot must complete"
+        );
+        assert_eq!(
+            agent
+                .leak_check_scanned_mutation_sequence
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the scan must record the mutation sequence it covered"
+        );
+
+        // The model rebuilds the bundle — a NEW snapshot. Verification credit
+        // is refreshed so only the leak check can block.
+        std::fs::write(
+            "dist/bundle.js",
+            "module.exports = require('private-internal-module');\n",
+        )
+        .unwrap();
+        agent.note_mutating_tool_call();
+        agent.note_verification_outcome("shell_exec", r#"{"command":"cargo test"}"#, true, "ok");
+
+        let msg = agent
+            .check_completion_gate()
+            .await
+            .expect("a leak introduced by a later rebuild must be caught");
+        assert!(msg.contains("LEAK CHECK"), "got: {msg}");
+        assert!(msg.contains("private-internal-module"), "got: {msg}");
+    }
+
+    // Review finding #13, regression (c): the perf/livelock contract — an
+    // UNCHANGED snapshot is NOT rescanned. After a blocked attempt the model
+    // may state why the identifier is safe to publish and complete without
+    // another scan; only a new mutation re-arms the check.
+    #[tokio::test]
+    async fn leak_check_does_not_rescan_unchanged_snapshot() {
+        let (_dir, _guard) = git_repo(&[("src/main.py", "print('ok')\n")]);
+        std::fs::create_dir_all("dist").unwrap();
+        std::fs::write(
+            "dist/bundle.js",
+            "module.exports = require('private-internal-module');\n",
+        )
+        .unwrap();
+
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.input_census_suspicious = vec!["private-internal-module".to_string()];
+
+        let first = agent
+            .check_completion_gate()
+            .await
+            .expect("the first attempt at this snapshot must be scanned and blocked");
+        assert!(first.contains("LEAK CHECK"), "got: {first}");
+
+        // No mutation since the scan: the same snapshot is not rescanned, so
+        // the gate does not re-block (the model may justify and complete).
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "an unchanged snapshot must not be rescanned"
         );
     }
 }

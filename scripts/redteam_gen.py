@@ -139,8 +139,11 @@ def chat(endpoint: str, model: str, prompt: str, seed: int) -> str:
         ],
         "temperature": 0.9,
         "seed": seed,
-        # Reasoning model: leave room for reasoning + the JSONL answer.
-        "max_tokens": 16384,
+        # Output ceiling = the models' max (64k on qwen38-flash-next). It is a
+        # ceiling, not a reservation: generation stops at completion and the
+        # KV pool is only charged for tokens actually produced, so there is
+        # no reason to truncate a long JSONL answer early.
+        "max_tokens": 65536,
         # Qwen3 thinking switch — without it the uncensored LAN build burns
         # the whole budget on reasoning_content and returns empty content.
         "chat_template_kwargs": {"enable_thinking": False},

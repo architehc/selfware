@@ -480,22 +480,22 @@ impl Agent {
     }
 
     /// Paths the agent wrote/edited this task (from checkpoint tool calls).
+    /// Covers the full mutating file-tool set — not just file_edit/file_write —
+    /// so best-snapshot capture and restore never operate on a subset of the
+    /// run's edits (a run editing only via patch_apply or file_multi_edit used
+    /// to get no snapshot at all).
     pub(super) fn written_paths(&self) -> Vec<std::path::PathBuf> {
         self.current_checkpoint
             .as_ref()
             .map(|cp| {
                 cp.tool_calls
                     .iter()
-                    .filter(|tc| matches!(tc.tool_name.as_str(), "file_edit" | "file_write"))
                     .filter_map(|tc| {
                         serde_json::from_str::<serde_json::Value>(&tc.arguments)
                             .ok()
-                            .and_then(|v| {
-                                v.get("path")
-                                    .and_then(|p| p.as_str())
-                                    .map(std::path::PathBuf::from)
-                            })
+                            .map(|args| written_paths_for_tool_call(&tc.tool_name, &args))
                     })
+                    .flatten()
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect()
@@ -1707,14 +1707,7 @@ impl Agent {
 
             if success && tool_call_is_mutating(&vt.name, &vt.args) {
                 self.note_mutating_tool_call();
-                if matches!(
-                    vt.name.as_str(),
-                    "file_edit"
-                        | "file_write"
-                        | "file_fim_edit"
-                        | "file_multi_edit"
-                        | "patch_apply"
-                ) {
+                if tool_call_writes_file(&vt.name) {
                     self.has_written_any_file = true;
                     self.terminal_guard_hits = 0;
                 }
@@ -2976,12 +2969,20 @@ impl Agent {
                 // Display color-coded diff for file mutations
                 if let Some((ref path, ref old_content)) = pre_edit_content {
                     if tool_success && matches!(name, "file_edit" | "file_write") {
-                        self.has_written_any_file = true;
-                        self.terminal_guard_hits = 0;
                         if let Ok(new_content) = tokio::fs::read_to_string(path).await {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }
                     }
+                }
+
+                // Durable write ledger: EVERY file-writing tool counts.
+                // file_fim_edit, file_multi_edit and patch_apply take the
+                // `pre_edit_content == None` branch above, so gating the
+                // ledger on the diff-display block meant those edits never
+                // counted as writes on this dispatch path (review finding #4).
+                if tool_success && tool_call_writes_file(name) {
+                    self.has_written_any_file = true;
+                    self.terminal_guard_hits = 0;
                 }
 
                 // Track mutating tool calls for FailureMode classification.

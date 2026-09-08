@@ -3,6 +3,7 @@ use colored::*;
 use tracing::warn;
 
 use super::*;
+use crate::orchestration::swarm::{create_dev_swarm, AgentRole, Swarm, SwarmTask};
 
 use super::failure_mode::{FailureKind, FailureMode, RunOutcome};
 use super::tui_events::AgentEvent;
@@ -130,8 +131,8 @@ impl Agent {
         self.total_no_action_prompts = 0;
         self.requirements_audit_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.leak_check_done
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.leak_check_scanned_mutation_sequence
+            .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;
         self.input_census_suspicious.clear();
         self.failed_install_streak = 0;
@@ -164,6 +165,12 @@ impl Agent {
         self.task_start_time = std::time::Instant::now();
         // Fresh task → no prior segments; the budget starts at zero.
         self.prior_elapsed_secs = 0;
+        // The shared API client must observe the task boundary too: its
+        // wall-budget anchor is latched on the first billable request and
+        // would otherwise keep measuring (and exhausting) the PREVIOUS
+        // task's window. Resume does not go through run_task and keeps
+        // its accumulated window, matching prior_elapsed_secs above.
+        self.client.reset_wall_budget();
         // Arm the single-terminal-event guard for this run.
         self.terminal_event_emitted = false;
         self.last_run_failure_mode = None;
@@ -416,8 +423,6 @@ impl Agent {
     }
 
     pub(super) async fn run_swarm_task(&mut self, task: &str) -> Result<()> {
-        use crate::orchestration::swarm::{create_dev_swarm, AgentRole, SwarmTask};
-
         let mut swarm = create_dev_swarm();
         let mut agents = swarm.list_agents();
         agents.sort_by_key(|a| std::cmp::Reverse(a.role.priority()));
@@ -438,33 +443,11 @@ impl Agent {
 
         // Build role-specific sub-tasks and queue them in the swarm in
         // priority order: Architect -> Coder -> Tester -> Reviewer.
-        let phases: Vec<(AgentRole, &str, u8)> = vec![
-            (
-                AgentRole::Architect,
-                "Design the architecture and plan the implementation",
-                10,
-            ),
-            (
-                AgentRole::Coder,
-                "Implement the changes based on the architecture plan",
-                8,
-            ),
-            (
-                AgentRole::Tester,
-                "Write and run tests to verify the implementation",
-                6,
-            ),
-            (
-                AgentRole::Reviewer,
-                "Review the code changes for quality and correctness",
-                4,
-            ),
-        ];
-
-        for (role, phase_desc, priority) in &phases {
-            let sub_task = SwarmTask::new(format!("{}: {}", phase_desc, task))
-                .with_role(*role)
-                .with_priority(*priority);
+        let phases = swarm_phases();
+        for phase in &phases {
+            let sub_task = SwarmTask::new(format!("{}: {}", phase.description, task))
+                .with_role(phase.role)
+                .with_priority(phase.priority);
             if let Err(e) = swarm.queue_task(sub_task) {
                 tracing::warn!("Failed to queue swarm task: {}", e);
             }
@@ -476,95 +459,41 @@ impl Agent {
             phases.len()
         );
 
-        // Process tasks from the swarm queue in priority order.
-        // Each phase uses the specialist agent's system prompt to guide
-        // the LLM, then records the result back into the swarm.
-        let mut phase_num = 0usize;
-        while let Some(task_id) = swarm.next_task() {
-            phase_num += 1;
+        // Process tasks from the swarm queue in priority order. Each phase
+        // uses the specialist agent's system prompt to guide the LLM, then
+        // records the result back into the swarm.
+        let outcomes = run_swarm_phases(self, &mut swarm, &phases, |agent, prompt| {
+            Box::pin(async move { agent.run_task(&prompt).await })
+        })
+        .await;
 
-            // Get the task details from active_tasks
-            let sub_task = match swarm.get_task(&task_id) {
-                Some(t) => t.clone(),
-                None => {
-                    warn!("Task {} not found after next_task()", task_id);
-                    break;
-                }
-            };
-
-            let assigned = swarm.assign_task(&task_id);
-
-            // Determine the lead agent for this sub-task
-            let lead_agent_prompt = if let Some(agent_id) = assigned.first() {
-                swarm
-                    .get_agent(agent_id)
-                    .map(|a| a.system_prompt().to_string())
-                    .unwrap_or_default()
-            } else {
-                // No idle agent matched; fall back to role-based prompt
-                sub_task
-                    .required_roles
-                    .first()
-                    .map(|r| r.system_prompt().to_string())
-                    .unwrap_or_default()
-            };
-
-            let role_name = sub_task
-                .required_roles
-                .first()
-                .map(|r| r.name())
-                .unwrap_or("General");
-
-            cli_println!(
-                "\n{} Phase {}/{}: {} ({})",
-                "🐝".bright_cyan(),
-                phase_num,
-                phases.len(),
-                sub_task.description.bright_white(),
-                role_name.bright_yellow()
-            );
-
-            // Build a role-specific prompt that includes specialist guidance
-            let role_prompt = format!(
-                "{}\n\n\
-                 You are acting as the {} in a development swarm.\n\
-                 Previous phases have already contributed to the conversation context.\n\
-                 Focus specifically on your role's responsibilities.\n\
-                 After completing your work, verify with cargo_check if you made code changes.\n\n\
-                 Task: {}",
-                lead_agent_prompt, role_name, sub_task.description
-            );
-
-            let result = self.run_task(&role_prompt).await;
-
-            // Record completion back in the swarm
-            let (success, result_msg) = match &result {
-                Ok(()) => (true, "Phase completed successfully".to_string()),
-                Err(e) => (false, e.to_string()),
-            };
-
-            for agent_id in &assigned {
-                swarm.complete_task(&task_id, agent_id, &result_msg, success);
-            }
-
-            if !success {
-                warn!(
-                    "Swarm phase '{}' failed: {}; continuing with remaining phases",
-                    role_name, result_msg
+        // Honest verdict (AGENTS.md rule 3): "all phases executed" is NOT
+        // success. Any failed or blocked phase means the task did not
+        // succeed — report it in red and return an error naming every
+        // non-successful phase with its evidence.
+        let stats = swarm.stats();
+        match swarm_verdict(&phases, &outcomes) {
+            Ok(()) => {
+                cli_println!(
+                    "\n{} Swarm complete: all {} phases succeeded ({} agents, avg trust {:.0}%)",
+                    "🐝".bright_green(),
+                    phases.len(),
+                    stats.total_agents,
+                    stats.average_trust * 100.0
                 );
+                Ok(())
+            }
+            Err(summary) => {
+                cli_println!(
+                    "\n{} Swarm finished WITHOUT verified success ({} agents, avg trust {:.0}%):\n  {}",
+                    "🐝".bright_red(),
+                    stats.total_agents,
+                    stats.average_trust * 100.0,
+                    summary
+                );
+                Err(anyhow::anyhow!("swarm task did not succeed: {summary}"))
             }
         }
-
-        // Print swarm statistics
-        let stats = swarm.stats();
-        cli_println!(
-            "\n{} Swarm complete: {} agents, avg trust {:.0}%",
-            "🐝".bright_green(),
-            stats.total_agents,
-            stats.average_trust * 100.0
-        );
-
-        Ok(())
     }
 
     /// Build a progress injection message for periodic budget awareness.
@@ -1932,6 +1861,242 @@ impl Agent {
         let home = dirs::home_dir()?;
         Some(home.join(".selfware").join("checkpoints").join(task_id))
     }
+}
+
+/// One phase of the swarm pipeline. Phases run strictly in priority order;
+/// `depends_on` lists roles whose phases must have succeeded first — a phase
+/// whose required input failed is blocked, not run on a broken foundation.
+struct SwarmPhase {
+    role: AgentRole,
+    description: &'static str,
+    priority: u8,
+    depends_on: &'static [AgentRole],
+}
+
+/// The swarm pipeline: Architect -> Coder -> Tester/Reviewer.
+fn swarm_phases() -> Vec<SwarmPhase> {
+    vec![
+        SwarmPhase {
+            role: AgentRole::Architect,
+            description: "Design the architecture and plan the implementation",
+            priority: 10,
+            depends_on: &[],
+        },
+        SwarmPhase {
+            role: AgentRole::Coder,
+            description: "Implement the changes based on the architecture plan",
+            priority: 8,
+            depends_on: &[AgentRole::Architect],
+        },
+        SwarmPhase {
+            role: AgentRole::Tester,
+            description: "Write and run tests to verify the implementation",
+            priority: 6,
+            depends_on: &[AgentRole::Coder],
+        },
+        SwarmPhase {
+            role: AgentRole::Reviewer,
+            description: "Review the code changes for quality and correctness",
+            priority: 4,
+            depends_on: &[AgentRole::Coder],
+        },
+    ]
+}
+
+/// Outcome of a single swarm phase, aggregated into the final task verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PhaseOutcome {
+    /// The phase ran and its agent run succeeded.
+    Success,
+    /// The phase ran and failed; the error text is retained as evidence.
+    Failed(String),
+    /// The phase was not run because a phase it depends on did not succeed.
+    Blocked { dependency: AgentRole },
+}
+
+/// First dependency of `role` (if any) whose phase did not succeed.
+fn phase_blocked_by(
+    role: AgentRole,
+    phases: &[SwarmPhase],
+    outcomes: &[(AgentRole, PhaseOutcome)],
+) -> Option<AgentRole> {
+    let phase = phases.iter().find(|p| p.role == role)?;
+    phase.depends_on.iter().copied().find(|dep| {
+        outcomes
+            .iter()
+            .any(|(r, o)| r == dep && *o != PhaseOutcome::Success)
+    })
+}
+
+/// Aggregate per-phase outcomes into the task verdict. `Ok` only when every
+/// phase ran and succeeded; otherwise the error names each failed, blocked,
+/// or never-run phase with its evidence.
+fn swarm_verdict(
+    phases: &[SwarmPhase],
+    outcomes: &[(AgentRole, PhaseOutcome)],
+) -> Result<(), String> {
+    let mut problems: Vec<String> = outcomes
+        .iter()
+        .filter_map(|(role, outcome)| match outcome {
+            PhaseOutcome::Success => None,
+            PhaseOutcome::Failed(evidence) => {
+                Some(format!("phase '{}' FAILED: {}", role.name(), evidence))
+            }
+            PhaseOutcome::Blocked { dependency } => Some(format!(
+                "phase '{}' BLOCKED (input phase '{}' did not succeed)",
+                role.name(),
+                dependency.name()
+            )),
+        })
+        .collect();
+    for phase in phases {
+        if !outcomes.iter().any(|(role, _)| *role == phase.role) {
+            problems.push(format!("phase '{}' DID NOT RUN", phase.role.name()));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n  "))
+    }
+}
+
+/// Process the queued swarm phases in priority order, recording each phase's
+/// outcome in the swarm and in the returned vector. A phase whose required
+/// input phase did not succeed is blocked (its task settled as failed)
+/// instead of run.
+///
+/// `run_phase` is injected so tests can script phase failures without an
+/// LLM; production passes `Agent::run_task`.
+async fn run_swarm_phases<A, F>(
+    agent: &mut A,
+    swarm: &mut Swarm,
+    phases: &[SwarmPhase],
+    mut run_phase: F,
+) -> Vec<(AgentRole, PhaseOutcome)>
+where
+    F: for<'a> FnMut(
+        &'a mut A,
+        String,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>,
+    >,
+{
+    let mut outcomes: Vec<(AgentRole, PhaseOutcome)> = Vec::new();
+    let mut phase_num = 0usize;
+    while let Some(task_id) = swarm.next_task() {
+        phase_num += 1;
+
+        // Get the task details from active_tasks
+        let sub_task = match swarm.get_task(&task_id) {
+            Some(t) => t.clone(),
+            None => {
+                warn!("Task {} not found after next_task()", task_id);
+                break;
+            }
+        };
+
+        let role = sub_task.required_roles.first().copied();
+        let role_name = role.map(|r| r.name()).unwrap_or("General");
+
+        // A phase whose required input failed is blocked, not run: its
+        // output would build on a broken foundation, and the swarm must not
+        // report it as done.
+        if let Some(role) = role {
+            if let Some(dependency) = phase_blocked_by(role, phases, &outcomes) {
+                warn!(
+                    "Swarm phase '{}' blocked: input phase '{}' did not succeed",
+                    role_name,
+                    dependency.name()
+                );
+                cli_println!(
+                    "\n{} Phase {}/{}: {} ({}) {}",
+                    "🐝".bright_cyan(),
+                    phase_num,
+                    phases.len(),
+                    sub_task.description.bright_white(),
+                    role_name.bright_yellow(),
+                    format!(
+                        "BLOCKED — input phase '{}' did not succeed",
+                        dependency.name()
+                    )
+                    .bright_red()
+                );
+                // Settle the popped task so it doesn't sit active forever.
+                swarm.fail_task(&task_id);
+                outcomes.push((role, PhaseOutcome::Blocked { dependency }));
+                continue;
+            }
+        }
+
+        let assigned = swarm.assign_task(&task_id);
+
+        // Determine the lead agent for this sub-task
+        let lead_agent_prompt = if let Some(agent_id) = assigned.first() {
+            swarm
+                .get_agent(agent_id)
+                .map(|a| a.system_prompt().to_string())
+                .unwrap_or_default()
+        } else {
+            // No idle agent matched; fall back to role-based prompt
+            sub_task
+                .required_roles
+                .first()
+                .map(|r| r.system_prompt().to_string())
+                .unwrap_or_default()
+        };
+
+        cli_println!(
+            "\n{} Phase {}/{}: {} ({})",
+            "🐝".bright_cyan(),
+            phase_num,
+            phases.len(),
+            sub_task.description.bright_white(),
+            role_name.bright_yellow()
+        );
+
+        // Build a role-specific prompt that includes specialist guidance
+        let role_prompt = format!(
+            "{}\n\n\
+             You are acting as the {} in a development swarm.\n\
+             Previous phases have already contributed to the conversation context.\n\
+             Focus specifically on your role's responsibilities.\n\
+             After completing your work, verify with cargo_check if you made code changes.\n\n\
+             Task: {}",
+            lead_agent_prompt, role_name, sub_task.description
+        );
+
+        let result = run_phase(agent, role_prompt).await;
+
+        // Record completion back in the swarm
+        let (success, result_msg) = match &result {
+            Ok(()) => (true, "Phase completed successfully".to_string()),
+            Err(e) => (false, e.to_string()),
+        };
+
+        for agent_id in &assigned {
+            swarm.complete_task(&task_id, agent_id, &result_msg, success);
+        }
+
+        if let Some(role) = role {
+            outcomes.push((
+                role,
+                if success {
+                    PhaseOutcome::Success
+                } else {
+                    PhaseOutcome::Failed(result_msg.clone())
+                },
+            ));
+        }
+
+        if !success {
+            warn!(
+                "Swarm phase '{}' failed: {}; continuing with remaining phases",
+                role_name, result_msg
+            );
+        }
+    }
+    outcomes
 }
 
 #[cfg(test)]

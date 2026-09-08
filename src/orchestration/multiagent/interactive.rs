@@ -648,12 +648,13 @@ impl MultiAgentChat {
             // 7. Settle the task: if any assigned agent never reported a
             //    result (e.g. cancelled mid-run), don't leave the SwarmTask
             //    stuck InProgress forever — mark it Failed and release its
-            //    agents.
-            let task_completed = swarm
+            //    agents. Tasks already settled by `complete_task` (Completed,
+            //    Partial, or Failed) keep their recorded outcome.
+            let task_unsettled = swarm
                 .get_task(&task_id)
-                .map(|t| t.status == TaskStatus::Completed)
-                .unwrap_or(true);
-            if !task_completed {
+                .map(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::InProgress))
+                .unwrap_or(false);
+            if task_unsettled {
                 swarm.fail_task(&task_id);
             }
 

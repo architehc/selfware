@@ -808,6 +808,18 @@ impl Config {
             ));
         }
 
+        // Denylist semantics for `safety.denied_paths`: an explicit key in a
+        // config file can only ADD restrictions, never remove the built-in
+        // safety defaults — serde would otherwise REPLACE the 10-entry default
+        // with whatever the file lists, and stale generated configs carrying
+        // the old 3-entry list silently re-exposed `.env.production`, bare
+        // `secrets/`, `*.env` and `.git/config` (red-team review finding).
+        // Placed after the untrusted-config restriction above: that reset
+        // already restores the full default list, and the union is idempotent.
+        config.safety.denied_paths = super::safety::union_with_default_denied_paths(
+            std::mem::take(&mut config.safety.denied_paths),
+        );
+
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
             if let Ok(n) = max_tokens.parse::<usize>() {
                 config.max_tokens = n;
@@ -1049,9 +1061,25 @@ impl Config {
     /// the fallback `Config::load` applies on disk reads, shared with
     /// [`Config::validate_generated_toml`] so a generated config is judged
     /// against the SAME effective context window it gets at load time.
+    ///
+    /// This is a degradation, not a default: it warns loudly every time it
+    /// fires. With the stock `max_tokens` the derived conversation budget
+    /// collapses to the [`super::MIN_CONVERSATION_TOKENS`] floor, so the
+    /// warning names the model, the assumed window, and the remediation
+    /// (set `context_length` explicitly) rather than silently proceeding.
     fn apply_unknown_model_context_fallback(&mut self, context_length_explicit: bool) {
         if !context_length_explicit && match_profile(&self.model).is_none() {
             self.context_length = super::UNKNOWN_MODEL_CONTEXT_LENGTH;
+            warn!(
+                "UNKNOWN MODEL '{}': no built-in profile matches and context_length is not \
+                 set — assuming a conservative {}-token context window. With the default \
+                 max_tokens this collapses the conversation budget to the {}-token floor. \
+                 Set context_length explicitly (top-level or in the [models.*] profile) to \
+                 the model's real context window; see docs/configuration.md.",
+                self.model,
+                super::UNKNOWN_MODEL_CONTEXT_LENGTH,
+                super::MIN_CONVERSATION_TOKENS,
+            );
         }
     }
 

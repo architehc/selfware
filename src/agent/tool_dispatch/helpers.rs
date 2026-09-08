@@ -793,6 +793,54 @@ pub(crate) fn patch_target_paths(diff: &str) -> Vec<std::path::PathBuf> {
     targets
 }
 
+/// File paths a mutating file tool touches, mirroring the file-tool branch of
+/// `tool_call_is_mutating`. Used by the best-snapshot ledger
+/// (`Agent::written_paths`) so snapshot capture and restore cover every file
+/// the run wrote — `file_multi_edit` carries a LIST of per-edit paths and
+/// `patch_apply` embeds its targets inside the unified diff, so both need
+/// structured extraction rather than a single `path` lookup.
+pub(crate) fn written_paths_for_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+) -> Vec<std::path::PathBuf> {
+    match name {
+        "file_edit" | "file_write" | "file_delete" | "file_fim_edit" => args
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .collect(),
+        "file_multi_edit" => args
+            .get("edits")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
+            .map(std::path::PathBuf::from)
+            .collect(),
+        "patch_apply" => args
+            .get("diff")
+            .and_then(|v| v.as_str())
+            .map(patch_target_paths)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// True when a successful call to `name` writes file CONTENT (create or
+/// edit). This is the "has the agent written any file" evidence set for the
+/// completion gates: every file-writing tool counts — file_edit, file_write,
+/// file_fim_edit, file_multi_edit and patch_apply — while file_delete and
+/// shell/git mutations do not (they mutate state but are not "writing a
+/// file"). Mirrors the file-tool branch of `tool_call_is_mutating` minus
+/// `file_delete`; keep the two in sync.
+pub(crate) fn tool_call_writes_file(name: &str) -> bool {
+    matches!(
+        name,
+        "file_edit" | "file_write" | "file_fim_edit" | "file_multi_edit" | "patch_apply"
+    )
+}
+
 pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> bool {
     if matches!(
         name,
@@ -893,9 +941,14 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     // EXECUTE — this gate only decides what the ledger may trust.
     let segments = shell_segments_with_operators(&normalized);
     segments.iter().enumerate().any(|(i, (_op, segment))| {
-        segment_starts_with_verification_runner(segment, &verification_prefixes)
-            && runner_status_is_authoritative(&segments, i)
-    }) || script_runner_status_is_authoritative(&segments, &normalized)
+        match segment_verification_prefix(segment, &verification_prefixes) {
+            Some(prefix) => {
+                !segment_is_info_only_invocation(segment, prefix)
+                    && runner_status_is_authoritative(&segments, i)
+            }
+            None => false,
+        }
+    }) || script_runner_status_is_authoritative(&segments)
 }
 
 /// Does the runner segment's exit status determine the command's final
@@ -925,17 +978,45 @@ fn runner_status_is_authoritative(segments: &[(String, String)], runner_idx: usi
 /// be `&&`, so overall success implies every segment — including the test
 /// script — actually ran and passed. A masked or skipped assertion is not
 /// evidence (review finding: the fallback sat outside the masking check).
-fn script_runner_status_is_authoritative(segments: &[(String, String)], command: &str) -> bool {
+/// Detection is scoped per segment with the interpreter in COMMAND position:
+/// scanning the whole command credited prose like `echo python3 -c 'assert
+/// …'` — the echo prints the text, nothing executes (external review
+/// finding).
+fn script_runner_status_is_authoritative(segments: &[(String, String)]) -> bool {
     let all_authoritative = segments
         .iter()
         .all(|(op, _)| op.is_empty() || op.trim() == "&&");
-    all_authoritative && shell_command_runs_test_script(command)
+    all_authoritative
+        && segments
+            .iter()
+            .any(|(_, segment)| segment_runs_test_script(segment))
+}
+
+/// Does this single segment execute a test script, with the interpreter (or
+/// a direct `./test_x.py`-style path) as its first shell word?
+fn segment_runs_test_script(segment: &str) -> bool {
+    let Some(word) = first_shell_word(segment) else {
+        return false;
+    };
+    let basename = word.rsplit('/').next().unwrap_or(word);
+    let is_interpreter = basename.starts_with("python")
+        || basename.starts_with("pypy")
+        || matches!(
+            basename,
+            "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php" | "bash" | "sh"
+        );
+    if is_interpreter {
+        return shell_command_runs_test_script(segment);
+    }
+    (word.starts_with("./") || word.starts_with('/')) && Agent::gate_path_is_test(word)
 }
 
 /// Split a shell command into segments at top-level connectors (`&&`, `||`,
 /// `;`, `|`, background `&`, newlines), tracking single/double quotes so
 /// connectors inside quoted code (`python3 -c "assert add(2, 2) == 4"; true`)
-/// don't shred the analysis. Returns (operator_before, segment) pairs; the
+/// don't shred the analysis. An `&` that is part of a redirection (`2>&1`,
+/// `>&2`, `&>file`, `&>>file`) is NOT a connector — it stays in the segment
+/// text. Returns (operator_before, segment) pairs; the
 /// first segment's operator is empty. Parens and subshells are left in the
 /// segment text — only the status-connecting operators matter here.
 fn shell_segments_with_operators(command: &str) -> Vec<(String, String)> {
@@ -966,6 +1047,18 @@ fn shell_segments_with_operators(command: &str) -> Vec<(String, String)> {
                     chars.next();
                     segments.push((std::mem::take(&mut pending_op), std::mem::take(&mut cur)));
                     pending_op = "&&".to_string();
+                } else if (cur.ends_with('>') && !cur.ends_with("\\>"))
+                    || chars.peek() == Some(&'>')
+                {
+                    // Redirection, not background: `2>&1` / `>&2` duplicate a
+                    // descriptor and `&>file` / `&>>file` redirect both
+                    // streams — the runner's exit status still governs the
+                    // command's final status. Splitting on this `&` made
+                    // `cargo test 2>&1` non-authoritative, so a correct test
+                    // run never earned verification credit and the completion
+                    // gate refused every final answer (review finding #3).
+                    // `cmd & > log` (space before `>`) stays background.
+                    cur.push(c);
                 } else {
                     // Background: the runner detaches; final status belongs to
                     // whatever follows — same authority stance as `;`.
@@ -1019,24 +1112,58 @@ pub(crate) fn first_shell_word(segment: &str) -> Option<&str> {
 }
 
 /// Does this pipeline segment invoke a recognized verification runner as its
-/// first shell word? The runner set is derived from `verification_prefixes`
-/// (first token of each prefix); the existing boundary matching then decides
-/// whether the full prefix (e.g. `cargo test`, not `cargo add`) is present.
-/// Segments that merely PRINT a runner command (`echo`, `printf`, `true`,
-/// `exit`) never count.
-fn segment_starts_with_verification_runner(segment: &str, prefixes: &[&str]) -> bool {
-    let Some(word) = first_shell_word(segment) else {
-        return false;
-    };
+/// first shell word? Returns the matched prefix. The runner set is derived
+/// from `verification_prefixes` (first token of each prefix); the existing
+/// boundary matching then decides whether the full prefix (e.g. `cargo
+/// test`, not `cargo add`) is present. Segments that merely PRINT a runner
+/// command (`echo`, `printf`, `true`, `exit`) never count.
+fn segment_verification_prefix<'p>(segment: &str, prefixes: &[&'p str]) -> Option<&'p str> {
+    let word = first_shell_word(segment)?;
     let basename = word.rsplit('/').next().unwrap_or(word);
     if matches!(basename, "echo" | "printf" | "true" | "exit") {
-        return false;
+        return None;
     }
-    prefixes.iter().any(|prefix| {
+    prefixes.iter().copied().find(|prefix| {
         let runner = prefix.split_whitespace().next().unwrap_or(prefix);
         let runner_basename = runner.rsplit('/').next().unwrap_or(runner);
         basename == runner_basename && command_contains_at_boundary(segment, prefix)
     })
+}
+
+/// Info-only runner invocations run no tests: `pytest --version`,
+/// `go test -h`, `cargo test --help` (external review finding —
+/// `pytest --version` earned verification credit). Everything after the
+/// matched runner prefix must be info flags for this to apply; a lone `--`
+/// separator is ignored (`npm test -- --version`).
+fn segment_is_info_only_invocation(segment: &str, prefix: &str) -> bool {
+    const INFO_FLAGS: &[&str] = &[
+        "--version",
+        "-V",
+        "--help",
+        "-h",
+        "version",
+        "help",
+        "--collect-only",
+        "--list",
+        "--markers",
+        "--fixtures",
+    ];
+    let Some(at) = segment.find(prefix) else {
+        return false;
+    };
+    let rest = &segment[at + prefix.len()..];
+    let mut saw_info_flag = false;
+    for tok in rest.split_whitespace() {
+        if tok == "--" {
+            continue;
+        }
+        if INFO_FLAGS.contains(&tok) {
+            saw_info_flag = true;
+        } else {
+            return false;
+        }
+    }
+    saw_info_flag
 }
 
 /// True when the command's FIRST shell word (after optional `sudo` / `env` /
