@@ -177,7 +177,7 @@ impl Tool for HttpRequest {
 
         // Execute request
         let start = std::time::Instant::now();
-        let response = request
+        let mut response = request
             .send()
             .await
             .context("Failed to send HTTP request")?;
@@ -199,20 +199,41 @@ impl Tool for HttpRequest {
             .cloned()
             .unwrap_or_default();
 
-        let body = response
-            .text()
+        // Stream the body into a bounded buffer. Display truncation is 50K
+        // chars, but the ALLOCATION must be capped too (review finding: a
+        // large in-timeout response could exhaust memory before the truncate
+        // ran). Read chunks until the cap + overflow marker, then stop; the
+        // connection drops with the response.
+        const BODY_CAP: usize = 51_200; // 50 KiB
+        let mut buf: Vec<u8> = Vec::new();
+        let mut hit_cap = false;
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .context("Failed to read response body")?;
+            .context("Failed to read response body")?
+        {
+            if buf.len() + chunk.len() > BODY_CAP {
+                buf.extend_from_slice(&chunk[..BODY_CAP - buf.len()]);
+                hit_cap = true;
+                break;
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8_lossy(&buf).into_owned();
 
         // Truncate body if too large
-        let truncated = body.len() > 50000;
+        let truncated = hit_cap || body.len() > 50000;
         let body = if truncated {
             let safe_truncate: String = body.chars().take(50000).collect();
-            format!(
-                "{}...[truncated, {} bytes total]",
-                safe_truncate,
-                body.len()
-            )
+            if hit_cap {
+                format!("{safe_truncate}...[truncated at 50 KiB cap]")
+            } else {
+                format!(
+                    "{}...[truncated, {} bytes total]",
+                    safe_truncate,
+                    body.len()
+                )
+            }
         } else {
             body
         };
