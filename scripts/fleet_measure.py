@@ -43,22 +43,65 @@ def rate(w):
         parts.append(f"{ep} {a[0]//w}/{a[1]//w}")
     return "; ".join(parts) if parts else "-"
 
+GATE_ARTIFACTS = Path("/home/rig/selfdev/gate_artifacts")
+
+def run_gate():
+    """Run the redteam gate once. Returns (status, violations, exit_code, artifact).
+
+    status: pass | violations | compile-failure | infra-failure | timeout.
+    violations is None unless the tests actually ran to completion —
+    unknown must remain unknown, never reported as 0 (external review
+    finding 13: a mocked cargo exit 101 + compile error printed
+    gate_violations=0). Raw cargo output is kept in the artifact file.
+    """
+    GATE_ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    artifact = GATE_ARTIFACTS / f"gate_{time.strftime('%Y%m%dT%H%M%S')}.log"
+    try:
+        p = subprocess.run(
+            ["cargo", "test", "--test", "redteam_gate_test"],
+            cwd="/home/rig/selfware", capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        return "infra-failure", None, None, None
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else ""
+        err = e.stderr if isinstance(e.stderr, str) else ""
+        artifact.write_text(f"TIMEOUT after 600s\nSTDOUT:\n{out}\nSTDERR:\n{err}\n")
+        return "timeout", None, None, artifact
+    artifact.write_text(
+        f"exit_code={p.returncode}\nSTDOUT:\n{p.stdout}\nSTDERR:\n{p.stderr}\n")
+    out = p.stdout + p.stderr
+    if "error[" in out or "could not compile" in out:
+        return "compile-failure", None, p.returncode, artifact
+    if "test result:" not in p.stdout:
+        # cargo exited before running any test binary
+        return "infra-failure", None, p.returncode, artifact
+    n = out.count("attack was ALLOWED")
+    status = "pass" if p.returncode == 0 and n == 0 else "violations"
+    return status, n, p.returncode, artifact
+
 gate_viol = ""
+gate_status = ""
+gate_artifact = None
 if "--gate" in sys.argv:
-    p = subprocess.run(
-        ["cargo", "test", "--test", "redteam_gate_test"],
-        cwd="/home/rig/selfware", capture_output=True, text=True, timeout=600)
-    gate_viol = str(p.stdout.count("attack was ALLOWED"))
+    gate_status, n, code, gate_artifact = run_gate()
+    gate_viol = "" if n is None else str(n)
+    if code is not None:
+        gate_status += f"(exit={code})"
 
 row = [time.strftime("%Y-%m-%dT%H:%M:%S"), str(corpus_n), gate_viol,
-       rate(60), rate(300), rate(900), rate(3600)]
+       rate(60), rate(300), rate(900), rate(3600), gate_status]
 new = not LOG.exists()
 with LOG.open("a") as fh:
     if new:
-        fh.write("ts\tcorpus_cases\tgate_violations\ttok_in/out_1m\ttok_in/out_5m\ttok_in/out_15m\ttok_in/out_1h\n")
+        fh.write("ts\tcorpus_cases\tgate_violations\ttok_in/out_1m\ttok_in/out_5m\ttok_in/out_15m\ttok_in/out_1h\tgate_status\n")
     fh.write("\t".join(row) + "\n")
 
-print(f"corpus={corpus_n} gate_violations={gate_viol or 'n/a'}")
+if "--gate" in sys.argv:
+    print(f"corpus={corpus_n} gate_violations={gate_viol or 'unknown'} gate_status={gate_status}")
+    if gate_artifact and not gate_status.startswith("pass"):
+        print(f"  gate artifact: {gate_artifact}")
+else:
+    print(f"corpus={corpus_n} gate_violations=n/a")
 print(f" 1m: {rate(60)}")
 print(f" 5m: {rate(300)}")
 print(f"15m: {rate(900)}")
