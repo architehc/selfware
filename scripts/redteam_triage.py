@@ -73,7 +73,8 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> list:
         ],
         "temperature": 0.2,
         "seed": seed,
-        "max_tokens": 4096,
+        # Ceiling, not a reservation — never truncate a verdict batch early.
+        "max_tokens": 65536,
         "chat_template_kwargs": {"enable_thinking": False},
         "stream": True,
         "stream_options": {"include_usage": True},
