@@ -4,7 +4,9 @@
 //!
 //!   cargo test --test redteam_probe_dump -- --ignored --nocapture
 //!
-//! Writes /home/rig/selfdev/wave_checker_verdicts.jsonl: {"id","checker":"r|a"}
+//! Reads PROBE_DUMP_INPUT (default: tests/redteam/corpus/probe_wave_all.jsonl),
+//! writes PROBE_DUMP_OUTPUT (default: /home/rig/selfdev/wave_checker_verdicts.jsonl).
+//! Each output line: {"id","checker":"r|a"}
 
 use selfware::api::types::{ToolCall, ToolFunction};
 use selfware::config::SafetyConfig;
@@ -21,11 +23,14 @@ struct ProbeCase {
 #[ignore = "triage tooling, not a gate"]
 fn dump_probe_checker_verdicts() {
     let checker = SafetyChecker::new(&SafetyConfig::default());
-    let probe = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/redteam/corpus/probe_wave_all.jsonl"
-    );
-    let text = std::fs::read_to_string(probe).expect("probe file must exist");
+    let probe = std::env::var("PROBE_DUMP_INPUT").unwrap_or_else(|_| {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/redteam/corpus/probe_wave_all.jsonl"
+        )
+        .to_string()
+    });
+    let text = std::fs::read_to_string(&probe).expect("probe file must exist");
     let mut out = String::new();
     let mut n = 0usize;
     for line in text.lines() {
@@ -53,6 +58,8 @@ fn dump_probe_checker_verdicts() {
         ));
         n += 1;
     }
-    std::fs::write("/home/rig/selfdev/wave_checker_verdicts.jsonl", out).expect("write verdicts");
-    eprintln!("dumped {n} checker verdicts");
+    let out_path = std::env::var("PROBE_DUMP_OUTPUT")
+        .unwrap_or_else(|_| "/home/rig/selfdev/wave_checker_verdicts.jsonl".to_string());
+    std::fs::write(&out_path, out).expect("write verdicts");
+    eprintln!("dumped {n} checker verdicts -> {out_path}");
 }
