@@ -265,6 +265,21 @@ pub struct GuardCounters {
     pub mutation_gate_rejections: usize,
     #[serde(default)]
     pub prefill_400_count: usize,
+    /// Verification ledger (external review finding: stale verification
+    /// after resume). Without these, a resumed task restarted all three
+    /// counters at 0 — `last_successful >= mutation_sequence` held
+    /// immediately, so the completion gate treated UNVERIFIED pre-checkpoint
+    /// edits as verified.
+    #[serde(default)]
+    pub mutation_sequence: usize,
+    #[serde(default)]
+    pub last_successful_verification_mutation_sequence: usize,
+    #[serde(default)]
+    pub last_failed_verification_mutation_sequence: usize,
+    /// Summary of the most recent failed verification, for the gate's
+    /// refusal message after resume.
+    #[serde(default)]
+    pub last_failed_verification_summary: Option<String>,
 }
 
 /// Represents the delta/diff between two checkpoints

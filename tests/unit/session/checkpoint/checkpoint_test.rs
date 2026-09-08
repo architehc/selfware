@@ -1240,6 +1240,10 @@ fn task_checkpoint_budget_fields_roundtrip_and_default() {
         consecutive_no_action_prompts: 3,
         mutation_gate_rejections: 5,
         prefill_400_count: 2,
+        mutation_sequence: 7,
+        last_successful_verification_mutation_sequence: 4,
+        last_failed_verification_mutation_sequence: 6,
+        last_failed_verification_summary: Some("pytest: 2 failed".to_string()),
     };
     let json = serde_json::to_string(&cp).unwrap();
     let back: TaskCheckpoint = serde_json::from_str(&json).unwrap();
@@ -1248,6 +1252,25 @@ fn task_checkpoint_budget_fields_roundtrip_and_default() {
     assert_eq!(back.cumulative_cost_usd, 1.2345);
     assert_eq!(back.guard_counters.mutation_gate_rejections, 5);
     assert_eq!(back.guard_counters.prefill_400_count, 2);
+    // Verification ledger survives the round-trip (stale-verification-after-
+    // resume fix): unverified pre-checkpoint edits stay unverified.
+    assert_eq!(back.guard_counters.mutation_sequence, 7);
+    assert_eq!(
+        back.guard_counters
+            .last_successful_verification_mutation_sequence,
+        4
+    );
+    assert_eq!(
+        back.guard_counters
+            .last_failed_verification_mutation_sequence,
+        6
+    );
+    assert_eq!(
+        back.guard_counters
+            .last_failed_verification_summary
+            .as_deref(),
+        Some("pytest: 2 failed")
+    );
 
     // Legacy checkpoints without these fields must default to 0, not fail.
     let mut legacy_value =
@@ -1283,6 +1306,7 @@ fn delta_carries_cumulative_budget_across_apply() {
         consecutive_no_action_prompts: 2,
         mutation_gate_rejections: 4,
         prefill_400_count: 1,
+        ..GuardCounters::default()
     };
     let delta = newer.compute_delta(&base).expect("delta should exist");
     assert_eq!(delta.cumulative_tokens, Some(500));

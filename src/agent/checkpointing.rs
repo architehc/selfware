@@ -116,6 +116,21 @@ impl Agent {
             checkpoint.guard_counters.consecutive_no_action_prompts;
         agent.mutation_gate_rejections = checkpoint.guard_counters.mutation_gate_rejections;
         agent.prefill_400_count = checkpoint.guard_counters.prefill_400_count;
+        // Restore the verification ledger so UNVERIFIED pre-checkpoint edits
+        // stay unverified across resume — resetting the counters to 0 made
+        // `last_successful >= mutation_sequence` trivially true and the
+        // completion gate accepted stale work (external review finding).
+        agent.mutation_sequence = checkpoint.guard_counters.mutation_sequence;
+        agent.last_successful_verification_mutation_sequence = checkpoint
+            .guard_counters
+            .last_successful_verification_mutation_sequence;
+        agent.last_failed_verification_mutation_sequence = checkpoint
+            .guard_counters
+            .last_failed_verification_mutation_sequence;
+        agent.last_failed_verification_summary = checkpoint
+            .guard_counters
+            .last_failed_verification_summary
+            .clone();
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
         agent.last_checkpoint_persisted_at = Instant::now();
         agent.checkpoint_persisted_once = true;
@@ -242,6 +257,12 @@ impl Agent {
             consecutive_no_action_prompts: self.consecutive_no_action_prompts,
             mutation_gate_rejections: self.mutation_gate_rejections,
             prefill_400_count: self.prefill_400_count,
+            mutation_sequence: self.mutation_sequence,
+            last_successful_verification_mutation_sequence: self
+                .last_successful_verification_mutation_sequence,
+            last_failed_verification_mutation_sequence: self
+                .last_failed_verification_mutation_sequence,
+            last_failed_verification_summary: self.last_failed_verification_summary.clone(),
         };
 
         // Persist the hard budget caps themselves (CLI-only, `#[serde(skip)]` on
