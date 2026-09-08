@@ -2176,3 +2176,81 @@ fn test_memory_write_updates_metadata() {
     assert_eq!(entry.modified_by, Some("agent3".to_string()));
     assert!(entry.modified_at.is_some());
 }
+
+// ============================================================================
+// Task completion gating on success flags (review finding 16)
+// ============================================================================
+
+#[test]
+fn test_swarm_complete_task_failed_result_does_not_complete() {
+    // Regression: completion used to be gated only on the NUMBER of result
+    // strings, so a failed phase read as Completed (overall green success).
+    let mut swarm = Swarm::new();
+    let coder_id = swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
+
+    let task = SwarmTask::new("Build it").with_role(AgentRole::Coder);
+    let task_id = task.id.clone();
+    swarm.queue_task(task).unwrap();
+    swarm.assign_task(&task_id);
+
+    swarm.complete_task(&task_id, &coder_id, "boom: cargo check failed", false);
+
+    let task = swarm.get_task(&task_id).unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    // Failure evidence is retained and the failing agent is identifiable.
+    assert_eq!(
+        task.results.get(&coder_id).unwrap(),
+        "boom: cargo check failed"
+    );
+    let failed = task.failed_results();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, &coder_id);
+    assert_eq!(failed[0].1, "boom: cargo check failed");
+}
+
+#[test]
+fn test_swarm_complete_task_mixed_results_marked_partial() {
+    // Regression: mixed per-agent outcomes must surface as Partial with the
+    // failing side identified — not as Completed.
+    let mut swarm = Swarm::new();
+    let c1 = swarm.add_agent(Agent::new("C1", AgentRole::Coder));
+    let c2 = swarm.add_agent(Agent::new("C2", AgentRole::Coder));
+
+    let task = SwarmTask::new("Build it")
+        .with_role(AgentRole::Coder)
+        .with_role(AgentRole::Coder);
+    let task_id = task.id.clone();
+    swarm.queue_task(task).unwrap();
+    swarm.assign_task(&task_id);
+
+    swarm.complete_task(&task_id, &c1, "done", true);
+    swarm.complete_task(&task_id, &c2, "boom", false);
+
+    let task = swarm.get_task(&task_id).unwrap();
+    assert_eq!(task.status, TaskStatus::Partial);
+    let failed = task.failed_results();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, &c2);
+    assert_eq!(failed[0].1, "boom");
+}
+
+#[test]
+fn test_swarm_complete_task_all_failed_marked_failed() {
+    let mut swarm = Swarm::new();
+    let c1 = swarm.add_agent(Agent::new("C1", AgentRole::Coder));
+    let c2 = swarm.add_agent(Agent::new("C2", AgentRole::Coder));
+
+    let task = SwarmTask::new("Build it")
+        .with_role(AgentRole::Coder)
+        .with_role(AgentRole::Coder);
+    let task_id = task.id.clone();
+    swarm.queue_task(task).unwrap();
+    swarm.assign_task(&task_id);
+
+    swarm.complete_task(&task_id, &c1, "boom 1", false);
+    swarm.complete_task(&task_id, &c2, "boom 2", false);
+
+    let task = swarm.get_task(&task_id).unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.failed_results().len(), 2);
+}

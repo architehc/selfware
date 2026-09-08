@@ -477,6 +477,10 @@ pub enum TaskStatus {
     Pending,
     InProgress,
     Completed,
+    /// All assigned agents reported, but at least one reported failure while
+    /// at least one succeeded. The failing agents and their result strings
+    /// are identifiable via `SwarmTask::failed_results`.
+    Partial,
     Failed,
 }
 
@@ -497,6 +501,11 @@ pub struct SwarmTask {
     pub assigned_agents: Vec<String>,
     /// Results from agents
     pub results: HashMap<String, String>,
+    /// Per-agent success flags recorded alongside `results`. Task completion
+    /// is gated on these flags, not just on the number of result strings, so
+    /// a failed result can never read as success (review finding 16).
+    #[serde(default)]
+    pub result_success: HashMap<String, bool>,
     /// Created timestamp
     pub created_at: u64,
 }
@@ -512,6 +521,7 @@ impl SwarmTask {
             status: TaskStatus::Pending,
             assigned_agents: Vec::new(),
             results: HashMap::new(),
+            result_success: HashMap::new(),
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -529,5 +539,15 @@ impl SwarmTask {
     pub fn with_priority(mut self, priority: u8) -> Self {
         self.priority = priority;
         self
+    }
+
+    /// Agents whose recorded result reported failure, paired with their
+    /// result strings (the failure evidence).
+    pub fn failed_results(&self) -> Vec<(&String, &String)> {
+        self.result_success
+            .iter()
+            .filter(|(_, success)| !**success)
+            .filter_map(|(agent_id, _)| self.results.get(agent_id).map(|r| (agent_id, r)))
+            .collect()
     }
 }

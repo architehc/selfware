@@ -1676,12 +1676,13 @@ async fn run_coordinated_fan_out(
         }
     }
     // Settle the task: an assigned agent that never reported a result must
-    // not leave the SwarmTask stuck InProgress forever.
-    let task_completed = swarm
+    // not leave the SwarmTask stuck InProgress forever. Tasks already settled
+    // by `complete_task` (Completed, Partial, or Failed) keep their outcome.
+    let task_unsettled = swarm
         .get_task(&task_id)
-        .map(|t| t.status == TaskStatus::Completed)
-        .unwrap_or(true);
-    if !task_completed {
+        .map(|t| matches!(t.status, TaskStatus::Pending | TaskStatus::InProgress))
+        .unwrap_or(false);
+    if task_unsettled {
         swarm.fail_task(&task_id);
     }
 

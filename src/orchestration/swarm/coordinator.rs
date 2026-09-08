@@ -439,6 +439,12 @@ impl Swarm {
     /// flag so trust scores and `tasks_failed` reflect reality (the flag was
     /// previously hardcoded to `true`, so failures could never be counted).
     ///
+    /// Once every assigned agent has reported, the task status is derived
+    /// from the recorded success flags — never from the result count alone
+    /// (previously any all-reported task became `Completed`, so a failed
+    /// phase read as overall success):
+    /// all succeeded → `Completed`, mixed → `Partial`, all failed → `Failed`.
+    ///
     /// The agent is returned to the idle pool so it can be assigned to
     /// subsequent tasks — `assign_task` only considers `Idle` agents, and
     /// previously agents stayed `Completed` forever, so no agent could ever
@@ -462,6 +468,7 @@ impl Swarm {
         };
 
         task.results.insert(agent_id.to_string(), result.into());
+        task.result_success.insert(agent_id.to_string(), success);
 
         // Don't complete a task with no assigned agents
         if task.assigned_agents.is_empty() {
@@ -478,7 +485,12 @@ impl Swarm {
         // within the same mutable borrow to avoid inconsistent state
         let all_done = task.results.len() >= task.assigned_agents.len();
         if all_done {
-            task.status = TaskStatus::Completed;
+            let successes = task.result_success.values().filter(|s| **s).count();
+            task.status = match successes {
+                0 => TaskStatus::Failed,
+                n if n == task.result_success.len() => TaskStatus::Completed,
+                _ => TaskStatus::Partial,
+            };
         }
 
         // Update agent status only when task was found, keeping both
