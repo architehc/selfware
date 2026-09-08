@@ -793,6 +793,54 @@ pub(crate) fn patch_target_paths(diff: &str) -> Vec<std::path::PathBuf> {
     targets
 }
 
+/// File paths a mutating file tool touches, mirroring the file-tool branch of
+/// `tool_call_is_mutating`. Used by the best-snapshot ledger
+/// (`Agent::written_paths`) so snapshot capture and restore cover every file
+/// the run wrote — `file_multi_edit` carries a LIST of per-edit paths and
+/// `patch_apply` embeds its targets inside the unified diff, so both need
+/// structured extraction rather than a single `path` lookup.
+pub(crate) fn written_paths_for_tool_call(
+    name: &str,
+    args: &serde_json::Value,
+) -> Vec<std::path::PathBuf> {
+    match name {
+        "file_edit" | "file_write" | "file_delete" | "file_fim_edit" => args
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(std::path::PathBuf::from)
+            .into_iter()
+            .collect(),
+        "file_multi_edit" => args
+            .get("edits")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.get("path").and_then(|p| p.as_str()))
+            .map(std::path::PathBuf::from)
+            .collect(),
+        "patch_apply" => args
+            .get("diff")
+            .and_then(|v| v.as_str())
+            .map(patch_target_paths)
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// True when a successful call to `name` writes file CONTENT (create or
+/// edit). This is the "has the agent written any file" evidence set for the
+/// completion gates: every file-writing tool counts — file_edit, file_write,
+/// file_fim_edit, file_multi_edit and patch_apply — while file_delete and
+/// shell/git mutations do not (they mutate state but are not "writing a
+/// file"). Mirrors the file-tool branch of `tool_call_is_mutating` minus
+/// `file_delete`; keep the two in sync.
+pub(crate) fn tool_call_writes_file(name: &str) -> bool {
+    matches!(
+        name,
+        "file_edit" | "file_write" | "file_fim_edit" | "file_multi_edit" | "patch_apply"
+    )
+}
+
 pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> bool {
     if matches!(
         name,
@@ -966,7 +1014,9 @@ fn segment_runs_test_script(segment: &str) -> bool {
 /// Split a shell command into segments at top-level connectors (`&&`, `||`,
 /// `;`, `|`, background `&`, newlines), tracking single/double quotes so
 /// connectors inside quoted code (`python3 -c "assert add(2, 2) == 4"; true`)
-/// don't shred the analysis. Returns (operator_before, segment) pairs; the
+/// don't shred the analysis. An `&` that is part of a redirection (`2>&1`,
+/// `>&2`, `&>file`, `&>>file`) is NOT a connector — it stays in the segment
+/// text. Returns (operator_before, segment) pairs; the
 /// first segment's operator is empty. Parens and subshells are left in the
 /// segment text — only the status-connecting operators matter here.
 fn shell_segments_with_operators(command: &str) -> Vec<(String, String)> {
@@ -997,6 +1047,18 @@ fn shell_segments_with_operators(command: &str) -> Vec<(String, String)> {
                     chars.next();
                     segments.push((std::mem::take(&mut pending_op), std::mem::take(&mut cur)));
                     pending_op = "&&".to_string();
+                } else if (cur.ends_with('>') && !cur.ends_with("\\>"))
+                    || chars.peek() == Some(&'>')
+                {
+                    // Redirection, not background: `2>&1` / `>&2` duplicate a
+                    // descriptor and `&>file` / `&>>file` redirect both
+                    // streams — the runner's exit status still governs the
+                    // command's final status. Splitting on this `&` made
+                    // `cargo test 2>&1` non-authoritative, so a correct test
+                    // run never earned verification credit and the completion
+                    // gate refused every final answer (review finding #3).
+                    // `cmd & > log` (space before `>`) stays background.
+                    cur.push(c);
                 } else {
                     // Background: the runner detaches; final status belongs to
                     // whatever follows — same authority stance as `;`.

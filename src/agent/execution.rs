@@ -1425,7 +1425,7 @@ impl Agent {
                 .filter(|m| m.role == "assistant")
                 .filter_map(|m| m.tool_calls.as_ref())
                 .flatten()
-                .any(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"));
+                .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name));
 
         let terminal_threshold = if has_any_file_write { 20 } else { 8 };
         let warning_threshold = if has_any_file_write { 15 } else { 4 };

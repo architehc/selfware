@@ -169,6 +169,32 @@ fn test_shell_verification_rejects_exit_code_masks() {
 }
 
 #[test]
+fn test_shell_verification_credits_stderr_redirects() {
+    // Review finding #3 (HIGH): `2>&1` / `>&2` duplicate a descriptor — the
+    // `&` is not a background operator. The segmenter used to split there,
+    // making the runner's exit status non-authoritative, so `cargo test 2>&1`
+    // never earned verification credit and the completion gate refused every
+    // final answer (livelock until max_iterations).
+    assert!(shell_command_is_verification("cargo test 2>&1"));
+    assert!(shell_command_is_verification(
+        "cargo test 2>&1 && echo done"
+    ));
+    assert!(shell_command_is_verification("pytest -x 1>&2"));
+    // `&>file` / `&>>file` redirect BOTH streams to a file — still a single
+    // authoritative command whose exit status is the runner's.
+    assert!(shell_command_is_verification("cargo test &>test.log"));
+    assert!(shell_command_is_verification("cargo test &>>test.log"));
+    // A pipe after the redirect still masks the runner's status — no credit.
+    assert!(!shell_command_is_verification("cargo test 2>&1 | tee log"));
+    // A bare background `&` still detaches the runner — no credit.
+    assert!(!shell_command_is_verification("cargo test & sleep 1"));
+    assert!(!shell_command_is_verification("cargo test &"));
+    // `& > log` (space between `&` and `>`) is background + empty redirect,
+    // not the `&>` both-streams form — still no credit.
+    assert!(!shell_command_is_verification("cargo test & > log"));
+}
+
+#[test]
 fn test_shell_reader_requires_reader_as_first_word() {
     // P0 regression: the non-code readback gate must see an actual reader in
     // command position. `rm notes.txt` used to count as a readback of the
@@ -338,6 +364,48 @@ fn patch_target_paths_extracts_targets() {
     );
 }
 
+/// Regression (review #8): the best-snapshot written-path ledger counted only
+/// file_edit/file_write, so runs editing via the other mutating file tools
+/// got a partial restore or no snapshot at all.
+#[test]
+fn written_paths_for_tool_call_covers_full_mutating_set() {
+    // Single-path mutating tools.
+    for name in ["file_edit", "file_write", "file_delete", "file_fim_edit"] {
+        let args = serde_json::json!({"path": "src/a.rs"});
+        assert_eq!(
+            written_paths_for_tool_call(name, &args),
+            vec![std::path::PathBuf::from("src/a.rs")],
+            "{name} must contribute its path"
+        );
+    }
+    // file_multi_edit carries a LIST of edits — every target must be covered.
+    let args = serde_json::json!({"edits": [
+        {"path": "a.rs", "old_str": "x", "new_str": "y"},
+        {"path": "sub/b.rs", "old_str": "x", "new_str": "y"}
+    ]});
+    assert_eq!(
+        written_paths_for_tool_call("file_multi_edit", &args),
+        vec![
+            std::path::PathBuf::from("a.rs"),
+            std::path::PathBuf::from("sub/b.rs")
+        ]
+    );
+    // patch_apply embeds targets in the unified diff.
+    let args = serde_json::json!({"diff": "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-x\n+y\n"});
+    assert_eq!(
+        written_paths_for_tool_call("patch_apply", &args),
+        vec![std::path::PathBuf::from("src/a.rs")]
+    );
+    // Non-mutating tools contribute nothing.
+    assert!(
+        written_paths_for_tool_call("file_read", &serde_json::json!({"path": "a.rs"})).is_empty()
+    );
+    assert!(
+        written_paths_for_tool_call("shell_exec", &serde_json::json!({"command": "rm x"}))
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn multi_file_snapshot_captures_every_target_for_undo() {
     let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
@@ -453,6 +521,86 @@ async fn file_multi_edit_dispatch_snapshots_undo_and_clears_cache() {
 
 fn test_config(endpoint: String) -> Config {
     crate::test_support::mock_agent_config(&endpoint)
+}
+
+#[test]
+fn tool_call_writes_file_covers_every_file_writing_tool() {
+    for name in [
+        "file_edit",
+        "file_write",
+        "file_fim_edit",
+        "file_multi_edit",
+        "patch_apply",
+    ] {
+        assert!(
+            tool_call_writes_file(name),
+            "{name} writes file content and must count as a write"
+        );
+    }
+    for name in ["file_delete", "file_read", "shell_exec", "git_apply"] {
+        assert!(
+            !tool_call_writes_file(name),
+            "{name} does not write file content"
+        );
+    }
+}
+
+/// Review finding #4 regression: the single-call dispatch path set the
+/// durable `has_written_any_file` ledger only inside the diff-display block
+/// (file_edit/file_write with a pre-edit snapshot), so patch_apply and
+/// file_multi_edit edits never counted as writes on this path — the
+/// completion gate could then reject a run that had edited files.
+#[tokio::test]
+async fn mutating_file_tools_dispatch_sets_written_file_ledger() {
+    // file_multi_edit (absolute paths are accepted).
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("m.txt");
+    std::fs::write(&f, "one\n").unwrap();
+    let args = serde_json::json!({
+        "edits": [{"path": f.to_str().unwrap(), "old_str": "one", "new_str": "ONE"}]
+    });
+    let (ok, result, _) = agent
+        .execute_single_tool(
+            "file_multi_edit",
+            &args.to_string(),
+            &args,
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("dispatch should run");
+    assert!(ok, "file_multi_edit should succeed: {result}");
+    assert!(
+        agent.has_written_any_file,
+        "a successful file_multi_edit must set the durable write ledger"
+    );
+
+    // patch_apply (relative path — absolute paths are rejected).
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .expect("agent should build");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("p.txt"), "before\n").unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(dir.path());
+    let args = serde_json::json!({
+        "diff": "--- a/p.txt\n+++ b/p.txt\n@@ -1 +1 @@\n-before\n+after\n"
+    });
+    let (ok, result, _) = agent
+        .execute_single_tool(
+            "patch_apply",
+            &args.to_string(),
+            &args,
+            std::time::Instant::now(),
+        )
+        .await
+        .expect("dispatch should run");
+    assert!(ok, "patch_apply should succeed: {result}");
+    assert!(
+        agent.has_written_any_file,
+        "a successful patch_apply must set the durable write ledger"
+    );
 }
 
 // =========================================================================

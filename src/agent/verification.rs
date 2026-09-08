@@ -1360,13 +1360,20 @@ impl Agent {
         // were written at all. This catches the "context insufficient" early-quit
         // pattern where the model gives a text-only answer without doing any work.
         if !is_read_only && self.completion_requires_verification() {
-            let has_any_file_write = self
-                .messages
-                .iter()
-                .filter(|m| m.role == "assistant")
-                .filter_map(|m| m.tool_calls.as_ref())
-                .flatten()
-                .any(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"));
+            // The durable ledger is the primary evidence: compression rewrites
+            // self.messages, so a message-only scan rejects long tasks whose
+            // edits scrolled out of the compressed history (review finding #4).
+            // The message scan stays as a fallback and must count every
+            // file-writing tool — patch_apply, file_multi_edit and
+            // file_fim_edit are writes too, not just file_edit/file_write.
+            let has_any_file_write = self.has_written_any_file
+                || self
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "assistant")
+                    .filter_map(|m| m.tool_calls.as_ref())
+                    .flatten()
+                    .any(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name));
 
             if !has_any_file_write {
                 let task_desc = self
@@ -1657,11 +1664,12 @@ impl Agent {
             .map(|cp| {
                 cp.tool_calls
                     .iter()
-                    .filter(|tc| matches!(tc.tool_name.as_str(), "file_edit" | "file_write"))
-                    .filter_map(|tc| {
+                    .filter(|tc| super::tool_dispatch::tool_call_writes_file(&tc.tool_name))
+                    .flat_map(|tc| {
                         serde_json::from_str::<serde_json::Value>(&tc.arguments)
                             .ok()
-                            .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
+                            .map(|args| written_paths(&tc.tool_name, &args))
+                            .unwrap_or_default()
                     })
                     .collect()
             })
@@ -1764,7 +1772,9 @@ impl Agent {
     /// Detect when the agent only edited test files without modifying source code.
     /// This catches a common failure pattern where models write tests instead of fixes.
     fn validate_workflow_edits(&self) -> Option<String> {
-        // Scan message history for successful file_edit/file_write tool results
+        // Scan message history for successful file-writing tool results
+        // (every file-writing tool counts — file_edit/file_write plus
+        // file_fim_edit, file_multi_edit and patch_apply).
         // This is more reliable than checkpoints since messages are always up-to-date
         let edited_files: Vec<String> = self
             .messages
@@ -1772,14 +1782,12 @@ impl Agent {
             .filter(|m| m.role == "assistant")
             .filter_map(|m| m.tool_calls.as_ref())
             .flatten()
-            .filter(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"))
-            .filter_map(|tc| {
+            .filter(|tc| super::tool_dispatch::tool_call_writes_file(&tc.function.name))
+            .flat_map(|tc| {
                 serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                     .ok()
-                    .and_then(|v| {
-                        v.get("path")
-                            .and_then(|p| p.as_str().map(|s| s.to_string()))
-                    })
+                    .map(|args| written_paths(&tc.function.name, &args))
+                    .unwrap_or_default()
             })
             .collect();
 
@@ -2259,11 +2267,13 @@ fn evidence_is_valid(
         .skip(created_call_count.min(cp.tool_calls.len()))
         .any(|tc| {
             tc.success
-                && matches!(tc.tool_name.as_str(), "file_edit" | "file_write")
+                && super::tool_dispatch::tool_call_writes_file(&tc.tool_name)
                 && serde_json::from_str::<serde_json::Value>(&tc.arguments)
                     .ok()
-                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from))
-                    .is_some_and(|path| !path.is_empty() && evidence.contains(&path))
+                    .map(|args| written_paths(&tc.tool_name, &args))
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|path| !path.is_empty() && evidence.contains(path))
         })
 }
 

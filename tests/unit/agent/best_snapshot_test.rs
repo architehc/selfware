@@ -205,3 +205,170 @@ async fn green_verification_snapshots_and_failure_restores() {
     );
     server.stop().await;
 }
+
+/// Regression (review #8): a run that edits ONLY via patch_apply previously
+/// produced an empty written set — no snapshot at all, and a green-looking
+/// log for a state that was never captured. The full flow must work: green
+/// verification snapshots the patched files, failure restores them, and a
+/// file created by a post-green patch is rolled back.
+#[tokio::test]
+async fn patch_apply_only_run_snapshots_and_restores_completely() {
+    use crate::agent::Agent;
+    use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
+    use crate::config::Config;
+    use crate::testing::mock_api::MockLlmServer;
+    use chrono::Utc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let deliverable = dir.path().join("solver.py");
+    std::fs::write(&deliverable, "# green state\n").unwrap();
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let log_patch = |cp: &mut TaskCheckpoint, diff: String| {
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "patch_apply".to_string(),
+            arguments: serde_json::json!({"diff": diff}).to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(10),
+        });
+    };
+
+    let mut cp = TaskCheckpoint::new("t".to_string(), "implement it".to_string());
+    log_patch(
+        &mut cp,
+        format!(
+            "--- {0}\n+++ {0}\n@@ -1 +1 @@\n-old\n+# green state\n",
+            deliverable.display()
+        ),
+    );
+    agent.current_checkpoint = Some(cp);
+
+    // A passing verification must capture a snapshot even though no
+    // file_edit/file_write call ever happened.
+    agent.note_green_verification("shell_exec", r#"{"command":"python3 -m pytest"}"#, true);
+    assert!(
+        agent.best_snapshot.has_snapshot(),
+        "green verification must snapshot patch_apply targets"
+    );
+
+    // The run degrades: the deliverable is broken and a new file is patched
+    // in after the last-green state.
+    std::fs::write(&deliverable, "# broken end state\n").unwrap();
+    let created = dir.path().join("late_helper.py");
+    std::fs::write(&created, "# created after the green state\n").unwrap();
+    let mut cp = agent.current_checkpoint.take().unwrap();
+    log_patch(
+        &mut cp,
+        format!(
+            "--- /dev/null\n+++ {0}\n@@ -0,0 +1 @@\n+# created after the green state\n",
+            created.display()
+        ),
+    );
+    agent.current_checkpoint = Some(cp);
+
+    // Restore exactly the way task_runner's failure path does.
+    let paths = agent.written_paths();
+    // written_paths is BTreeSet-ordered: late_helper.py sorts before solver.py.
+    assert_eq!(
+        paths,
+        vec![created.clone(), deliverable.clone()],
+        "the written set must cover every patch_apply target"
+    );
+    agent.best_snapshot.restore_written(&paths).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&deliverable).unwrap(),
+        "# green state\n",
+        "the patched deliverable must roll back to the last-green bytes"
+    );
+    assert!(
+        !created.exists(),
+        "a file created by a post-green patch must not survive restore"
+    );
+    server.stop().await;
+}
+
+/// Regression (review #8): file_multi_edit carries a LIST of per-edit paths —
+/// every targeted file must land in the written set so capture and restore
+/// cover the whole batch.
+#[tokio::test]
+async fn multi_edit_run_covers_every_target_file() {
+    use crate::agent::Agent;
+    use crate::checkpoint::{TaskCheckpoint, ToolCallLog};
+    use crate::config::Config;
+    use crate::testing::mock_api::MockLlmServer;
+    use chrono::Utc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let files: Vec<_> = ["one.py", "two.py", "sub/three.py"]
+        .iter()
+        .map(|name| dir.path().join(name))
+        .collect();
+    std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+    for f in &files {
+        std::fs::write(f, "# green state\n").unwrap();
+    }
+
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let edits: Vec<_> = files
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "path": f.to_string_lossy(),
+                "old_str": "old",
+                "new_str": "new"
+            })
+        })
+        .collect();
+    let mut cp = TaskCheckpoint::new("t".to_string(), "implement it".to_string());
+    cp.log_tool_call(ToolCallLog {
+        timestamp: Utc::now(),
+        tool_name: "file_multi_edit".to_string(),
+        arguments: serde_json::json!({"edits": edits}).to_string(),
+        result: Some("ok".to_string()),
+        success: true,
+        duration_ms: Some(10),
+    });
+    agent.current_checkpoint = Some(cp);
+
+    agent.note_green_verification("shell_exec", r#"{"command":"python3 -m pytest"}"#, true);
+    assert!(
+        agent.best_snapshot.has_snapshot(),
+        "green verification must snapshot file_multi_edit targets"
+    );
+
+    let paths = agent.written_paths();
+    let mut expected = files.clone();
+    expected.sort(); // written_paths is BTreeSet-ordered
+    assert_eq!(
+        paths, expected,
+        "every file_multi_edit target must be in the written set"
+    );
+
+    for f in &files {
+        std::fs::write(f, "# broken end state\n").unwrap();
+    }
+    agent.best_snapshot.restore_written(&paths).unwrap();
+    for f in &files {
+        assert_eq!(
+            std::fs::read_to_string(f).unwrap(),
+            "# green state\n",
+            "{} must roll back to the last-green bytes",
+            f.display()
+        );
+    }
+    server.stop().await;
+}

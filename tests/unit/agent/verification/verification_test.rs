@@ -480,6 +480,83 @@ mod completion_gate_tests {
         );
     }
 
+    // Review finding #4 regression: the "not written ANY files" gate must
+    // trust the durable `has_written_any_file` ledger over the message
+    // history. Compression rewrites self.messages, so a long task whose
+    // file_write/file_edit calls scrolled out of the compressed history was
+    // rejected as "not written ANY files" even though the write happened.
+    #[tokio::test]
+    async fn no_files_written_gate_trusts_ledger_when_messages_compressed_away() {
+        let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a / b\n")]);
+        // The source edit the agent made earlier in the run.
+        std::fs::write("calc.py", "def div(a, b):\n    return a / b if b else 0\n").unwrap();
+
+        let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+        // The write and the passing verification both happened — then
+        // compression rewrote the message history and the edit's tool call
+        // scrolled away. The ledger is the only surviving write evidence.
+        agent.has_written_any_file = true;
+        if let Some(cp) = agent.current_checkpoint.as_mut() {
+            cp.log_tool_call(shell_exec("pytest tests/", true));
+        }
+
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "the durable write ledger must satisfy the no-files-written gate \
+             even when the edit scrolled out of the compressed messages"
+        );
+    }
+
+    // Review finding #4 regression (tool coverage): the no-files-written
+    // gate's message-history fallback counted only file_edit/file_write.
+    // Edits made via patch_apply, file_multi_edit or file_fim_edit are
+    // writes and must satisfy the gate even when the ledger was not set.
+    #[tokio::test]
+    async fn no_files_written_gate_counts_patch_multi_and_fim_edits() {
+        for (tool_name, arguments) in [
+            (
+                "patch_apply",
+                r#"{"diff":"--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-x\n+y\n"}"#,
+            ),
+            (
+                "file_multi_edit",
+                r#"{"edits":[{"path":"calc.py","old_str":"x","new_str":"y"}]}"#,
+            ),
+            ("file_fim_edit", r#"{"path":"calc.py"}"#),
+        ] {
+            let (_dir, _cwd) = git_repo(&[("calc.py", "def div(a, b):\n    return a / b\n")]);
+            std::fs::write("calc.py", "def div(a, b):\n    return a / b if b else 0\n").unwrap();
+
+            let mut agent = mutation_task_agent("Fix the divide-by-zero bug in calc.py").await;
+            // Ledger deliberately left false: the message-history fallback
+            // must recognize the write on its own.
+            agent.has_written_any_file = false;
+            agent.messages.push(crate::api::types::Message {
+                role: "assistant".to_string(),
+                content: crate::api::types::MessageContent::Text(String::new()),
+                reasoning_content: None,
+                tool_calls: Some(vec![crate::api::types::ToolCall {
+                    id: "tc_write".to_string(),
+                    call_type: "function".to_string(),
+                    function: crate::api::types::ToolFunction {
+                        name: tool_name.to_string(),
+                        arguments: arguments.to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            });
+            if let Some(cp) = agent.current_checkpoint.as_mut() {
+                cp.log_tool_call(shell_exec("pytest tests/", true));
+            }
+
+            assert!(
+                agent.check_completion_gate().await.is_none(),
+                "an edit via {tool_name} must count as a file write for the no-files-written gate"
+            );
+        }
+    }
+
     // Regression: a READ-ONLY review whose answer legitimately quotes code
     // must be allowed to complete. Before the read-only guard, the code in
     // the answer tripped `contains_unwritten_code`, the gate demanded a
