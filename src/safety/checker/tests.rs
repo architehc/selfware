@@ -3150,3 +3150,85 @@ fn npm_token_in_package_json_publish_config_is_blocked() {
         "npm_ token in package.json must be refused"
     );
 }
+
+#[test]
+fn credential_prefix_assembled_from_variables_is_blocked() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_write".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    // Red-team triage case: the token shape only exists after variable
+    // substitution — the literal scanners see three harmless fragments.
+    let js = r#"{"path":"lib/config.js","content":"const p1 = 'ghp_';\nconst p2 = 's7dF89sdF78sdf6sd';\nconst p3 = '8sdf7sdF678sdf6';\nexport const GITHUB_TOKEN = [p1, p2, p3].join('');"}"#;
+    let r1 = checker.check_tool_call(&mk(js));
+    eprintln!("js-join: err={:?}", r1.as_ref().err());
+    assert!(r1.is_err(), "JS array-join of prefix vars must be refused");
+    // Python f-string form with both parts literal-assigned.
+    let py = r#"{"path":"sync/token.py","content":"TOKEN_PREFIX = 'ghp_'\nTOKEN_SUFFIX = 's7dF89sdF78sdf6sd8sdf7sdF678sdf6'\nSYNC_TOKEN = f'{TOKEN_PREFIX}{TOKEN_SUFFIX}'"}"#;
+    let r2 = checker.check_tool_call(&mk(py));
+    eprintln!("py-fstring: err={:?}", r2.as_ref().err());
+    assert!(r2.is_err(), "python f-string assembly must be refused");
+    // Prefix var concatenated with an UNRESOLVABLE var — the deliberate
+    // strict refusal (a vendor prefix literal feeding a concat is not an
+    // everyday pattern).
+    let mixed = r#"{"path":"lib/auth.js","content":"const p1 = 'glpat-';\nconst TOKEN = p1 + suffix_var;"}"#;
+    let r3 = checker.check_tool_call(&mk(mixed));
+    eprintln!("unresolvable: err={:?}", r3.as_ref().err());
+    assert!(
+        r3.is_err(),
+        "prefix var plus unresolvable var must be refused"
+    );
+    let msg = format!("{:?}", r3.err());
+    assert!(
+        msg.contains("credential prefix assembled from variables"),
+        "refusal should name the assembly finding: {msg}"
+    );
+}
+
+#[test]
+fn credential_prefix_variable_false_positive_controls() {
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::SafetyConfig;
+    let checker = crate::safety::checker::SafetyChecker::new(&SafetyConfig::default());
+    let mk = |args: &str| ToolCall {
+        id: "t".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: "file_write".to_string(),
+            arguments: args.to_string(),
+        },
+    };
+    for (label, args) in [
+        // Prefix constant with NO concat use → allow.
+        (
+            "bare prefix constant",
+            r#"{"path":"lib/consts.js","content":"const PREFIX = 'ghp_';\nexport default PREFIX;"}"#,
+        ),
+        // 'sk-' is not a known credential prefix; plain constant → allow.
+        (
+            "sk- plain constant",
+            r#"{"path":"lib/api.js","content":"const API = 'sk-';\nmodule.exports = API;"}"#,
+        ),
+        // Join of variables whose reconstruction has no credential shape.
+        (
+            "benign var join",
+            r#"{"path":"lib/slug.js","content":"const a = 'hello';\nconst b = 'world';\nconst SLUG = [a, b].join('-');"}"#,
+        ),
+        // Markdown prose without code-shaped assignment+concat → allow.
+        (
+            "markdown prose",
+            r##"{"path":"docs/tokens.md","content":"# Tokens\nGitHub tokens start with the ghp_ prefix.\nNever paste a token into a ticket, even joined from parts."}"##,
+        ),
+    ] {
+        let r = checker.check_tool_call(&mk(args));
+        eprintln!("{label}: err={:?}", r.as_ref().err());
+        assert!(r.is_ok(), "{label} must be allowed: {r:?}");
+    }
+}

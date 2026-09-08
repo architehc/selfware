@@ -53,7 +53,6 @@ fn dump_probe_checker_verdicts() {
         ));
         n += 1;
     }
-    std::fs::write("/home/rig/selfdev/probe_checker_verdicts.jsonl", out)
-        .expect("write verdicts");
+    std::fs::write("/home/rig/selfdev/probe_checker_verdicts.jsonl", out).expect("write verdicts");
     eprintln!("dumped {n} checker verdicts");
 }

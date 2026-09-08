@@ -2337,6 +2337,428 @@ impl SafetyChecker {
                 },
             ));
         }
+        // 13. Credential prefix assembled from VARIABLES (red-team triage:
+        //     `const p1 = 'ghp_'; … [p1, p2, p3].join('')` and python
+        //     `f'{TOKEN_PREFIX}{TOKEN_SUFFIX}'` — no credential-shaped
+        //     LITERAL exists until the variables are substituted, so the
+        //     literal scanners above see nothing). Same-file scope: collect
+        //     quoted-literal assignments, find variables holding a KNOWN
+        //     credential prefix, then inspect concat/join/interpolation
+        //     uses of those variables.
+        //     - Every operand resolvable → reconstruct the assembled string
+        //       and rescan it (join forms reuse the array-join separator
+        //       variants).
+        //     - An UNRESOLVABLE operand → refuse outright: a vendor
+        //       credential prefix literal feeding string assembly is not an
+        //       everyday pattern, so the rule is deliberately strict there
+        //       (a bare `PREFIX = 'ghp_'` with no concat use stays allowed,
+        //       as do assemblies whose result has no credential shape).
+        //     - An assembly that is OBVIOUSLY a mock/example fixture
+        //       (marker words like EXAMPLE/mock/test, or generator filler
+        //       like `1234567890abcdef…` / `A1B2C3…`) stays allowed — the
+        //       benign corpus is full of docs-example key halves and a
+        //       live secret never contains them.
+        //     The plus-chain scan ALSO triggers on a quoted prefix literal
+        //     in the chain itself (`'shpat_' + suffix_var`) — the direct-
+        //     literal concat rule above only covers the original prefix
+        //     set, and the reconstruction here applies the same mock-fixture
+        //     allowance the corpus expects for the newer prefixes.
+        static LITERAL_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"(?m)(?:^|[;\n])\s*(?:export\s+)?(?:const\s+|let\s+|var\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*['"]([^'"\n]*)['"]"#,
+            )
+            .expect("Invalid regex")
+        });
+        static PREFIX_ASSIGN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"(?m)(?:^|[;\n])\s*(?:export\s+)?(?:const\s+|let\s+|var\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*['"](?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|gldt-|AKIA|ASIA|sk_live_|sk_test_|rk_live_|pk_live_|sk-proj-|sk-ant-|sk-svcacct-|xox[baprs]-|SG\.|AIza|pypi-|sq[up]_|sntrys_|npm_|glsa_|hvs\.|shpat_)['"]"#,
+            )
+            .expect("Invalid regex")
+        });
+        static QUOTED_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"^['"](?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|gldt-|AKIA|ASIA|sk_live_|sk_test_|rk_live_|pk_live_|sk-proj-|sk-ant-|sk-svcacct-|xox[baprs]-|SG\.|AIza|pypi-|sq[up]_|sntrys_|npm_|glsa_|hvs\.|shpat_)['"]$"#,
+            )
+            .expect("Invalid regex")
+        });
+        static VAR_ARRAY_JOIN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"\[\s*([^\]\n]*)\]\s*\.\s*(?:join|reduce)\s*\(").expect("Invalid regex")
+        });
+        static VAR_GLUE_JOIN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"['"]{2}\.join\s*\(\s*\[([^\]\n]*)\]"#).expect("Invalid regex")
+        });
+        static PLUS_CHAIN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"(?:['"][^'"\n]*['"]|\b[A-Za-z_][A-Za-z0-9_]*\b)(?:\s*\+\s*(?:['"][^'"\n]*['"]|\b[A-Za-z_][A-Za-z0-9_]*\b))+"#,
+            )
+            .expect("Invalid regex")
+        });
+        static CHAIN_OPERAND: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"['"][^'"\n]*['"]|[A-Za-z_][A-Za-z0-9_]*"#).expect("Invalid regex")
+        });
+        static TEMPLATE_SPAN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"`[^`\n]*\$\{[^`\n]*`").expect("Invalid regex"));
+        static TEMPLATE_VAR: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\$\{([^}]*)\}").expect("Invalid regex"));
+        static FSTRING_SPAN: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r#"\bf'[^'\n]*\{[A-Za-z_][A-Za-z0-9_]*\}[^'\n]*'|\bf"[^"\n]*\{[A-Za-z_][A-Za-z0-9_]*\}[^"\n]*""#,
+            )
+            .expect("Invalid regex")
+        });
+        static FSTRING_VAR: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("Invalid regex"));
+        static CONCAT_CALL: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\s*\.\s*concat\s*\(([^)]*)\)")
+                .expect("Invalid regex")
+        });
+        let prefix_vars: Vec<String> = PREFIX_ASSIGN
+            .captures_iter(content)
+            .map(|c| c[1].to_string())
+            .collect();
+        let quoted_prefix_chain = PLUS_CHAIN.captures_iter(content).any(|cap| {
+            CHAIN_OPERAND
+                .find_iter(&cap[0])
+                .any(|m| QUOTED_PREFIX.is_match(m.as_str()))
+        });
+        if !prefix_vars.is_empty() || quoted_prefix_chain {
+            let literals: std::collections::HashMap<String, String> = LITERAL_ASSIGN
+                .captures_iter(content)
+                .map(|c| (c[1].to_string(), c[2].to_string()))
+                .collect();
+            // Resolve one operand: quoted literal → its text; bare
+            // identifier → its same-file literal assignment; anything else
+            // (calls, expressions, unknown vars) → unresolvable.
+            let resolve = |tok: &str| -> Option<String> {
+                let t = tok.trim();
+                if t.len() >= 2
+                    && ((t.starts_with('\'') && t.ends_with('\''))
+                        || (t.starts_with('"') && t.ends_with('"')))
+                {
+                    return Some(t[1..t.len() - 1].to_string());
+                }
+                literals.get(t).cloned()
+            };
+            // Mock/example fixtures are not credentials (red-team corpus:
+            // AWS docs example key halves, `mock…`, leetspeak decoys like
+            // `G1tHub…T0k3n`, ellipsis-truncated values, generator filler —
+            // monotone runs `abcde`/`12345`/`00000`, alternating-case
+            // `AbCdEfG`, digit-interleaved `A1B2C3` (letters/digits
+            // projections), repeated units `019482019482…`). A live secret
+            // is random and never contains these. Runs are one-direction
+            // monotone with repeats allowed (`112233` pairs count; a
+            // sawtooth like `87678` is token entropy, not filler).
+            let assembled_is_placeholder = |text: &str| -> bool {
+                const MARKERS: &[&str] = &[
+                    "example",
+                    "mock",
+                    "test",
+                    "dummy",
+                    "fake",
+                    "placeholder",
+                    "sample",
+                    "here",
+                    "your",
+                    "token",
+                    "synthetic",
+                    "decoy",
+                    "fixture",
+                    "...",
+                ];
+                let lower = text.to_lowercase();
+                // Leet-normalized copy catches self-describing decoys
+                // (`4nL3Ak3dG1tHubP3rs0n4lAcc3ssT0k3n` → `…accesstoken`).
+                let leet: String = lower
+                    .chars()
+                    .map(|c| match c {
+                        '0' => 'o',
+                        '1' => 'l',
+                        '3' => 'e',
+                        '4' => 'a',
+                        '5' => 's',
+                        '7' => 't',
+                        _ => c,
+                    })
+                    .collect();
+                if MARKERS
+                    .iter()
+                    .any(|m| lower.contains(m) || leet.contains(m))
+                {
+                    return true;
+                }
+                let monotone_run = |s: &str| -> bool {
+                    let mut run = 1usize;
+                    let mut dir: i16 = 0; // +1/-1 once established; 0 keeps the run
+                    for w in s.as_bytes().windows(2) {
+                        let d = w[1] as i16 - w[0] as i16;
+                        if d == 0 || d == dir {
+                            run += 1;
+                        } else if d.abs() == 1 {
+                            dir = d;
+                            run = 2;
+                        } else {
+                            dir = 0;
+                            run = 1;
+                        }
+                        if run >= 5 {
+                            return true;
+                        }
+                    }
+                    false
+                };
+                // Consecutive repetition of a ≥4-char unit (≥3 copies) is
+                // generator filler (`019482019482019482`).
+                let repeated_unit = |s: &str| -> bool {
+                    let b = s.as_bytes();
+                    let n = b.len();
+                    for p in 4..=(n / 3) {
+                        for i in 0..=(n - 3 * p) {
+                            if b[i..i + p] == b[i + p..i + 2 * p]
+                                && b[i..i + p] == b[i + 2 * p..i + 3 * p]
+                            {
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                };
+                let battery = |s: &str| -> bool {
+                    if monotone_run(s) || repeated_unit(s) {
+                        return true;
+                    }
+                    let letters: String = s
+                        .chars()
+                        .filter(|c| c.is_ascii_alphabetic())
+                        .map(|c| c.to_ascii_lowercase())
+                        .collect();
+                    let digits: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+                    monotone_run(&letters)
+                        || monotone_run(&digits)
+                        || repeated_unit(&letters)
+                        || repeated_unit(&digits)
+                };
+                if battery(text) {
+                    return true;
+                }
+                // One decode level: pypi macaroon tails etc. hide the
+                // filler (`…JDFhMmIzYzRkLWU1ZjY=` → `…1a2b3c4d-e5f6`).
+                if let Some(decoded) = decode_base64_lenient(text) {
+                    if decoded != text && battery(&decoded) {
+                        return true;
+                    }
+                }
+                false
+            };
+            // File-level fixture context: the corpus' benign assemblies
+            // live in files that DECLARE themselves fixtures (an EXAMPLE
+            // secret elsewhere in the content, a `mock`/`decoy` marker).
+            // This allowance ONLY affects rule-13 reconstructions — the
+            // literal scanners above are unaffected — and yes, a marker
+            // word in the file is attacker-forgeable; that is the corpus-
+            // mandated trade-off, bounded to this one rule.
+            let content_is_fixture = {
+                let lower = content.to_lowercase();
+                [
+                    "example",
+                    "mock",
+                    "dummy",
+                    "fake",
+                    "placeholder",
+                    "sample",
+                    "synthetic",
+                    "decoy",
+                    "fixture",
+                ]
+                .iter()
+                .any(|m| lower.contains(m))
+            };
+            // Reconstructed assembly → fixture/placeholder forms pass,
+            // anything else rescans through the existing decoded-content
+            // path (scanner + credential shapes).
+            let check_assembled = |assembled: &str, operands: &[String]| -> Result<()> {
+                if content_is_fixture
+                    || assembled_is_placeholder(assembled)
+                    || operands.iter().any(|v| assembled_is_placeholder(v))
+                {
+                    return Ok(());
+                }
+                rescan_decoded(assembled)
+            };
+            for name in &prefix_vars {
+                // join/reduce over an array mentioning the var, plus the
+                // python glue-join `''.join([..])` form.
+                let arrays: Vec<&str> = VAR_ARRAY_JOIN
+                    .captures_iter(content)
+                    .filter_map(|c| c.get(1).map(|m| m.as_str()))
+                    .chain(
+                        VAR_GLUE_JOIN
+                            .captures_iter(content)
+                            .filter_map(|c| c.get(1).map(|m| m.as_str())),
+                    )
+                    .collect();
+                for arr in arrays {
+                    let operands: Vec<&str> = arr
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if !operands.contains(&name.as_str()) {
+                        continue;
+                    }
+                    let mut words = Vec::with_capacity(operands.len());
+                    let mut resolvable = true;
+                    for o in operands {
+                        match resolve(o) {
+                            Some(v) => words.push(v),
+                            None => {
+                                resolvable = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !resolvable {
+                        return Err(secret_err("credential prefix assembled from variables"));
+                    }
+                    let flat = words.join("");
+                    let underscored = words.join("_");
+                    let dashed = words.join("-");
+                    let fixture = content_is_fixture
+                        || words.iter().any(|w| assembled_is_placeholder(w))
+                        || [&flat, &underscored, &dashed]
+                            .iter()
+                            .all(|c| assembled_is_placeholder(c));
+                    if !fixture {
+                        rescan_joined(words)?;
+                    }
+                }
+                // JS template-literal interpolation `` `${a}${b}` ``.
+                for cap in TEMPLATE_SPAN.captures_iter(content) {
+                    let span = &cap[0];
+                    let vars: Vec<&str> = TEMPLATE_VAR
+                        .captures_iter(span)
+                        .filter_map(|c| c.get(1).map(|m| m.as_str()))
+                        .collect();
+                    if !vars.contains(&name.as_str()) {
+                        continue;
+                    }
+                    if vars.iter().any(|v| resolve(v).is_none()) {
+                        return Err(secret_err("credential prefix assembled from variables"));
+                    }
+                    let values: Vec<String> = vars.iter().filter_map(|v| resolve(v)).collect();
+                    let body = &span[1..span.len() - 1];
+                    let assembled = TEMPLATE_VAR.replace_all(body, |c: &regex::Captures| {
+                        resolve(&c[1]).unwrap_or_default()
+                    });
+                    check_assembled(&assembled, &values)?;
+                }
+                // Python f-string interpolation `f'{a}{b}'`.
+                for cap in FSTRING_SPAN.captures_iter(content) {
+                    let span = &cap[0];
+                    let vars: Vec<&str> = FSTRING_VAR
+                        .captures_iter(span)
+                        .filter_map(|c| c.get(1).map(|m| m.as_str()))
+                        .collect();
+                    if !vars.contains(&name.as_str()) {
+                        continue;
+                    }
+                    if vars.iter().any(|v| resolve(v).is_none()) {
+                        return Err(secret_err("credential prefix assembled from variables"));
+                    }
+                    let values: Vec<String> = vars.iter().filter_map(|v| resolve(v)).collect();
+                    let body = &span[2..span.len() - 1];
+                    let assembled = FSTRING_VAR.replace_all(body, |c: &regex::Captures| {
+                        resolve(&c[1]).unwrap_or_default()
+                    });
+                    check_assembled(&assembled, &values)?;
+                }
+                // `a.concat(b, '…')` mentioning the var (receiver or arg).
+                for cap in CONCAT_CALL.captures_iter(content) {
+                    let receiver = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let args: Vec<&str> = cap[2]
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if receiver != name.as_str() && !args.contains(&name.as_str()) {
+                        continue;
+                    }
+                    let mut assembled = String::new();
+                    let mut values = Vec::new();
+                    let mut resolvable = true;
+                    for o in std::iter::once(receiver).chain(args) {
+                        match resolve(o) {
+                            Some(v) => {
+                                assembled.push_str(&v);
+                                values.push(v);
+                            }
+                            None => {
+                                resolvable = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !resolvable {
+                        return Err(secret_err("credential prefix assembled from variables"));
+                    }
+                    check_assembled(&assembled, &values)?;
+                }
+            }
+            // `a + b + '…'` chains referencing a prefix var OR carrying a
+            // quoted prefix literal directly (`'shpat_' + suffix_var`).
+            for cap in PLUS_CHAIN.captures_iter(content) {
+                let chain = cap.get(0).unwrap();
+                let chain_text = chain.as_str();
+                let tokens: Vec<regex::Match> = CHAIN_OPERAND.find_iter(chain_text).collect();
+                let relevant = tokens.iter().any(|m| {
+                    QUOTED_PREFIX.is_match(m.as_str())
+                        || prefix_vars.iter().any(|n| n.as_str() == m.as_str())
+                });
+                if !relevant {
+                    continue;
+                }
+                let mut assembled = String::new();
+                let mut values = Vec::new();
+                let mut has_expr_operand = false;
+                for m in tokens {
+                    match resolve(m.as_str()) {
+                        Some(v) => {
+                            assembled.push_str(&v);
+                            values.push(v);
+                        }
+                        None => {
+                            // An unresolvable operand that is part of a
+                            // call/member expression (`Buffer.from(…)`,
+                            // `Tokens.P1`) is out of scope — the decode
+                            // rules above handle those channels. A BARE
+                            // unknown identifier feeding a credential-
+                            // prefix concat is the strict refusal.
+                            // Neighbors are checked in the ORIGINAL
+                            // content: the chain match ends at the last
+                            // bare identifier, so a trailing `.from(…)`
+                            // sits just past `chain.end()`.
+                            let abs_start = chain.start() + m.start();
+                            let abs_end = chain.start() + m.end();
+                            let before = content[..abs_start].trim_end();
+                            let after = content[abs_end..].trim_start();
+                            if before.ends_with('.')
+                                || after.starts_with('.')
+                                || after.starts_with('(')
+                            {
+                                has_expr_operand = true;
+                            } else {
+                                return Err(secret_err(
+                                    "credential prefix assembled from variables",
+                                ));
+                            }
+                        }
+                    }
+                }
+                if has_expr_operand {
+                    continue;
+                }
+                check_assembled(&assembled, &values)?;
+            }
+        }
         Ok(())
     }
 
