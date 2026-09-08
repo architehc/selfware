@@ -1571,6 +1571,57 @@ async fn stale_verification_rescue_is_none_without_any_verification_signal() {
 }
 
 #[tokio::test]
+async fn stale_verification_rescue_detects_python_node_go_ecosystems() {
+    // External review (TB4 production-planning 253-turn StaleVerification
+    // spin): with no Cargo.toml/lakefile and no prior model-run verification
+    // command, the rescue had nothing to offer on standard SWE tasks. Each
+    // ecosystem marker now maps to its canonical test command.
+    let cases: &[(&[&str], &str)] = &[
+        (&["pyproject.toml"], "python -m pytest"),
+        (&["pytest.ini"], "python -m pytest"),
+        (&["package.json"], "npm test"),
+        (&["go.mod"], "go test ./..."),
+        (&["Makefile"], "make test"),
+    ];
+    for (markers, expected) in cases {
+        let tmp = tempfile::tempdir().unwrap();
+        for m in *markers {
+            std::fs::write(tmp.path().join(m), "# marker\n").unwrap();
+        }
+        let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+        let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+            .await
+            .unwrap();
+        let (tool, _args, display) = agent
+            .stale_verification_rescue_call()
+            .unwrap_or_else(|| panic!("{markers:?} should rescue with {expected}"));
+        assert_eq!(tool, "shell_exec");
+        assert_eq!(display, *expected, "markers {markers:?}");
+    }
+}
+
+#[tokio::test]
+async fn stale_verification_rescue_rust_still_wins_over_node() {
+    // Precedence: a Rust repo that also has a package.json (like selfware
+    // itself) still rescues with the dedicated cargo_check tool.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("package.json"), "{}\n").unwrap();
+    let _guard = crate::test_support::CwdGuard::enter(tmp.path());
+    let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    let (tool, _, _) = agent
+        .stale_verification_rescue_call()
+        .expect("rust+node repo should rescue");
+    assert_eq!(tool, "cargo_check");
+}
+
+#[tokio::test]
 async fn test_gate_min_steps_message_omits_cargo_for_non_rust_task() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let mut config = test_config(format!("{}/v1", server.url()));

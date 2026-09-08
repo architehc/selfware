@@ -518,6 +518,36 @@ impl Agent {
                 "cargo_check".to_string(),
             ));
         }
+        // Multi-ecosystem fallbacks (external review, TB4 production-planning
+        // finding): without these, a Python/Node/Go/C++ project with no prior
+        // model-run verification command deadlocks on StaleVerification —
+        // the model completes in prose, the gate refuses, the run burns its
+        // budget apologizing. Ordered by signal strength; Makefile last
+        // (weakest — `make test` may not exist).
+        if self.tools.get("shell_exec").is_some() {
+            let ecosystem: Option<&str> = if root.join("go.mod").exists() {
+                Some("go test ./...")
+            } else if root.join("pyproject.toml").exists()
+                || root.join("pytest.ini").exists()
+                || root.join("setup.cfg").exists()
+                || root.join("tests").is_dir()
+            {
+                Some("python -m pytest")
+            } else if root.join("package.json").exists() {
+                Some("npm test")
+            } else if root.join("Makefile").exists() {
+                Some("make test")
+            } else {
+                None
+            };
+            if let Some(cmd) = ecosystem {
+                return Some((
+                    "shell_exec".to_string(),
+                    serde_json::json!({"command": cmd}).to_string(),
+                    cmd.to_string(),
+                ));
+            }
+        }
         let command = self
             .current_checkpoint
             .as_ref()?
