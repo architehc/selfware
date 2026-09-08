@@ -1188,8 +1188,16 @@ fn test_parse_sse_event_json_without_choices() {
 #[test]
 fn test_parse_sse_event_usage_with_invalid_structure() {
     let mut acc = ToolCallAccumulator::new();
-    // Usage field is present but cannot deserialize to Usage struct
+    // Usage fields are serde(default) now: an object with only unknown fields
+    // deserializes to a zeroed Usage instead of being dropped.
     let event = r#"data: {"usage":{"invalid":"fields"}}"#;
+    let results = parse_sse_event(event, &mut acc);
+    assert_eq!(results.len(), 1);
+    assert!(matches!(&results[0], StreamChunk::Usage(u) if u.total_tokens == 0));
+
+    // A non-object usage still cannot deserialize and is dropped (with a
+    // warn! log so the undercounting is visible).
+    let event = r#"data: {"usage":"not-an-object"}"#;
     let results = parse_sse_event(event, &mut acc);
     assert!(results.is_empty());
 }
@@ -2503,6 +2511,31 @@ fn test_merge_extra_body_rejects_reserved_keys_for_profile_chat_request() {
 }
 
 #[test]
+fn test_merge_extra_body_allows_reasoning_effort_keys() {
+    // Hosted reasoning models (GLM 5.3 via OpenRouter) need reasoning_effort /
+    // reasoning to bound hidden reasoning spend; without them the whole
+    // completion budget burns before the answer (measured: 16k tokens, zero
+    // answer content, finish_reason=length).
+    let mut body = serde_json::json!({
+        "model": "z-ai/glm-5.3",
+        "messages": [],
+        "stream": false
+    });
+    let mut extra = serde_json::Map::new();
+    extra.insert("reasoning_effort".to_string(), serde_json::json!("low"));
+    extra.insert(
+        "reasoning".to_string(),
+        serde_json::json!({ "max_tokens": 4096 }),
+    );
+
+    merge_extra_body(&mut body, Some(&extra), "reasoning effort")
+        .expect("reasoning effort keys must be allowed in extra_body");
+
+    assert_eq!(body["reasoning_effort"], "low");
+    assert_eq!(body["reasoning"]["max_tokens"], 4096);
+}
+
+#[test]
 fn test_merge_extra_body_rejects_non_allowlisted_keys() {
     let mut body = serde_json::json!({
         "model": "test",
@@ -2630,6 +2663,42 @@ fn test_canonicalize_already_ordered() {
     assert_eq!(msgs[0].role, "system");
     assert_eq!(msgs[1].role, "user");
     assert_eq!(msgs[2].role, "assistant");
+    // Anthropic prefill guard: a trailing assistant message is no longer a
+    // valid end-state — a user continuation closes the turn instead.
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs[3].role, "user");
+    assert_eq!(msgs[3].content, "Continue with the task.");
+}
+
+#[test]
+fn test_canonicalize_trailing_assistant_gets_user_continuation() {
+    // The measured claude-fable-5/opus-5 failure: recovery left the history
+    // ending on assistant and Anthropic 400'd every request ("This model does
+    // not support assistant message prefill").
+    let mut msgs = vec![
+        Message::system("sys".to_string()),
+        Message::user("task".to_string()),
+        Message::assistant("partial answer".to_string()),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.last().unwrap().role, "user");
+    // Mid-conversation assistant messages are untouched.
+    assert_eq!(msgs[2].role, "assistant");
+    assert_eq!(msgs[2].content, "partial answer");
+}
+
+#[test]
+fn test_canonicalize_trailing_user_unchanged() {
+    let mut msgs = vec![
+        Message::system("sys".to_string()),
+        Message::user("task".to_string()),
+        Message::assistant("call".to_string()),
+        Message::user("tool result".to_string()),
+    ];
+    canonicalize_message_order(&mut msgs);
+    assert_eq!(msgs.len(), 4);
+    assert_eq!(msgs.last().unwrap().role, "user");
+    assert_eq!(msgs.last().unwrap().content, "tool result");
 }
 
 #[test]
@@ -2663,11 +2732,14 @@ fn test_canonicalize_multiple_misplaced_system() {
     ];
     canonicalize_message_order(&mut msgs);
     // All system messages merged into one at position 0
-    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[0].role, "system");
     assert_eq!(msgs[0].content, "sys1\n\nsys2\n\nsys3");
     assert_eq!(msgs[1].role, "user");
     assert_eq!(msgs[2].role, "assistant");
+    // Prefill guard: trailing assistant is closed with a user continuation.
+    assert_eq!(msgs[3].role, "user");
+    assert_eq!(msgs[3].content, "Continue with the task.");
 }
 
 #[test]
@@ -2810,6 +2882,8 @@ async fn test_chat_with_profile_normalizes_messages() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     // Only system + tool messages (no user message) — canonicalization
@@ -2870,6 +2944,8 @@ async fn test_chat_with_profile_strips_images_for_text_only_model() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     // Send a real multimodal message — strip_images should remove the image block.
@@ -2919,6 +2995,8 @@ async fn test_chat_with_profile_context_overflow() {
         context_length: 100, // Impossibly small
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let messages = vec![
@@ -3836,6 +3914,8 @@ async fn test_chat_with_profile_honors_native_function_calling_true() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: Some(true),
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let result = client
@@ -3892,6 +3972,8 @@ async fn test_chat_with_profile_honors_native_function_calling_false() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: Some(false),
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let result = client
@@ -3948,6 +4030,8 @@ async fn test_chat_with_profile_inherits_parent_native_fc() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None, // inherit from parent
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
 
     let result = client
@@ -4012,6 +4096,8 @@ async fn test_chat_and_chat_with_profile_agree_on_tool_choice() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: Some(true),
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let _ = client
         .chat_with_profile(
@@ -4046,6 +4132,7 @@ fn test_http_status_error_401_includes_remediation_hint() {
         "https://api.openai.com/v1",
         reqwest::StatusCode::UNAUTHORIZED,
         "No cookie auth credentials found".to_string(),
+        None,
     );
     let msg = format!("{}", err);
     assert!(msg.contains("401"), "status preserved: {}", msg);
@@ -4077,6 +4164,7 @@ fn test_http_status_error_401_names_openrouter_var_for_openrouter() {
         "https://openrouter.ai/api/v1",
         reqwest::StatusCode::UNAUTHORIZED,
         "unauthorized".to_string(),
+        None,
     );
     let msg = format!("{}", err);
     assert!(msg.contains("OPENROUTER_API_KEY"), "{}", msg);
@@ -4089,6 +4177,7 @@ fn test_http_status_error_non_401_has_no_hint() {
         "https://openrouter.ai/api/v1",
         reqwest::StatusCode::BAD_REQUEST,
         "bad request body".to_string(),
+        None,
     );
     let msg = format!("{}", err);
     assert!(msg.contains("bad request body"), "{}", msg);
@@ -4124,4 +4213,413 @@ fn test_retryable_status_excludes_4xx() {
             status
         );
     }
+}
+
+// ============================================
+// Adaptive server-speed timeout tests
+// ============================================
+
+#[test]
+fn test_speed_tracker_empty_estimate_is_none() {
+    let tracker = super::client::ServerSpeedTracker::new();
+    assert!(tracker.estimate().is_none());
+}
+
+#[test]
+fn test_speed_tracker_first_sample_sets_estimate() {
+    let mut tracker = super::client::ServerSpeedTracker::new();
+    tracker.record(10.0);
+    assert_eq!(tracker.estimate(), Some(10.0));
+}
+
+#[test]
+fn test_speed_tracker_ema_blends_samples() {
+    let mut tracker = super::client::ServerSpeedTracker::new();
+    tracker.record(10.0);
+    tracker.record(20.0);
+    // alpha = 0.4: 10 + 0.4 * (20 - 10) = 14
+    let est = tracker.estimate().unwrap();
+    assert!((est - 14.0).abs() < 1e-9, "unexpected EMA: {est}");
+}
+
+#[test]
+fn test_speed_tracker_rejects_non_finite_and_non_positive() {
+    let mut tracker = super::client::ServerSpeedTracker::new();
+    tracker.record(f64::NAN);
+    tracker.record(0.0);
+    tracker.record(-5.0);
+    assert!(tracker.estimate().is_none());
+}
+
+#[test]
+fn test_adaptive_timeout_unmeasured_local_endpoint_assumes_slow_server() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    // local default 3 t/s: 2048 / 3 * 2.5 = 1706.67 -> 1707
+    assert_eq!(client.adaptive_response_timeout_secs(), 1707);
+}
+
+#[test]
+fn test_adaptive_timeout_unmeasured_remote_endpoint_uses_floor() {
+    let config = crate::config::Config {
+        endpoint: "https://api.example.com/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    // remote default 30 t/s: 2048 / 30 * 2.5 = 171 -> floor 600
+    assert_eq!(client.adaptive_response_timeout_secs(), 600);
+}
+
+#[test]
+fn test_adaptive_timeout_uses_measured_speed() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    client.speed_tracker.lock().unwrap().record(4.0);
+    // 2048 / 4 * 2.5 = 1280
+    assert_eq!(client.adaptive_response_timeout_secs(), 1280);
+}
+
+#[test]
+fn test_adaptive_timeout_respects_larger_step_timeout() {
+    let config = crate::config::Config {
+        endpoint: "https://api.example.com/v1".to_string(),
+        max_tokens: 1024,
+        agent: crate::config::AgentConfig {
+            step_timeout_secs: 900,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    // computed value is below 900 -> step timeout wins
+    assert_eq!(client.adaptive_response_timeout_secs(), 900);
+}
+
+#[test]
+fn test_adaptive_timeout_clamps_to_ceiling() {
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 8192,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    client.speed_tracker.lock().unwrap().record(0.1);
+    // 8192 / 0.1 * 2.5 = 204800 -> clamp 7200
+    assert_eq!(client.adaptive_response_timeout_secs(), 7200);
+}
+
+// --- Reasoning-budget exhaustion (GLM 5.3 evolution review, 2026-08-23) ---
+//
+// Measured failure mode with hosted reasoning models: the whole completion
+// budget burns on hidden reasoning, returning finish_reason=length with an
+// empty answer. The client must (a) retry once with bounded reasoning when
+// the user has not pinned reasoning keys, and (b) otherwise fail with a
+// typed error instead of a "successful" empty answer.
+
+/// Mock server helper: accepts `responses.len()` connections, records each
+/// request body, replies with the matching JSON body.
+macro_rules! reasoning_mock_server {
+    ($listener:expr, $bodies:expr, $responses:expr) => {{
+        // Bind outside the async move so only the cloned Arc is captured.
+        let bodies = $bodies;
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for resp_body in $responses {
+                let (mut socket, _) = $listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 65536];
+                let n = socket.read(&mut buf).await.unwrap();
+                bodies
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).to_string());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    resp_body.len(),
+                    resp_body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+                drop(socket);
+            }
+        })
+    }};
+}
+
+const EXHAUSTED_BODY: &str = r#"{"id":"c-x","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"long hidden reasoning trace"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":100,"total_tokens":105}}"#;
+
+#[tokio::test]
+async fn test_chat_retries_once_with_bounded_reasoning_on_budget_exhaustion() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let ok_body = r#"{"id":"c-ok","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"recovered answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY, ok_body]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("bounded-reasoning retry should recover");
+    assert_eq!(result.choices[0].message.content, "recovered answer");
+
+    let (count, first, second) = {
+        let seen = bodies.lock().unwrap();
+        (seen.len(), seen[0].clone(), seen[1].clone())
+    };
+    assert_eq!(count, 2, "exactly one bounded-reasoning retry");
+    assert!(!first.contains("reasoning_effort"));
+    assert!(
+        second.contains("\"reasoning_effort\":\"low\""),
+        "retry must pin reasoning_effort=low: {second}"
+    );
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_typed_error_when_reasoning_retry_also_exhausts() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY, EXHAUSTED_BODY]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let err = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect_err("double exhaustion must fail");
+    match err.downcast_ref::<crate::errors::ApiError>() {
+        Some(crate::errors::ApiError::ReasoningBudgetExhausted { .. }) => {}
+        other => panic!(
+            "expected ApiError::ReasoningBudgetExhausted, got {:?}",
+            other
+        ),
+    }
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        2,
+        "one retry, then typed error"
+    );
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_length_with_answer_content_does_not_retry() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // finish_reason=length but the answer IS present (truncated prose) — a
+    // legitimate partial answer, not reasoning starvation: pass it through.
+    let partial = r#"{"id":"c-p","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"partial answer text"},"finish_reason":"length"}],"usage":{"prompt_tokens":5,"completion_tokens":100,"total_tokens":105}}"#;
+    let server = reasoning_mock_server!(listener, bodies.clone(), [partial]);
+
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let result = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect("partial answer passes through");
+    assert_eq!(result.choices[0].message.content, "partial answer text");
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        1,
+        "no retry without starvation"
+    );
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_chat_no_reasoning_retry_when_user_pinned_effort() {
+    use std::sync::{Arc, Mutex};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let server = reasoning_mock_server!(listener, bodies.clone(), [EXHAUSTED_BODY]);
+
+    // The user already pinned a reasoning effort — the client must not
+    // second-guess it, only report the typed exhaustion.
+    let config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        extra_body: Some(
+            serde_json::json!({"reasoning_effort": "medium"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let err = client
+        .chat(vec![Message::user("q")], None, ThinkingMode::Enabled)
+        .await
+        .expect_err("pinned reasoning still exhausts -> typed error");
+    match err.downcast_ref::<crate::errors::ApiError>() {
+        Some(crate::errors::ApiError::ReasoningBudgetExhausted { .. }) => {}
+        other => panic!(
+            "expected ApiError::ReasoningBudgetExhausted, got {:?}",
+            other
+        ),
+    }
+    assert_eq!(bodies.lock().unwrap().len(), 1, "no retry when user pinned");
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_streaming_response_collect_missing_finish_reason_stays_none() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_http_request(&mut socket).await;
+        // Content but no finish_reason on any chunk: collect() must report
+        // None (callers map it to "unknown"), not a fabricated "stop".
+        let events = vec![
+            r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
+            "data: [DONE]",
+        ];
+
+        let mut full_body = String::new();
+        for event in &events {
+            full_body.push_str(event);
+            full_body.push_str("\n\n");
+        }
+
+        let chunk = format!("{:X}\r\n{}\r\n", full_body.len(), full_body);
+        let end_chunk = "0\r\n\r\n";
+        let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
+    let result = stream.collect().await;
+    assert!(result.is_ok());
+    let chat_resp = result.unwrap();
+    assert_eq!(chat_resp.choices[0].message.content, "Hello");
+    assert!(chat_resp.choices[0].finish_reason.is_none());
+
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn test_streaming_response_collect_zero_events_without_done_is_error() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_http_request(&mut socket).await;
+        // A proxy answering 200 with an HTML error page: zero parseable SSE
+        // events and no [DONE] marker must surface as a typed error, not an
+        // empty "successful" completion.
+        let body = "<html><body><h1>502 Bad Gateway</h1></body></html>";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+    let stream = StreamingResponse::new(response, Duration::from_secs(5), None);
+    let result = stream.collect().await;
+    let err = result.expect_err("zero-event stream without [DONE] must fail");
+    assert!(
+        err.chain().any(|c| matches!(
+            c.downcast_ref::<crate::errors::ApiError>(),
+            Some(crate::errors::ApiError::Parse(_))
+        )),
+        "expected ApiError::Parse, got: {:?}",
+        err
+    );
+
+    let _ = server.await;
+}
+
+#[test]
+fn test_per_call_stream_deadline_merges_adaptive_and_run_wall() {
+    use std::time::{Duration, Instant};
+    let config = crate::config::Config {
+        endpoint: "http://127.0.0.1:30000/v1".to_string(),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+    client.speed_tracker.lock().unwrap().record(4.0);
+    // Adaptive budget: 2048 / 4 * 2.5 = 1280s.
+    let now = Instant::now();
+
+    // No run deadline: the per-call adaptive bound applies (~1280s out).
+    let d = client.per_call_stream_deadline(None);
+    let delta = d.saturating_duration_since(now);
+    assert!(
+        (Duration::from_secs(1279)..=Duration::from_secs(1281)).contains(&delta),
+        "adaptive per-call bound expected, got {delta:?}"
+    );
+
+    // Run deadline SOONER than the adaptive bound: the run wall wins.
+    let run = now + Duration::from_secs(60);
+    let d = client.per_call_stream_deadline(Some(run));
+    assert!(
+        d.saturating_duration_since(now) <= Duration::from_secs(61),
+        "sooner run wall must win"
+    );
+
+    // Run deadline LATER than the adaptive bound: the per-call bound wins —
+    // this is the case that used to leave streams unbounded for hours.
+    let run = now + Duration::from_secs(7200);
+    let d = client.per_call_stream_deadline(Some(run));
+    let delta = d.saturating_duration_since(now);
+    assert!(
+        (Duration::from_secs(1279)..=Duration::from_secs(1281)).contains(&delta),
+        "per-call bound must win over a distant run wall, got {delta:?}"
+    );
 }

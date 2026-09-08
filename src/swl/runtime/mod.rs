@@ -432,15 +432,45 @@ impl SwlRuntime {
     async fn execute_sequential(
         &self,
         doc: &SwlDocument,
-        _workflow: &WorkflowDefinition,
+        workflow: &WorkflowDefinition,
     ) -> Result<ExecutionResult> {
         debug!("Executing sequential workflow");
         let workflow_start = std::time::Instant::now();
 
         let mut outputs = HashMap::new();
 
-        // For now, execute all agents in sequence
-        for (agent_name, agent) in &doc.agents {
+        // Declared steps define execution order and subset (review finding:
+        // the runtime ignored `steps` and iterated the agents map in BTreeMap
+        // key order — deterministic, but the wrong execution contract). With
+        // no declared steps, keep the legacy all-agents order for back-compat.
+        let declared: Vec<(String, crate::swl::parser::ast::AgentDefinition)> = if workflow
+            .steps
+            .is_empty()
+        {
+            doc.agents
+                .iter()
+                .map(|(name, agent)| (name.clone(), agent.clone()))
+                .collect()
+        } else {
+            let mut resolved = Vec::with_capacity(workflow.steps.len());
+            for (idx, step) in workflow.steps.iter().enumerate() {
+                let name = step.agent.as_ref().or(step.delegate.as_ref());
+                let Some(name) = name else {
+                    return Err(crate::errors::SelfwareError::Internal(format!(
+                            "workflow step {idx} declares neither `agent` nor `delegate` — unsupported step form"
+                        )));
+                };
+                let Some(agent) = doc.agents.get(name) else {
+                    return Err(crate::errors::SelfwareError::Internal(format!(
+                        "workflow step {idx} references unknown agent '{name}'"
+                    )));
+                };
+                resolved.push((name.clone(), agent.clone()));
+            }
+            resolved
+        };
+
+        for (agent_name, agent) in &declared {
             if self.dry_run {
                 println!("   [DRY-RUN] Would execute agent: {}", agent_name);
                 continue;
@@ -570,7 +600,18 @@ impl SwlRuntime {
         }) {
             if let Some(agent) = doc.agents.get(&reduce_agent_name) {
                 if !self.dry_run {
-                    let _reduce_output = self.execute_agent(&reduce_agent_name, agent).await?;
+                    // The reducer's output IS the workflow result (review
+                    // finding: it was bound to `_reduce_output` and dropped,
+                    // returning only the map outputs).
+                    let reduce_output = self.execute_agent(&reduce_agent_name, agent).await?;
+                    let mut outputs = map_result.outputs;
+                    outputs.insert(reduce_agent_name, reduce_output);
+                    let duration_ms = workflow_start.elapsed().as_millis() as u64;
+                    return Ok(ExecutionResult {
+                        status: map_result.status,
+                        outputs,
+                        duration_ms,
+                    });
                 } else {
                     println!(
                         "   [DRY-RUN] Would execute reduce agent: {}",
@@ -582,8 +623,10 @@ impl SwlRuntime {
 
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
 
+        // Preserve the map phase's status (review finding: map-reduce
+        // returned Completed even when a map agent failed).
         Ok(ExecutionResult {
-            status: ExecutionStatus::Completed,
+            status: map_result.status,
             outputs: map_result.outputs,
             duration_ms,
         })
@@ -676,7 +719,6 @@ impl SwlRuntime {
         let mut messages = vec![Message::system(system_prompt), Message::user(instruction)];
 
         // Tool execution loop
-        let mut final_response = String::new();
         let mut iteration = 0;
 
         loop {
@@ -686,8 +728,14 @@ impl SwlRuntime {
                     "Agent {} reached maximum tool iterations ({})",
                     name, self.max_tool_iterations
                 );
-                final_response.push_str("\n[Note: Reached maximum tool iterations]");
-                break;
+                // Iteration exhaustion is a typed failure, not a successful
+                // completion (review finding: the loop appended a note and
+                // returned ordinary success text, letting the workflow
+                // classify an unfinished agent as completed).
+                return Err(crate::errors::SelfwareError::Internal(format!(
+                    "agent {name} exhausted max_tool_iterations ({}) without completing",
+                    self.max_tool_iterations
+                )));
             }
 
             // Track inference latency
@@ -799,11 +847,8 @@ impl SwlRuntime {
             }
 
             // No tool calls - this is the final response
-            final_response = text;
-            break;
+            return Ok(text);
         }
-
-        Ok(final_response)
     }
 
     /// Get the list of tools available to an agent based on its definition

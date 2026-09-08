@@ -47,6 +47,7 @@ async fn smoke_config(work_dir: &Path) -> Option<selfware::config::Config> {
         agent: selfware::config::AgentConfig {
             max_iterations: 15,
             step_timeout_secs: 120,
+            stream_stall_timeout_secs: None,
             token_budget: 65536,
             streaming: true,
             native_function_calling: false,

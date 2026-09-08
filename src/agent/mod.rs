@@ -91,6 +91,7 @@ macro_rules! cli_prompt {
 }
 
 mod assistant_response;
+pub mod best_snapshot;
 mod checkpointing;
 pub mod compression;
 pub mod context;
@@ -101,6 +102,7 @@ pub mod context_map;
 pub mod evolution_events;
 mod execution;
 pub mod failure_mode;
+pub mod input_census;
 mod interactive;
 pub mod last_tool;
 mod learning;
@@ -113,12 +115,15 @@ pub mod prompt_builder;
 mod recovery;
 mod session_log;
 mod streaming;
+mod task_policy;
 mod task_runner;
 mod tool_collect;
 mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
+
+pub use task_runner::RunSummary;
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
@@ -373,7 +378,11 @@ Error Recovery Rules:
 struct FailedToolAttempt {
     tool_name: String,
     args_hash: u64,
+    /// Failure class ("validation" / "parsing" / "safety" / ...); mapped to a
+    /// human-readable category by `failure_category` in the suppression message.
     failure_kind: &'static str,
+    /// Last attempt's error text, tail-truncated to
+    /// RETRY_SUPPRESSION_ERROR_PREVIEW_CHARS so the actionable end survives.
     error_preview: String,
 }
 
@@ -383,6 +392,53 @@ struct FileReadState {
     total_lines: usize,
     last_modified: Option<u64>,
     unchanged_read_count: u32,
+}
+
+/// Render the result of an undo/redo restore: restored count plus honest
+/// notes for files already current or skipped (corrupt snapshots), never
+/// claiming restores that the guards refused.
+fn render_restore_outcomes(
+    verb: &str,
+    description: &str,
+    outcomes: &[(
+        std::path::PathBuf,
+        crate::session::edit_history::RestoreOutcome,
+    )],
+) -> String {
+    use crate::session::edit_history::RestoreOutcome;
+    let restored = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::Restored)
+        .count();
+    let already_current = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::AlreadyCurrent)
+        .count();
+    let skipped: Vec<String> = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::SkippedCorrupt)
+        .map(|(p, _)| p.display().to_string())
+        .collect();
+    let write_failed = outcomes
+        .iter()
+        .filter(|(_, o)| *o == RestoreOutcome::WriteFailed)
+        .count();
+    let mut line =
+        if restored == 0 && already_current == 0 && skipped.is_empty() && write_failed == 0 {
+            format!("{verb}: {description} (no files to restore)")
+        } else {
+            format!("{verb}: {description} ({restored} file(s) restored)")
+        };
+    if already_current > 0 {
+        line.push_str(&format!(" · {already_current} already current"));
+    }
+    if !skipped.is_empty() {
+        line.push_str(&format!(" · skipped (corrupt): {}", skipped.join(", ")));
+    }
+    if write_failed > 0 {
+        line.push_str(&format!(" · {write_failed} write(s) failed"));
+    }
+    line
 }
 
 /// Consolidated file-context tracking.
@@ -428,6 +484,10 @@ impl FileTracker {
 }
 
 const TASK_STATE_NOTE_LIMIT: usize = 16;
+/// Bound on the escalation cache (FIFO window) so a model varying
+/// old_str/new_str on each retry cannot grow it without bound — mirrors the
+/// FAILED_TOOL_ATTEMPT_WINDOW_SIZE pattern for recent failed attempts.
+pub(crate) const ESCALATED_EDIT_ARGS_WINDOW_SIZE: usize = 64;
 
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
@@ -509,12 +569,22 @@ pub struct Agent {
     recent_tool_calls: VecDeque<(String, u64)>,
     /// Recent per-step tool batches for oscillation detection.
     recent_tool_batches: VecDeque<Vec<(String, u64)>>,
+    /// Per-turn progress signals (outcome + call signatures) for the
+    /// adaptive iteration-budget check — recorded per executed batch.
+    recent_turn_progress: VecDeque<loop_control::TurnProgress>,
+    /// Redo stack for /undo-/redo: one entry per undo (edit description +
+    /// the file bytes as they were before that undo). New mutating edits
+    /// clear it (standard undo-tree semantics).
+    redo_stack: Vec<(
+        String,
+        std::collections::HashMap<std::path::PathBuf, crate::session::edit_history::FileSnapshot>,
+    )>,
     /// Failed tool attempts in the current recovery window.
     recent_failed_tool_attempts: VecDeque<FailedToolAttempt>,
     /// args-hashes of file_edit calls already escalated to file_write. Prevents
     /// re-reading and re-injecting the whole target file on every repeat of the
     /// same failing edit (EDIT-RETRY-REINJECT context bloat).
-    escalated_edit_args_hashes: std::collections::HashSet<u64>,
+    escalated_edit_args_hashes: VecDeque<u64>,
     /// Hook registry for event-driven automation
     hook_registry: HookRegistry,
     /// Plan mode: propose tool calls without executing them
@@ -552,6 +622,58 @@ pub struct Agent {
     total_no_action_prompts: usize,
     /// Hash of the most recent no-action assistant content used for loop detection.
     last_no_action_prompt_hash: Option<u64>,
+    /// Completion-time requirements audit latch: the audit fires at most once
+    /// per task. Atomic because the completion gate holds `&self`.
+    requirements_audit_done: std::sync::atomic::AtomicBool,
+    /// Rendered input census for the current task (loop 7), captured at task
+    /// start and reused by the requirements audit prompt.
+    input_census_note: Option<String>,
+    /// Suspicious identifiers from the census, reused by the completion-time
+    /// leak check against files changed this run.
+    input_census_suspicious: Vec<String>,
+    /// Completion-time leak-check latch (census suspicious identifiers vs
+    /// changed files). Fires at most once per task.
+    leak_check_done: std::sync::atomic::AtomicBool,
+    /// Consecutive dependency-install failures since the last successful
+    /// install (dependency firewall). Interleaved successful non-install
+    /// commands deliberately do NOT reset it — the spiral pattern includes
+    /// working diagnostic reads.
+    failed_install_streak: usize,
+    /// Last-green workspace snapshot (best-snapshot restore): updated whenever
+    /// the model's own verification passes, restored when the run fails so a
+    /// broken end state never gets submitted over a working one.
+    best_snapshot: best_snapshot::AgentSnapshot,
+    /// Wall-clock commit-mode latches (Opus 5 deadline policy): COMMIT MODE at
+    /// 65%, FINAL STRETCH at 85% of max_wall_secs, each once per task.
+    commit_mode_65_fired: std::sync::atomic::AtomicBool,
+    commit_mode_85_fired: std::sync::atomic::AtomicBool,
+    /// Audit finding ledger (loop 13a): adversarial-audit findings persist
+    /// until closed with evidence; the LLM auditor fires at most once per task.
+    audit_findings: std::sync::Mutex<Vec<verification::AuditFinding>>,
+    /// Completion rejections caused by open ledger findings.
+    audit_rejected_attempts: std::sync::atomic::AtomicUsize,
+    /// Output-key contract latch (anti-hedge advisory): fires at most once
+    /// per task, and only when a violation is found.
+    output_key_check_done: std::sync::atomic::AtomicBool,
+    /// Last computed workspace fingerprint (stagnation detector).
+    last_workspace_fingerprint: Option<u64>,
+    /// Consecutive tool calls with an unchanged fingerprint and no green
+    /// verification. Warns at 10, aborts at 20 (mutation tasks only).
+    stagnation_streak: usize,
+    /// The 10-call stall directive fires once per task.
+    stagnation_warned: std::sync::atomic::AtomicBool,
+    /// Verification-deadline directive latch (loop 12): fires at most once
+    /// per task, when 60% of the iteration budget is gone with no passing
+    /// verification. Atomic to match the other per-task directive latches.
+    verification_deadline_directive_done: std::sync::atomic::AtomicBool,
+    /// Repeated-probe pivot latch (loop 12): the pivot directive fires at
+    /// most once per task regardless of how many distinct probe loops occur.
+    probe_pivot_done: std::sync::atomic::AtomicBool,
+    /// Counts of identical normalized shell commands (hash of the
+    /// digits/whitespace-collapsed form) since the last successful
+    /// verification. Bounded at TRACKED_PROBE_COMMAND_LIMIT entries; cleared
+    /// by any successful verification call.
+    probe_command_counts: std::collections::HashMap<u64, usize>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Unified cache manager for tool results and LLM responses (long-term memory)
@@ -583,6 +705,11 @@ pub struct Agent {
     /// When this exceeds a threshold the agent forces completion instead of
     /// looping until max_iterations.
     consecutive_suppressions: usize,
+    /// One-shot latch for the recoverable edit-failure loop: the first time
+    /// `consecutive_suppressions >= 3` fires after a successful mutation we
+    /// recover (reset + re-read directive) instead of bailing; only a
+    /// recurrence after that recovery is fatal. Reset per task.
+    edit_loop_recovery_used: bool,
     /// Total injection findings the trust gate has sanitized out of tool
     /// results this session. Surfaced in the interactive status line when > 0.
     trust_gate_findings: usize,
@@ -623,12 +750,25 @@ pub struct Agent {
     /// directive. The very next mutating edit is allowed to bypass the FILES:
     /// checklist guard so the model can recover from a read-only loop.
     force_mutation_pending: bool,
+    /// Task-aware policy: read-only classification computed ONCE at task
+    /// start (`classify_task_policy`) from the task context. When true, the
+    /// force-mutation directives, read-only streak stagnation blocks, and
+    /// the NoSourceEdit / has_written_any_file completion-gate demands are
+    /// suppressed — a review/analysis task's deliverable is the report.
+    task_is_read_only: bool,
     /// Monotonic sequence incremented after every successful state-changing tool.
     mutation_sequence: usize,
     /// Mutation sequence number covered by the most recent successful verification.
     last_successful_verification_mutation_sequence: usize,
     /// Most recent failed verification summary, used by the completion gate.
     last_failed_verification_summary: Option<String>,
+    /// Mutation sequence at which the most recent verification failure was
+    /// recorded. The gate compares this against the credited success: a
+    /// failure at the SAME revision as (or after) the last pass is an
+    /// unresolved failure of the current code and overrides that pass —
+    /// "edit → build passes → tests fail → claim" must not complete
+    /// (external review of 6e231e2e, finding #2).
+    last_failed_verification_mutation_sequence: usize,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
     /// Lifetime count of successful mutating tool calls (file_write/file_edit/file_delete/etc.)
@@ -778,7 +918,7 @@ impl Agent {
 
         // Detect project type for verification instructions
         let project_type = detect_project_type().await;
-        let (verify_step, test_step, completion_rule) = verification_instructions(project_type);
+        let (_, _, completion_rule) = verification_instructions(project_type);
         info!("Detected project type: {:?}", project_type);
 
         // Build system prompt using Static/Dynamic boundary system
@@ -787,16 +927,16 @@ impl Agent {
 
         // Tool discovery message - explains deferred tool loading
         let tool_discovery_note = r#"## TOOL DISCOVERY
-You have access to a focused set of critical tools. Additional specialized tools (git, cargo, containers, browser, etc.) can be discovered using the `tool_search` tool.
+You have access to a focused set of critical tools (files, shell, search, routine git/cargo). Additional specialized tools (containers, browser, package managers, etc.) can be discovered using the `tool_search` tool.
 
-To find more tools: <tool><name>tool_search</name><arguments>{"query": "git"}</arguments></tool>
+To find more tools: <tool><name>tool_search</name><arguments>{"query": "container"}</arguments></tool>
 
 Found tools become available immediately for the rest of the session."#;
 
         // === STATIC SECTIONS (cached across conversations) ===
         // Core identity and workflow - doesn't change between sessions
         if config.agent.native_function_calling {
-            info!("Using native function calling mode");
+            info!("Using native function calling mode (subject to per-session XML fallback latch)");
             prompt_builder.add_static(format!(
                 r#"You are Selfware, an expert software engineering AI assistant.
 
@@ -805,19 +945,12 @@ Additional tools can be discovered using tool_search.
 
 {}
 
-## MANDATORY WORKFLOW
-1. PLAN: Understand what needs to change — read relevant files first
-2. IMPLEMENT: Make code changes using file_edit or file_write
-{}
-4. FIX: If verification fails, fix errors before proceeding
-{}
-
 ## EFFICIENCY RULES
 - To read multiple files at once, use context_bulk_read with a glob pattern (e.g. "src/agent/*.rs")
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
 - Use grep_search to find specific code instead of reading entire files
 - Use directory_tree to understand structure before reading files
-- Need git, cargo, containers, or other tools? Use tool_search to discover them
+- Need containers, browsers, package managers, or other specialized tools? Use tool_search to discover them
 
 ## CRITICAL RULES
 - **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like "I'll..." or "Let me..." before calling tools.
@@ -826,7 +959,7 @@ Additional tools can be discovered using tool_search.
 - When editing files, include 3-5 lines of context for unique matches
 - You have a large budget. Do NOT rush. Be thorough and methodical.
 - When the task is complete, respond with a summary of what was done."#,
-                tool_discovery_note, verify_step, test_step, completion_rule
+                tool_discovery_note, completion_rule
             ));
             prompt_builder.add_static(ERROR_RECOVERY_INSTRUCTIONS.to_string());
         } else {
@@ -907,19 +1040,12 @@ To call a tool, use this EXACT XML structure:
 - <function>tool_name</function> — WRONG
 - Any format other than <tool><name>...</name><arguments>...</arguments></tool> — WRONG
 
-## MANDATORY WORKFLOW
-1. PLAN: Understand what needs to change — read relevant files first
-2. IMPLEMENT: Make code changes using file_edit or file_write
-{}
-4. FIX: If verification fails, fix errors before proceeding
-{}
-
 ## EFFICIENCY RULES
 - To read multiple files at once, use context_bulk_read with a glob pattern (e.g. "src/agent/*.rs")
 - For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
 - Use grep_search to find specific code instead of reading entire files
 - Use directory_tree to understand structure before reading files
-- Need git, cargo, containers, or other tools? Use tool_search to discover them
+- Need containers, browsers, package managers, or other specialized tools? Use tool_search to discover them
 
 ## CRITICAL RULES
 - **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like "I'll..." or "Let me..." before calling tools.
@@ -932,7 +1058,7 @@ To call a tool, use this EXACT XML structure:
 - You have a large budget. Do NOT rush. Be thorough and methodical.
 - When done, respond with plain text only (no tool tags)"#,
                 critical_tools.len(), deferred_count, tool_descriptions,
-                tool_discovery_note, verify_step, test_step, completion_rule
+                tool_discovery_note, completion_rule
             ));
             prompt_builder.add_static(ERROR_RECOVERY_INSTRUCTIONS.to_string());
         }
@@ -1202,8 +1328,10 @@ To call a tool, use this EXACT XML structure:
             self_healing,
             recent_tool_calls: VecDeque::new(),
             recent_tool_batches: VecDeque::new(),
+            recent_turn_progress: VecDeque::new(),
+            redo_stack: Vec::new(),
             recent_failed_tool_attempts: VecDeque::new(),
-            escalated_edit_args_hashes: std::collections::HashSet::new(),
+            escalated_edit_args_hashes: VecDeque::new(),
             hook_registry,
             plan_mode,
             plan_mode_manager: plan_mode::PlanModeManager::new(),
@@ -1217,6 +1345,23 @@ To call a tool, use this EXACT XML structure:
             consecutive_stale_verification: 0,
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
+            requirements_audit_done: std::sync::atomic::AtomicBool::new(false),
+            input_census_note: None,
+            input_census_suspicious: Vec::new(),
+            leak_check_done: std::sync::atomic::AtomicBool::new(false),
+            failed_install_streak: 0,
+            best_snapshot: best_snapshot::AgentSnapshot::default(),
+            commit_mode_65_fired: std::sync::atomic::AtomicBool::new(false),
+            commit_mode_85_fired: std::sync::atomic::AtomicBool::new(false),
+            audit_findings: std::sync::Mutex::new(Vec::new()),
+            audit_rejected_attempts: std::sync::atomic::AtomicUsize::new(0),
+            output_key_check_done: std::sync::atomic::AtomicBool::new(false),
+            last_workspace_fingerprint: None,
+            stagnation_streak: 0,
+            stagnation_warned: std::sync::atomic::AtomicBool::new(false),
+            verification_deadline_directive_done: std::sync::atomic::AtomicBool::new(false),
+            probe_pivot_done: std::sync::atomic::AtomicBool::new(false),
+            probe_command_counts: std::collections::HashMap::new(),
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor,
@@ -1232,6 +1377,7 @@ To call a tool, use this EXACT XML structure:
             rag_engine: None,
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
+            edit_loop_recovery_used: false,
             trust_gate_findings: 0,
             consecutive_read_only_steps: 0,
             seen_read_targets: std::collections::HashSet::new(),
@@ -1241,9 +1387,11 @@ To call a tool, use this EXACT XML structure:
             has_written_any_file: false,
             files_checklist_seen: false,
             force_mutation_pending: false,
+            task_is_read_only: false,
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
+            last_failed_verification_mutation_sequence: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
             total_tool_call_count: 0,
@@ -1761,9 +1909,16 @@ To call a tool, use this EXACT XML structure:
         }
     }
 
+    /// Native FC for this turn: the config flag minus the client's session
+    /// latch (a provider that 400s on the native payload flips the whole
+    /// session to XML — system prompts and api_tools must follow).
+    pub(crate) fn effective_native_fc(&self) -> bool {
+        self.config.agent.native_function_calling && !self.client.native_fc_latched()
+    }
+
     /// Get tools for API calls - returns Some(tools) if native function calling is enabled
     fn api_tools(&self) -> Option<Vec<crate::api::types::ToolDefinition>> {
-        if self.config.agent.native_function_calling {
+        if self.effective_native_fc() {
             Some(self.tools.definitions())
         } else {
             None
@@ -2167,6 +2322,149 @@ To call a tool, use this EXACT XML structure:
         &self.config.model
     }
 
+    /// Read-only access to the resolved configuration.
+    pub fn config(&self) -> &crate::config::Config {
+        &self.config
+    }
+
+    /// Number of messages currently in the conversation.
+    pub fn message_count(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// The context token budget the trim/compression machinery targets.
+    pub fn max_context_tokens(&self) -> usize {
+        self.max_context_tokens
+    }
+
+    /// Read-only access to the tool registry (for /tools-style listings).
+    pub fn registry(&self) -> &crate::tools::ToolRegistry {
+        &self.tools
+    }
+
+    /// Push a user-role message into the conversation (chat `!cmd` shell
+    /// passthrough output, operator notes) so the next turn sees it.
+    pub fn push_user_message(&mut self, content: String) {
+        self.messages
+            .push(crate::api::types::Message::user(content));
+    }
+
+    /// Run a chat `!cmd` shell passthrough (gemini/aider parity): execute
+    /// via the default shell, capture output (4K-char cap, honest
+    /// truncation flag), push it into the conversation as context, and
+    /// return the display text (`$ cmd (exit N)\n<output>`). Shared by the
+    /// TUI loop, the interactive REPL, and the basic-mode stdin loop — one
+    /// implementation, one format.
+    pub async fn shell_passthrough(&mut self, cmd: &str) -> String {
+        const MAX_SHELL_OUT_CHARS: usize = 4_000;
+        let (shell, flag) = crate::tools::shell_exec::default_shell();
+        let output = tokio::process::Command::new(shell)
+            .args([flag, cmd])
+            .output()
+            .await;
+        let out = match output {
+            Ok(out) => out,
+            Err(e) => return format!("$ {cmd} — failed to start: {e}"),
+        };
+        let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        if !stderr.trim().is_empty() {
+            text.push_str(&format!("\n[stderr]\n{stderr}"));
+        }
+        let truncated = text.chars().count() > MAX_SHELL_OUT_CHARS;
+        let mut text: String = text.chars().take(MAX_SHELL_OUT_CHARS).collect();
+        if truncated {
+            text.push_str("\n…[truncated]");
+        }
+        let status_note = if out.status.success() {
+            String::new()
+        } else {
+            format!(" (exit {})", out.status.code().unwrap_or(-1))
+        };
+        self.push_user_message(format!(
+            "<shell_command>{cmd}</shell_command>\n<output{truncated_attr}>{text}</output>",
+            truncated_attr = if truncated { " truncated=\"true\"" } else { "" },
+        ));
+        format!("$ {cmd}{status_note}\n{text}")
+    }
+
+    /// Memory/context status line for /memory-style commands (same data the
+    /// interactive dispatcher prints).
+    pub fn memory_status_text(&self) -> String {
+        let (entries, tokens, near_limit) = self.memory_stats();
+        let mut out = format!(
+            "memory entries: {} · estimated tokens: {} · context window: {} · near limit: {}",
+            entries,
+            tokens,
+            self.memory.context_window(),
+            near_limit
+        );
+        if !self.memory.is_empty() {
+            out.push_str(&format!("\nrecent:\n{}", self.memory.summary(3)));
+        }
+        out
+    }
+
+    /// Undo the most recent file edit (/undo): restore the pre-edit bytes
+    /// captured in the tip checkpoint. Before reverting, the current bytes
+    /// are pushed onto the redo stack so /redo can honestly reapply (one
+    /// stack entry per undo, most recent first). Single-step per call —
+    /// chained undos/redos walk the stack in order. Returns a
+    /// human-readable result line.
+    pub async fn undo_last_edit(&mut self) -> String {
+        use crate::session::edit_history::FileSnapshot;
+        if let Some(tip) = self.edit_history.current_checkpoint() {
+            if !tip.files.is_empty() {
+                let mut snapshots = std::collections::HashMap::new();
+                for path in tip.files.keys() {
+                    if let Ok(content) = tokio::fs::read_to_string(path).await {
+                        snapshots.insert(path.clone(), FileSnapshot::new(path.clone(), content));
+                    }
+                }
+                if !snapshots.is_empty() {
+                    self.redo_stack.push((tip.action.description(), snapshots));
+                }
+            }
+        }
+        let Some(checkpoint) = self.edit_history.undo() else {
+            return "Nothing to undo".to_string();
+        };
+        let outcomes =
+            crate::session::edit_history::restore_checkpoint_guarded(&checkpoint.files).await;
+        render_restore_outcomes("Undone", &checkpoint.action.description(), &outcomes)
+    }
+
+    /// Redo the last undone edit (/redo): pop the redo stack entry the
+    /// matching /undo pushed (the file bytes as they were BEFORE the undo —
+    /// i.e. the reapplied state). Never claims to reapply changes no
+    /// snapshot covers.
+    pub async fn redo_last_edit(&mut self) -> String {
+        let Some((description, snapshots)) = self.redo_stack.pop() else {
+            return "Nothing to redo".to_string();
+        };
+        let outcomes = crate::session::edit_history::restore_checkpoint_guarded(&snapshots).await;
+        render_restore_outcomes("Reapplied", &description, &outcomes)
+    }
+
+    /// Hot-switch the session model: update the config, rebuild the API
+    /// client against it (the same rebuild the recovery tree uses for
+    /// endpoint fallback, progress emitter re-attached), and re-key the
+    /// tokenizer. Session-only — the config file is not written. Returns
+    /// the previous model name.
+    pub fn switch_model(&mut self, model: &str) -> Result<String> {
+        let model = model.trim();
+        anyhow::ensure!(
+            !model.is_empty(),
+            "model name must not be empty (it overrides the `model` config key)"
+        );
+        let previous = std::mem::replace(&mut self.config.model, model.to_string());
+        self.client = crate::api::ApiClient::new(&self.config)?;
+        self.client
+            .with_progress_emitter(std::sync::Arc::clone(&self.progress_emitter));
+        crate::token_count::set_configured_model(&self.config.model);
+        Ok(previous)
+    }
+
     /// Count of HTTP 400 "Assistant response prefill incompatible" responses.
     pub fn prefill_400_count(&self) -> usize {
         self.prefill_400_count
@@ -2194,8 +2492,34 @@ To call a tool, use this EXACT XML structure:
     /// that requires file mutation (`fix`, `implement`, `edit`, `add`, etc.).
     /// Used by `FailureMode::classify` to flag suspicious natural-completion
     /// runs where the model wrote zero files but claimed success.
+    ///
+    /// A task classified read-only at task start (`classify_task_policy`)
+    /// NEVER requires mutation here, even when its text trips the raw
+    /// keyword classifier: every mutation-demanding guard (no-tool stall
+    /// aborts, force-mutation fallbacks, completion demands) consults this
+    /// one method, so honoring the stored decision in this single place
+    /// gates them all consistently.
     pub fn current_task_requires_mutation(&self) -> bool {
-        tool_dispatch::task_requires_mutation(self.task_context_for_classification())
+        !self.current_task_is_read_only()
+            && tool_dispatch::task_requires_mutation(self.task_context_for_classification())
+    }
+
+    /// True when the current task was classified read-only (review /
+    /// analysis / report deliverable, no mutation required) at task start.
+    /// All mutation-demanding machinery (force-mutation directives,
+    /// read-only streak blocks, NoSourceEdit completion demands) consults
+    /// this stored decision instead of re-deriving it.
+    pub(super) fn current_task_is_read_only(&self) -> bool {
+        self.task_is_read_only
+    }
+
+    /// Wire the task-aware policy ONCE at task start: classify the task
+    /// context as read-only (review/analysis/report AND no mutation
+    /// required) and store the decision. Deterministic and unit-testable
+    /// via `task_policy::task_is_read_only`.
+    pub(super) fn classify_task_policy(&mut self) {
+        self.task_is_read_only =
+            task_policy::task_is_read_only(self.task_context_for_classification());
     }
 
     /// Reset all per-task failure-mode counters. Called when starting or
@@ -2210,6 +2534,7 @@ To call a tool, use this EXACT XML structure:
         self.mutation_sequence = 0;
         self.last_successful_verification_mutation_sequence = 0;
         self.last_failed_verification_summary = None;
+        self.last_failed_verification_mutation_sequence = 0;
         self.permanently_blocked_tool_calls.clear();
         self.prefill_400_count = 0;
         self.prefill_breaker_open = false;
@@ -2375,6 +2700,10 @@ To call a tool, use this EXACT XML structure:
     #[cfg(test)]
     pub(super) fn test_set_last_assistant_response(&mut self, s: String) {
         self.last_assistant_response = s;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_task_read_only(&mut self, v: bool) {
+        self.task_is_read_only = v;
     }
 }
 

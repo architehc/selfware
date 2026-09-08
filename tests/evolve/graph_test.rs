@@ -160,13 +160,18 @@ fn test_scan_is_deterministic_and_separates_production_from_tests() {
         .filter(|node| node.path.is_some())
         .map(|node| node.id.as_str())
         .collect();
+    // Schema v2: Code-layer Rust files also emit symbol-level nodes for their
+    // top-level `pub` items (parent file id + `::Name`), sorted with the rest.
     assert_eq!(
         ids,
         vec![
             "bin::tool",
             "crate::agent",
+            "crate::agent::Agent",
             "crate::api",
+            "crate::api::request",
             "crate::config",
+            "crate::config::Config",
             "crate::web::app.js",
             "example::demo",
             "test::agent_test",
@@ -338,12 +343,25 @@ fn test_repository_scan_covers_workspace_sources_and_prunes_unsafe_artifacts() {
             "{excluded}"
         );
     }
-    for node in graph.nodes.iter().filter(|node| node.path.is_some()) {
+    // File nodes hang off structure:: nodes; schema-v2 symbol nodes hang off
+    // their parent file node instead (also a Contains edge).
+    for node in graph
+        .nodes
+        .iter()
+        .filter(|node| node.path.is_some() && node.layer != NodeLayer::Symbol)
+    {
         assert!(graph.edges.iter().any(|edge| {
             edge.edge_type == EdgeType::Contains
                 && edge.to == node.id
                 && edge.from.starts_with("structure::")
         }));
     }
+    // Symbol nodes (schema v2): src/lib.rs declares `pub fn library`, so a
+    // crate::library node exists and is contained by its parent file node.
+    let library = by_id("crate::library");
+    assert_eq!(library.layer, NodeLayer::Symbol);
+    assert!(graph.edges.iter().any(|edge| {
+        edge.edge_type == EdgeType::Contains && edge.from == "crate" && edge.to == "crate::library"
+    }));
     assert!(selfware::evolve::validate_graph(&graph).valid);
 }

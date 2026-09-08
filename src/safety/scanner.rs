@@ -240,13 +240,16 @@ impl SecretScanner {
             ),
             SecretPattern::new(
                 "AWS Secret Key",
-                r#"(?i)aws(.{0,20})?['"][0-9a-zA-Z/+]{40}['"]"#,
+                // .{0,24}: the canonical `AWS_SECRET_ACCESS_KEY = "…"` form
+                // has 21 chars between `aws` and the quote — .{0,20} missed
+                // it by one (red-team wave-27b).
+                r#"(?i)aws(.{0,24})?['"][0-9a-zA-Z/+]{40}['"]"#,
                 SecuritySeverity::Critical,
             ),
             // GitHub classic tokens (ghp_, gho_, ghu_, ghs_, ghr_)
             SecretPattern::new(
                 "GitHub Token",
-                r"gh[pousr]_[A-Za-z0-9_]{36,}",
+                r"gh[pousr]_[A-Za-z0-9_]{16,}",
                 SecuritySeverity::Critical,
             ),
             // GitHub fine-grained personal access tokens
@@ -259,6 +262,13 @@ impl SecretScanner {
             SecretPattern::new(
                 "GitLab Token",
                 r"glpat-[A-Za-z0-9_\-]{20,}",
+                SecuritySeverity::Critical,
+            ),
+            // npm automation/access tokens (npm_ + 36 chars) — red-team:
+            // publishConfig `_authToken` in package.json, not just .npmrc.
+            SecretPattern::new(
+                "npm Token",
+                r"npm_[A-Za-z0-9]{30,}",
                 SecuritySeverity::Critical,
             ),
             SecretPattern::new(
@@ -280,12 +290,12 @@ impl SecretScanner {
             // Stripe secret keys
             SecretPattern::new(
                 "Stripe Key",
-                r"(sk_live_|rk_live_|pk_live_)[a-zA-Z0-9]{24,}",
+                r"(sk|rk|pk)_(live|test)_[a-zA-Z0-9]{16,}",
                 SecuritySeverity::Critical,
             ),
             SecretPattern::new(
                 "Password in Code",
-                r#"(?i)(password|passwd|pwd)['"]?\s*[:=]\s*['"][^'"]{8,}['"]"#,
+                r#"(?i)(password|passwd|pwd|_pass)['"]?\s*[:=]\s*['"][^'"]{8,}['"]"#,
                 SecuritySeverity::High,
             ),
             SecretPattern::new(
@@ -300,7 +310,7 @@ impl SecretScanner {
             ),
             SecretPattern::new(
                 "Database URL",
-                r"(?i)(postgres|mysql|mongodb)://[^:]+:[^@]+@",
+                r"(?i)(postgres|mysql|mongodb(\+srv)?|redis|valkey)://[^:/\s]*:[^@/\s]+@",
                 SecuritySeverity::High,
             ),
             // Slack tokens: bot (xoxb-), user (xoxp-), app-level (xoxa-),
@@ -316,6 +326,20 @@ impl SecretScanner {
                 r"eyJ[a-zA-Z0-9_/+\-]{30,}",
                 SecuritySeverity::Medium,
             ),
+            // Slack webhook URLs — anyone holding one can post (wave 4)
+            SecretPattern::new(
+                "Slack Webhook",
+                r"hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+",
+                SecuritySeverity::Critical,
+            ),
+            // Azure storage account keys (red-team wave 3)
+            SecretPattern::new(
+                "Azure Account Key",
+                r"AccountKey=[A-Za-z0-9+/=]{20,}",
+                SecuritySeverity::Critical,
+            ),
+            // Twilio Account SIDs (AC + 32 hex)
+            SecretPattern::new("Twilio SID", r"AC[0-9a-f]{32}", SecuritySeverity::High),
             // Generic high-entropy base64 strings
             SecretPattern::new(
                 "Base64 Secret",
@@ -335,13 +359,19 @@ impl SecretScanner {
         let mut findings = Vec::new();
 
         for (line_num, line) in content.lines().enumerate() {
-            // Skip comments
+            // Comment lines: secrets in comments leak exactly like secrets in
+            // code (red-team wave-3 finding: `// GITHUB_TOKEN=ghp_…` sailed
+            // through). Keep the prose false-positive guard by scanning them
+            // only for Critical, high-confidence shapes (AWS keys, GitHub
+            // tokens, private keys, Stripe/Azure) — prose never matches those.
             let trimmed = line.trim();
-            if trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*") {
-                continue;
-            }
+            let is_comment =
+                trimmed.starts_with("//") || trimmed.starts_with('#') || trimmed.starts_with("/*");
 
             for pattern in &self.patterns {
+                if is_comment && pattern.severity != SecuritySeverity::Critical {
+                    continue;
+                }
                 if let Some(ref re) = pattern.compiled {
                     for mat in re.find_iter(line) {
                         let mut finding = SecurityFinding::new(

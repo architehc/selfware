@@ -1051,3 +1051,492 @@ fn resolve_preset_task_passthrough_plain_task() {
     let task = resolve_preset_task(None, Some("do the thing".to_string())).unwrap();
     assert_eq!(task, "do the thing");
 }
+
+// ── journal_title tests ──
+
+#[test]
+fn journal_title_takes_first_non_empty_line() {
+    assert_eq!(
+        journal_title("\n\n   \nReview the auth module\nand report findings", 60),
+        "Review the auth module"
+    );
+}
+
+#[test]
+fn journal_title_truncates_long_lines_with_ellipsis() {
+    let long = "x".repeat(100);
+    let title = journal_title(&long, 60);
+    assert_eq!(title.chars().count(), 60);
+    assert!(title.ends_with("..."));
+}
+
+#[test]
+fn journal_title_empty_prompt_is_honest_placeholder() {
+    assert_eq!(journal_title("", 60), "(untitled task)");
+    assert_eq!(journal_title("\n  \n\t\n", 60), "(untitled task)");
+}
+
+// ── render_run_summary tests ──
+
+fn sample_summary() -> crate::agent::RunSummary {
+    crate::agent::RunSummary {
+        iterations: 12,
+        max_iterations: 30,
+        budget_extended: false,
+        files_changed: vec![
+            "src/a.rs".to_string(),
+            "src/b.rs".to_string(),
+            "src/c.rs".to_string(),
+            "src/d.rs".to_string(),
+        ],
+        verification: Some((true, 4)),
+        total_tokens: 123_456,
+        cost_usd: Some(0.0123),
+    }
+}
+
+#[test]
+fn render_run_summary_completed_run() {
+    let rendered = render_run_summary(&sample_summary(), None);
+    assert!(rendered.contains("outcome: completed"), "{rendered}");
+    assert!(rendered.contains("iterations: 12/30"), "{rendered}");
+    assert!(
+        rendered.contains("files changed: 4 (src/a.rs, src/b.rs, src/c.rs, +1 more)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("verification: passed (4 checks)"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("tokens: 123456 total, cost $0.0123"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("budget extended"), "{rendered}");
+}
+
+#[test]
+fn render_run_summary_failed_run_with_extension_and_no_verification() {
+    let mut summary = sample_summary();
+    summary.iterations = 31;
+    summary.max_iterations = 45;
+    summary.budget_extended = true;
+    summary.files_changed = Vec::new();
+    summary.verification = None;
+    summary.cost_usd = None;
+    let rendered = render_run_summary(&summary, Some("Max iterations exceeded"));
+    assert!(
+        rendered.contains("outcome: failed — Max iterations exceeded"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("iterations: 31/45 (budget extended)"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("files changed: none"), "{rendered}");
+    assert!(
+        rendered.contains("verification: not performed"),
+        "{rendered}"
+    );
+    // No invented cost line when nothing was billed (rule 3).
+    assert!(rendered.contains("tokens: 123456 total"), "{rendered}");
+    assert!(!rendered.contains("cost $"), "{rendered}");
+}
+
+// ── Harness-alignment flags: --model, exec alias, mcp list ──
+
+#[test]
+fn cli_global_model_flag_parses() {
+    use clap::Parser;
+    let cli =
+        Cli::try_parse_from(["selfware", "--model", "qwen3.8-max", "run", "fix bug"]).unwrap();
+    assert_eq!(cli.model.as_deref(), Some("qwen3.8-max"));
+    match cli.command.unwrap() {
+        Commands::Run { task, .. } => assert_eq!(task.as_deref(), Some("fix bug")),
+        other => panic!("Expected Run, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_short_m_stays_mode_not_model() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "-m", "yolo", "run", "fix bug"]).unwrap();
+    assert!(
+        cli.model.is_none(),
+        "-m must stay --mode; only --model sets the model override"
+    );
+    assert!(matches!(cli.mode, Some(crate::config::ExecutionMode::Yolo)));
+}
+
+#[test]
+fn cli_exec_alias_routes_to_run() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "exec", "fix the bug"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Run { task, .. } => assert_eq!(task.as_deref(), Some("fix the bug")),
+        other => panic!("Expected Run via exec alias, got {:?}", other),
+    }
+}
+
+#[test]
+fn cli_mcp_list_parses() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "mcp", "list"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Mcp { command } => assert!(matches!(command, args::McpCommands::List)),
+        other => panic!("Expected Mcp, got {:?}", other),
+    }
+}
+
+// ── Slash-command handler rendering ──
+
+#[test]
+fn slash_help_lists_all_session_commands() {
+    let help = slash_help_text();
+    for command in [
+        "/help", "/status", "/compact", "/cost", "/model", "/doctor", "/mcp", "/clear", "/plan",
+        "/quit", "/exit",
+    ] {
+        assert!(help.contains(command), "help missing {command}: {help}");
+    }
+}
+
+#[test]
+fn render_cost_line_honest_about_missing_billing() {
+    let mut summary = crate::agent::RunSummary {
+        iterations: 1,
+        max_iterations: 30,
+        budget_extended: false,
+        files_changed: Vec::new(),
+        verification: None,
+        total_tokens: 12_345,
+        cost_usd: None,
+    };
+    let rendered = render_cost_line(&summary);
+    assert!(rendered.contains("tokens: 12345 total"), "{rendered}");
+    assert!(rendered.contains("cost not tracked"), "{rendered}");
+    assert!(!rendered.contains('$'), "no invented cost: {rendered}");
+
+    summary.cost_usd = Some(0.0123);
+    let rendered = render_cost_line(&summary);
+    assert!(rendered.contains("cost $0.0123"), "{rendered}");
+}
+
+#[test]
+fn mcp_servers_text_covers_empty_and_configured() {
+    let mut config = crate::config::Config::default();
+    assert!(mcp_servers_text(&config).contains("no MCP servers configured"));
+
+    config.mcp.servers.push(crate::mcp::McpServerConfig {
+        name: "docs".to_string(),
+        command: "uvx".to_string(),
+        args: vec!["docs-mcp".to_string()],
+        env: Default::default(),
+        init_timeout_secs: 30,
+        framing: crate::mcp::transport::Framing::default(),
+    });
+    let rendered = mcp_servers_text(&config);
+    assert!(
+        rendered.contains("1 configured MCP server(s)"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("docs — uvx docs-mcp"), "{rendered}");
+    assert!(
+        rendered.contains("not live connectivity") || rendered.contains("configured"),
+        "{rendered}"
+    );
+}
+
+// ── Round E2: attachments, mcp config edits, --continue, render helpers ──
+
+#[test]
+fn expand_attachments_resolves_files_and_ignores_non_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("note.txt");
+    std::fs::write(&file, "hello world").expect("write");
+    let input = format!(
+        "review @{} and @/nonexistent/missing.rs now",
+        file.display()
+    );
+    let attachments = expand_attachments(&input);
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].content, "hello world");
+    assert!(!attachments[0].truncated);
+}
+
+#[test]
+fn expand_attachments_marks_truncation_honestly() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("big.txt");
+    std::fs::write(&file, "x".repeat(ATTACHMENT_MAX_CHARS + 100)).expect("write");
+    let attachments = expand_attachments(&format!("@{}", file.display()));
+    assert_eq!(attachments.len(), 1);
+    assert!(attachments[0].truncated);
+    assert_eq!(attachments[0].content.chars().count(), ATTACHMENT_MAX_CHARS);
+}
+
+#[test]
+fn mcp_add_remove_round_trip_through_the_config_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("config.toml");
+
+    let added = edit_mcp_servers(&path, |servers| {
+        let mut entry = toml::value::Table::new();
+        entry.insert("name".to_string(), toml::Value::String("docs".to_string()));
+        entry.insert(
+            "command".to_string(),
+            toml::Value::String("uvx".to_string()),
+        );
+        servers.push(toml::Value::Table(entry));
+        Ok("added".to_string())
+    })
+    .expect("add");
+    assert_eq!(added, "added");
+
+    // The file parses back with the server present.
+    let parsed: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    let servers = parsed["mcp"]["servers"].as_array().expect("servers array");
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0]["name"].as_str(), Some("docs"));
+    assert_eq!(servers[0]["command"].as_str(), Some("uvx"));
+
+    let removed = edit_mcp_servers(&path, |servers| {
+        servers.retain(|s| s.get("name").and_then(|n| n.as_str()) != Some("docs"));
+        Ok("removed".to_string())
+    })
+    .expect("remove");
+    assert_eq!(removed, "removed");
+    let parsed: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+    assert!(parsed["mcp"]["servers"]
+        .as_array()
+        .expect("servers array")
+        .is_empty());
+}
+
+#[test]
+fn cli_continue_flag_parses_and_keeps_dash_c_for_config() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "--continue"]).unwrap();
+    assert!(cli.continue_flag);
+    let cli = Cli::try_parse_from(["selfware", "-c", "custom.toml", "run", "x"]).unwrap();
+    assert!(!cli.continue_flag);
+    assert_eq!(cli.config.as_deref(), Some("custom.toml"));
+}
+
+#[test]
+fn cli_mcp_add_remove_parse() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "mcp",
+        "add",
+        "docs",
+        "--command",
+        "uvx",
+        "--args",
+        "docs-mcp",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Commands::Mcp { command } => match command {
+            args::McpCommands::Add {
+                name,
+                command,
+                args,
+            } => {
+                assert_eq!(name, "docs");
+                assert_eq!(command, "uvx");
+                assert_eq!(args, vec!["docs-mcp".to_string()]);
+            }
+            other => panic!("Expected Mcp Add, got {:?}", other),
+        },
+        other => panic!("Expected Mcp, got {:?}", other),
+    }
+
+    let cli = Cli::try_parse_from(["selfware", "mcp", "remove", "docs"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Mcp { command } => match command {
+            args::McpCommands::Remove { name } => assert_eq!(name, "docs"),
+            other => panic!("Expected Mcp Remove, got {:?}", other),
+        },
+        other => panic!("Expected Mcp, got {:?}", other),
+    }
+}
+
+#[test]
+fn slash_help_covers_round_e2_commands() {
+    let help = slash_help_text();
+    for command in [
+        "/undo",
+        "/redo",
+        "/agents",
+        "/resume",
+        "/permissions",
+        "/journal",
+        "/memory",
+        "/tools",
+        "/garden",
+        "/analyze",
+        "/review",
+        "/bug",
+        "/skills",
+        "!cmd",
+        "@path",
+    ] {
+        assert!(help.contains(command), "help missing {command}: {help}");
+    }
+}
+
+#[test]
+fn agents_status_text_is_honest_roster() {
+    let text = agents_status_text();
+    assert!(text.contains("Archie"), "{text}");
+    assert!(text.contains("no live agents are tracked"), "{text}");
+}
+
+#[test]
+fn untrusted_repo_config_is_not_the_trust_default() {
+    // The mcp add/remove target gate relies on this predicate: a repo-local
+    // selfware.toml is untrusted until `selfware trust` records it.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let repo_config = temp.path().join("selfware.toml");
+    std::fs::write(&repo_config, "").expect("write");
+    assert!(!crate::config::trust::is_config_trusted(&repo_config));
+}
+
+// ── Coverage for the pure helpers the 780k-token architecture review
+// (2026-09-02) flagged: crate::cli was the most complex module in the
+// codebase with zero inline tests at review time. ──
+
+#[test]
+fn workflow_file_kind_recognizes_swl_and_yaml() {
+    assert!(matches!(
+        workflow_file_kind(Path::new("flow.swl")),
+        Some(WorkflowFileKind::Swl)
+    ));
+    assert!(matches!(
+        workflow_file_kind(Path::new("flow.yaml")),
+        Some(WorkflowFileKind::Yaml)
+    ));
+    assert!(matches!(
+        workflow_file_kind(Path::new("flow.yml")),
+        Some(WorkflowFileKind::Yaml)
+    ));
+}
+
+#[test]
+fn workflow_file_kind_rejects_other_extensions() {
+    assert!(workflow_file_kind(Path::new("flow.toml")).is_none());
+    assert!(workflow_file_kind(Path::new("flow")).is_none());
+    assert!(workflow_file_kind(Path::new("flow.SWL")).is_none());
+}
+
+#[test]
+fn parse_workflow_inputs_parses_key_value_pairs() {
+    let inputs = parse_workflow_inputs(&[
+        "name=selfware".to_string(),
+        "count=3".to_string(),
+        "empty=".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(inputs.len(), 3);
+    assert!(inputs.contains_key("name"));
+    assert!(inputs.contains_key("empty"));
+}
+
+#[test]
+fn parse_workflow_inputs_rejects_missing_equals() {
+    assert!(parse_workflow_inputs(&["no-equals-here".to_string()]).is_err());
+}
+
+#[test]
+fn estimate_workflow_llm_cost_scales_linearly() {
+    let one = estimate_workflow_llm_cost_usd(1_000_000, 0);
+    assert!((one - 3.0).abs() < 1e-9);
+    let both = estimate_workflow_llm_cost_usd(1_000_000, 1_000_000);
+    assert!((both - 18.0).abs() < 1e-9);
+    assert_eq!(estimate_workflow_llm_cost_usd(0, 0), 0.0);
+}
+
+#[test]
+fn workflow_agent_label_extracts_swl_agent_line() {
+    assert_eq!(
+        workflow_agent_label("SWL agent: reviewer\nrest"),
+        "reviewer"
+    );
+    assert_eq!(workflow_agent_label("SWL agent:   padded  \nx"), "padded");
+    assert_eq!(workflow_agent_label("no label here"), "workflow_llm");
+    assert_eq!(workflow_agent_label("SWL agent: \nx"), "workflow_llm");
+    assert_eq!(workflow_agent_label(""), "workflow_llm");
+}
+
+#[test]
+fn resolve_preset_task_requires_task_or_preset() {
+    assert!(resolve_preset_task(None, None).is_err());
+    assert_eq!(
+        resolve_preset_task(None, Some("do the thing".to_string())).unwrap(),
+        "do the thing"
+    );
+}
+
+#[test]
+fn resolve_preset_task_rejects_unknown_preset() {
+    let err = resolve_preset_task(Some("no-such-preset-xyz".to_string()), None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("unknown preset"),
+        "error should name the cause: {err}"
+    );
+}
+
+#[test]
+fn resolve_preset_task_renders_first_preset_prompt_renders_nonempty() {
+    let first = crate::evolve::presets::presets()
+        .into_iter()
+        .next()
+        .expect("at least one preset ships");
+    let rendered = resolve_preset_task(Some(first.id.to_string()), None).unwrap();
+    assert!(!rendered.trim().is_empty());
+}
+
+// ── workflow tool handler: safety gate + outcome interpretation (review
+// findings P1-1/P1-3: workflow tool steps bypassed the central safety gate,
+// and a tool's structured failure was reported as a completed step) ──
+
+fn workflow_args(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workflow_tool_handler_applies_central_safety_gate() {
+    let handler = build_workflow_tool_handler(&crate::config::SafetyConfig::default());
+    // A command the main agent's checker refuses must be refused here too.
+    let blocked = handler("shell_exec", &workflow_args(&[("command", "rm -rf /")])).await;
+    assert!(
+        blocked.is_err(),
+        "workflow tool step must honor the central safety gate"
+    );
+    // A harmless command still executes.
+    let allowed = handler("shell_exec", &workflow_args(&[("command", "echo hi")])).await;
+    assert!(allowed.is_ok(), "harmless command must pass: {allowed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workflow_tool_handler_fails_step_on_nonzero_exit() {
+    let handler = build_workflow_tool_handler(&crate::config::SafetyConfig::default());
+    // shell_exec encodes process failure in the JSON payload; the step must
+    // fail, not complete with a structured error string.
+    let failed = handler("shell_exec", &workflow_args(&[("command", "exit 7")])).await;
+    assert!(
+        failed.is_err(),
+        "nonzero exit inside tool payload must fail the step: {failed:?}"
+    );
+    let ok = handler("shell_exec", &workflow_args(&[("command", "echo ok")])).await;
+    assert!(ok.is_ok(), "zero exit must pass: {ok:?}");
+}

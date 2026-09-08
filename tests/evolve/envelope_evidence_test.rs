@@ -9,7 +9,7 @@ use selfware::config::Config;
 use selfware::evolve::{build_envelope, ContextMode, EvolveServer, Graph, Node, TierMeasurer};
 use selfware::testing::mock_api::{MockLlmServer, MockResponse};
 
-use crate::{edge, get_json, post_json};
+use crate::{edge, get_json, poll_review_job, post_json};
 
 /// The reviewed file: small, with one distinctive body line that must survive
 /// verbatim in every tier (the selected document is never projected).
@@ -127,7 +127,8 @@ async fn reviewed_document_hash(server: &EvolveServer) -> String {
     document["hash"].as_str().unwrap().to_string()
 }
 
-/// POST /api/assistant/review with scope active_context and return the JSON.
+/// POST /api/assistant/review with scope active_context, poll the spawned
+/// job to completion, and return the review result JSON.
 async fn review(server: &EvolveServer, mode: &str) -> Value {
     let expected_hash = reviewed_document_hash(server).await;
     let (status, body) = post_json(
@@ -142,8 +143,11 @@ async fn review(server: &EvolveServer, mode: &str) -> Value {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "review failed: {body}");
-    serde_json::from_str(&body).unwrap()
+    assert_eq!(status, StatusCode::ACCEPTED, "review not queued: {body}");
+    let accepted: Value = serde_json::from_str(&body).unwrap();
+    let job = poll_review_job(server, accepted["job_id"].as_str().unwrap()).await;
+    assert_eq!(job["status"], "done", "review failed: {job}");
+    job["result"].clone()
 }
 
 /// Total shipped evidence characters in a review response.

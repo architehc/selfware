@@ -373,11 +373,10 @@ fn test_checkpoint_multiple_errors() {
 fn test_checkpoint_manager_load_nonexistent_recovers_fresh() {
     let dir = tempdir().unwrap();
     let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
-    // With recovery, loading a nonexistent task creates a fresh checkpoint
-    let result = manager.load("nonexistent_task").unwrap();
-    assert_eq!(result.task_id, "nonexistent_task");
-    assert_eq!(result.task_description, "");
-    assert_eq!(result.status, TaskStatus::InProgress);
+    // Changed contract (external review sign-off): loading a nonexistent
+    // task is RecoveryRequired, not a fresh checkpoint.
+    let err = manager.load("nonexistent_task").unwrap_err().to_string();
+    assert!(err.contains("unrecoverable"), "must name the state: {err}");
 }
 
 #[test]
@@ -702,12 +701,11 @@ fn test_load_detects_corrupted_file_and_recovers() {
     envelope["payload"]["task_description"] = serde_json::Value::String("TAMPERED".to_string());
     std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
 
-    // Load should detect corruption and recover with a fresh checkpoint
-    // (no backup exists, so recovery creates a new empty one)
-    let result = manager.load("corrupt_test").unwrap();
-    assert_eq!(result.task_id, "corrupt_test");
-    // The description is empty because recovery created a fresh checkpoint
-    assert_eq!(result.task_description, "");
+    // Load should detect corruption and refuse (changed contract, external
+    // review sign-off: no backup exists, so recovery cannot restore anything
+    // — a fresh blank checkpoint is NOT a valid substitute for the resume).
+    let err = manager.load("corrupt_test").unwrap_err().to_string();
+    assert!(err.contains("unrecoverable"), "must name the state: {err}");
 }
 
 #[test]
@@ -831,11 +829,10 @@ fn test_recover_from_corruption_creates_fresh_when_no_backup() {
     let primary = dir.path().join("no_bak.json");
     std::fs::write(&primary, "CORRUPT DATA").unwrap();
 
-    // Load should create a fresh checkpoint
-    let loaded = manager.load("no_bak").unwrap();
-    assert_eq!(loaded.task_id, "no_bak");
-    assert_eq!(loaded.task_description, "");
-    assert_eq!(loaded.status, TaskStatus::InProgress);
+    // Changed contract (external review sign-off): RecoveryRequired error,
+    // not a fresh checkpoint.
+    let err = manager.load("no_bak").unwrap_err().to_string();
+    assert!(err.contains("unrecoverable"), "must name the state: {err}");
 }
 
 #[test]
@@ -849,10 +846,10 @@ fn test_recover_from_corruption_creates_fresh_when_backup_also_corrupt() {
     std::fs::write(&primary, "CORRUPT").unwrap();
     std::fs::write(&backup, "ALSO CORRUPT").unwrap();
 
-    // Load should create a fresh checkpoint
-    let loaded = manager.load("both_bad").unwrap();
-    assert_eq!(loaded.task_id, "both_bad");
-    assert_eq!(loaded.task_description, "");
+    // Changed contract (external review sign-off): RecoveryRequired error,
+    // not a fresh checkpoint.
+    let err = manager.load("both_bad").unwrap_err().to_string();
+    assert!(err.contains("unrecoverable"), "must name the state: {err}");
 }
 
 #[test]
@@ -1339,4 +1336,66 @@ fn save_final_makes_base_reflect_terminal_state() {
     assert_eq!(loaded.status, TaskStatus::Completed);
     assert_eq!(loaded.current_step, 7);
     assert_eq!(loaded.current_iteration, 3);
+}
+
+#[test]
+fn test_unrecoverable_checkpoint_is_recovery_required_not_fresh_resume() {
+    // Review finding: corrupt primary + corrupt backup used to return a
+    // successful BLANK checkpoint, erasing the distinction between
+    // continuation and a new task. The contract is now explicit.
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    // Save a real checkpoint, then corrupt both the primary and the backup.
+    let cp = TaskCheckpoint::new("lost-task".to_string(), "real work".to_string());
+    manager.save(&cp).unwrap();
+    let primary = dir.path().join("lost-task.json");
+    let backup = dir.path().join("lost-task.json.bak");
+    std::fs::write(&primary, "{ not json !!!").unwrap();
+    std::fs::write(&backup, "{ also not json !!!").unwrap();
+
+    match manager.load_with_status("lost-task").unwrap() {
+        crate::checkpoint::CheckpointLoad::RecoveryRequired { task_id, .. } => {
+            assert_eq!(task_id, "lost-task");
+        }
+        other => panic!("expected RecoveryRequired, got {other:?}"),
+    }
+    // load() must refuse rather than report a blank resume.
+    let err = manager.load("lost-task").unwrap_err().to_string();
+    assert!(
+        err.contains("unrecoverable"),
+        "load() must name the recovery state: {err}"
+    );
+    // And no fresh checkpoint may have been saved over the evidence.
+    let raw = std::fs::read_to_string(&primary).unwrap();
+    assert_eq!(raw, "{ not json !!!");
+}
+
+#[test]
+fn test_missing_task_is_recovery_required() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    match manager.load_with_status("no-such-task").unwrap() {
+        crate::checkpoint::CheckpointLoad::RecoveryRequired { .. } => {}
+        other => panic!("expected RecoveryRequired, got {other:?}"),
+    }
+    assert!(manager.load("no-such-task").is_err());
+}
+
+#[test]
+fn test_backup_recovery_is_distinct_from_clean() {
+    let dir = tempdir().unwrap();
+    let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+    let cp = TaskCheckpoint::new("recov-task".to_string(), "real work".to_string());
+    // Backup is the PREVIOUS primary — save twice so one exists.
+    manager.save(&cp).unwrap();
+    manager.save(&cp).unwrap();
+    // Corrupt only the primary; the backup must carry the resume.
+    let primary = dir.path().join("recov-task.json");
+    std::fs::write(&primary, "{ corrupt").unwrap();
+    match manager.load_with_status("recov-task").unwrap() {
+        crate::checkpoint::CheckpointLoad::RecoveredFromBackup(cp) => {
+            assert_eq!(cp.task_description, "real work");
+        }
+        other => panic!("expected RecoveredFromBackup, got {other:?}"),
+    }
 }

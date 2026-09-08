@@ -58,11 +58,11 @@ impl Tool for VisionAnalyze {
                 },
                 "endpoint": {
                     "type": "string",
-                    "description": "Vision model API endpoint (e.g. 'http://localhost:1234/v1'). Required. Localhost is allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
+                    "description": "Vision model API endpoint. OPTIONAL — the harness fills it from the configured vision profile; only supply to override. Localhost is allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
                 },
                 "model": {
                     "type": "string",
-                    "description": "Vision model name. Required."
+                    "description": "Vision model name. OPTIONAL — filled from the configured vision profile; only supply to override."
                 },
                 "api_key": {
                     "type": "string",
@@ -86,7 +86,11 @@ impl Tool for VisionAnalyze {
                     "description": "Optional extra request fields merged into the chat-completion body, e.g. chat_template_kwargs."
                 }
             },
-            "required": ["prompt", "endpoint", "model"]
+            // Only the prompt is truly required: endpoint/model are injected
+            // from the configured vision profile at dispatch time (a TB4
+            // cad-model trial died pixel-peeping a schematic because the
+            // model was asked to GUESS infrastructure it cannot know).
+            "required": ["prompt"]
         })
     }
 

@@ -1096,12 +1096,10 @@ fn test_checkpoint_manager_load_nonexistent_recovers() {
     let dir = tempfile::tempdir().unwrap();
     let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
 
-    // Recovery creates a fresh checkpoint for unknown task IDs
-    let result = manager.load("does-not-exist");
-    assert!(result.is_ok());
-    let cp = result.unwrap();
-    assert_eq!(cp.task_id, "does-not-exist");
-    assert_eq!(cp.status, TaskStatus::InProgress);
+    // Changed contract (external review sign-off): an unknown task ID is
+    // RecoveryRequired, never a fresh blank "resume".
+    let err = manager.load("does-not-exist").unwrap_err().to_string();
+    assert!(err.contains("unrecoverable"), "must name the state: {err}");
 }
 
 #[test]
@@ -1114,11 +1112,10 @@ fn test_checkpoint_manager_corrupted_file_recovers() {
     let path = dir.path().join("corrupt-task.json");
     std::fs::write(&path, "this is not valid json!!!").unwrap();
 
-    // Load should recover (create a fresh checkpoint)
-    let result = manager.load("corrupt-task");
-    assert!(result.is_ok());
-    let cp = result.unwrap();
-    assert_eq!(cp.task_id, "corrupt-task");
+    // Changed contract (external review sign-off): unrecoverable corruption
+    // is an explicit error, not a fresh checkpoint.
+    let err = manager.load("corrupt-task").unwrap_err().to_string();
+    assert!(err.contains("unrecoverable"), "must name the state: {err}");
 }
 
 #[test]

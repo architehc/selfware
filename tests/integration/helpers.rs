@@ -38,6 +38,7 @@ pub fn test_config() -> Config {
         agent: AgentConfig {
             max_iterations: 10, // Limit for tests
             step_timeout_secs: timeout,
+            stream_stall_timeout_secs: None,
             token_budget: 50000,
             native_function_calling: false,
             streaming: false, // Disable for tests

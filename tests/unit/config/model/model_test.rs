@@ -121,6 +121,8 @@ fn test_model_profile_supports_vision_true() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     assert!(profile.supports_vision());
 }
@@ -137,6 +139,8 @@ fn test_model_profile_supports_vision_false() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     assert!(!profile.supports_vision());
 }
@@ -153,6 +157,8 @@ fn test_model_profile_supports_vision_empty_modalities() {
         context_length: 32768,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     assert!(!profile.supports_vision());
 }
@@ -169,6 +175,8 @@ fn test_model_profile_serialization() {
         context_length: 131072,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let json = serde_json::to_string(&profile).unwrap();
     assert!(json.contains("qwen-72b"));
@@ -214,6 +222,8 @@ fn test_model_profile_with_extra_body() {
         context_length: 32768,
         extra_body: Some(extra),
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let extra = profile.extra_body.as_ref().unwrap();
     assert_eq!(extra["top_p"], serde_json::json!(0.95));
@@ -318,8 +328,59 @@ fn test_model_profile_clone() {
         context_length: 8192,
         extra_body: None,
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let cloned = profile.clone();
     assert_eq!(cloned.model, "model");
     assert_eq!(cloned.api_key.as_ref().unwrap().expose(), "key");
+}
+
+#[test]
+fn test_profile_max_retries_override_resolution() {
+    let base = ModelProfile {
+        endpoint: "http://localhost/v1".to_string(),
+        model: "m".to_string(),
+        api_key: None,
+        max_tokens: 1024,
+        temperature: 0.0,
+        modalities: vec!["text".to_string()],
+        context_length: 8192,
+        extra_body: None,
+        native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
+    };
+    // None inherits the parent default.
+    assert_eq!(base.effective_max_retries(5), 5);
+    // Some wins over the parent default.
+    let overridden = ModelProfile {
+        max_retries: Some(9),
+        ..base.clone()
+    };
+    assert_eq!(overridden.effective_max_retries(5), 9);
+    // Zero is a legitimate explicit choice (fail fast on flaky local boxes).
+    let fail_fast = ModelProfile {
+        max_retries: Some(0),
+        ..base
+    };
+    assert_eq!(fail_fast.effective_max_retries(5), 0);
+}
+
+#[test]
+fn test_profile_response_timeout_floor_deserialization() {
+    let toml_src = r#"
+        endpoint = "http://localhost:31000/v1"
+        model = "local-model"
+        response_timeout_floor_secs = 1800
+        max_retries = 2
+    "#;
+    let profile: ModelProfile = toml::from_str(toml_src).unwrap();
+    assert_eq!(profile.response_timeout_floor_secs, Some(1800));
+    assert_eq!(profile.max_retries, Some(2));
+    // Absent fields stay None (backwards compatible with existing configs).
+    let minimal: ModelProfile =
+        toml::from_str("endpoint = \"http://localhost/v1\"\nmodel = \"m\"").unwrap();
+    assert_eq!(minimal.response_timeout_floor_secs, None);
+    assert_eq!(minimal.max_retries, None);
 }

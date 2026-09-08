@@ -30,16 +30,19 @@ pub struct CompactedContent {
 }
 
 impl CompactedContent {
-    /// Estimate token count of the compacted content.
+    /// Measured token count of the compacted content (AGENTS.md rule 4:
+    /// `estimate_content_tokens` per field, never byte-fraction heuristics).
     pub fn estimated_tokens(&self) -> usize {
-        let text_len = self.summary.len()
-            + self.key_facts.iter().map(|s| s.len()).sum::<usize>()
-            + self.entities.iter().map(|s| s.len()).sum::<usize>()
-            + self.actions.iter().map(|s| s.len()).sum::<usize>()
-            + self.outcomes.iter().map(|s| s.len()).sum::<usize>()
-            + self.insights.iter().map(|s| s.len()).sum::<usize>();
-        // Rough estimate: ~4 chars per token
-        text_len / 4
+        crate::token_count::estimate_content_tokens(&self.summary)
+            + self
+                .key_facts
+                .iter()
+                .chain(&self.entities)
+                .chain(&self.actions)
+                .chain(&self.outcomes)
+                .chain(&self.insights)
+                .map(|s| crate::token_count::estimate_content_tokens(s))
+                .sum::<usize>()
     }
 }
 

@@ -691,7 +691,10 @@ async fn test_tool_step_live_with_handler() {
     let mut ctx = WorkflowContext::new("/tmp");
     ctx.set_var("arg1", "val1");
     let executor = WorkflowExecutor::new().with_tool_handler(Box::new(
-        |name: &str, args: &HashMap<String, String>| Ok(format!("tool={}, args={:?}", name, args)),
+        |name: &str, args: &HashMap<String, String>| {
+            let out = format!("tool={}, args={:?}", name, args);
+            Box::pin(async move { Ok(out) })
+        },
     ));
     let step_type = StepType::Tool {
         name: "my_tool".into(),
@@ -1399,7 +1402,9 @@ async fn test_sub_workflow_inputs_passed() {
 #[test]
 fn test_executor_builder_methods() {
     let executor = WorkflowExecutor::new()
-        .with_tool_handler(Box::new(|_name, _args| Ok("ok".to_string())))
+        .with_tool_handler(Box::new(|_name, _args| {
+            Box::pin(async { Ok("ok".to_string()) })
+        }))
         .with_llm_handler(|_prompt: &str, _ctx: &[String]| Ok("ok".to_string()));
     // Just verify it compiles and the handlers are set
     assert!(executor.tool_handler.is_some());
@@ -1665,7 +1670,10 @@ async fn test_full_workflow_with_tool_handler() {
         tags: vec![],
     };
     let mut executor = WorkflowExecutor::new().with_tool_handler(Box::new(
-        |name: &str, _args: &HashMap<String, String>| Ok(format!("result from {}", name)),
+        |name: &str, _args: &HashMap<String, String>| {
+            let out = format!("result from {}", name);
+            Box::pin(async move { Ok(out) })
+        },
     ));
     executor.register(wf);
     let result = executor
@@ -1694,18 +1702,21 @@ async fn test_tool_step_with_registry_backed_handler() {
     let handler: crate::workflows::ToolHandler =
         Box::new(move |name: &str, args: &HashMap<String, String>| {
             let registry = Arc::clone(&registry);
-            let mut json_map = serde_json::Map::new();
-            for (k, v) in args {
-                let parsed = serde_json::from_str::<serde_json::Value>(v)
-                    .unwrap_or(serde_json::Value::String(v.clone()));
-                json_map.insert(k.clone(), parsed);
-            }
-            let input = serde_json::Value::Object(json_map);
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async move { registry.execute_any(name, input).await })
+            let name = name.to_string();
+            let args = args.clone();
+            Box::pin(async move {
+                let mut json_map = serde_json::Map::new();
+                for (k, v) in &args {
+                    let parsed = serde_json::from_str::<serde_json::Value>(v)
+                        .unwrap_or(serde_json::Value::String(v.clone()));
+                    json_map.insert(k.clone(), parsed);
+                }
+                let input = serde_json::Value::Object(json_map);
+                registry
+                    .execute_any(&name, input)
+                    .await
+                    .map(|v| v.to_string())
             })
-            .map(|v| v.to_string())
         });
 
     let mut ctx = WorkflowContext::new("/tmp");

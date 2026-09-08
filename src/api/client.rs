@@ -148,6 +148,51 @@ pub struct ApiClient {
     /// budget and the run could bill long past expiry. Shared across clones
     /// so derived clients observe the same anchor.
     wall_budget_start: Arc<std::sync::Mutex<Option<Instant>>>,
+    /// Latched when a provider 400s on the native tool-call payload — the
+    /// session flips to XML tool calling permanently (works-with-any-model:
+    /// m3:free et al. reject native FC outright).
+    native_fc_disabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Rolling estimate of the endpoint's effective generation speed
+    /// (completion tokens / wall seconds of the whole call, EMA). Drives the
+    /// adaptive non-streaming response timeout so slow local CPU servers get
+    /// proportionally longer budgets than fast remote ones.
+    pub(crate) speed_tracker: Arc<std::sync::Mutex<ServerSpeedTracker>>,
+}
+
+/// EMA of observed effective generation speed (tokens/second) for an
+/// endpoint. "Effective" means completion tokens over the full call's wall
+/// time (queue + prefill + decode), which is deliberately conservative: it
+/// underestimates true decode speed and therefore lengthens timeouts.
+#[derive(Debug, Default)]
+pub(crate) struct ServerSpeedTracker {
+    ema_tps: Option<f64>,
+}
+
+impl ServerSpeedTracker {
+    /// Weight of each new sample in the moving average.
+    const EMA_ALPHA: f64 = 0.4;
+
+    pub(crate) fn new() -> Self {
+        Self { ema_tps: None }
+    }
+
+    /// Fold one observation into the average. Non-positive and non-finite
+    /// samples are rejected (a zero-token or failed call says nothing about
+    /// server speed).
+    pub(crate) fn record(&mut self, tps: f64) {
+        if !tps.is_finite() || tps <= 0.0 {
+            return;
+        }
+        self.ema_tps = Some(match self.ema_tps {
+            None => tps,
+            Some(ema) => ema + Self::EMA_ALPHA * (tps - ema),
+        });
+    }
+
+    /// Current speed estimate in tokens/second, if any sample was recorded.
+    pub(crate) fn estimate(&self) -> Option<f64> {
+        self.ema_tps
+    }
 }
 
 impl ApiClient {
@@ -199,7 +244,70 @@ impl ApiClient {
             circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
             progress_emitter: Arc::new(crate::agent::progress::NoopProgressEmitter),
             wall_budget_start: Arc::new(std::sync::Mutex::new(None)),
+            native_fc_disabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            speed_tracker: Arc::new(std::sync::Mutex::new(ServerSpeedTracker::new())),
         })
+    }
+
+    /// Response timeout for the non-streaming chat path, adapted to the
+    /// endpoint's measured generation speed.
+    ///
+    /// The estimate is `max_tokens / effective_tps * SAFETY_FACTOR`, floored at
+    /// 600 s (or `agent.step_timeout_secs` if larger) and clamped to 7200 s.
+    /// Until a real measurement exists, local endpoints are presumed slow
+    /// (3 t/s — a CPU-bound local MoE) and remote endpoints fast (30 t/s), so
+    /// a first long review on a slow local server is not killed by a
+    /// remote-tuned budget. The estimate deliberately uses *effective* speed
+    /// (whole-call wall time), keeping the budget conservative.
+    pub(crate) fn adaptive_response_timeout_secs(&self) -> u64 {
+        /// Assumed effective speed before the first measurement lands.
+        const LOCAL_DEFAULT_TPS: f64 = 3.0;
+        const REMOTE_DEFAULT_TPS: f64 = 30.0;
+        /// Headroom over the naive estimate for prefill variance, queueing,
+        /// and bimodal slow phases.
+        const SAFETY_FACTOR: f64 = 2.5;
+        const FLOOR_SECS: u64 = 600;
+        const CEILING_SECS: u64 = 7200;
+
+        let measured = self
+            .speed_tracker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .estimate();
+        let tps = measured.unwrap_or_else(|| {
+            if crate::config::is_local_endpoint(&self.config.endpoint) {
+                LOCAL_DEFAULT_TPS
+            } else {
+                REMOTE_DEFAULT_TPS
+            }
+        });
+        let estimated_secs = (self.config.max_tokens as f64 / tps) * SAFETY_FACTOR;
+        let timeout = self
+            .config
+            .agent
+            .step_timeout_secs
+            .max(FLOOR_SECS)
+            .max(estimated_secs.ceil() as u64);
+        timeout.min(CEILING_SECS)
+    }
+
+    /// Absolute deadline bounding ONE streaming response body.
+    ///
+    /// The streaming path previously had no per-call bound: `step_timeout_secs`
+    /// applies only to tool execution, and the chunk-stall watchdog resets on
+    /// every received chunk, so a model streaming an endless monologue (bytes
+    /// flowing, no tool call, no end) was stopped only by the run-level wall
+    /// clock — hours. Observed: a cad-model visual trial sat in a single
+    /// 2h streamed "analysis" step on the 31000 endpoint (2026-09-05). The
+    /// per-call bound reuses the non-streaming path's adaptive budget
+    /// (max_tokens / measured tps × safety, floored, capped at 2h) and is
+    /// merged with the run-level wall deadline — whichever comes first wins.
+    pub(crate) fn per_call_stream_deadline(&self, run_deadline: Option<Instant>) -> Instant {
+        let per_call = Instant::now() + Duration::from_secs(self.adaptive_response_timeout_secs());
+        match run_deadline {
+            Some(d) => d.min(per_call),
+            None => per_call,
+        }
     }
 
     /// Return a reference to the underlying [`Config`](crate::config::Config).
@@ -266,6 +374,16 @@ impl ApiClient {
         )
     }
 
+    /// True when the user's `extra_body` already pins reasoning behavior
+    /// (`reasoning_effort` / `reasoning`) — the bounded-reasoning retry must
+    /// not override an explicit choice.
+    fn user_pinned_reasoning(&self) -> bool {
+        self.config
+            .extra_body
+            .as_ref()
+            .is_some_and(|m| m.contains_key("reasoning_effort") || m.contains_key("reasoning"))
+    }
+
     pub async fn completion(
         &self,
         prompt: &str,
@@ -273,7 +391,10 @@ impl ApiClient {
         stop: Option<Vec<String>>,
     ) -> Result<CompletionResponse> {
         self.circuit_breaker
-            .call(|| self.completion_inner(prompt, max_tokens, stop.clone()))
+            .call_with_classifier(
+                || self.completion_inner(prompt, max_tokens, stop.clone()),
+                counts_toward_circuit_breaker,
+            )
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
@@ -338,7 +459,12 @@ impl ApiClient {
                         delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                         continue;
                     }
-                    return Err(Self::http_status_error(&self.base_url, status, text));
+                    return Err(Self::http_status_error(
+                        &self.base_url,
+                        status,
+                        text,
+                        self.config.api_key.as_ref(),
+                    ));
                 }
                 Err(e) => {
                     if attempt < max_attempts {
@@ -390,7 +516,37 @@ impl ApiClient {
             });
 
         let started = std::time::Instant::now();
-        let resp = self.send_with_retry(&body).await?;
+        let mut body = body;
+        let mut resp = self.send_with_retry(&body).await?;
+
+        // Reasoning-budget exhaustion (measured with hosted GLM 5.3): the
+        // whole completion budget burns on hidden reasoning, returning
+        // finish_reason=length with an empty answer — a "successful" empty
+        // response that callers then have to untangle. Retry once with
+        // bounded reasoning (unless the user pinned reasoning keys — the
+        // client must not second-guess an explicit choice), else fail typed.
+        //
+        // Metering (external review of 6e231e2e, finding #5): the exhausted
+        // attempt DID cost money — prompt processed, completion budget burned
+        // on hidden reasoning. Its usage must not vanish when `resp` is
+        // overwritten by the retry; accumulate it into the reported metadata.
+        let mut discarded_usage: Option<crate::api::types::Usage> = None;
+        if reasoning_budget_exhausted(&resp).is_some() {
+            if self.user_pinned_reasoning() {
+                let reasoning_chars = reasoning_budget_exhausted(&resp).unwrap_or(0);
+                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+            }
+            warn!(
+                "completion budget exhausted by hidden reasoning (finish_reason=length, \
+                 empty answer); retrying once with reasoning_effort=low"
+            );
+            body["reasoning_effort"] = serde_json::json!("low");
+            discarded_usage = Some(resp.usage.clone());
+            resp = self.send_with_retry(&body).await?;
+            if let Some(reasoning_chars) = reasoning_budget_exhausted(&resp) {
+                return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
+            }
+        }
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
         let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.clone());
@@ -401,14 +557,30 @@ impl ApiClient {
                 completion_tokens: resp.usage.completion_tokens as u32,
             });
 
+        let (mut prompt_tokens, mut completion_tokens, mut total_tokens, mut cost) = (
+            resp.usage.prompt_tokens,
+            resp.usage.completion_tokens,
+            resp.usage.total_tokens,
+            resp.usage.cost,
+        );
+        if let Some(discarded) = discarded_usage {
+            prompt_tokens += discarded.prompt_tokens;
+            completion_tokens += discarded.completion_tokens;
+            total_tokens += discarded.total_tokens;
+            cost = match (cost, discarded.cost) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, b) => a.or(b),
+            };
+        }
+
         let meta = ChatMetadata {
             request_body: body,
             elapsed_ms,
             finish_reason,
-            prompt_tokens: Some(resp.usage.prompt_tokens as u32),
-            completion_tokens: Some(resp.usage.completion_tokens as u32),
-            total_tokens: Some(resp.usage.total_tokens as u32),
-            cost: resp.usage.cost,
+            prompt_tokens: Some(prompt_tokens as u32),
+            completion_tokens: Some(completion_tokens as u32),
+            total_tokens: Some(total_tokens as u32),
+            cost,
         };
         Ok((resp, meta))
     }
@@ -463,7 +635,7 @@ impl ApiClient {
             "stream": stream,
         });
 
-        attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
+        attach_tools_to_body(&mut body, &tools, self.effective_native_fc());
 
         // Ask for token usage in the final streaming chunk. `stream_options` is
         // STANDARD OpenAI (supported by vLLM/SGLang/llama.cpp/OpenAI/OpenRouter),
@@ -537,7 +709,10 @@ impl ApiClient {
         let body_for_meta = body.clone();
         let stream = self
             .circuit_breaker
-            .call(|| self.chat_stream_send(body.clone()))
+            .call_with_classifier(
+                || self.chat_stream_send(body.clone()),
+                counts_toward_circuit_breaker,
+            )
             .await
             .map_err(|e| -> anyhow::Error {
                 match e {
@@ -562,7 +737,7 @@ impl ApiClient {
         Ok((stream, meta))
     }
 
-    async fn chat_stream_send(&self, body: serde_json::Value) -> Result<StreamingResponse> {
+    async fn chat_stream_send(&self, mut body: serde_json::Value) -> Result<StreamingResponse> {
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
 
@@ -646,8 +821,11 @@ impl ApiClient {
                     Ok(response) => {
                         let status = response.status();
                         if status.is_success() {
-                            let mut stream_chunk_timeout_secs =
-                                self.config.agent.step_timeout_secs.max(30);
+                            let mut stream_chunk_timeout_secs = self
+                                .config
+                                .agent
+                                .stream_stall_timeout_secs
+                                .unwrap_or_else(|| self.config.agent.step_timeout_secs.max(30));
                             if let Some(wall) = self.config.agent.max_wall_secs {
                                 stream_chunk_timeout_secs =
                                     stream_chunk_timeout_secs.min(wall.max(1));
@@ -655,12 +833,35 @@ impl ApiClient {
                             return Ok(StreamingResponse::new(
                                 response,
                                 Duration::from_secs(stream_chunk_timeout_secs),
-                                deadline,
+                                Some(self.per_call_stream_deadline(deadline)),
                             ));
                         }
 
                         let retry_after = Self::parse_retry_after(response.headers());
                         let text = response.text().await.unwrap_or_default();
+                        // Provider rejects the native tool-call payload:
+                        // latch XML mode for the session and retry — the
+                        // alternative is a guaranteed dead run on models
+                        // without native-FC support (m3:free case).
+                        if Self::is_tool_schema_400(status, &text)
+                            && self.config.agent.native_function_calling
+                            && self.latch_xml_fallback()
+                        {
+                            warn!(
+                                "Provider 400 on native tool calls — latching XML tool-calling mode for this session"
+                            );
+                            // The retry must not resend the rejected payload
+                            // (review finding: the loop previously reused the
+                            // unchanged body, so the "fallback" failed
+                            // identically). This turn may come back prose-only
+                            // — the NEXT turn's system prompt carries the XML
+                            // tool instructions via Agent::effective_native_fc.
+                            if let Some(obj) = body.as_object_mut() {
+                                obj.remove("tools");
+                                obj.remove("tool_choice");
+                            }
+                            continue;
+                        }
                         if Self::is_retryable_status(status) && attempt < max_attempts {
                             let sleep_ms = self.retry_sleep_ms(delay_ms, retry_after);
                             warn!(
@@ -672,7 +873,12 @@ impl ApiClient {
                             delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
                             continue;
                         }
-                        return Err(Self::http_status_error(&self.base_url, status, text));
+                        return Err(Self::http_status_error(
+                            &self.base_url,
+                            status,
+                            text,
+                            self.config.api_key.as_ref(),
+                        ));
                     }
                     Err(e) => {
                         if attempt < max_attempts {
@@ -699,6 +905,42 @@ impl ApiClient {
         Err(ApiError::Network("Streaming request exhausted retries".to_string()).into())
     }
 
+    /// Native FC for this session: config flag minus the session latch.
+    pub(crate) fn effective_native_fc(&self) -> bool {
+        self.config.agent.native_function_calling
+            && !self
+                .native_fc_disabled
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A 400 that plausibly means "this provider rejects the native
+    /// tool-call payload" — flip the session to XML and retry once latched.
+    pub(crate) fn is_tool_schema_400(status: reqwest::StatusCode, body: &str) -> bool {
+        if status != reqwest::StatusCode::BAD_REQUEST {
+            return false;
+        }
+        let lower = body.to_lowercase();
+        ["tool", "function", "schema", "tool_call"]
+            .iter()
+            .any(|marker| lower.contains(marker))
+    }
+
+    /// Whether the session has latched to XML mode (provider rejected the
+    /// native tool-call payload once). The agent consults this when building
+    /// system prompts and api_tools so latched turns use the XML path.
+    pub fn native_fc_latched(&self) -> bool {
+        self.native_fc_disabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Latch XML mode for the session. Returns true if this call did the
+    /// latching (so the request should be retried rather than failed).
+    pub(crate) fn latch_xml_fallback(&self) -> bool {
+        !self
+            .native_fc_disabled
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+
     pub(crate) fn is_retryable_status(status: reqwest::StatusCode) -> bool {
         status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
     }
@@ -711,7 +953,17 @@ impl ApiClient {
         endpoint: &str,
         status: reqwest::StatusCode,
         body: String,
+        api_key: Option<&crate::config::RedactedString>,
     ) -> anyhow::Error {
+        // Some OpenAI-compatible gateways echo the offending API key back in
+        // error bodies, and this error flows to headless output — redact the
+        // body before embedding it (generic secret patterns plus the literal
+        // configured key, same treatment as the raw-response debug log).
+        let body = crate::observability::telemetry::redact_secrets(&body);
+        let body = match api_key {
+            Some(key) if key.expose().trim().len() >= 8 => body.replace(key.expose(), "[REDACTED]"),
+            _ => body,
+        };
         let message = if status == reqwest::StatusCode::UNAUTHORIZED {
             format!(
                 "{}\nHint: authentication failed against '{}'. Set SELFWARE_API_KEY{} in your \
@@ -759,7 +1011,10 @@ impl ApiClient {
 
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
         self.circuit_breaker
-            .call(|| self.send_with_retry_inner(body))
+            .call_with_classifier(
+                || self.send_with_retry_inner(body),
+                counts_toward_circuit_breaker,
+            )
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
@@ -771,20 +1026,33 @@ impl ApiClient {
     }
 
     async fn send_with_retry_inner(&self, body: &serde_json::Value) -> Result<ChatResponse> {
-        self.send_request_with_retry(body, &self.base_url, self.config.api_key.as_ref())
-            .await
+        self.send_request_with_retry(
+            body.clone(),
+            &self.base_url,
+            self.config.api_key.as_ref(),
+            None,
+        )
+        .await
     }
 
     async fn send_request_with_retry(
         &self,
-        body: &serde_json::Value,
+        mut body: serde_json::Value,
         endpoint: &str,
         api_key: Option<&crate::config::RedactedString>,
+        timeout_overrides: Option<&crate::config::ModelProfile>,
     ) -> Result<ChatResponse> {
         crate::config::api_key::assert_credential_endpoint_safe(endpoint, api_key.is_some())?;
 
+        // Per-profile overrides (None fields fall back to the parent's
+        // global retry config / adaptive-timeout floor).
+        let max_retries = timeout_overrides
+            .map(|p| p.effective_max_retries(self.retry_config.max_retries))
+            .unwrap_or(self.retry_config.max_retries);
+
         let url = format!("{}/chat/completions", endpoint);
         let mut last_error: Option<anyhow::Error> = None;
+        let mut saw_connect_error = false;
         let mut delay_ms = self.retry_config.initial_delay_ms;
         let mut honored_retry_after = false;
 
@@ -794,7 +1062,7 @@ impl ApiClient {
         // in the run must not restart the budget window.
         let deadline = self.run_wall_deadline();
 
-        for attempt in 0..=self.retry_config.max_retries {
+        for attempt in 0..=max_retries {
             // Stop rather than begin another billable attempt once the
             // run-level wall-clock deadline has passed. Classified as a
             // budget stop (WallClockBudgetExceeded), not a network error, so
@@ -805,7 +1073,7 @@ impl ApiClient {
             if attempt > 0 {
                 warn!(
                     "Retry attempt {}/{} after {}ms delay",
-                    attempt, self.retry_config.max_retries, delay_ms
+                    attempt, max_retries, delay_ms
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
@@ -841,11 +1109,16 @@ impl ApiClient {
 
             // Bound the request generously rather than at the tight step
             // timeout: non-streaming can't do per-chunk stall detection, and the
-            // "response wait" here effectively covers generation. A >=10-minute
-            // floor (or the step timeout if larger) lets slow-but-healthy models
-            // finish while still bounding a truly-dead connection. Raced against
-            // shutdown so Ctrl-C / SIGTERM interrupts promptly.
-            let mut response_timeout_secs = self.config.agent.step_timeout_secs.max(600);
+            // "response wait" here effectively covers generation. The budget
+            // adapts to the endpoint's measured effective speed (slow local
+            // CPU servers get proportionally longer), floored at >=10 minutes
+            // (or the step timeout if larger), clamped at 2 hours, and raced
+            // against shutdown so Ctrl-C / SIGTERM interrupts promptly.
+            let call_started = Instant::now();
+            let mut response_timeout_secs = self.adaptive_response_timeout_secs();
+            if let Some(floor) = timeout_overrides.and_then(|p| p.response_timeout_floor_secs) {
+                response_timeout_secs = response_timeout_secs.max(floor);
+            }
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit).
                 let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
@@ -861,7 +1134,7 @@ impl ApiClient {
                 }
                 r = tokio::time::timeout(
                     Duration::from_secs(response_timeout_secs),
-                    request.json(body).send(),
+                    request.json(&body).send(),
                 ) => r,
             };
 
@@ -872,7 +1145,7 @@ impl ApiClient {
                         "Non-streaming request timed out after {}s (attempt {}/{})",
                         response_timeout_secs,
                         attempt + 1,
-                        self.retry_config.max_retries + 1
+                        max_retries + 1
                     );
                     last_error = Some(
                         ApiError::Network(format!(
@@ -952,6 +1225,18 @@ impl ApiClient {
                                 e
                             );
                         }
+                        // Feed the observed effective speed back into the
+                        // adaptive timeout for the next request on this
+                        // endpoint.
+                        let elapsed_secs = call_started.elapsed().as_secs_f64();
+                        if elapsed_secs > 0.0 && chat_response.usage.completion_tokens > 0 {
+                            self.speed_tracker
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .record(
+                                    chat_response.usage.completion_tokens as f64 / elapsed_secs,
+                                );
+                        }
                         return Ok(chat_response);
                     }
 
@@ -968,6 +1253,22 @@ impl ApiClient {
                             .map(|s| s.min(300));
 
                         let error_text = response.text().await.unwrap_or_default();
+                        // Some OpenAI-compatible gateways echo the offending
+                        // API key back in error bodies — and 429/5xx bodies are
+                        // no exception. Redact before the warn! log fires on
+                        // every retry and before the message propagates to
+                        // headless output / the session log: generic secret
+                        // patterns plus the literal configured key, the same
+                        // treatment `http_status_error` gives the
+                        // non-retryable path.
+                        let error_text =
+                            crate::observability::telemetry::redact_secrets(&error_text);
+                        let error_text = match api_key {
+                            Some(key) if key.expose().trim().len() >= 8 => {
+                                error_text.replace(key.expose(), "[REDACTED]")
+                            }
+                            _ => error_text,
+                        };
                         warn!("Retryable error ({}): {}", status, error_text);
                         last_error = Some(
                             ApiError::HttpStatus {
@@ -988,10 +1289,44 @@ impl ApiClient {
 
                     let status_code = status;
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(Self::http_status_error(endpoint, status_code, error_text));
+                    // Provider rejects the native tool-call payload: latch
+                    // XML mode for the session and retry instead of dying —
+                    // the alternative is a guaranteed dead run on models
+                    // without native-FC support (m3:free case). A 400 lands
+                    // here by default since it is not a retryable status.
+                    if Self::is_tool_schema_400(status_code, &error_text)
+                        && self.config.agent.native_function_calling
+                        && self.latch_xml_fallback()
+                    {
+                        warn!(
+                            "Provider 400 on native tool calls — latching XML tool-calling mode for this session"
+                        );
+                        // Same strip as the streaming path: the retry must not
+                        // resend the rejected native payload.
+                        let mut stripped = body.clone();
+                        if let Some(obj) = stripped.as_object_mut() {
+                            obj.remove("tools");
+                            obj.remove("tool_choice");
+                        }
+                        body = stripped;
+                        last_error = Some(
+                            ApiError::Network(
+                                "native FC rejected by provider; latched XML mode".to_string(),
+                            )
+                            .into(),
+                        );
+                        continue;
+                    }
+                    return Err(Self::http_status_error(
+                        endpoint,
+                        status_code,
+                        error_text,
+                        api_key,
+                    ));
                 }
                 Err(e) => {
                     if e.is_timeout() || e.is_connect() {
+                        saw_connect_error |= e.is_connect();
                         warn!("Network error (retrying): {}", e);
                         last_error = Some(ApiError::Network(e.to_string()).into());
                         continue;
@@ -1001,9 +1336,20 @@ impl ApiClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
+        // Endpoint-down must say how to fix it, not just "connection
+        // refused": the retry loop exhausted against an unreachable server.
+        let terminal = last_error.unwrap_or_else(|| {
             ApiError::Network("Request failed after all retries".to_string()).into()
-        }))
+        });
+        if saw_connect_error {
+            Err(terminal.context(format!(
+                "endpoint '{endpoint}' is unreachable — is the model server running? \
+                 Check the `endpoint` config key, start your local server, or run \
+                 `selfware llm-doctor` for diagnosis"
+            )))
+        } else {
+            Err(terminal)
+        }
     }
 
     /// Send a chat completion to an alternate model described by a `ModelProfile`.
@@ -1081,8 +1427,13 @@ impl ApiClient {
             "model profile chat request",
         )?;
 
-        self.send_request_with_retry(&body, &profile.endpoint, profile.api_key.as_ref())
-            .await
+        self.send_request_with_retry(
+            body.clone(),
+            &profile.endpoint,
+            profile.api_key.as_ref(),
+            Some(profile),
+        )
+        .await
     }
 }
 
@@ -1115,6 +1466,48 @@ impl LlmClient for ApiClient {
 ///
 /// This is a synchronous helper so it can be called from the bench-harness
 /// runner (which runs inside `spawn_blocking`).
+/// Detect the reasoning-budget exhaustion failure mode: `finish_reason ==
+/// "length"`, empty answer content, and a non-empty reasoning trace. Returns
+/// the reasoning length in chars when exhausted. Models without a reasoning
+/// field can never trip this — a plain truncated answer passes through.
+fn reasoning_budget_exhausted(resp: &ChatResponse) -> Option<usize> {
+    let choice = resp.choices.first()?;
+    if choice.finish_reason.as_deref() != Some("length") {
+        return None;
+    }
+    if !choice.message.content.text().trim().is_empty() {
+        return None;
+    }
+    let reasoning = choice
+        .reasoning_content
+        .as_deref()
+        .or(choice.message.reasoning_content.as_deref())
+        .map(str::trim)
+        .filter(|r| !r.is_empty())?;
+    Some(reasoning.len())
+}
+
+/// Whether a failure should count toward opening the circuit breaker.
+///
+/// Only transient conditions — network errors, timeouts, and retryable
+/// 5xx/429 statuses — indicate a sick backend. Permanent typed errors (401
+/// auth, 400 bad request, context overflow, parse failures, …) must surface
+/// their own remediation message instead of tripping the breaker and being
+/// masked as "API unavailable".
+fn counts_toward_circuit_breaker(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<ApiError>() {
+        Some(ApiError::Network(_)) | Some(ApiError::Timeout) | Some(ApiError::RateLimit { .. }) => {
+            true
+        }
+        Some(ApiError::HttpStatus { status, .. }) => *status == 429 || (500..600).contains(status),
+        Some(_) => false,
+        // Untyped errors (e.g. reqwest body-read failures) keep the previous
+        // behavior and count — except the run-level wall-clock budget stop,
+        // which is a deliberate halt, not a sick backend.
+        None => err.downcast_ref::<WallClockBudgetExceeded>().is_none(),
+    }
+}
+
 pub fn detect_backend(endpoint: &str) -> Result<String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))

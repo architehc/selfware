@@ -14,7 +14,7 @@ use selfware::evolve::assistant::{evidence_from_document, GroundedAssistant, Rev
 use selfware::evolve::{EvolveServer, Graph, Node};
 use selfware::testing::mock_api::{MockLlmServer, MockResponse};
 
-use crate::{get_json, post_json};
+use crate::{get_json, poll_review_job, post_json};
 
 const REPAIR_TEXT: &str =
     "Your previous reply was not valid JSON matching the required schema. Respond with ONLY the JSON object.";
@@ -178,7 +178,10 @@ async fn fully_ungrounded_review_yields_ungrounded_protocol_error() {
     assert_eq!(mock.captured_request_bodies().await.len(), 1);
 }
 
-// --- HTTP mapping: trust_state on 200s, typed 422 bodies (spec §2.1, §3.1) ---
+// --- HTTP mapping: the review runs as a background job (POST → 202 + job id,
+// poll for the terminal state). `done` carries trust_state in its result;
+// protocol failures surface as `failed` jobs with the typed protocol message
+// (the verbatim spec bodies are asserted on the direct API above). ---
 
 /// Server pinned against a single-file project, with the model endpoint
 /// pointing at a scripted mock. Selected-document scope is used throughout:
@@ -201,8 +204,9 @@ async fn review_server(endpoint: &str, content: &str) -> (tempfile::TempDir, Evo
     (dir, server)
 }
 
-/// POST /api/assistant/review (selected-document scope) against the fixture.
-async fn post_review(server: &EvolveServer) -> (StatusCode, Value) {
+/// POST /api/assistant/review (selected-document scope) against the fixture
+/// and poll the spawned job to its terminal state.
+async fn run_review(server: &EvolveServer) -> Value {
     let (status, document) = get_json(server, "/api/ide/document?path=src/reviewed.rs").await;
     assert_eq!(status, StatusCode::OK);
     let expected_hash = document["hash"].as_str().unwrap().to_string();
@@ -217,7 +221,9 @@ async fn post_review(server: &EvolveServer) -> (StatusCode, Value) {
         }),
     )
     .await;
-    (status, serde_json::from_str(&body).unwrap())
+    assert_eq!(status, StatusCode::ACCEPTED, "review not queued: {body}");
+    let accepted: Value = serde_json::from_str(&body).unwrap();
+    poll_review_job(server, accepted["job_id"].as_str().unwrap()).await
 }
 
 #[tokio::test]
@@ -225,10 +231,10 @@ async fn clean_review_reports_structural_trust_state() {
     let (_mock, endpoint) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
     let (_dir, server) = review_server(&endpoint, "pub fn grounded() {}\n").await;
 
-    let (status, body) = post_review(&server).await;
+    let job = run_review(&server).await;
 
-    assert_eq!(status, StatusCode::OK, "review failed: {body}");
-    let review = &body["review"];
+    assert_eq!(job["status"], "done", "review failed: {job}");
+    let review = &job["result"]["review"];
     assert_eq!(review["trust_state"], "structural");
     assert_eq!(review["citation_valid"], true);
     assert_eq!(review["evidence_complete"], true);
@@ -246,48 +252,43 @@ async fn partial_evidence_review_reports_degraded_trust_state() {
     let (_mock, endpoint) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
     let (_dir, server) = review_server(&endpoint, &content).await;
 
-    let (status, body) = post_review(&server).await;
+    let job = run_review(&server).await;
 
-    assert_eq!(status, StatusCode::OK, "review failed: {body}");
-    let review = &body["review"];
+    assert_eq!(job["status"], "done", "review failed: {job}");
+    let review = &job["result"]["review"];
     assert_eq!(review["evidence_complete"], false);
     assert_eq!(review["trust_state"], "degraded");
 }
 
 #[tokio::test]
-async fn malformed_twice_maps_to_422_with_spec_body() {
+async fn malformed_twice_fails_job_with_typed_protocol_message() {
     let (mock, endpoint) =
         spawn_scripted_mock(vec!["nope".to_string(), "still nope".to_string()]).await;
     let (_dir, server) = review_server(&endpoint, "pub fn grounded() {}\n").await;
 
-    let (status, body) = post_review(&server).await;
+    let job = run_review(&server).await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
-    assert_eq!(body["error"], "model_output_invalid");
-    assert!(body["detail"].is_string());
-    assert_eq!(body["model"], "mock-review");
-    assert!(body["latency_ms"].is_number());
-    // Accumulated across original + repair call (2 requests x 18);
-    // last-call-only reporting was the old dishonest underreport.
-    assert_eq!(body["usage"]["total_tokens"], 36);
+    assert_eq!(job["status"], "failed", "job: {job}");
+    let error = job["error"].as_str().unwrap();
+    assert!(
+        error.contains("model output invalid after one repair"),
+        "the typed protocol message must survive the job boundary: {error}"
+    );
     // One budgeted repair, then the typed failure.
     assert_eq!(mock.captured_request_bodies().await.len(), 2);
 }
 
 #[tokio::test]
-async fn fully_ungrounded_maps_to_422_with_rejected_items() {
+async fn fully_ungrounded_fails_job_with_typed_protocol_message() {
     let (_mock, endpoint) = spawn_scripted_mock(vec![UNGROUNDED_REVIEW.to_string()]).await;
     let (_dir, server) = review_server(&endpoint, "pub fn grounded() {}\n").await;
 
-    let (status, body) = post_review(&server).await;
+    let job = run_review(&server).await;
 
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "body: {body}");
-    assert_eq!(body["error"], "model_output_ungrounded");
+    assert_eq!(job["status"], "failed", "job: {job}");
+    let error = job["error"].as_str().unwrap();
     assert!(
-        body["rejected_items"].as_u64().unwrap() >= 1,
-        "ungrounded body must report rejected items: {body}"
+        error.contains("model review fully ungrounded"),
+        "the typed protocol message must survive the job boundary: {error}"
     );
-    assert_eq!(body["model"], "mock-review");
-    assert!(body["latency_ms"].is_number());
-    assert_eq!(body["usage"]["total_tokens"], 18);
 }

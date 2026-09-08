@@ -137,3 +137,10 @@ system_tests/swe_bench_pro/*.jsonl
 
 # TQEC hands-on lessons: local Python virtual environment (runtime artifact)
 tqec/tools-env/
+
+# deep-research run artifacts (reports live in Open WebUI / on disk)
+research/
+
+# autonomous self-improve loop workspace
+scratchpad/
+.worktrees/

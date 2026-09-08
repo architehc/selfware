@@ -440,6 +440,7 @@ fn mock_config(endpoint: String) -> Config {
         agent: crate::config::AgentConfig {
             max_iterations: 5,
             step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             ..Default::default()
@@ -2502,10 +2503,12 @@ async fn test_repeated_parse_failure_is_suppressed_before_reexecution() {
     assert!(recovery.content.text().contains("RETRY SUPPRESSED"));
     assert!(recovery.content.text().contains("valid JSON"));
     assert!(recovery.content.text().contains("`command`"));
-    assert!(agent
-        .pending_failure_hint
-        .as_deref()
-        .is_some_and(|hint| { hint.contains("RETRY SUPPRESSED") && hint.contains("valid JSON") }));
+    // Error-channel consolidation: the tool result is the ONE feedback
+    // channel — no duplicate pending-failure system hint may be set.
+    assert!(
+        agent.pending_failure_hint.is_none(),
+        "suppression feedback must live only in the tool result, not a second channel"
+    );
 
     server.stop().await;
 }
@@ -2539,9 +2542,12 @@ async fn test_repeated_validation_failure_is_suppressed_before_reexecution() {
     assert!(recovery.content.text().contains("RETRY SUPPRESSED"));
     assert!(recovery.content.text().contains("schema validation"));
     assert!(recovery.content.text().contains("`command`"));
-    assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
-        hint.contains("RETRY SUPPRESSED") && hint.contains("schema validation")
-    }));
+    // Error-channel consolidation: the tool result is the ONE feedback
+    // channel — no duplicate pending-failure system hint may be set.
+    assert!(
+        agent.pending_failure_hint.is_none(),
+        "suppression feedback must live only in the tool result, not a second channel"
+    );
 
     server.stop().await;
 }
@@ -2623,6 +2629,8 @@ async fn test_execute_tool_batch_vision_analyze_uses_configured_vision_profile()
                 extra
             }),
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     let mut agent = Agent::new(config).await.unwrap();
@@ -3448,4 +3456,255 @@ async fn read_line_pausing_esc_unpauses_even_on_error() {
         !ack.load(Ordering::Acquire),
         "esc_pause_ack must always be cleared, even if read_line fails"
     );
+}
+
+// --- Rejected-completion loop detection (TB 3.0 failure, 2026-08-24):
+// cli-2ph-simplex at temp 0 spun 10 identical "final answer" turns to the
+// 2500s timeout. Root cause: the mutation-task completion gate REJECTED each
+// attempt but dropped the reason silently (no message pushed, no loop-detector
+// signal), so the model's context never changed and temp-0 determinism made
+// every next response byte-identical. ---
+
+#[tokio::test]
+async fn rejected_completion_pushes_directive_and_feeds_loop_detection() {
+    use crate::testing::mock_api::MockResponse;
+
+    let answer = "The solver is complete and handles every requirement listed. All work is done."
+        .to_string();
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Text(answer))
+        .build()
+        .await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement the two-phase simplex solver in /app/simplex.py with pivot logging, unboundedness detection, exact two-decimal objective output, and verification against the sample LPs in /app/data before finishing.".to_string();
+
+    // Turn 1: the gate rejects a no-tool "final answer" (nothing written).
+    let _ = agent.execute_step_internal(false).await;
+    let injected: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        injected.contains("<selfware_system_directive>"),
+        "a rejected completion must push the gate's reason — silent rejection \
+         loops byte-identical at temp 0. Messages so far: {}",
+        &injected[..injected.len().min(400)]
+    );
+    assert!(
+        agent.consecutive_no_action_prompts >= 1,
+        "a rejected completion must count as a no-action turn (streak={})",
+        agent.consecutive_no_action_prompts
+    );
+
+    // Identical repeats must ESCALATE the streak, never reset it.
+    let _ = agent.execute_step_internal(false).await;
+    let _ = agent.execute_step_internal(false).await;
+    assert!(
+        agent.consecutive_no_action_prompts >= 3,
+        "identical rejected completions must escalate (streak={})",
+        agent.consecutive_no_action_prompts
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn identical_code_bearing_completion_pinned_past_gate_aborts_early() {
+    use crate::testing::mock_api::MockResponse;
+
+    // The cli-2ph-simplex failure shape: long code-bearing "final answers"
+    // skip the no-action mutation rule (unwritten-code exemption) and the
+    // length-based prose exemption, then pin at the identical-response
+    // threshold forever — the FAKE_COMPLETE_LOOP abort one section below is
+    // never reached. At temp 0 every repeat is byte-identical.
+    let answer = format!(
+        "Here is the complete implementation with every requirement handled.\n\n```python\n{}```\nAll checks pass.",
+        "x = compute(x)\n".repeat(8)
+    );
+    let server = MockLlmServer::builder()
+        .with_default_response(MockResponse::Text(answer))
+        .build()
+        .await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.min_completion_steps = 0;
+    config.agent.require_verification_before_completion = true;
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement the two-phase simplex solver in /app/simplex.py with pivot logging, unboundedness detection, exact two-decimal objective output, and verification against the sample LPs in /app/data before finishing.".to_string();
+
+    let mut aborted = false;
+    for _ in 0..12 {
+        match agent.execute_step_internal(false).await {
+            Err(e) => {
+                // Either early-abort marker is correct: the point is that the
+                // run terminates instead of spinning to the task timeout.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("FAKE_COMPLETE_LOOP") || msg.contains("NONTERM_PROSE_NO_TOOL"),
+                    "wrong abort reason: {msg}"
+                );
+                aborted = true;
+                break;
+            }
+            Ok(true) => panic!("must not complete with zero edits"),
+            Ok(false) => {}
+        }
+    }
+    assert!(
+        aborted,
+        "pinned identical completions on a zero-edit mutation task must abort early, not spin to the timeout"
+    );
+    server.stop().await;
+}
+
+// =========================================================================
+// Scaffold auto-write honesty (P1: no success claim before the write lands)
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn scaffold_write_claims_success_only_after_batch_succeeds() {
+    // P1 regression: the escalated progress guard used to set
+    // has_written_any_file and push a "scaffold was written" directive
+    // BEFORE the write attempt, swallowing any execute_tool_batch error.
+    // The success claim must only follow an Ok batch.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/lib.rs"), "// empty\n").unwrap();
+    cwd.switch_to(dir.path());
+
+    let server = MockLlmServer::builder()
+        .with_response(
+            "<tool>\n<name>shell_exec</name>\n<arguments>{\"command\":\"git status\"}</arguments>\n</tool>",
+        )
+        .build()
+        .await;
+    let config = test_config(format!("{}/v1", server.url()));
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.current_task_context = "Implement a calculator library in Rust".to_string();
+    agent.messages.push(crate::api::types::Message::user(
+        "Implement a calculator library in Rust".to_string(),
+    ));
+    agent.pending_synthesis = Some("Implement a calculator library in Rust".to_string());
+    agent.consecutive_read_only_steps = 8;
+
+    let done = agent.execute_step_internal(false).await.unwrap();
+
+    assert!(!done, "scaffold injection should continue the loop");
+    assert!(
+        agent.has_written_any_file,
+        "a successful scaffold write must credit the file write"
+    );
+    assert!(
+        agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("A scaffold file was written to src/lib.rs")),
+        "success directive should be pushed after the write succeeds"
+    );
+    assert!(
+        !agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("Writing the scaffold to src/lib.rs FAILED")),
+        "no failure directive when the write succeeded"
+    );
+    let written = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert!(
+        written.contains("AUTO-SCAFFOLD"),
+        "scaffold should be on disk, got: {written}"
+    );
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn files_checklist_guard_skips_verified_read_only_tasks() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(test_config(format!("{}/v1", server.url())))
+        .await
+        .unwrap();
+
+    // Mutation task: the guard still blocks a blind first edit.
+    assert!(agent.check_files_guard(true));
+
+    // Verified read-only task: no FILES: ceremony even with write intent.
+    agent.test_set_task_read_only(true);
+    assert!(!agent.check_files_guard(true));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn edit_failure_loop_first_trigger_recovers_instead_of_bailing() {
+    // TB4 medical-claims class: killed at iter 37 after a SUCCESSFUL mutation
+    // with zero recovery chance. The first trigger must recover, not bail.
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s", "Fix the bug in parse_port.");
+    assert!(agent.current_task_requires_mutation());
+    agent.mutating_tool_call_count = 1;
+    agent.consecutive_suppressions = 3;
+
+    agent
+        .handle_edit_failure_loop()
+        .expect("first trigger must recover, not bail");
+
+    assert!(agent.edit_loop_recovery_used);
+    assert_eq!(agent.consecutive_suppressions, 0);
+    let directive = agent.messages.last().expect("recovery directive");
+    assert!(directive
+        .content
+        .text()
+        .contains("RE-READ the current file state"));
+}
+
+#[tokio::test]
+async fn edit_failure_loop_recurrence_after_recovery_is_fatal() {
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s", "Fix the bug in parse_port.");
+    agent.mutating_tool_call_count = 1;
+    agent.consecutive_suppressions = 3;
+    agent
+        .handle_edit_failure_loop()
+        .expect("first trigger recovers");
+
+    // Same stale pattern recurs after the forced recovery: now fatal.
+    agent.consecutive_suppressions = 3;
+    let err = agent
+        .handle_edit_failure_loop()
+        .expect_err("recurrence after recovery must hard-stop");
+    assert!(err.to_string().contains("EDIT_FAILURE_LOOP_AFTER_EDIT"));
+}
+
+#[tokio::test]
+async fn edit_failure_loop_does_not_fire_below_threshold_or_on_read_only() {
+    let mut agent = Agent::new(crate::config::Config::default())
+        .await
+        .expect("agent should build");
+    agent.start_learning_session("s", "Fix the bug in parse_port.");
+    agent.mutating_tool_call_count = 1;
+    // Below threshold: no-op.
+    agent.consecutive_suppressions = 2;
+    agent
+        .handle_edit_failure_loop()
+        .expect("no-op below threshold");
+    assert!(!agent.edit_loop_recovery_used);
+
+    // Read-only task: never fires even at threshold.
+    agent.test_set_task_read_only(true);
+    agent.consecutive_suppressions = 5;
+    agent
+        .handle_edit_failure_loop()
+        .expect("read-only tasks never enter the edit-failure loop");
+    assert!(!agent.edit_loop_recovery_used);
 }

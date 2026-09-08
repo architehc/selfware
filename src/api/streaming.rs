@@ -214,15 +214,27 @@ impl StreamingResponse {
             cost: None,
         };
         let mut finish_reason: Option<String> = None;
+        let mut saw_events = false;
+        let mut saw_done = false;
 
         while let Some(chunk_result) = rx.recv().await {
             let chunk = chunk_result?;
 
             match chunk {
-                StreamChunk::Content(text) => content.push_str(&text),
-                StreamChunk::Reasoning(text) => reasoning.push_str(&text),
-                StreamChunk::ToolCall(call) => tool_calls.push(call),
+                StreamChunk::Content(text) => {
+                    saw_events = true;
+                    content.push_str(&text);
+                }
+                StreamChunk::Reasoning(text) => {
+                    saw_events = true;
+                    reasoning.push_str(&text);
+                }
+                StreamChunk::ToolCall(call) => {
+                    saw_events = true;
+                    tool_calls.push(call);
+                }
                 StreamChunk::Usage(u) => {
+                    saw_events = true;
                     if let Err(e) = u.validate() {
                         tracing::warn!(
                             "Streaming usage chunk has inconsistent token counts: {}. Ignoring chunk.",
@@ -233,16 +245,36 @@ impl StreamingResponse {
                     }
                 }
                 StreamChunk::FinishReason(reason) => {
+                    saw_events = true;
                     finish_reason = Some(reason);
                 }
                 StreamChunk::Error(msg) => {
-                    return Err(anyhow::anyhow!(
-                        "Provider streamed an error mid-response: {}",
-                        msg
-                    ));
+                    // Typed error (AGENTS.md rule 3): a provider error event
+                    // mid-stream is a protocol failure, same family as the
+                    // zero-events Parse error below — not an untyped anyhow.
+                    return Err(ApiError::Parse(format!(
+                        "Provider streamed an error mid-response: {msg}"
+                    ))
+                    .into());
                 }
-                StreamChunk::Done => break,
+                StreamChunk::Done => {
+                    saw_done = true;
+                    break;
+                }
             }
+        }
+
+        // A stream that produced zero parsed SSE events and no [DONE] marker
+        // is not an empty completion — it is a protocol violation (e.g. a
+        // proxy answering 200 with an HTML error page). Fail typed instead of
+        // returning a clean-looking empty response.
+        if !saw_done && !saw_events && content.is_empty() {
+            return Err(ApiError::Parse(
+                "stream ended with zero SSE events and no [DONE] marker \
+                 (possible non-SSE error page from a proxy)"
+                    .to_string(),
+            )
+            .into());
         }
 
         if let Err(e) = usage.validate() {
@@ -285,7 +317,9 @@ impl StreamingResponse {
                     name: None,
                 },
                 reasoning_content: None,
-                finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
+                // Keep `None` when the stream never reported a finish reason;
+                // callers map `None` to "unknown" where a label is required.
+                finish_reason,
             }],
             usage,
         })
@@ -459,18 +493,39 @@ pub(crate) fn parse_sse_event(
 ) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
 
-    for line in event.lines() {
-        // Strip the `data:` prefix. The SSE spec allows an optional single
-        // leading space after the colon, so accept both `data: ...` and
-        // `data:...`. A comment line starts with `:` (colon first), so it
-        // will not match the `data:` prefix and is correctly ignored.
-        let Some(data) = line.strip_prefix("data:") else {
-            continue;
-        };
-        // SSE only strips a single optional leading space — do NOT trim all
-        // whitespace, as that would alter the payload.
-        let data = data.strip_prefix(' ').unwrap_or(data);
+    // Collect the event's `data:` field values first. The SSE spec says a
+    // multi-line data field is the lines JOINED by `\n` — a provider may
+    // legally split one JSON payload across several `data:` lines. Try the
+    // joined payload first; only if it is not valid JSON fall back to
+    // parsing each line independently (the historical behavior, kept so
+    // servers that pack several independent JSON objects into one event
+    // keep working).
+    let data_lines: Vec<String> = event
+        .lines()
+        .filter_map(|line| {
+            // Strip the `data:` prefix. The SSE spec allows an optional single
+            // leading space after the colon, so accept both `data: ...` and
+            // `data:...`. A comment line starts with `:` (colon first), so it
+            // will not match the `data:` prefix and is correctly ignored.
+            let data = line.strip_prefix("data:")?;
+            // SSE only strips a single optional leading space — do NOT trim
+            // all whitespace, as that would alter the payload.
+            Some(data.strip_prefix(' ').unwrap_or(data).to_string())
+        })
+        .collect();
 
+    let payloads: Vec<String> = if data_lines.len() > 1 {
+        let joined = data_lines.join("\n");
+        if serde_json::from_str::<serde_json::Value>(&joined).is_ok() {
+            vec![joined]
+        } else {
+            data_lines
+        }
+    } else {
+        data_lines
+    };
+
+    for data in payloads {
         if data == "[DONE]" {
             for call in accumulator.flush() {
                 chunks.push(StreamChunk::ToolCall(call));
@@ -479,7 +534,7 @@ pub(crate) fn parse_sse_event(
             return chunks;
         }
 
-        let json = match serde_json::from_str::<serde_json::Value>(data) {
+        let json = match serde_json::from_str::<serde_json::Value>(&data) {
             Ok(j) => j,
             Err(e) => {
                 warn!(
@@ -545,8 +600,12 @@ pub(crate) fn parse_sse_event(
         }
 
         if let Some(usage) = json.get("usage") {
-            if let Ok(u) = serde_json::from_value::<Usage>(usage.clone()) {
-                chunks.push(StreamChunk::Usage(u));
+            match serde_json::from_value::<Usage>(usage.clone()) {
+                Ok(u) => chunks.push(StreamChunk::Usage(u)),
+                Err(e) => warn!(
+                    "Failed to parse streamed usage ({}); token counts for this stream will be underreported (raw: {})",
+                    e, usage
+                ),
             }
         }
     }

@@ -522,6 +522,8 @@ fn test_verifier_from_model_profile() {
         context_length: 262_144,
         extra_body: Some(extra_body.clone()),
         native_function_calling: None,
+        max_retries: None,
+        response_timeout_floor_secs: None,
     };
     let v = VisualVerifier::from_model_profile(&profile);
     assert_eq!(v.endpoint, "https://vision.example/v1");
@@ -560,6 +562,8 @@ fn test_verifier_from_app_config_prefers_vision_profile() {
             context_length: 1_000_000,
             extra_body: None,
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
     config.models.insert(
@@ -581,6 +585,8 @@ fn test_verifier_from_app_config_prefers_vision_profile() {
                 map
             }),
             native_function_calling: None,
+            max_retries: None,
+            response_timeout_floor_secs: None,
         },
     );
 

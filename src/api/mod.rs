@@ -91,6 +91,15 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
         };
         messages.insert(insert_pos, Message::user("Continue with the task."));
     }
+
+    // Anthropic rejects assistant prefill: the conversation must not END with
+    // an assistant message (measured live 2026-09-01: claude-fable-5/opus-5 via
+    // OpenRouter 400'd on every request once a recovery path left the history
+    // trailing on assistant). Ending on a user message is accepted by every
+    // provider, so close the turn with a minimal continuation.
+    if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
+        messages.push(Message::user("Continue with the task."));
+    }
 }
 
 fn maybe_prepend_disabled_thinking_instruction(
@@ -162,6 +171,14 @@ const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
     "models",
     "route",
     "transforms",
+    // Reasoning-effort control (OpenRouter `reasoning_effort` / `reasoning`):
+    // steers how much the model thinks, not output content — same class as
+    // best_of/provider above. Needed so hosted reasoning models (GLM 5.3)
+    // don't burn the whole completion budget on hidden reasoning before the
+    // answer (measured 2026-08-23: unbounded reasoning exhausted 16k tokens
+    // with finish_reason=length and zero answer content).
+    "reasoning_effort",
+    "reasoning",
 ];
 
 pub(crate) fn merge_extra_body(

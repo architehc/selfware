@@ -123,6 +123,10 @@ impl FailureMode {
         let total_calls = agent.total_tool_call_count();
         let final_answer_len = agent.last_assistant_response_len();
         let has_final_answer_marker = agent.last_assistant_response_has_final_answer();
+        // Read-only classification stored at task start: on a review /
+        // analysis / report task 0 mutating calls is the CORRECT outcome,
+        // never a FakeComplete.
+        let read_only = agent.current_task_is_read_only();
         let circuit_open = agent.prefill_breaker_open();
         let prefill_400s = agent.prefill_400_count();
         // A run that kept hitting the safety checker and never found another
@@ -133,7 +137,11 @@ impl FailureMode {
 
         match outcome {
             RunOutcome::NaturalCompletion => {
-                if mutating == 0 && has_final_answer_marker {
+                // A "Final answer" with 0 mutating calls is only fake when the
+                // task was expected to mutate. On a read-only task (review /
+                // analysis / report) the prose answer IS the deliverable —
+                // fall through to the honest NoChange label below.
+                if mutating == 0 && has_final_answer_marker && !read_only {
                     return FailureMode {
                         kind: FailureKind::FakeComplete,
                         evidence: format!(
@@ -159,9 +167,10 @@ impl FailureMode {
                         advice: "the model said it was done but changed no files — restate the task with the exact file(s) and change required, or confirm whether it was meant to be read-only".to_string(),
                     };
                 }
-                // Reaching here with 0 mutating calls means: no "Final answer"
-                // marker AND the task was not detected as mutation-requiring —
-                // i.e. a legitimate read-only / Q&A completion. It changed
+                // Reaching here with 0 mutating calls means: the task was
+                // read-only (final-answer marker or not) OR there was no
+                // marker on a non-mutation task — i.e. a legitimate read-only
+                // / Q&A completion. It changed
                 // nothing, so it is NOT a REAL_EDIT; label it honestly.
                 if mutating == 0 {
                     return FailureMode {
@@ -241,6 +250,7 @@ impl FailureMode {
                         total_calls,
                         final_answer_len,
                         safety_blocked,
+                        read_only,
                     );
                 }
                 // Token-budget exhaustion is NOT a wall-clock timeout — the fix
@@ -288,6 +298,7 @@ impl FailureMode {
                     total_calls,
                     final_answer_len,
                     safety_blocked,
+                    read_only,
                 )
             }
             RunOutcome::Partial => classify_max_iter_failure(
@@ -298,6 +309,7 @@ impl FailureMode {
                 total_calls,
                 final_answer_len,
                 safety_blocked,
+                read_only,
             ),
         }
     }
@@ -384,6 +396,7 @@ fn classify_max_iter_failure(
     total_calls: usize,
     final_answer_len: usize,
     safety_blocked: Option<(usize, usize)>,
+    read_only: bool,
 ) -> FailureMode {
     // Order matters: most specific signals first.
 
@@ -431,8 +444,10 @@ fn classify_max_iter_failure(
         };
     }
 
-    // 4) Fake-complete (caught by gate, not by natural completion).
-    if mutating == 0 && final_answer_len > 0 {
+    // 4) Fake-complete (caught by gate, not by natural completion). On a
+    // read-only task prose output is the deliverable — 0 mutating calls is
+    // expected, so fall through to the honest MaxIterations label.
+    if !read_only && mutating == 0 && final_answer_len > 0 {
         return FailureMode {
             kind: FailureKind::FakeComplete,
             evidence: format!(

@@ -190,49 +190,47 @@ impl CodeExplainer {
 
     fn explain_line(&self, line: &str) -> (String, Vec<String>) {
         let mut concepts = Vec::new();
-        let explanation;
 
         // Pattern matching for common code constructs
-        if line.starts_with("fn ") || line.starts_with("pub fn ") {
+        let explanation = if line.starts_with("fn ") || line.starts_with("pub fn ") {
             concepts.push("function".to_string());
-            explanation = self.explain_function(line);
+            self.explain_function(line)
         } else if line.starts_with("let ") || line.starts_with("let mut ") {
             concepts.push("variable_binding".to_string());
             if line.contains("mut ") {
                 concepts.push("mutability".to_string());
             }
-            explanation = self.explain_variable(line);
+            self.explain_variable(line)
         } else if line.starts_with("struct ") || line.starts_with("pub struct ") {
             concepts.push("struct".to_string());
-            explanation = self.explain_struct(line);
+            self.explain_struct(line)
         } else if line.starts_with("impl ") {
             concepts.push("implementation".to_string());
-            explanation = self.explain_impl(line);
+            self.explain_impl(line)
         } else if line.starts_with("if ") {
             concepts.push("conditional".to_string());
-            explanation =
-                "Conditional statement that executes code based on a condition".to_string();
+            "Conditional statement that executes code based on a condition".to_string()
         } else if line.starts_with("for ")
             || line.starts_with("while ")
             || line.starts_with("loop ")
         {
             concepts.push("loop".to_string());
-            explanation = self.explain_loop(line);
+            self.explain_loop(line)
         } else if line.contains("->") {
             concepts.push("return_type".to_string());
-            explanation = "Specifies the return type of a function".to_string();
+            "Specifies the return type of a function".to_string()
         } else if line.contains("::") {
             concepts.push("path".to_string());
-            explanation = "Namespace path to access items".to_string();
+            "Namespace path to access items".to_string()
         } else if line.contains(".unwrap()") || line.contains(".expect(") {
             concepts.push("error_handling".to_string());
-            explanation = "Unwraps a Result or Option, panicking if it's an error".to_string();
+            "Unwraps a Result or Option, panicking if it's an error".to_string()
         } else if line.contains("async ") || line.contains(".await") {
             concepts.push("async".to_string());
-            explanation = "Asynchronous code that can be paused and resumed".to_string();
+            "Asynchronous code that can be paused and resumed".to_string()
         } else {
-            explanation = "Executes an operation or expression".to_string();
-        }
+            "Executes an operation or expression".to_string()
+        };
 
         (explanation, concepts)
     }

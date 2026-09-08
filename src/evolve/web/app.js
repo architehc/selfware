@@ -88,6 +88,7 @@ const state = {
     files: [],
     fileIndex: new Map(),
     expandedFolders: new Set(['src']),
+    explorerFilter: '',
     openDocuments: new Map(),
     activePath: null,
     editor: null,
@@ -276,6 +277,10 @@ function appendOutput(label, payload) {
     state.output.push(`[${timestamp}] ${label}\n${outputText(payload)}`);
     const log = $('#output-log');
     if (log) log.textContent = state.output.join('\n\n');
+    const app = $('#app');
+    if (app.classList.contains('bottom-collapsed')) {
+        selectBottomView('output');
+    }
 }
 
 function clearOutput() {
@@ -378,9 +383,9 @@ async function initialize() {
         setGlobalStatus(`${failures.length} workspace request${failures.length === 1 ? '' : 's'} failed`, 'error');
     }
 
-    // Deep-link: open a specific inspector tab, e.g. index.html#inspector=context
+    // Deep-link: open a specific inspector view, e.g. index.html#inspector=context
     const inspectorMatch = location.hash.match(/^#inspector=(\w+)$/);
-    if (inspectorMatch && $(`.inspector-tab[data-inspector="${inspectorMatch[1]}"]`)) {
+    if (inspectorMatch && $(`#inspector-select option[value="${inspectorMatch[1]}"]`)) {
         selectInspector(inspectorMatch[1]);
     }
     const viewMatch = location.hash.match(/^#view=(\w+)$/);
@@ -414,8 +419,8 @@ function wireEvents() {
     $('#component-apply')?.addEventListener('click', () => applyComponentContext([...state.componentChecked]));
     $('#component-clear')?.addEventListener('click', () => applyComponentContext([]));
 
-    $$('.inspector-tab[data-inspector]').forEach((button) => {
-        button.addEventListener('click', () => selectInspector(button.dataset.inspector));
+    $('#inspector-select')?.addEventListener('change', (event) => {
+        selectInspector(event.target.value);
     });
 
     $$('.bottom-tab[data-bottom-view]').forEach((button) => {
@@ -424,6 +429,10 @@ function wireEvents() {
 
     $('#save-action')?.addEventListener('click', saveActiveDocument);
     $('#refresh-files')?.addEventListener('click', () => loadFiles(true));
+    $('#explorer-filter')?.addEventListener('input', (event) => {
+        state.explorerFilter = event.target.value.trim().toLowerCase();
+        renderFileTree();
+    });
     $$('[data-analysis-kind]').forEach((button) => {
         button.addEventListener('click', () => runAnalysis(button.dataset.analysisKind, button));
     });
@@ -456,6 +465,10 @@ function wireEvents() {
 
     $('#clear-output')?.addEventListener('click', clearOutput);
     $('#toggle-bottom')?.addEventListener('click', toggleBottomPanel);
+    let bottomCollapsed = true;
+    try { bottomCollapsed = localStorage.getItem('selfware.bottomCollapsed') !== '0'; } catch {}
+    if (bottomCollapsed) $('#app').classList.add('bottom-collapsed');
+    updateBottomToggleIcon();
 
     $('#graph-zoom-in')?.addEventListener('click', () => graphZoom(1.3));
     $('#graph-zoom-out')?.addEventListener('click', () => graphZoom(0.77));
@@ -520,6 +533,28 @@ function wireEvents() {
         if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
             event.preventDefault();
             saveActiveDocument();
+        }
+    });
+
+    document.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
+            event.preventDefault();
+            openQuickOpen();
+        } else if (event.key === 'Escape' && !$('#quick-open').classList.contains('hidden')) {
+            closeQuickOpen();
+        }
+    });
+    $('#quick-open-input').addEventListener('input', (event) => renderQuickOpen(event.target.value));
+    $('#quick-open-input').addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            if (!quickOpenMatches.length) return;
+            event.preventDefault();
+            const delta = event.key === 'ArrowDown' ? 1 : -1;
+            quickOpenActiveIndex = Math.min(Math.max(quickOpenActiveIndex + delta, 0), quickOpenMatches.length - 1);
+            renderQuickOpenList();
+        } else if (event.key === 'Enter' && quickOpenMatches[quickOpenActiveIndex]) {
+            openFile(quickOpenMatches[quickOpenActiveIndex].path);
+            closeQuickOpen();
         }
     });
 
@@ -671,51 +706,44 @@ function renderContext(previous = null) {
 
     const metrics = $('#context-metrics');
     if (!metrics) return;
-    metrics.replaceChildren();
 
     if (state.context.files === null && state.context.tokens === null) {
         metrics.textContent = state.context.mode ? `${contextLabel(state.context.mode)} context` : 'Context unavailable';
+        metrics.title = '';
         return;
     }
 
-    const base = document.createElement('span');
     const contextLimit = Number(state.workspace?.context_length);
     const selectedTokens = Number(state.context.tokens);
     const hasLimit = Number.isFinite(contextLimit) && contextLimit > 0 && Number.isFinite(selectedTokens);
-    base.textContent = hasLimit
+
+    // Full stats line (previously the visible text) now lives in the tooltip.
+    const fullParts = [hasLimit
         ? `${formatCount(state.context.files)} files · ${formatCount(selectedTokens)} / ${formatCount(contextLimit)} tokens`
-        : `${formatCount(state.context.files)} files · ${formatCount(state.context.tokens)} tokens`;
-    metrics.appendChild(base);
+        : `${formatCount(state.context.files)} files · ${formatCount(state.context.tokens)} tokens`];
 
     if (hasLimit && selectedTokens > contextLimit) {
-        const overflow = document.createElement('span');
-        overflow.className = 'capacity-overflow';
-        overflow.textContent = ` · +${formatCount(selectedTokens - contextLimit)} over window`;
-        metrics.appendChild(overflow);
-        metrics.title = 'Active context is indexed, but it cannot fit in one configured model request.';
-    } else {
-        metrics.title = '';
+        fullParts.push(`+${formatCount(selectedTokens - contextLimit)} over window`);
+        fullParts.push('Active context is indexed, but it cannot fit in one configured model request.');
     }
     if (state.context.mixedFiles > 0) {
-        const mixed = document.createElement('span');
-        mixed.className = 'partition-warning';
-        mixed.textContent = ` · ${formatCount(state.context.mixedFiles)} files contain inline test-only bodies`;
-        metrics.appendChild(mixed);
-        metrics.title = [metrics.title, `${formatCount(state.context.inlineTestLines)} inline test lines are excluded from Full active-context evidence.`]
-            .filter(Boolean)
-            .join(' ');
+        fullParts.push(`${formatCount(state.context.mixedFiles)} files contain inline test-only bodies`);
+        fullParts.push(`${formatCount(state.context.inlineTestLines)} inline test lines are excluded from Full active-context evidence.`);
     }
-
     if (previous) {
         const fileDelta = Number(state.context.files) - Number(previous.files);
         const tokenDelta = Number(state.context.tokens) - Number(previous.tokens);
         if (Number.isFinite(fileDelta) && Number.isFinite(tokenDelta) && (fileDelta !== 0 || tokenDelta !== 0)) {
-            const delta = document.createElement('span');
-            delta.className = fileDelta > 0 || tokenDelta > 0 ? 'delta-positive' : 'delta-negative';
-            delta.textContent = ` (${fileDelta >= 0 ? '+' : ''}${formatCount(fileDelta)} files, ${tokenDelta >= 0 ? '+' : ''}${formatCount(tokenDelta)} tokens)`;
-            metrics.appendChild(delta);
+            fullParts.push(`(${fileDelta >= 0 ? '+' : ''}${formatCount(fileDelta)} files, ${tokenDelta >= 0 ? '+' : ''}${formatCount(tokenDelta)} tokens)`);
         }
     }
+
+    const full = fullParts.join(' · ');
+    const compact = hasLimit
+        ? `${formatTokensCompact(selectedTokens)} / ${formatTokensCompact(contextLimit)} tok · ${contextLabel(state.context.mode)}`
+        : `${formatTokensCompact(selectedTokens)} tok · ${contextLabel(state.context.mode)}`;
+    metrics.textContent = compact;
+    metrics.title = full;
 
     renderContextInspector();
     if (state.contextCards) renderComponentChecklist();
@@ -1064,10 +1092,18 @@ async function loadContext() {
         loadContextSizes();
         return payload;
     } catch (error) {
-        $('#context-metrics').textContent = `Context unavailable: ${formatError(error)}`;
+        const metrics = $('#context-metrics');
+        metrics.textContent = `Context unavailable: ${formatError(error)}`;
+        metrics.title = '';
         appendOutput('Context request failed', formatError(error));
         throw error;
     }
+}
+
+// One-decimal compact token count for the #context-metrics line: 23.3K, 65.5K.
+function formatTokensCompact(n) {
+    if (n == null) return '—';
+    return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
 }
 
 // Compact token count for the picker labels: 0, 12.3K, 1.8M.
@@ -1212,7 +1248,14 @@ function buildFileTree(entries) {
 function renderFileTree() {
     const container = $('#file-tree');
     container.replaceChildren();
-    const root = buildFileTree(state.files);
+    let files = state.files;
+    const filter = (state.explorerFilter || '').toLowerCase();
+    if (filter) {
+        files = files.filter((entry) =>
+            entry.isDirectory || entry.path.toLowerCase().includes(filter)
+        );
+    }
+    const root = buildFileTree(files);
 
     const sortedChildren = (node) => [...node.children.values()].sort((left, right) => {
         if (left.isDirectory !== right.isDirectory) return left.isDirectory ? -1 : 1;
@@ -1226,7 +1269,7 @@ function renderFileTree() {
 
         if (node.isDirectory) {
             const openForActive = state.activePath?.startsWith(`${node.path}/`);
-            const expanded = state.expandedFolders.has(node.path) || openForActive;
+            const expanded = Boolean(state.explorerFilter) || state.expandedFolders.has(node.path) || openForActive;
             const label = document.createElement('button');
             label.type = 'button';
             label.className = 'tree-folder-label';
@@ -1448,6 +1491,70 @@ function updateFallbackCursorStatus() {
     const lastNewline = before.lastIndexOf('\n');
     const column = offset - lastNewline;
     $('#cursor-status').textContent = `Ln ${line}, Col ${column}`;
+}
+
+let quickOpenMatches = [];
+let quickOpenActiveIndex = 0;
+
+function openQuickOpen() {
+    const overlay = $('#quick-open');
+    overlay.classList.remove('hidden');
+    const input = $('#quick-open-input');
+    input.value = '';
+    renderQuickOpen('');
+    input.focus();
+}
+
+function closeQuickOpen() {
+    $('#quick-open').classList.add('hidden');
+}
+
+function renderQuickOpen(query) {
+    const q = query.trim().toLowerCase();
+    const matched = state.files
+        .filter((entry) => !entry.isDirectory && (!q || entry.path.toLowerCase().includes(q)));
+    if (q) {
+        // Rank matches: basename hits first, then earliest match position, then shortest
+        // path. Decorate with the original index so ties keep API order (stable sort).
+        quickOpenMatches = matched
+            .map((entry, index) => ({
+                entry,
+                index,
+                key: [
+                    basename(entry.path).toLowerCase().includes(q) ? 0 : 1,
+                    entry.path.toLowerCase().indexOf(q),
+                    entry.path.length,
+                ],
+            }))
+            .sort((a, b) => a.key[0] - b.key[0] || a.key[1] - b.key[1] || a.key[2] - b.key[2] || a.index - b.index)
+            .map((decorated) => decorated.entry)
+            .slice(0, 12);
+    } else {
+        // Empty query keeps API order.
+        quickOpenMatches = matched.slice(0, 12);
+    }
+    quickOpenActiveIndex = 0;
+    renderQuickOpenList();
+}
+
+function renderQuickOpenList() {
+    const list = $('#quick-open-list');
+    list.replaceChildren();
+    if (!quickOpenMatches.length) {
+        const empty = document.createElement('div');
+        empty.className = 'quick-open-empty';
+        empty.textContent = 'no files';
+        list.appendChild(empty);
+        return;
+    }
+    quickOpenMatches.forEach((entry, index) => {
+        const row = document.createElement('div');
+        row.className = 'quick-open-row' + (index === quickOpenActiveIndex ? ' active' : '');
+        row.setAttribute('role', 'option');
+        row.textContent = entry.path;
+        row.addEventListener('click', () => { openFile(entry.path); closeQuickOpen(); });
+        list.appendChild(row);
+    });
 }
 
 function renderDocumentTabs() {
@@ -1773,11 +1880,8 @@ function methodRow(path, method, kindLabel = 'method') {
 
 function selectInspector(name) {
     state.activeInspector = name;
-    $$('.inspector-tab[data-inspector]').forEach((button) => {
-        const active = button.dataset.inspector === name;
-        button.classList.toggle('active', active);
-        button.setAttribute('aria-selected', String(active));
-    });
+    const picker = $('#inspector-select');
+    if (picker && picker.value !== name) picker.value = name;
     $$('.inspector-view').forEach((panel) => {
         const active = panel.id === `inspector-${name}`;
         panel.classList.toggle('active', active);
@@ -1809,7 +1913,10 @@ function selectBottomView(name) {
 }
 
 function toggleBottomPanel() {
-    $('#app').classList.toggle('bottom-collapsed');
+    const app = $('#app');
+    app.classList.toggle('bottom-collapsed');
+    const collapsed = app.classList.contains('bottom-collapsed');
+    try { localStorage.setItem('selfware.bottomCollapsed', collapsed ? '1' : '0'); } catch {}
     updateBottomToggleIcon();
 }
 
@@ -3135,7 +3242,7 @@ function renderGraph(data) {
     const canvas = $('#graph-canvas');
     if (!window.d3) throw new Error('D3 did not load.');
     state.graphRuntime?.simulation?.stop();
-    canvas.querySelector('svg')?.remove();
+    canvas.querySelectorAll("svg[role='img']").forEach((stale) => stale.remove());
 
     const width = Math.max(canvas.clientWidth, 640);
     const height = Math.max(canvas.clientHeight, 420);
@@ -3159,7 +3266,10 @@ function renderGraph(data) {
         .attr('role', 'img')
         .attr('aria-label', `Code graph with ${nodes.length} nodes and ${links.length} edges`);
     const viewport = svg.append('g');
-    const zoom = window.d3.zoom().scaleExtent([0.15, 4]).on('zoom', (event) => viewport.attr('transform', event.transform));
+    const zoom = window.d3.zoom().scaleExtent([0.15, 4]).on('zoom', (event) => {
+        viewport.attr('transform', event.transform);
+        labels.classed('hidden-label', event.transform.k < 0.6);
+    });
     svg.call(zoom);
 
     const edge = viewport.append('g').selectAll('line')
@@ -3210,6 +3320,23 @@ function renderGraph(data) {
         groupCenters[g] = { x: width / 2 + Math.cos(angle) * 200, y: height / 2 + Math.sin(angle) * 200 };
     });
 
+    let didFit = false;
+    const fitGraph = () => {
+        const nodesNow = simulation.nodes();
+        if (!nodesNow.length) return;
+        const xs = nodesNow.map((n) => n.x), ys = nodesNow.map((n) => n.y);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+        const boundsW = Math.max(x1 - x0, 1), boundsH = Math.max(y1 - y0, 1);
+        const canvasBox = canvas.getBoundingClientRect();
+        if (!canvasBox.width || !canvasBox.height) return;
+        const scale = Math.max(Math.min(canvasBox.width / boundsW, canvasBox.height / boundsH, 1) * 0.85, 0.15);
+        const tx = (canvasBox.width - scale * (x0 + x1)) / 2;
+        const ty = (canvasBox.height - scale * (y0 + y1)) / 2;
+        const transform = window.d3.zoomIdentity.translate(tx, ty).scale(scale);
+        if (state.graphRuntime) state.graphRuntime.fitTransform = transform;
+        svg.call(zoom.transform, transform);
+    };
+
     const simulation = window.d3.forceSimulation(nodes)
         .force('link', window.d3.forceLink(links).id((item) => item.id).distance(78).strength(0.35))
         .force('charge', window.d3.forceManyBody().strength(-170))
@@ -3222,6 +3349,11 @@ function renderGraph(data) {
                 .attr('x2', (item) => item.target.x).attr('y2', (item) => item.target.y);
             node.attr('cx', (item) => item.x).attr('cy', (item) => item.y);
             labels.attr('x', (item) => item.x + 10).attr('y', (item) => item.y + 4);
+        })
+        .on('end', () => {
+            if (didFit) return;
+            didFit = true;
+            fitGraph();
         });
 
     node.call(window.d3.drag()
@@ -3251,6 +3383,7 @@ function renderGraph(data) {
         height,
         nodeSelection: node,
         labelSelection: labels,
+        fitTransform: null,
     };
     highlightGraphSearch($('#graph-search')?.value || '');
     renderGraphLegend();
@@ -3420,7 +3553,8 @@ function graphZoom(factor) {
 function resetGraphView() {
     const runtime = state.graphRuntime;
     if (!runtime) return;
-    runtime.svg.transition().duration(220).call(runtime.zoom.transform, window.d3.zoomIdentity);
+    const target = runtime.fitTransform || window.d3.zoomIdentity;
+    runtime.svg.transition().duration(220).call(runtime.zoom.transform, target);
 }
 
 function renderStructured(value, depth = 0, budget = { count: 0, limit: 500 }) {
@@ -3561,7 +3695,10 @@ async function runReview() {
     setGlobalStatus('Grounded review running', 'working');
 
     try {
-        const payload = await request('/api/assistant/review', {
+        // The POST only queues the review (202 + job id): the model call runs
+        // server-side for minutes on local models, longer than one fetch
+        // survives, so the outcome comes from polling the status route.
+        const accepted = await request('/api/assistant/review', {
             method: 'POST',
             body: {
                 path,
@@ -3572,6 +3709,22 @@ async function runReview() {
                 scope: $('#review-scope')?.value || 'selected_document',
             },
         });
+        const jobId = accepted?.job_id;
+        if (!jobId) throw new ApiError('Grounded review was not queued (no job id in the response)', 0, accepted);
+        let payload = null;
+        for (;;) {
+            await new Promise((resolve) => window.setTimeout(resolve, 9000));
+            if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
+            const job = await request(`/api/assistant/review/status?id=${encodeURIComponent(jobId)}`);
+            if (job?.status === 'done') {
+                payload = job.result;
+                break;
+            }
+            if (job?.status === 'failed') {
+                throw new ApiError(job.error || 'Grounded review failed', 0, job);
+            }
+            setGlobalStatus('Grounded review running', 'working');
+        }
         if (discardStaleGroundingResponse(result, snapshot, 'Grounded review')) return;
         result.className = 'inspector-result';
         result.replaceChildren(renderStructured(payload));
@@ -3944,6 +4097,7 @@ async function runAnalysis(kind, trigger) {
     selectBottomView('output');
     appendOutput(label, 'Started');
 
+    let outcomeState = null;
     try {
         const payload = await request('/api/analysis/run', { method: 'POST', body: { kind } });
         const staleReason = staleness(workspaceSnapshot);
@@ -3957,12 +4111,14 @@ async function runAnalysis(kind, trigger) {
         renderProblems();
         appendOutput(label, payload);
         const outcome = explicitOutcome(payload);
+        outcomeState = outcome;
         if (state.problems.length > 0) selectBottomView('problems');
         setGlobalStatus(
             outcome === true ? `${label} passed` : outcome === false ? `${label} failed` : `${label} response received`,
             outcome === false ? 'error' : outcome === true ? 'success' : 'neutral',
         );
     } catch (error) {
+        outcomeState = false;
         state.problems = [{ severity: 'error', message: formatError(error), path: '', line: null, column: null, source: label }];
         renderProblems();
         appendOutput(`${label} failed`, formatError(error));
@@ -3975,6 +4131,13 @@ async function runAnalysis(kind, trigger) {
             button.setAttribute('aria-busy', 'false');
             button.disabled = false;
         });
+        if (trigger) {
+            const badge = document.createElement('span');
+            badge.className = 'tool-badge ' + (outcomeState === true ? 'ok' : outcomeState === false ? 'fail' : 'neutral');
+            badge.textContent = outcomeState === true ? '✓' : outcomeState === false ? '✗' : '•';
+            trigger.appendChild(badge);
+            setTimeout(() => badge.remove(), 8000);
+        }
         updateDocumentStatus();
     }
 }

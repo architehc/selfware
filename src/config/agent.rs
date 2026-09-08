@@ -24,6 +24,20 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     #[serde(default = "default_step_timeout")]
     pub step_timeout_secs: u64,
+    /// Verify-after-every-edit cadence (the measured gemini behavior): when
+    /// on, the stale-verification rescue fires after ONE unverified edit
+    /// instead of two — the build runs and errors come back immediately
+    /// after each change. Off by default (preserves prior behavior); turn on
+    /// for proof/Lean/TB profiles where the write->build->fix loop pays.
+    #[serde(default)]
+    pub verify_after_edit: Option<bool>,
+    /// Cancel a streaming request that produces NO chunks for this many
+    /// seconds (no-progress watchdog). `None` keeps the legacy behavior
+    /// (`max(step_timeout_secs, 30)`). Tune per endpoint: slow local boxes
+    /// with long prefill phases want 1200+, fast boxes want 300 — silence on
+    /// a fast box means wedged, silence on a slow box means prefill.
+    #[serde(default)]
+    pub stream_stall_timeout_secs: Option<u64>,
     #[serde(default = "default_token_budget")]
     pub token_budget: usize,
     /// Safety margin subtracted from token_budget to prevent exceeding model context limit.
@@ -96,18 +110,15 @@ pub struct AgentConfig {
     pub post_edit_test_command: Option<String>,
 
     /// Hard limit: stop when total prompt+completion tokens exceed this.
-    /// CLI-only; not persisted in config files.
-    #[serde(skip)]
+    #[serde(default)]
     pub max_budget_tokens: Option<usize>,
 
     /// Hard limit: stop after this many wall-clock seconds.
-    /// CLI-only; not persisted in config files.
-    #[serde(skip)]
+    #[serde(default)]
     pub max_wall_secs: Option<u64>,
 
     /// Hard limit: stop when accumulated provider-reported USD cost exceeds this.
-    /// CLI-only; not persisted in config files.
-    #[serde(skip)]
+    #[serde(default)]
     pub max_cost_usd: Option<f64>,
 }
 
@@ -116,6 +127,8 @@ impl Default for AgentConfig {
         Self {
             max_iterations: default_max_iterations(),
             step_timeout_secs: default_step_timeout(),
+            verify_after_edit: None,
+            stream_stall_timeout_secs: None,
             token_budget: super::default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
             token_safety_margin: default_token_safety_margin(),
             native_function_calling: false,

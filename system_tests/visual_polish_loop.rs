@@ -228,7 +228,7 @@ fn take_screenshot() -> Result<(), Box<dyn std::error::Error>> {
             "--headless",
             "--disable-gpu",
             "--no-sandbox",
-            &format!("--screenshot={}", &screenshot_path()),
+            &format!("--screenshot={}", screenshot_path()),
             "--window-size=1920,1080",
             &format!("http://127.0.0.1:{}", SERVER_PORT),
         ])

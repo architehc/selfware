@@ -475,23 +475,27 @@ impl Tool for ShellExec {
         // deadlock on a full pipe or OOM the agent with unbounded output.
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
-        let stdout_task = tokio::spawn(async move {
+        let mut stdout_task = tokio::spawn(async move {
             match stdout_pipe {
                 Some(s) => drain_capped(s).await,
                 None => Vec::new(),
             }
         });
-        let stderr_task = tokio::spawn(async move {
+        let mut stderr_task = tokio::spawn(async move {
             match stderr_pipe {
                 Some(s) => drain_capped(s).await,
                 None => Vec::new(),
             }
         });
 
+        // One absolute deadline covering BOTH the process and the output
+        // drain (review finding: a descendant holding the pipes open kept the
+        // tool waiting past timeout_secs even after the parent exited).
+        let deadline = std::time::Instant::now() + Duration::from_secs(args.timeout_secs);
         let wait_result =
             tokio::time::timeout(Duration::from_secs(args.timeout_secs), child.wait()).await;
 
-        let (exit_code, timed_out) = match wait_result {
+        let (exit_code, mut timed_out) = match wait_result {
             Ok(Ok(status)) => (status.code().unwrap_or(-1), false),
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
@@ -508,10 +512,29 @@ impl Tool for ShellExec {
             }
         };
 
-        // Always await the drain tasks so they don't leak; the pipes close once
-        // the process (and its group) exit.
-        let stdout_bytes = stdout_task.await.unwrap_or_default();
-        let stderr_bytes = stderr_task.await.unwrap_or_default();
+        // Await the drains only up to the same absolute deadline. A child that
+        // backgrounded a pipe-holding descendant (`sleep 300 &`) must not hold
+        // the tool past the budget — reap the group and report the timeout.
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let (stdout_bytes, stderr_bytes) = match tokio::time::timeout(remaining, async {
+            tokio::join!(&mut stdout_task, &mut stderr_task)
+        })
+        .await
+        {
+            Ok((out, err)) => (out.unwrap_or_default(), err.unwrap_or_default()),
+            Err(_) => {
+                stdout_task.abort();
+                stderr_task.abort();
+                #[cfg(unix)]
+                if let Some(pid) = child_pid {
+                    use nix::sys::signal::{killpg, Signal};
+                    use nix::unistd::Pid;
+                    let _ = killpg(Pid::from_raw(pid as i32), Signal::SIGKILL);
+                }
+                timed_out = true;
+                (Vec::new(), Vec::new())
+            }
+        };
         let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
         let stderr = if timed_out {
             format!(

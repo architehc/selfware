@@ -302,10 +302,9 @@ fn public_symbol(line: &str) -> Option<(SymKind, String)> {
         (SymKind::Trait, a)
     } else if let Some(a) = rest.strip_prefix("const ") {
         (SymKind::Const, a)
-    } else if let Some(a) = rest.strip_prefix("static ") {
-        (SymKind::Const, a)
     } else {
-        return None;
+        let a = rest.strip_prefix("static ")?;
+        (SymKind::Const, a)
     };
     let name: String = after
         .chars()

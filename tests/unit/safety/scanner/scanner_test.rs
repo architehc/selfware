@@ -437,11 +437,20 @@ fn test_secret_scanner_detect_base64_secret() {
 }
 
 #[test]
-fn test_secret_scanner_skip_double_slash_comment() {
+fn test_secret_scanner_finds_critical_patterns_in_comments() {
+    // Policy changed 2026-09-03 (red-team wave-3 finding): comment lines are
+    // no longer skipped outright — a secret in a comment leaks exactly like a
+    // secret in code (`// GITHUB_TOKEN=ghp_…` was the generated attack).
+    // Critical high-confidence shapes (AWS keys, GitHub/Stripe/Azure tokens,
+    // private keys) ARE found in comments; lower-severity patterns stay
+    // skipped to keep prose safe (see test_secret_scanner_skip_hash_comment).
     let mut scanner = SecretScanner::new();
     let content = "// aws_key = AKIAIOSFODNN7EXAMPLE";
     let findings = scanner.scan_content(content, None);
-    assert!(findings.is_empty());
+    assert!(
+        findings.iter().any(|f| f.title == "AWS Access Key"),
+        "Critical secret in a comment must be found: {findings:?}"
+    );
 }
 
 #[test]
@@ -1648,4 +1657,21 @@ fn test_compliance_checker_no_match_when_no_pattern() {
     let findings = checker.check_content("something dangerous", None);
     // Only pattern-based rules fire; ensure no panic
     let _ = findings;
+}
+
+#[test]
+fn test_secret_scanner_detects_aws_secret_key_40char() {
+    // The canonical AWS_SECRET_ACCESS_KEY = "<40 chars>" shape. The literal
+    // is assembled from fragments: a contiguous 40-char credential-shaped
+    // string in source trips GitHub push protection (GH013) even when fake
+    // (waves 27b/50 corpus collisions).
+    let secret = concat!("wJalrXUtnFEMI", "/K7MDENG/bPxRfiCY", "EXAMPLEKEY");
+    assert_eq!(secret.len(), 40);
+    let mut scanner = SecretScanner::new();
+    let content = format!("aws_secret_access_key = \"{secret}\"");
+    let findings = scanner.scan_content(&content, None);
+    assert!(
+        findings.iter().any(|f| f.title == "AWS Secret Key"),
+        "canonical 40-char aws secret not detected: {findings:?}"
+    );
 }

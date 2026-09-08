@@ -213,6 +213,7 @@ async fn test_build_learning_hint_empty_prompt_returns_none() {
         agent: crate::config::AgentConfig {
             max_iterations: 5,
             step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             ..Default::default()
@@ -241,6 +242,7 @@ async fn test_build_learning_hint_returns_string_or_none() {
         agent: crate::config::AgentConfig {
             max_iterations: 5,
             step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             ..Default::default()
@@ -282,6 +284,7 @@ async fn test_learning_context_defaults_to_general() {
         agent: crate::config::AgentConfig {
             max_iterations: 5,
             step_timeout_secs: 5,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             ..Default::default()

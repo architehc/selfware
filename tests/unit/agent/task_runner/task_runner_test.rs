@@ -64,6 +64,7 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
         agent: AgentConfig {
             max_iterations: 8,
             step_timeout_secs: 30,
+            stream_stall_timeout_secs: None,
             streaming,
             native_function_calling: false,
             min_completion_steps: 0,
@@ -1989,6 +1990,478 @@ async fn test_planning_answer_ready_to_finalize_gates() {
         agent.planning_answer_ready_to_finalize().await.as_deref(),
         Some(answer),
         "a substantial read-only answer that passes the completion gate must finalize"
+    );
+    server.stop().await;
+}
+
+// --- Wall-clock commit-mode bands (six-model consult, Opus 5 deadline
+// policy: inject budget pressure before the hard stop so the run ships
+// something). TB 3.0 evidence: two of four v3 failures were timeouts. ---
+
+#[tokio::test]
+async fn commit_mode_directive_fires_at_65_and_85_percent_once_each() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_wall_secs = Some(100);
+    let mut agent = Agent::new(config).await.unwrap();
+
+    // 50%: nothing yet.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(50);
+    let before = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(agent.messages.len(), before, "nothing fires at 50%");
+
+    // 65%: COMMIT MODE once.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(70);
+    agent.maybe_inject_commit_mode_directive();
+    let body: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("COMMIT MODE"), "{body}");
+    let n = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(agent.messages.len(), n, "fires once");
+
+    // 85%: FINAL STRETCH once.
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(90);
+    agent.maybe_inject_commit_mode_directive();
+    let body: String = agent
+        .messages
+        .iter()
+        .map(|m| m.content.text_all())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(body.contains("FINAL STRETCH"), "{body}");
+    let n = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(agent.messages.len(), n, "fires once");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn commit_mode_is_silent_without_wall_budget() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.task_start_time = std::time::Instant::now() - std::time::Duration::from_secs(10_000);
+    let before = agent.messages.len();
+    agent.maybe_inject_commit_mode_directive();
+    assert_eq!(
+        agent.messages.len(),
+        before,
+        "no budget configured — no directive"
+    );
+    server.stop().await;
+}
+
+// =========================================================================
+// Synthesis auto-write honesty (P1: no success claim before the write lands)
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable on Windows CI"
+)]
+async fn synthesis_auto_write_claims_success_only_after_batch_succeeds() {
+    // P1 regression: the phase-2 synthesis auto-write used to set
+    // has_written_any_file and push a "code was auto-written" directive
+    // BEFORE the write attempt, swallowing any execute_tool_batch error.
+    // The success claim must only follow an Ok batch.
+    let cwd = crate::test_support::CwdGuard::hold();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    cwd.switch_to(dir.path());
+
+    let code_answer = "Here is the implementation for src/lib.rs:\n```rust\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n```";
+    let server = MockLlmServer::builder()
+        .with_response("Analyzed.")
+        .with_response(code_answer)
+        .with_default_response(MockResponse::Text(
+            "Complete. The helper is explained and the requested code is written to disk."
+                .to_string(),
+        ))
+        .build()
+        .await;
+    let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+    config.agent.max_iterations = 4;
+    let mut agent = Agent::new(config).await.unwrap();
+    // Ground phase-2 synthesis with prior tool history and queue it so it
+    // fires at the top of the first Executing step.
+    agent.messages.push(Message::user(
+        "<tool_result>pub fn existing_helper() -> i32 { 41 } // contents of src/lib.rs read earlier</tool_result>".to_string(),
+    ));
+    agent.pending_synthesis = Some("Explain what the helper function does".to_string());
+
+    // The run's own outcome is not under test here — the auto-write side
+    // effects are.
+    let _ = agent
+        .run_task("Explain what the helper function does")
+        .await;
+
+    assert!(
+        agent.has_written_any_file,
+        "a successful synthesis auto-write must credit the file write"
+    );
+    assert!(
+        agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("auto-written to file")),
+        "success directive should be pushed after the write succeeds"
+    );
+    assert!(
+        !agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("Auto-writing the code from your response FAILED")),
+        "no failure directive when the write succeeded"
+    );
+    let written = std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap();
+    assert!(
+        written.contains("pub fn add"),
+        "synthesized code should be on disk, got: {written}"
+    );
+
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive iteration budget (loop 13) — Agent-level wiring
+// ---------------------------------------------------------------------------
+
+fn productive_turn(name: &str, args_hash: u64) -> crate::agent::loop_control::TurnProgress {
+    crate::agent::loop_control::TurnProgress {
+        had_success: true,
+        signatures: vec![(name.to_string(), args_hash)],
+    }
+}
+
+#[tokio::test]
+async fn adaptive_budget_extends_repeatedly_on_sustained_productive_streak() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Five turns, each with a distinct successful tool call.
+    for (i, name) in ["a", "b", "c", "d", "e"].iter().enumerate() {
+        agent
+            .recent_turn_progress
+            .push_back(productive_turn(name, i as u64));
+    }
+
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    agent
+        .loop_control
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+    agent.loop_control.restore_progress(0, 4);
+    let capped = agent.loop_control.next_state(); // 5 > 4 — cap tripped
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    let resumed = agent
+        .maybe_extend_iteration_budget()
+        .expect("productive streak must earn the extension");
+    assert!(matches!(resumed, AgentState::Executing { .. }));
+    assert_eq!(agent.loop_control.max_iterations(), 5);
+    assert!(matches!(
+        agent.loop_control.current_state_label(),
+        "executing"
+    ));
+
+    // Multi-fire policy (TB4: the one-shot +50% still left productive tasks
+    // dead at the cap): a still-productive streak keeps earning +25% grants,
+    // up to the +100% ceiling (4 grants: cap 4 → 8).
+    for expected_cap in [6, 7, 8] {
+        let cap = agent.loop_control.max_iterations();
+        agent.loop_control.restore_progress(0, cap);
+        let tripped = agent.loop_control.next_state();
+        assert!(matches!(tripped, Some(AgentState::Failed { .. })));
+        assert!(
+            agent.maybe_extend_iteration_budget().is_some(),
+            "sustained productivity re-earns budget"
+        );
+        assert_eq!(agent.loop_control.max_iterations(), expected_cap);
+    }
+    // Fifth trip: the extension ceiling is reached.
+    let cap = agent.loop_control.max_iterations();
+    agent.loop_control.restore_progress(0, cap);
+    let tripped = agent.loop_control.next_state();
+    assert!(matches!(tripped, Some(AgentState::Failed { .. })));
+    assert!(
+        agent.maybe_extend_iteration_budget().is_none(),
+        "total extension is capped at +100% of the original cap"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn adaptive_budget_aborts_without_progress_signals() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // Error-only streak: turns ran, but nothing succeeded.
+    for i in 0..5u64 {
+        agent
+            .recent_turn_progress
+            .push_back(crate::agent::loop_control::TurnProgress {
+                had_success: false,
+                signatures: vec![("file_read".to_string(), i)],
+            });
+    }
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(4);
+    agent.loop_control.restore_progress(0, 4);
+    let capped = agent.loop_control.next_state();
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+    assert!(
+        agent.maybe_extend_iteration_budget().is_none(),
+        "error-only streak must not earn an extension"
+    );
+
+    // No recorded turns at all: thin evidence also aborts.
+    agent.recent_turn_progress.clear();
+    assert!(agent.maybe_extend_iteration_budget().is_none());
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn run_summary_reflects_tracked_state_honestly() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    // No writes, no verification, no cost yet.
+    let summary = agent.run_summary();
+    assert!(summary.files_changed.is_empty());
+    assert!(summary.verification.is_none(), "verification not performed");
+    assert!(summary.cost_usd.is_none(), "no invented cost");
+    assert!(!summary.budget_extended);
+
+    // Track some state: two writes (stale = written/edited), one extension,
+    // and token/cost accumulators.
+    agent.file_tracker.mark_written("src/zeta.rs");
+    agent.file_tracker.mark_written("src/alpha.rs");
+    agent.cumulative_token_usage.total = 42_000;
+    agent.cumulative_cost_usd = 0.5;
+    agent.loop_control = crate::agent::loop_control::AgentLoop::new(10);
+    assert!(agent.loop_control.extend_budget_once().is_some());
+
+    let summary = agent.run_summary();
+    assert_eq!(
+        summary.files_changed,
+        vec!["src/alpha.rs".to_string(), "src/zeta.rs".to_string()],
+        "files changed sorted"
+    );
+    assert!(summary.budget_extended);
+    assert_eq!(summary.max_iterations, 12);
+    assert_eq!(summary.total_tokens, 42_000);
+    assert_eq!(summary.cost_usd, Some(0.5));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn preamble_has_no_mutation_mandates_on_read_only_task() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    agent
+        .run_task("Review the authentication module and report findings. Do NOT edit any files.")
+        .await
+        .expect("read-only task completes");
+
+    let system = agent.messages[0].content.text();
+    assert!(
+        !system.contains("MANDATORY WORKFLOW"),
+        "read-only task must not get the workflow block: {}",
+        &system[..system.len().min(600)]
+    );
+    assert!(
+        !system.contains("IMPLEMENT: Make code changes"),
+        "read-only task must not get mutation mandates"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn preamble_keeps_mutation_workflow_on_mutation_task() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    // The mock can't satisfy the mutation completion gate (no real edit) —
+    // the run will fail at the cap, but the preamble is injected BEFORE the
+    // loop, and that is what this asserts.
+    let _ = agent.run_task("Fix the off-by-one bug in src/lib.rs").await;
+
+    let system = agent.messages[0].content.text();
+    assert!(
+        system.contains("MANDATORY WORKFLOW"),
+        "mutation task must keep the workflow block"
+    );
+    assert!(system.contains("IMPLEMENT: Make code changes"));
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn deferred_manifest_note_is_injected_at_task_start() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    agent
+        .run_task("Do a simple task")
+        .await
+        .expect("task completes");
+
+    assert!(
+        agent.messages.iter().any(|m| m
+            .content
+            .text()
+            .contains("<selfware_context_note kind=tool_manifest>")),
+        "the deferred-tool manifest note must be injected at task start"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn switch_model_hot_switches_session_model() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    let before = agent.model().to_string();
+
+    let previous = agent.switch_model("qwen3.8-max").expect("switch succeeds");
+    assert_eq!(previous, before);
+    assert_eq!(agent.model(), "qwen3.8-max");
+
+    // Empty names are rejected with the config key named.
+    let err = agent
+        .switch_model("   ")
+        .expect_err("empty model must fail");
+    assert!(err.to_string().contains("`model`"), "got: {err}");
+    assert_eq!(agent.model(), "qwen3.8-max", "failed switch is a no-op");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn undo_redo_round_trip_restores_bytes() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let file = temp.path().join("target.rs");
+    std::fs::write(&file, "original\n").expect("write");
+
+    // The dispatcher's snapshot point: checkpoint + pre-edit bytes.
+    agent
+        .edit_history
+        .create_checkpoint(crate::session::edit_history::EditAction::FileEdit {
+            path: file.clone(),
+            tool: "file_edit".to_string(),
+        });
+    agent
+        .edit_history
+        .add_file_to_current(crate::session::edit_history::FileSnapshot::new(
+            file.clone(),
+            "original\n".to_string(),
+        ));
+    // The edit lands.
+    std::fs::write(&file, "edited\n").expect("write");
+
+    let undone = agent.undo_last_edit().await;
+    assert!(undone.contains("Undone"), "{undone}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        "original\n",
+        "undo must restore the pre-edit bytes"
+    );
+
+    let redone = agent.redo_last_edit().await;
+    assert!(redone.contains("Reapplied"), "{redone}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("read"),
+        "edited\n",
+        "redo must reapply the edit, not revert it again"
+    );
+
+    let again = agent.redo_last_edit().await;
+    assert_eq!(again, "Nothing to redo");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn undo_reports_nothing_when_no_snapshot_exists() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    assert_eq!(agent.undo_last_edit().await, "Nothing to undo");
+    assert_eq!(agent.redo_last_edit().await, "Nothing to redo");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn shell_passthrough_runs_command_into_context_without_starting_a_task() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+    let messages_before = agent.messages.len();
+
+    let rendered = agent.shell_passthrough("echo hello").await;
+    assert_eq!(rendered, "$ echo hello\nhello\n", "exact basic-mode format");
+
+    // Output went into context as ONE user message — and NO agent task was
+    // started (the smoke-test bug was `!git log` becoming a full task).
+    assert_eq!(agent.messages.len(), messages_before + 1);
+    let last = &agent.messages[agent.messages.len() - 1];
+    assert_eq!(last.role, "user");
+    assert!(last
+        .content
+        .text()
+        .contains("<shell_command>echo hello</shell_command>"));
+    assert!(last.content.text().contains("hello"));
+    assert!(
+        agent.current_checkpoint.is_none(),
+        "a passthrough must not start a task or checkpoint"
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn shell_passthrough_marks_truncation_and_exit_codes() {
+    let server = MockLlmServer::builder().with_response("done").build().await;
+    let mut agent = Agent::new(mock_agent_config(format!("{}/v1", server.url()), false))
+        .await
+        .unwrap();
+
+    let rendered = agent.shell_passthrough("seq 1 2000").await;
+    assert!(
+        rendered.contains("…[truncated]"),
+        "display shows truncation"
+    );
+    let last = &agent.messages[agent.messages.len() - 1];
+    assert!(
+        last.content.text().contains("truncated=\"true\""),
+        "context push carries the truncation flag: {}",
+        &last.content.text()[..120]
+    );
+
+    let rendered = agent.shell_passthrough("exit 3").await;
+    assert!(
+        rendered.starts_with("$ exit 3 (exit 3)\n"),
+        "exit code in the status note: {rendered}"
     );
     server.stop().await;
 }

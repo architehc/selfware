@@ -432,6 +432,11 @@ textarea:focus-visible,
     animation: spin 0.85s linear infinite;
 }
 
+.tool-badge { margin-left: 6px; font-size: 12px; }
+.tool-badge.ok { color: var(--accent, #3fb950); }
+.tool-badge.fail { color: var(--danger, #f85149); }
+.tool-badge.neutral { color: var(--muted, #8b949e); }
+
 .tool-button svg,
 .icon-button svg,
 .command-button svg,
@@ -604,6 +609,8 @@ textarea:focus-visible,
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
+
+.explorer-filter { width: 100%; box-sizing: border-box; padding: 6px 8px; margin: 4px 0; background: var(--bg, #0d1117); color: var(--text, #e6edf3); border: 1px solid var(--border, #30363d); border-radius: 6px; font: inherit; font-size: 12px; }
 
 .file-tree {
     flex: 1 1 auto;
@@ -887,6 +894,10 @@ textarea:focus-visible,
     stroke-width: 4px;
 }
 
+.hidden-label {
+    display: none;
+}
+
 .graph-edge {
     stroke: var(--edge);
     stroke-opacity: 0.55;
@@ -1029,6 +1040,30 @@ textarea:focus-visible,
 
 .inspector-tab.active {
     border-bottom-color: var(--accent);
+}
+
+.inspector-picker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.pane-heading-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--muted, #8b949e);
+    letter-spacing: 0.04em;
+}
+
+#inspector-select {
+    background: var(--surface-raised, #242424);
+    color: var(--text, #ededed);
+    border: 1px solid var(--border, #383838);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font: inherit;
 }
 
 .inspector-view {
@@ -1490,6 +1525,55 @@ textarea:focus-visible,
 
 @keyframes pulse {
     50% { opacity: 0.45; }
+}
+
+.quick-open {
+    position: fixed;
+    top: 12%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 560px;
+    max-width: 90vw;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .5);
+    z-index: 1000;
+    padding: 10px;
+}
+
+#quick-open-input {
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font: inherit;
+}
+
+.quick-open-list {
+    margin-top: 6px;
+}
+
+.quick-open-row {
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.quick-open-row:hover,
+.quick-open-row.active {
+    background: var(--surface-hover);
+}
+
+.quick-open-empty {
+    padding: 6px 10px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
 }
 
 .branch-dialog {

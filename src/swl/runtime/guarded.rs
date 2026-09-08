@@ -140,11 +140,26 @@ impl GuardedSwlRuntime {
             }
         };
 
-        // Post-workflow guardrail check
+        // Post-workflow guardrail check — a blocking outcome FAILS the
+        // workflow (review finding: blocking violations were assigned to
+        // `_post_summary` and the successful result returned anyway).
         let post_context = self.build_guardrail_context(None, None, None).await;
-        let _post_summary = self
+        if let Some(violations) = self
             .check_guardrails(GuardrailType::PostWorkflow, &post_context)
-            .await?;
+            .await?
+        {
+            let names: Vec<&str> = violations
+                .iter()
+                .map(|v| v.guardrail_name.as_str())
+                .collect();
+            record_state_transition("executing_workflow", "failed");
+            record_failure("post-workflow guardrail blocked");
+            return Err(SelfwareError::Safety(
+                SafetyError::DangerousCommandPattern {
+                    description: format!("post-workflow guardrail blocked: {}", names.join(", ")),
+                },
+            ));
+        }
 
         // Record telemetry
         let duration_ms = workflow_start.elapsed().as_millis() as u64;

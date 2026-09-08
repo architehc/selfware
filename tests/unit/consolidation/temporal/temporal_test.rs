@@ -116,5 +116,14 @@ fn test_compacted_content_tokens() {
         outcomes: vec![],
         insights: vec![],
     };
-    assert_eq!(content.estimated_tokens(), 125); // 500 / 4
+    // Measured accounting (AGENTS.md rule 4): the value comes from
+    // estimate_content_tokens, not the old len/4 heuristic (500/4 = 125).
+    let expected = crate::token_count::estimate_content_tokens(&"A".repeat(400))
+        + crate::token_count::estimate_content_tokens(&"B".repeat(100));
+    assert_eq!(content.estimated_tokens(), expected);
+    assert_ne!(
+        content.estimated_tokens(),
+        125,
+        "must not be the old byte-fraction heuristic value"
+    );
 }

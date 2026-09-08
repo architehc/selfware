@@ -364,16 +364,98 @@ fn test_tool_search_is_critical() {
 }
 
 #[test]
+fn test_routine_dev_tools_always_on() {
+    let registry = ToolRegistry::new();
+
+    // Tool-discovery consensus: routine development tools must be always-on
+    // critical, never deferred behind tool_search.
+    const ALWAYS_ON: &[&str] = &[
+        "cargo_check",
+        "cargo_test",
+        "git_status",
+        "git_diff",
+        "symbol_search",
+    ];
+
+    let critical_names: std::collections::HashSet<&str> =
+        registry.list_critical().iter().map(|t| t.name()).collect();
+
+    for name in ALWAYS_ON {
+        assert!(
+            CRITICAL_TOOLS.contains(name),
+            "{} should be listed in CRITICAL_TOOLS",
+            name
+        );
+        assert!(
+            registry.is_activated(name),
+            "{} should be activated without tool_search",
+            name
+        );
+        assert!(
+            critical_names.contains(name),
+            "{} should be a critical tool",
+            name
+        );
+        // Usable immediately — no activation round-trip required
+        assert!(
+            registry.get_activated(name).is_some(),
+            "{} should be executable without activation",
+            name
+        );
+    }
+}
+
+#[test]
+fn test_activate_already_active_critical_tool_is_idempotent() {
+    let mut registry = ToolRegistry::new();
+
+    // tool_search may ask to activate a tool that is already active; this
+    // must succeed honestly, not error or change state.
+    assert!(registry.is_activated("cargo_check"));
+    let before = registry.activated_count();
+    assert!(registry.activate("cargo_check"));
+    assert_eq!(registry.activated_count(), before);
+    assert!(registry.is_activated("cargo_check"));
+}
+
+#[tokio::test]
+async fn test_tool_search_reports_critical_tool_as_already_available() {
+    let registry = ToolRegistry::new();
+    let tool = registry.get("tool_search").expect("tool_search registered");
+    let result = tool
+        .execute(serde_json::json!({"query": "git_status", "limit": 5}))
+        .await
+        .expect("tool_search should execute");
+
+    assert_eq!(result.get("success").and_then(|v| v.as_bool()), Some(true));
+    let found = result
+        .get("found_tools")
+        .and_then(|v| v.as_array())
+        .expect("found_tools should be an array");
+    let git_status = found
+        .iter()
+        .find(|v| v.get("name").and_then(|n| n.as_str()) == Some("git_status"))
+        .expect("git_status should still be discoverable");
+    assert_eq!(
+        git_status.get("is_critical").and_then(|v| v.as_bool()),
+        Some(true),
+        "git_status should be reported as critical (already available)"
+    );
+}
+
+#[test]
 fn test_git_tools_deferred() {
     let mut registry = ToolRegistry::new();
 
-    // Git tools should exist but not be activated initially
-    assert!(registry.get("git_status").is_some());
-    assert!(!registry.is_activated("git_status"));
+    // Mutating git tools should exist but not be activated initially
+    // (git_status/git_diff are always-on critical tools — see
+    // test_routine_dev_tools_always_on)
+    assert!(registry.get("git_commit").is_some());
+    assert!(!registry.is_activated("git_commit"));
 
     // Activate and check
-    assert!(registry.activate("git_status"));
-    assert!(registry.is_activated("git_status"));
+    assert!(registry.activate("git_commit"));
+    assert!(registry.is_activated("git_commit"));
 }
 
 #[test]
@@ -417,7 +499,7 @@ fn test_definitions_returns_activated_only() {
     assert_eq!(initial_count, registry.activated_count());
 
     // Activate a deferred tool
-    registry.activate("cargo_test");
+    registry.activate("cargo_clippy");
 
     // Definitions should now include the activated tool
     let new_count = registry.definitions().len();
@@ -437,13 +519,15 @@ fn test_critical_definitions_count() {
 }
 
 #[test]
-fn test_cargo_tools_deferred() {
+fn test_cargo_clippy_and_fmt_stay_deferred() {
     let registry = ToolRegistry::new();
 
-    // Cargo tools should exist but not be activated
-    assert!(registry.get("cargo_test").is_some());
-    assert!(!registry.is_activated("cargo_test"));
-    assert!(!registry.is_activated("cargo_check"));
+    // cargo_clippy/cargo_fmt remain deferred behind tool_search, while
+    // cargo_check/cargo_test are always-on critical tools
+    assert!(registry.get("cargo_clippy").is_some());
+    assert!(registry.get("cargo_fmt").is_some());
+    assert!(!registry.is_activated("cargo_clippy"));
+    assert!(!registry.is_activated("cargo_fmt"));
 }
 
 #[test]
@@ -579,4 +663,110 @@ fn every_registered_tool_has_explicit_safety_metadata() {
             "registered tools missing an explicit safety-metadata entry — add them to              classify_tool_metadata in src/safety/tool_metadata.rs: {:?}",
             missing
         );
+}
+
+#[test]
+fn deferred_manifest_lists_deferred_tools_within_measured_budget() {
+    let registry = ToolRegistry::new();
+    let manifest = registry
+        .deferred_manifest(500)
+        .expect("registry ships deferred tools");
+    assert!(
+        crate::token_count::estimate_content_tokens(&manifest) <= 500,
+        "manifest must fit its measured budget"
+    );
+    assert!(manifest.contains("## Deferred tools"), "{manifest}");
+    assert!(
+        manifest.contains("activates automatically"),
+        "manifest must pitch exact-name activation: {manifest}"
+    );
+    assert!(manifest.contains("graph_summary"), "{manifest}");
+    // Sorted by tool name for a stable, scannable list.
+    let mut names = manifest.lines().filter_map(|line| {
+        if line.contains('…') {
+            return None; // the "+N more" tail line
+        }
+        line.strip_prefix("- ")
+            .map(|l| l.split([' ', '—']).next().unwrap_or(l))
+    });
+    let mut previous = names.next().unwrap_or_default().to_string();
+    for name in names {
+        assert!(
+            previous.as_str() <= name,
+            "manifest sorted: {previous} > {name}"
+        );
+        previous = name.to_string();
+    }
+}
+
+#[test]
+fn deferred_manifest_degrades_honestly_under_tiny_budgets() {
+    let registry = ToolRegistry::new();
+    // A realistic-but-tight budget forces the names-only (or prefix) form;
+    // it must still fit and still say what it covers.
+    let manifest = registry
+        .deferred_manifest(200)
+        .expect("manifest degrades, never vanishes");
+    assert!(
+        crate::token_count::estimate_content_tokens(&manifest) <= 200,
+        "tight budget must be honored: {manifest}"
+    );
+    assert!(manifest.contains("## Deferred tools"), "{manifest}");
+    // Absurdly small: at minimum the header survives.
+    let manifest = registry
+        .deferred_manifest(1)
+        .expect("header survives even a 1-token budget");
+    assert!(manifest.contains("## Deferred tools"), "{manifest}");
+}
+
+#[test]
+fn deferred_manifest_is_none_when_nothing_is_deferred() {
+    let mut registry = ToolRegistry::new();
+    for name in registry
+        .list()
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect::<Vec<_>>()
+    {
+        registry.activate(&name);
+    }
+    assert!(registry.list_deferred().is_empty());
+    assert!(registry.deferred_manifest(500).is_none());
+}
+
+#[test]
+fn search_uses_the_tokenizer_underscore_to_space() {
+    let registry = ToolRegistry::new();
+    // The capstone miss: "cargo check" (space) must find `cargo_check`.
+    let results = registry.search("cargo check", 5);
+    assert!(
+        results.iter().any(|r| r.name == "cargo_check"),
+        "cargo check must resolve cargo_check: {:?}",
+        results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn search_falls_back_to_any_token_when_all_fail() {
+    let registry = ToolRegistry::new();
+    // "xyzzy cargo" matches nothing by ALL tokens; the ANY fallback must
+    // still surface the cargo family instead of dead-ending.
+    let results = registry.search("xyzzy cargo", 5);
+    assert!(
+        results.iter().any(|r| r.name.starts_with("cargo_")),
+        "ANY-token fallback must surface cargo tools: {:?}",
+        results.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn search_suggestions_ranks_closest_names_first() {
+    let registry = ToolRegistry::new();
+    let suggestions = registry.search_suggestions("cargo chek", 5);
+    assert_eq!(
+        suggestions.first().map(String::as_str),
+        Some("cargo_check"),
+        "typo must suggest the closest real name: {suggestions:?}"
+    );
+    assert!(suggestions.len() <= 5);
 }

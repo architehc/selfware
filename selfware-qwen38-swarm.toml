@@ -1,0 +1,25 @@
+# Qwen 3.8 27B swarm profile — OpenRouter, 1M context, high concurrency.
+# Key: SELFWARE_API_KEY env. For selfware multi-chat fan-outs and swarm
+# sub-agents (role agents also accept [models.qwen38] from selfware.toml).
+#
+# Verified 2026-08-24: exact-answer probe $0.0001; qwen/qwen3.8-27b, 1M ctx.
+
+endpoint = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3.8-27b"
+max_tokens = 8192
+temperature = 0.0
+context_length = 1000000
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 100
+step_timeout_secs = 600
+native_function_calling = true
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000

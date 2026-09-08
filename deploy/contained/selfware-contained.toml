@@ -1,0 +1,28 @@
+# Contained-agent config — points at the uncensored endpoint, scopes all file
+# access to /work inside the container. The endpoint key arrives as env; never
+# stored here.
+endpoint = "https://e97b8112d15a.ngrok.app/v1"
+model = "qwen3.8-27b-uncensored-nvfp4"
+max_tokens = 8192
+context_length = 262144
+temperature = 0.0
+
+[safety]
+# Hard scope: the agent sees only its scratch dir, even inside the container.
+allowed_paths = ["/work/**"]
+denied_paths = ["/etc/**", "/proc/**", "/sys/**", "/root/**", "/home/**"]
+
+[agent]
+max_iterations = 200
+step_timeout_secs = 600
+max_wall_secs = 3300
+native_function_calling = true
+
+[continuous_work]
+enabled = false
+auto_recovery = false
+
+[retry]
+max_retries = 3
+base_delay_ms = 1000
+max_delay_ms = 30000

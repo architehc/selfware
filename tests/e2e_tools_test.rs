@@ -504,10 +504,35 @@ async fn test_e2e_localhost_http_and_browser_fetch_round_trip() {
         .contains("local chart"));
 
     let browser_fetch = registry.get("browser_fetch").unwrap();
+    // Skip the browser half when no Chrome/Chromium is installed (minimal CI
+    // images); the http_request half above already ran either way.
+    let chrome_present = [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+    ]
+    .iter()
+    .any(|candidate| {
+        std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    });
+    if !chrome_present {
+        server.abort();
+        return;
+    }
     let browser_result = browser_fetch
         .execute(serde_json::json!({
             "url": format!("{}/chart.html", base_url),
-            "timeout_secs": 5
+            // CI runners cold-start Chrome slowly; 5s was under the startup
+            // floor and timed out on ubuntu-24.04.
+            "timeout_secs": 30
         }))
         .await
         .unwrap();

@@ -68,6 +68,9 @@ pub fn concept_node(id: &str) -> Node {
         inline_test_lines: 0,
         inline_test_tokens: 0,
         classification: "concept".to_string(),
+        symbol_kind: None,
+        parent_id: None,
+        line_range: None,
     }
 }
 
@@ -189,4 +192,21 @@ async fn get_text(server: &EvolveServer, uri: &str) -> (StatusCode, String) {
         .await
         .unwrap();
     (status, String::from_utf8(body.to_vec()).unwrap())
+}
+
+/// Poll a grounded-review job (POST /api/assistant/review returns 202 + job
+/// id; the model call runs in the background) to its terminal state and
+/// return the status JSON: `{"status":"done","result":…}` on success or
+/// `{"status":"failed","error":…}` on failure.
+async fn poll_review_job(server: &EvolveServer, job_id: &str) -> Value {
+    for _ in 0..200 {
+        let (status, job) =
+            get_json_auth(server, &format!("/api/assistant/review/status?id={job_id}")).await;
+        assert_eq!(status, StatusCode::OK, "review job lost: {job}");
+        if job["status"] != "running" {
+            return job;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("review job {job_id} did not reach a terminal state");
 }

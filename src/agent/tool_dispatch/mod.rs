@@ -5,6 +5,7 @@ use colored::*;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use super::task_policy::{policy_envelope, PolicyKind};
 use super::*;
 use crate::api::types::Message;
 use crate::checkpoint::ToolCallLog;
@@ -35,12 +36,19 @@ impl Agent {
         success: bool,
         result_str: &str,
     ) {
-        if success && tool_call_is_verification(name, args_str) && self.mutation_sequence > 0 {
-            self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-            self.last_failed_verification_summary = None;
+        if success && tool_call_is_verification(name, args_str) {
+            // Loop 12: a passing verification breaks any repeated-probe
+            // streak — probes interleaved with green checks are iteration,
+            // not a stall.
+            self.probe_command_counts.clear();
+            if self.mutation_sequence > 0 {
+                self.last_successful_verification_mutation_sequence = self.mutation_sequence;
+                self.last_failed_verification_summary = None;
+            }
         } else if !success && tool_call_is_verification(name, args_str) {
             let preview: String = result_str.chars().take(300).collect();
             self.last_failed_verification_summary = Some(format!("{} failed: {}", name, preview));
+            self.last_failed_verification_mutation_sequence = self.mutation_sequence;
         }
     }
 
@@ -85,7 +93,6 @@ impl Agent {
         error_msg: &str,
     ) {
         cli_println!("{} {}", "✗".bright_red(), error_msg);
-        self.pending_failure_hint = Some(error_msg.to_string());
         self.push_tool_result_message(
             use_native_fc,
             call_id,
@@ -96,7 +103,6 @@ impl Agent {
         )
         .await;
         self.log_tool_call(tool_name, args_str, error_msg, false, start_time, false);
-        self.remember_failed_tool(tool_name, error_msg);
         self.record_failed_tool_attempt(tool_name, args_str, failure_kind, error_msg);
         self.consecutive_suppressions += 1;
     }
@@ -119,7 +125,12 @@ impl Agent {
         let block_threshold = if has_written { 16 } else { 12 };
         let escalation_threshold = if has_written { 20 } else { 18 };
 
-        if !task_requires_mutation(self.task_context_for_classification())
+        // A read-only task (review/analysis/report) must never be pushed into
+        // mutation: the deliverable is prose, so blocking read-only tools or
+        // injecting force-mutation directives livelocks the session (the
+        // 4-model read-only study: all agents died fighting these gates).
+        if self.current_task_is_read_only()
+            || !task_requires_mutation(self.task_context_for_classification())
             || self.consecutive_read_only_steps <= block_threshold
             || tool_calls.is_empty()
             || !tool_calls
@@ -129,9 +140,14 @@ impl Agent {
             return Ok(Some(tool_calls));
         }
 
-        let error_msg = format!(
-            "PROGRESS GUARD: This task requires making changes, but you have already spent {} consecutive steps on read-only or verification actions. Read-only tools are temporarily blocked. Your next action must change code or project state: use `file_edit`, `file_write`, `file_delete`, or `shell_exec` with a mutating command. Do NOT rerun more reads, status commands, or test commands until after you edit something.",
-            self.consecutive_read_only_steps
+        let error_msg = policy_envelope(
+            PolicyKind::Stagnation,
+            true,
+            "read-only streak on a mutation task",
+            &format!(
+                "PROGRESS GUARD: This task requires making changes, but you have already spent {} consecutive steps on read-only or verification actions. Read-only tools are temporarily blocked. Your next action must change code or project state: use `file_edit`, `file_write`, `file_delete`, or `shell_exec` with a mutating command. Do NOT rerun more reads, status commands, or test commands until after you edit something.",
+                self.consecutive_read_only_steps
+            ),
         );
 
         // Record the firing for FailureMode classification.
@@ -141,6 +157,17 @@ impl Agent {
             count: self.progress_guard_fire_count(),
         });
         let guard_count = self.progress_guard_fire_count();
+
+        // Hard-abort BEFORE the per-call rejection bookkeeping: an error
+        // return must not leave tool results recorded for calls that were
+        // never adjudicated.
+        if guard_count >= 3 && self.mutating_tool_call_count() == 0 {
+            anyhow::bail!(
+                "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
+                guard_count,
+                self.consecutive_read_only_steps
+            );
+        }
 
         for (name, args_str, tool_call_id) in tool_calls {
             let start_time = std::time::Instant::now();
@@ -158,20 +185,15 @@ impl Agent {
             .await;
         }
 
-        if guard_count >= 3 && self.mutating_tool_call_count() == 0 {
-            anyhow::bail!(
-                "READ_LOOP_NO_EDIT: progress guard blocked read-only tools {} times after {} consecutive read-only steps, with 0 mutating tools",
-                guard_count,
-                self.consecutive_read_only_steps
-            );
-        }
-
         if self.config.agent.read_loop_policy == crate::config::ReadLoopPolicy::ForceMutation {
             self.force_mutation_pending = true;
             self.messages
                 .push(Message::user(self.force_mutation_directive()));
         } else {
-            self.messages.push(Message::user(
+            self.messages.push(Message::user(policy_envelope(
+                PolicyKind::Stagnation,
+                true,
+                "read-only tools blocked until a mutation lands",
                 "<selfware_system_directive>\n\
                  Read-only and verification tools are blocked until you make a real change.\n\
                  Your NEXT response must do one of these:\n\
@@ -179,9 +201,8 @@ impl Agent {
                  - use `shell_exec` with a mutating command\n\
                  - if you already know the exact code change, output the replacement code as text and include the target path; Selfware will write it automatically\n\
                  Do NOT call more file reads, directory listings, grep searches, cargo test, or cargo check right now.\n\
-                 </selfware_system_directive>"
-                    .to_string(),
-            ));
+                 </selfware_system_directive>",
+            )));
         }
 
         if self.consecutive_read_only_steps >= escalation_threshold
@@ -204,7 +225,11 @@ impl Agent {
             .unwrap_or("PATH_YOU_ALREADY_READ");
         let target_json =
             serde_json::to_string(target).unwrap_or_else(|_| "\"PATH_YOU_ALREADY_READ\"".into());
-        format!(
+        policy_envelope(
+            PolicyKind::ForceMutation,
+            true,
+            "read-loop force-mutation mode",
+            &format!(
             "<selfware_system_directive>\n\
              READ-LOOP FORCE-MUTATION MODE is active.\n\
              Your previous read-only or verification tool calls were suppressed. \
@@ -233,6 +258,7 @@ impl Agent {
              - Do NOT create src/lib.rs unless this repository already has Cargo.toml and src/lib.rs is the real target.\n\
              - You MUST make an edit now. If uncertain, edit the highest-ranked source file with the smallest plausible fix; do not stop without editing.\n\
              </selfware_system_directive>"
+            ),
         )
     }
 
@@ -240,7 +266,10 @@ impl Agent {
         if self.task_state_notes.back() == Some(&note) {
             return;
         }
-        if self.task_state_notes.len() == TASK_STATE_NOTE_LIMIT {
+        // `>=` (not `==`): any state that ever exceeds the limit — a pusher
+        // without this check, or a lowered limit — self-corrects here instead
+        // of growing unbounded.
+        while self.task_state_notes.len() >= TASK_STATE_NOTE_LIMIT {
             self.task_state_notes.pop_front();
         }
         self.task_state_notes.push_back(note);
@@ -251,79 +280,149 @@ impl Agent {
         self.task_state_notes.clear();
     }
 
-    fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
-        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
-
-        // Classify the error and generate contextual recovery hint
-        let error_kind = ToolErrorKind::classify(error);
-        let recovery_hint = error_kind.recovery_hint();
-
-        self.pending_failure_hint = Some(format!(
-            "⚠️  Tool failure [{}]: `{}` failed.\n   Error: {}\n   Recovery: {}",
-            error_kind.as_str(),
-            tool_name,
-            error_preview,
-            recovery_hint
-        ));
-    }
-
     fn build_failed_tool_retry_suppressed_message(&self, failure: &FailedToolAttempt) -> String {
-        let schema_hint = self
+        let required_fields: Vec<String> = self
             .tools
             .get(&failure.tool_name)
-            .and_then(|tool| {
-                let required: Vec<String> = tool
-                    .schema()
+            .map(|tool| {
+                tool.schema()
                     .get("required")
                     .and_then(|value| value.as_array())
                     .into_iter()
                     .flatten()
                     .filter_map(|value| value.as_str())
                     .map(|field| format!("`{}`", field))
-                    .collect();
-                (!required.is_empty())
-                    .then(|| format!(" Required top-level fields: {}.", required.join(", ")))
+                    .collect()
             })
             .unwrap_or_default();
+        let required_sentence = if required_fields.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " Required top-level fields: {}.",
+                required_fields.join(", ")
+            )
+        };
 
-        match failure.failure_kind {
-            "parsing" => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed because the arguments were not valid JSON.{} Change the JSON before retrying. Last error: {}",
-                failure.tool_name, schema_hint, failure.error_preview
+        let category = failure_category(failure.failure_kind);
+        let error = failure.error_preview.as_str();
+
+        // Per-kind (intro, suggested_fix): the 4-model harness study found
+        // "change X before retrying" without the actionable reason left
+        // models retrying blind — each arm names WHAT to change.
+        let (intro, suggested_fix) = match failure.failure_kind {
+            "parsing" => {
+                let fix = match parse_error_position(error) {
+                    Some(position) => format!(
+                        "fix the JSON syntax — the parser stopped {}.{}",
+                        position, required_sentence
+                    ),
+                    None => format!(
+                        "fix the arguments so they are valid JSON.{}",
+                        required_sentence
+                    ),
+                };
+                (
+                    format!(
+                        "RETRY SUPPRESSED: `{}` with these exact arguments already failed because the arguments were not valid JSON.",
+                        failure.tool_name
+                    ),
+                    fix,
+                )
+            }
+            "validation" => {
+                let missing = missing_fields_in_error(error);
+                let fix = if missing.is_empty() {
+                    format!(
+                        "fix the arguments to satisfy the `{}` schema.{}",
+                        failure.tool_name, required_sentence
+                    )
+                } else {
+                    format!(
+                        "add the missing field(s): {}.{}",
+                        missing.join(", "),
+                        required_sentence
+                    )
+                };
+                (
+                    format!(
+                        "RETRY SUPPRESSED: `{}` with these exact arguments already failed schema validation.",
+                        failure.tool_name
+                    ),
+                    fix,
+                )
+            }
+            "safety" => (
+                format!(
+                    "RETRY SUPPRESSED: `{}` with these exact arguments already failed the safety check.",
+                    failure.tool_name
+                ),
+                "the call matched a blocked safety pattern (see the error above); rewrite the command/arguments to avoid that pattern class, or use a different tool."
+                    .to_string(),
             ),
-            "validation" => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed schema validation.{} Change the arguments before retrying. Last error: {}",
-                failure.tool_name, schema_hint, failure.error_preview
+            "task_policy" => (
+                format!(
+                    "RETRY SUPPRESSED: `{}` is blocked by the task's explicit tool constraints.",
+                    failure.tool_name
+                ),
+                "use a tool that matches the task instructions instead.".to_string(),
             ),
-            "safety" => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed the safety check. Change the tool or arguments before retrying. Last error: {}",
-                failure.tool_name, failure.error_preview
+            "operator_denied" => (
+                format!(
+                    "RETRY SUPPRESSED: the operator denied `{}` with these exact arguments.",
+                    failure.tool_name
+                ),
+                "Do not ask for the same permission again; choose a different approach or explain that the task cannot continue without it."
+                    .to_string(),
             ),
-            "task_policy" => format!(
-                "RETRY SUPPRESSED: `{}` is blocked by the task's explicit tool constraints. Use a tool that matches the task instructions instead. Last error: {}",
-                failure.tool_name, failure.error_preview
-            ),
-            "operator_denied" => format!(
-                "RETRY SUPPRESSED: the operator denied `{}` with these exact arguments. Do not ask for the same permission again; choose a different approach or explain that the task cannot continue without it. Last response: {}",
-                failure.tool_name, failure.error_preview
-            ),
-            "progress_guard" => format!(
-                "RETRY SUPPRESSED: `{}` is blocked by the progress guard because you need to make an edit or other state-changing action before using more read-only or verification tools. Last error: {}",
-                failure.tool_name, failure.error_preview
+            "progress_guard" => (
+                format!(
+                    "RETRY SUPPRESSED: `{}` is blocked by the progress guard.",
+                    failure.tool_name
+                ),
+                "make an edit or other state-changing action before using more read-only or verification tools."
+                    .to_string(),
             ),
             other => {
                 // For file_read failures, hint that the file may need to be created first
-                let hint = if failure.tool_name == "file_read" && failure.error_preview.contains("Failed to read") {
+                let hint = if failure.tool_name == "file_read" && error.contains("Failed to read") {
                     " If the file does not exist yet, use file_write to CREATE it first."
                 } else {
                     ""
                 };
-                format!(
-                    "RETRY SUPPRESSED: `{}` with these exact arguments already failed due to {}. Do not rerun it until a different successful tool call changes the situation or you change the inputs.{} Last error: {}",
-                    failure.tool_name, other, hint, failure.error_preview
+                (
+                    format!(
+                        "RETRY SUPPRESSED: `{}` with these exact arguments already failed due to {}.",
+                        failure.tool_name, other
+                    ),
+                    format!(
+                        "change the inputs, or wait until a different successful tool call changes the situation.{}",
+                        hint
+                    ),
                 )
-            },
+            }
+        };
+
+        let build_body = |err: &str| {
+            format!(
+                "{} Failure category: {}. Last error: {}\nsuggested_fix: {}",
+                intro, category, err, suggested_fix
+            )
+        };
+        let mut body = build_body(error);
+        // Bound the body: shrink the quoted error first — the category and
+        // suggested_fix lines carry the actionable content and are never cut.
+        if body.chars().count() > RETRY_SUPPRESSED_BODY_BUDGET_CHARS {
+            let excess = body.chars().count() - RETRY_SUPPRESSED_BODY_BUDGET_CHARS;
+            let keep = error.chars().count().saturating_sub(excess).max(80);
+            body = build_body(&truncate_chars_tail(error, keep));
         }
+        policy_envelope(
+            PolicyKind::RetrySuppressed,
+            true,
+            "identical tool call already failed",
+            &body,
+        )
     }
 
     pub(super) fn record_failed_tool_attempt(
@@ -334,7 +433,9 @@ impl Agent {
         error: &str,
     ) {
         let args_hash = hash_tool_args(args_str);
-        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
+        // Tail-preserving: the actionable end of the error (missing field,
+        // line/column, blocked pattern) survives truncation.
+        let error_preview = truncate_chars_tail(error, RETRY_SUPPRESSION_ERROR_PREVIEW_CHARS);
         self.recent_failed_tool_attempts.retain(|existing| {
             !(existing.tool_name == tool_name
                 && existing.args_hash == args_hash
@@ -358,11 +459,280 @@ impl Agent {
         self.consecutive_suppressions = 0;
     }
 
+    /// Record an escalated edit-args hash, FIFO-bounded at
+    /// ESCALATED_EDIT_ARGS_WINDOW_SIZE so a model varying old_str/new_str on
+    /// each retry cannot grow the cache without bound.
+    pub(super) fn record_escalated_edit(&mut self, hash: u64) {
+        if self.escalated_edit_args_hashes.contains(&hash) {
+            return;
+        }
+        self.escalated_edit_args_hashes.push_back(hash);
+        while self.escalated_edit_args_hashes.len() > ESCALATED_EDIT_ARGS_WINDOW_SIZE {
+            self.escalated_edit_args_hashes.pop_front();
+        }
+    }
+
     /// Clear recorded failed attempts for a single tool name.
     /// Used when that tool succeeds so that unrelated failures are not forgiven.
     pub(super) fn clear_failed_tool_attempts_for_tool(&mut self, tool_name: &str) {
         self.recent_failed_tool_attempts
             .retain(|existing| existing.tool_name != tool_name);
+    }
+
+    /// Paths the agent wrote/edited this task (from checkpoint tool calls).
+    pub(super) fn written_paths(&self) -> Vec<std::path::PathBuf> {
+        self.current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .filter(|tc| matches!(tc.tool_name.as_str(), "file_edit" | "file_write"))
+                    .filter_map(|tc| {
+                        serde_json::from_str::<serde_json::Value>(&tc.arguments)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("path")
+                                    .and_then(|p| p.as_str())
+                                    .map(std::path::PathBuf::from)
+                            })
+                    })
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Stagnation accounting (loop 13d): count consecutive tool calls that
+    /// leave the workspace fingerprint unchanged and aren't a green
+    /// verification. Warn once at 10, abort at 20 — a run whose workspace
+    /// never moves is not converging (data-anonymization: 67 probes, 3600s).
+    /// Mutation tasks only; fingerprint errors fail open (counted as changed).
+    pub(super) fn note_workspace_state_with_root(
+        &mut self,
+        root: &std::path::Path,
+        tool_name: &str,
+        args_str: &str,
+        success: bool,
+    ) -> Result<()> {
+        if !self.current_task_requires_mutation() || self.current_task_is_read_only() {
+            return Ok(());
+        }
+        let fingerprint = workspace_fingerprint(root);
+        let green_verification =
+            success && super::tool_dispatch::tool_call_is_verification(tool_name, args_str);
+        match (fingerprint, self.last_workspace_fingerprint) {
+            (Some(now), Some(prev)) if now == prev && !green_verification => {
+                self.stagnation_streak += 1;
+            }
+            _ => {
+                self.stagnation_streak = 0;
+            }
+        }
+        if fingerprint.is_some() {
+            self.last_workspace_fingerprint = fingerprint;
+        }
+
+        if self.stagnation_streak == 10
+            && !self
+                .stagnation_warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.messages
+                .push(crate::api::types::Message::user(policy_envelope(
+                    PolicyKind::Stagnation,
+                    true,
+                    "10 consecutive tool calls with no workspace change",
+                    "<selfware_system_directive>\n\
+                 STALL: 10 consecutive tool calls produced no workspace change and no passing \
+                 verification. Your next action must change the deliverable or run the \
+                 verification command.\n\
+                 </selfware_system_directive>",
+                )));
+        }
+        if self.stagnation_streak >= 20 {
+            anyhow::bail!(
+                "WORKSPACE_STAGNATION: 20 consecutive tool calls with no workspace change and no \
+                 passing verification — the run is not converging"
+            );
+        }
+        Ok(())
+    }
+
+    /// Stagnation accounting at the agent's project root.
+    pub(super) fn note_workspace_state(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        success: bool,
+    ) -> Result<()> {
+        let root = super::current_project_root();
+        self.note_workspace_state_with_root(&root, tool_name, args_str, success)
+    }
+
+    /// Best-snapshot capture: a green verification marks the current written
+    /// state as the best known (submit best state, not last state).
+    pub(super) fn note_green_verification(&mut self, name: &str, args_str: &str, success: bool) {
+        if !success || !super::tool_dispatch::tool_call_is_verification(name, args_str) {
+            return;
+        }
+        let paths = self.written_paths();
+        if paths.is_empty() {
+            return;
+        }
+        match self.best_snapshot.snapshot_written(&paths) {
+            Ok(()) => info!(
+                "best snapshot updated after green verification ({} files)",
+                paths.len()
+            ),
+            Err(e) => warn!("best snapshot capture failed: {e}"),
+        }
+    }
+
+    /// Dependency-firewall accounting: count consecutive install failures.
+    /// Resets only on a successful install — interleaved successful
+    /// diagnostics are part of the spiral pattern, not progress out of it.
+    pub(super) fn note_shell_outcome(&mut self, command: &str, success: bool) {
+        if !is_dependency_install_command(command) {
+            return;
+        }
+        if success {
+            self.failed_install_streak = 0;
+        } else {
+            self.failed_install_streak += 1;
+        }
+    }
+
+    /// Block an install command when the install streak has hit the limit —
+    /// the environment is not yielding, so the model must pivot (stdlib-only,
+    /// vendored, different tool) instead of retrying the same ladder forever.
+    /// Returns true when the call was rejected.
+    pub(super) async fn maybe_block_dependency_spiral(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        if !matches!(tool_name, "shell_exec" | "pty_shell") {
+            return false;
+        }
+        if self.failed_install_streak < DEPENDENCY_SPIRAL_LIMIT {
+            return false;
+        }
+        let Some(command) = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from))
+        else {
+            return false;
+        };
+        if !is_dependency_install_command(&command) {
+            return false;
+        }
+
+        let directive = format!(
+            "DEPENDENCY FIREWALL: {} consecutive install attempts have failed (latest: `{command}`). \
+             The environment is not yielding — do NOT retry installation. Pivot now: \
+             (a) use a stdlib-only approach, (b) vendor a minimal implementation, \
+             (c) use a different tool that is already installed, or (d) state exactly which \
+             package+version is missing and continue the task assuming it. The streak resets \
+             only on a successful install.",
+            self.failed_install_streak
+        );
+        self.push_tool_result_message(
+            use_native_fc,
+            call_id,
+            tool_name,
+            args_str,
+            false,
+            &directive,
+        )
+        .await;
+        self.log_tool_call(tool_name, args_str, &directive, false, start_time, false);
+        self.consecutive_suppressions += 1;
+        true
+    }
+
+    /// Repeated-probe pivot (loop 12): the same normalized shell command
+    /// (digits/whitespace collapsed) more than REPEATED_PROBE_LIMIT times with
+    /// no intervening successful verification means the probe is exhausted —
+    /// block the next identical call ONCE with a change-strategy directive.
+    /// The latch caps this at one fire per task; counting itself is fail-open
+    /// (non-shell tools, unparseable args, and an over-cap tracking map all
+    /// pass through). Returns true when the call was rejected.
+    pub(super) async fn maybe_block_repeated_probe(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        if !matches!(tool_name, "shell_exec" | "pty_shell") {
+            return false;
+        }
+        if self
+            .probe_pivot_done
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        let Some(command) = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| v.get("command").and_then(|c| c.as_str()).map(String::from))
+        else {
+            return false;
+        };
+
+        let normalized = normalize_probe_command(&command);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        normalized.hash(&mut hasher);
+        let probe_hash = hasher.finish();
+        let count = match self.probe_command_counts.get_mut(&probe_hash) {
+            Some(count) => {
+                *count += 1;
+                *count
+            }
+            None => {
+                if self.probe_command_counts.len() >= TRACKED_PROBE_COMMAND_LIMIT {
+                    // Fail-open: too many distinct commands to track — never block.
+                    return false;
+                }
+                self.probe_command_counts.insert(probe_hash, 1);
+                1
+            }
+        };
+        if count <= REPEATED_PROBE_LIMIT {
+            return false;
+        }
+
+        // Latch BEFORE the bookkeeping so no retry path can re-fire it.
+        self.probe_pivot_done
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let preview = truncate_chars(&command, TOOL_CONFIRM_ARGS_PREVIEW_CHARS);
+        let directive = format!(
+            "<selfware_system_directive>\n\
+             REPEATED PROBE PIVOT: the same command (digits/whitespace normalized) has now run \
+             {count} times with no successful verification in between (latest: `{preview}`). \
+             The approach is exhausted — rerunning it will not produce a different result. \
+             Change strategy NOW: (a) gather the missing information with a materially \
+             different command or tool, or (b) stop probing and write the final artifact now \
+             from what you already know, then run the real verification command once.\n\
+             </selfware_system_directive>"
+        );
+        self.push_tool_result_message(
+            use_native_fc,
+            call_id,
+            tool_name,
+            args_str,
+            false,
+            &directive,
+        )
+        .await;
+        self.log_tool_call(tool_name, args_str, &directive, false, start_time, false);
+        self.consecutive_suppressions += 1;
+        true
     }
 
     pub(super) async fn maybe_block_redundant_reread(
@@ -418,17 +788,19 @@ impl Agent {
             "Blocked redundant reread of `{}` on the {}th unchanged read",
             path, read_count
         ));
-        self.pending_failure_hint = Some(err.clone());
         self.push_tool_result_message(use_native_fc, call_id, name, args_str, false, &err)
             .await;
         self.log_tool_call(name, args_str, &err, false, start_time, false);
-        self.remember_failed_tool(name, &err);
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
         self.consecutive_suppressions += 1;
 
         // After suppressed rereads, trigger phase-2 synthesis early.
         // The model has the data in context — force it to produce code.
-        if read_count >= 3 && self.pending_synthesis.is_none() {
+        // Read-only task: never — the synthesis consumer in task_runner
+        // auto-writes any code it extracts to disk, which is exactly the
+        // forced mutation a "do NOT edit" task must be spared.
+        if read_count >= 3 && self.pending_synthesis.is_none() && !self.current_task_is_read_only()
+        {
             info!(
                 "Triggering phase-2 synthesis after {} suppressed rereads",
                 read_count
@@ -511,16 +883,14 @@ impl Agent {
                 if unchanged_count > 0 {
                     self.push_task_state_note(format!(
                         "Reread unchanged file `{}` ({}x consecutive unchanged reads)",
-                        path_str,
-                        unchanged_count + 1
+                        path_str, unchanged_count
                     ));
                 }
 
                 if unchanged_count >= 1 {
                     self.pending_failure_hint = Some(format!(
                         "You have reread unchanged file `{}` {} times in this task. Unless something outside the agent changed it, use the content already in context or make the edit now instead of reading it again.",
-                        path_str,
-                        unchanged_count + 1
+                        path_str, unchanged_count
                     ));
                 }
             }
@@ -562,13 +932,16 @@ impl Agent {
         };
 
         // For file_read failures, check if the file exists now — it may have
-        // been created by file_write since the last failed attempt.
+        // been created by file_write since the last failed attempt. Only a
+        // confirmed-absent file stays suppressed: a stat error (permissions,
+        // transient I/O) must not masquerade as "does not exist".
         if tool_name == "file_read" {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    if tokio::fs::try_exists(path).await.unwrap_or(false) {
+                    let exists = tokio::fs::try_exists(path).await;
+                    if !file_read_retry_stays_suppressed(&exists) {
                         info!(
-                            "file_read('{}') was previously suppressed but file now exists — allowing retry",
+                            "file_read('{}') was previously suppressed but file is now readable — allowing retry",
                             path
                         );
                         self.recent_failed_tool_attempts
@@ -618,7 +991,7 @@ impl Agent {
                         self.consecutive_suppressions += 1;
                         return true;
                     }
-                    self.escalated_edit_args_hashes.insert(args_hash);
+                    self.record_escalated_edit(args_hash);
 
                     let edit_fail_count = self
                         .recent_failed_tool_attempts
@@ -633,20 +1006,36 @@ impl Agent {
                         path, edit_fail_count
                     );
 
-                    // Force-read the file so the model sees current content
-                    let read_result = if tokio::fs::try_exists(path).await.unwrap_or(false) {
-                        match tokio::fs::read_to_string(path).await {
-                            Ok(content) => {
-                                let lines = content.lines().count();
+                    // Force-read the file so the model sees current content.
+                    // Read directly (no try_exists pre-check) so a stat error
+                    // can't masquerade as a missing file; cap the injection at
+                    // ESCALATION_CONTENT_CHAR_BUDGET so large targets can't
+                    // bloat the message history without bound.
+                    let read_result = match tokio::fs::read_to_string(path).await {
+                        Ok(content) => {
+                            let lines = content.lines().count();
+                            if content.chars().count() > ESCALATION_CONTENT_CHAR_BUDGET {
+                                let kept = truncate_chars(&content, ESCALATION_CONTENT_CHAR_BUDGET);
+                                let kept_lines = kept.lines().count();
+                                format!(
+                                    "Current content of {} ({} lines, truncated to the first {} — over the {}-char escalation budget):\n{}",
+                                    path,
+                                    lines,
+                                    kept_lines,
+                                    ESCALATION_CONTENT_CHAR_BUDGET,
+                                    kept
+                                )
+                            } else {
                                 format!(
                                     "Current content of {} ({} lines):\n{}",
                                     path, lines, content
                                 )
                             }
-                            Err(e) => format!("Could not read {}: {}", path, e),
                         }
-                    } else {
-                        format!("File {} does not exist. Use file_write to create it.", path)
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            format!("File {} does not exist. Use file_write to create it.", path)
+                        }
+                        Err(e) => format!("Could not read {}: {}", path, e),
                     };
 
                     let escalation = format!(
@@ -688,11 +1077,18 @@ impl Agent {
             "Suppressing repeated failed tool call for '{}' after prior {} failure",
             tool_name, failure.failure_kind
         );
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "retry_suppressed".to_string(),
+            detail: format!(
+                "`{}` — {}",
+                tool_name,
+                failure_category(failure.failure_kind)
+            ),
+        });
         cli_println!("{} {}", "✗".bright_red(), err);
         self.push_tool_result_message(use_native_fc, call_id, tool_name, args_str, false, &err)
             .await;
         self.log_tool_call(tool_name, args_str, &err, false, start_time, false);
-        self.remember_failed_tool(tool_name, &err);
         // Surface this as a permanently-blocked tool call for FailureMode.
         self.note_permanently_blocked(tool_name);
         let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -755,6 +1151,25 @@ impl Agent {
         let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls).await? else {
             return Ok(());
         };
+
+        // Record this turn's progress signal for the adaptive iteration
+        // budget: every attempted call's signature, credited with a success
+        // when any result comes back non-error (see push_tool_result_message).
+        {
+            const TURN_PROGRESS_WINDOW: usize = 10;
+            let signatures = tool_calls
+                .iter()
+                .map(|(name, args_str, _)| (name.clone(), hash_tool_args(args_str)))
+                .collect();
+            self.recent_turn_progress
+                .push_back(super::loop_control::TurnProgress {
+                    had_success: false,
+                    signatures,
+                });
+            if self.recent_turn_progress.len() > TURN_PROGRESS_WINDOW {
+                self.recent_turn_progress.pop_front();
+            }
+        }
 
         // Phase 1: Partition into parallel-safe and sequential groups.
         // Read-only tools with no path conflicts go into the parallel batch.
@@ -949,6 +1364,36 @@ impl Agent {
                 continue;
             }
 
+            if self
+                .maybe_block_dependency_spiral(
+                    &name,
+                    &args_str,
+                    &call_id,
+                    use_native_fc,
+                    start_time,
+                )
+                .await
+            {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
+            if self
+                .maybe_block_repeated_probe(&name, &args_str, &call_id, use_native_fc, start_time)
+                .await
+            {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
             if let Some(error_msg) = self.current_task_tool_policy_violation(&name) {
                 self.reject_tool_call_before_execution(
                     &name,
@@ -969,7 +1414,7 @@ impl Agent {
             }
 
             if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                let error_msg = format!("Safety check failed: {}", e);
+                let error_msg = self.model_facing_safety_error(&e);
                 crate::output::safety_blocked(&error_msg);
                 if let Some(ref logger) = self.audit_logger {
                     logger.log_safety_block(&name, &error_msg);
@@ -984,7 +1429,6 @@ impl Agent {
                 )
                 .await;
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
-                self.remember_failed_tool(&name, &error_msg);
                 self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
                 continue;
             }
@@ -1006,7 +1450,6 @@ impl Agent {
                     )
                     .await;
                     self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
-                    self.remember_failed_tool(&name, &error_msg);
                     self.record_failed_tool_attempt(&name, &args_str, "validation", &error_msg);
                     self.emit_event(crate::agent::AgentEvent::ToolCompleted {
                         name: name.clone(),
@@ -1102,6 +1545,18 @@ impl Agent {
 
         // Execute all validated tools concurrently using the tool registry
         let mut results: Vec<(usize, (bool, String, String))> = Vec::with_capacity(validated.len());
+
+        // Implicit activation for deferred tools called by exact name
+        // (done before the concurrent block — activation mutates the
+        // registry, which the futures only borrow). Consumed when the
+        // model-facing results are pushed below.
+        let mut activations: std::collections::HashMap<usize, serde_json::Value> =
+            std::collections::HashMap::new();
+        for (idx, vt) in validated.iter().enumerate() {
+            if let Some(schema) = self.implicit_activation_schema(&vt.name) {
+                activations.insert(idx, schema);
+            }
+        }
 
         {
             use futures::stream::{FuturesUnordered, StreamExt};
@@ -1236,6 +1691,17 @@ impl Agent {
                 self.record_failed_tool_attempt(&vt.name, &vt.args_str, "execution", &result_str);
             }
 
+            // Dependency-firewall accounting (loop 9).
+            if matches!(vt.name.as_str(), "shell_exec" | "pty_shell") {
+                if let Some(cmd) = vt.args.get("command").and_then(|c| c.as_str()) {
+                    self.note_shell_outcome(cmd, success);
+                }
+            }
+            // Best-snapshot capture on green verification.
+            self.note_green_verification(&vt.name, &vt.args_str, success);
+            // Stagnation accounting (loop 13d).
+            self.note_workspace_state(&vt.name, &vt.args_str, success)?;
+
             self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success)
                 .await;
 
@@ -1286,19 +1752,15 @@ impl Agent {
                 &vt.name,
                 &vt.args_str,
                 success,
-                &result_str,
+                &Self::activation_envelope(
+                    &vt.name,
+                    activations.get(&idx).cloned(),
+                    result_str.clone(),
+                ),
             )
             .await;
-            if !success {
-                self.remember_failed_tool(&vt.name, &result_str);
-            }
 
             self.reset_no_action_prompt_state();
-
-            if !success {
-                let recovery_hint = self.build_error_recovery_hint(&vt.name, &result_str);
-                self.messages.push(Message::user(recovery_hint));
-            }
 
             // Fire PostToolUse hooks
             let post_ctx = HookContext::post_tool(&vt.name, &vt.args_str, success, &result_str);
@@ -1373,6 +1835,30 @@ impl Agent {
             return Ok(());
         }
 
+        if self
+            .maybe_block_dependency_spiral(&name, &args_str, &call_id, use_native_fc, start_time)
+            .await
+        {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if self
+            .maybe_block_repeated_probe(&name, &args_str, &call_id, use_native_fc, start_time)
+            .await
+        {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
         if let Some(error_msg) = self.current_task_tool_policy_violation(&name) {
             self.reject_tool_call_before_execution(
                 &name,
@@ -1393,7 +1879,7 @@ impl Agent {
         }
 
         if let Err(e) = self.safety.check_tool_call(&fake_call) {
-            let error_msg = format!("Safety check failed: {}", e);
+            let error_msg = self.model_facing_safety_error(&e);
             let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
             spinner.stop_error(&error_msg);
             crate::output::safety_blocked(&error_msg);
@@ -1410,7 +1896,6 @@ impl Agent {
             )
             .await;
             self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
-            self.remember_failed_tool(&name, &error_msg);
             let duration_ms = start_time.elapsed().as_millis() as u64;
             self.self_improvement.record_tool(
                 &name,
@@ -1565,6 +2050,19 @@ impl Agent {
             self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
         }
 
+        // Dependency-firewall accounting (loop 9).
+        if matches!(name.as_str(), "shell_exec" | "pty_shell") {
+            if let Some(cmd) = args.get("command").and_then(|c| c.as_str()) {
+                self.note_shell_outcome(cmd, success);
+            }
+        }
+
+        // Best-snapshot capture on green verification.
+        self.note_green_verification(&name, &args_str, success);
+
+        // Stagnation accounting (loop 13d).
+        self.note_workspace_state(&name, &args_str, success)?;
+
         self.track_task_state_after_tool(&name, &args, &result, success)
             .await;
 
@@ -1603,19 +2101,10 @@ impl Agent {
 
         self.push_tool_result_message(use_native_fc, &call_id, &name, &args_str, success, &result)
             .await;
-        if !success {
-            self.remember_failed_tool(&name, &result);
-        }
 
         // Reset no-action counter - the model attempted to use a tool
         // (even if it failed, this counts as taking action)
         self.reset_no_action_prompt_state();
-
-        // Add post-error guidance for failed tools to help model recover
-        if !success {
-            let recovery_hint = self.build_error_recovery_hint(&name, &result);
-            self.messages.push(Message::user(recovery_hint));
-        }
 
         // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
         let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
@@ -1841,10 +2330,22 @@ impl Agent {
             "newly_activated": activated,
             "total_tools_available": total_tools,
             "activated_tools_count": activated_tools,
-            "note": if activated.is_empty() {
-                "These tools are available for use in this session."
+            "note": if found_tools.is_empty() {
+                let suggestions = self.tools.search_suggestions(query, 5);
+                if suggestions.is_empty() {
+                    format!(
+                        "No tools matched '{query}'. Try different keywords, or proceed with the tools you already have — do NOT repeat the same tool_search."
+                    )
+                } else {
+                    format!(
+                        "No tools matched '{query}'. Did you mean: {}? Or try different keywords.",
+                        suggestions.join(", ")
+                    )
+                }
+            } else if activated.is_empty() {
+                "These tools are available for use in this session.".to_string()
             } else {
-                "These tools are now available for use in this session."
+                "These tools are now available for use in this session.".to_string()
             },
         })
     }
@@ -2108,7 +2609,6 @@ impl Agent {
                     call_id,
                     use_native_fc,
                 );
-                self.remember_failed_tool(name, &err);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
                     name,
@@ -2158,7 +2658,6 @@ impl Agent {
                     call_id,
                     use_native_fc,
                 );
-                self.remember_failed_tool(name, &err);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
                     name,
@@ -2258,10 +2757,14 @@ impl Agent {
             let result = self.execute_context_tool_async(name, args).await;
             let elapsed = start_time.elapsed().as_millis() as u64;
             let result_str = serde_json::to_string(&result)?;
+            // Derive success from the payload: context tools report failures
+            // as {"error": ...} (e.g. CONTEXT_LOAD_SKELETON read failures),
+            // and those must not be logged as successes.
+            let ok = tool_result_value_indicates_success(&result);
             let summary =
-                crate::output::semantic_summary(name, args, Some(&result_str), true, elapsed);
-            self.log_tool_call(name, args_str, &result_str, true, start_time, true);
-            return Ok((true, result_str, summary));
+                crate::output::semantic_summary(name, args, Some(&result_str), ok, elapsed);
+            self.log_tool_call(name, args_str, &result_str, ok, start_time, true);
+            return Ok((ok, result_str, summary));
         }
 
         // Intercept tool_search — it activates deferred tools and returns their schemas
@@ -2275,6 +2778,10 @@ impl Agent {
             return Ok((true, result_str, summary));
         }
 
+        // Implicit activation (capstone): a deferred tool called by its
+        // exact registered name activates transparently; the schema rides
+        // the result envelope. Unknown names stay hard errors below.
+        let activation_schema = self.implicit_activation_schema(name);
         let Some(tool) = self.tools.get(name) else {
             let err = format!("Unknown tool: {}", name);
             self.log_tool_call(name, args_str, &err, false, start_time, false);
@@ -2320,6 +2827,14 @@ impl Agent {
         }
 
         // Snapshot file before edit/write for undo support + diff display.
+        // A NEW mutating edit supersedes the redo stack (standard undo-tree
+        // rule: redo only survives until the next change).
+        if matches!(
+            name,
+            "file_edit" | "file_write" | "file_delete" | "file_multi_edit" | "patch_apply"
+        ) {
+            self.redo_stack.clear();
+        }
         let pre_edit_content: Option<(String, String)> =
             if matches!(name, "file_edit" | "file_write" | "file_delete") {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
@@ -2557,6 +3072,7 @@ impl Agent {
                         ),
                     }.into());
                 }
+                let final_result = Self::activation_envelope(name, activation_schema, final_result);
                 Ok((tool_success, final_result, summary))
             }
             Ok(Err(e)) => {
@@ -2665,7 +3181,18 @@ impl Agent {
         // contain BEFORE it enters the model's conversation context — otherwise a
         // command that echoes a secret (or a mis-run `cat .env`) would leak
         // credentials into context and every downstream log/exfil path.
-        let result_to_store = crate::safety::redact::redact_secrets(&result_to_store).into_owned();
+        // Redact with the trust gate's content classification: first-party
+        // workspace Rust gets the conservative carve-out (generic keyword
+        // patterns off — they mangle ordinary code the model must read
+        // verbatim); key-format patterns still redact everywhere.
+        let redaction_context = if classification_for(args_str) == "rust_source" {
+            crate::safety::redact::RedactionContext::RustSource
+        } else {
+            crate::safety::redact::RedactionContext::Generic
+        };
+        let result_to_store =
+            crate::safety::redact::redact_secrets_with_context(&result_to_store, redaction_context)
+                .into_owned();
 
         // Trust gate: scan untrusted tool output for prompt-injection
         // patterns and neutralize high-severity findings in place (the loop
@@ -2688,6 +3215,25 @@ impl Agent {
         }
         let result_to_store = gate.content;
 
+        // Unified error feedback (4-model study: tool errors reached the
+        // model through THREE overlapping channels — the tool result, a
+        // separate ERROR RECOVERY user message, and a next-request
+        // pending-failure system hint — with redundant/conflicting text
+        // that also diverged between sequential and parallel dispatch).
+        // The tool result is now the ONE channel: sequential, parallel,
+        // rejected, and suppressed failures all land in this function, so
+        // every failed call yields exactly one policy-enveloped message.
+        let result_to_store = if success {
+            // Credit the current turn: a non-error result is the progress
+            // signal the adaptive iteration budget looks for.
+            if let Some(turn) = self.recent_turn_progress.back_mut() {
+                turn.had_success = true;
+            }
+            result_to_store
+        } else {
+            self.tool_error_feedback(tool_name, &result_to_store)
+        };
+
         if use_native_fc {
             let result_json = if success {
                 result_to_store
@@ -2706,6 +3252,107 @@ impl Agent {
             };
             self.messages.push(Message::user(formatted));
         }
+    }
+
+    /// Implicit activation (capstone convergence — all three completers
+    /// asked for this): a deferred tool called by its exact registered name
+    /// activates transparently instead of staying invisible behind
+    /// tool_search. Returns the tool's schema for the result envelope when
+    /// the call triggered an activation, `None` when the tool was already
+    /// active (or doesn't exist — that stays a hard error).
+    fn implicit_activation_schema(&mut self, name: &str) -> Option<serde_json::Value> {
+        if self.tools.is_activated(name) {
+            return None;
+        }
+        let schema = self.tools.get(name)?.schema();
+        self.tools.activate(name);
+        info!("deferred tool '{name}' implicitly activated on exact-name call");
+        Some(schema)
+    }
+
+    /// Wrap a tool result when its call implicitly activated a deferred tool:
+    /// the model sees the activation, the schema to call with next time, and
+    /// the original result — one message (glm's ask). Internal accounting
+    /// always sees the RAW result; only the model-facing message is wrapped.
+    fn activation_envelope(
+        name: &str,
+        schema: Option<serde_json::Value>,
+        result: String,
+    ) -> String {
+        let Some(schema) = schema else {
+            return result;
+        };
+        let result_value: serde_json::Value =
+            serde_json::from_str(&result).unwrap_or_else(|_| serde_json::json!(result));
+        serde_json::json!({
+        "auto_activated": name,
+        "note": "This deferred tool is now active for the rest of the session — future calls can use it directly, no tool_search needed.",
+        "schema": schema,
+        "result": result_value,
+    })
+    .to_string()
+    }
+
+    /// Render a safety-check failure for the model. An unregistered-tool    /// call gets an actionable rewrite (gemini capstone: "Register it in
+    /// checker.rs" is harness-developer language with no valid names
+    /// offered — the model retried identically into the suppression loop).
+    fn model_facing_safety_error(&self, error: &crate::errors::SelfwareError) -> String {
+        if let crate::errors::SelfwareError::Safety(
+            crate::errors::SafetyError::UnregisteredTool { tool },
+        ) = error
+        {
+            let mut names: Vec<&str> = self
+                .tools
+                .list_activated()
+                .iter()
+                .map(|tool| tool.name())
+                .collect();
+            names.sort_unstable();
+            let preview: Vec<&str> = names.iter().take(20).copied().collect();
+            let more = names.len().saturating_sub(preview.len());
+            let suffix = if more > 0 {
+                format!(", +{more} more")
+            } else {
+                String::new()
+            };
+            return format!(
+                "Safety check failed: tool '{tool}' does not exist. Available tools: {}{suffix}. \
+                 Call one of those by exact name, or use tool_search with a keyword to discover more tools.",
+                preview.join(", ")
+            );
+        }
+        format!("Safety check failed: {error}")
+    }
+
+    /// The single error-feedback channel for a failed tool call: one
+    /// `[POLICY kind=tool_error ...]` message carrying the error text, its
+    /// classified kind, whether a bare retry could work, and ONE
+    /// consolidated `Recovery:` section (kind hint first, then the
+    /// tool-specific guidance — a single header, never two). Errors that
+    /// already carry a policy envelope (progress guard, retry suppression)
+    /// pass through untouched so markers are never doubled.
+    fn tool_error_feedback(&self, tool_name: &str, error: &str) -> String {
+        if error.trim_start().starts_with("[POLICY ") {
+            return error.to_string();
+        }
+        let kind = ToolErrorKind::classify(error);
+        let retryable = matches!(
+            kind,
+            ToolErrorKind::ResourceNotFound
+                | ToolErrorKind::Timeout
+                | ToolErrorKind::ExecutionError
+        );
+        let body = format!(
+            "{error}\nRecovery: {}\n{}",
+            kind.recovery_hint(),
+            self.build_error_recovery_hint(tool_name, error)
+        );
+        policy_envelope(
+            PolicyKind::ToolError,
+            retryable,
+            &kind.as_str().to_lowercase(),
+            &body,
+        )
     }
 
     pub(super) fn log_tool_call(

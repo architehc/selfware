@@ -1,0 +1,61 @@
+# Selfware configuration — hosted GLM 5.3 via OpenRouter (local GLM disabled
+# for now; restore by reverting endpoint/model and launching the local server).
+# Key: SELFWARE_API_KEY env (from ~/.openrouter_key) or the keyring — never in this file.
+# GLM 5.3: 1,048,576 context / 131,072 max output. $1.4/M prompt, $4.4/M completion.
+
+endpoint = "https://openrouter.ai/api/v1"
+model = "z-ai/glm-5.3"
+# GLM 5.3 is a reasoning model and reasons generously on hosted speed —
+# 8192 was exhausted before any answer JSON (finish_reason=length on the
+# trust-gate security review). 16384 gives reasoning + the schema answer room.
+max_tokens = 16384
+# 262144 keeps Map + Lite tiers inside budget and leaves deep headroom for
+# reviews; Compact/Full/Extended still exceed it (they need >1M).
+context_length = 262144
+
+[extra_body]
+# GLM 5.3 on OpenRouter reasons without bound otherwise — measured: reasoning
+# consumed the whole 16384-token budget twice with zero answer tokens.
+# "low" keeps useful reasoning while leaving room for the answer.
+reasoning_effort = "low"
+
+# Qwen 3.8 27B via OpenRouter — swarm/sub-agent workhorse profile (verified
+# 2026-08-24: answers exactly, $0.0001/probe call, 1M context). Use from swarm
+# agents via .with_model("qwen38"). High-concurrency parallel calls go here.
+[models.qwen38]
+endpoint = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3.8-27b"
+max_tokens = 8192
+temperature = 0.0
+context_length = 1000000
+
+[safety]
+# Scope filesystem access to the project directory by default. Only widen this
+# (e.g. add "~/**") if you genuinely need it — a wide scope lets an autonomous
+# run read/modify files far outside your project.
+allowed_paths = ["/home/rig/harbor-agents/**", "/home/rig/selfware/benchmarks/**", "./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+# Keep the iteration cap modest. Raise deliberately for large tasks rather than
+# shipping a five-figure default.
+max_iterations = 100
+step_timeout_secs = 600
+# Use XML-based tool calling for SGLang
+native_function_calling = false
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+# Disabled 2026-08-01: recovered review tasks kept re-firing and dying at
+# step_timeout_secs=600 mid-generation, holding the assistant lock and
+# blocking all UI reviews. The soak loop drives reviews deterministically.
+auto_recovery = false
+# Bound automatic recovery so a wedged task cannot retry indefinitely.
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000

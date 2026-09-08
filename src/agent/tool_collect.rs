@@ -32,7 +32,7 @@ impl Agent {
             name: None,
         };
 
-        let mut extracted = extract_tool_calls(&msg, self.config.agent.native_function_calling);
+        let mut extracted = extract_tool_calls(&msg, self.effective_native_fc());
 
         // Validate native tool calls against the loaded schema for early
         // diagnostic.  Validation failures are logged but do not abort —

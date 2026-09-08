@@ -136,6 +136,14 @@ pub enum ApiError {
     #[error("Context overflow: {0}")]
     ContextOverflow(String),
 
+    /// The completion budget was consumed entirely by hidden reasoning:
+    /// `finish_reason=length` with an empty answer and a non-empty reasoning
+    /// trace. Measured with hosted GLM 5.3 (2026-08-23): unbounded reasoning
+    /// ate a 16k budget and returned zero answer content. Recovery: lower
+    /// reasoning effort or raise max_tokens.
+    #[error("completion budget exhausted by hidden reasoning ({reasoning_chars} reasoning chars, empty answer, finish_reason=length) — lower reasoning effort or raise max_tokens")]
+    ReasoningBudgetExhausted { reasoning_chars: usize },
+
     #[error("Invalid token usage from API: {0}")]
     InvalidUsage(String),
 }
@@ -218,6 +226,9 @@ pub enum SafetyError {
     )]
     PathSuspiciousMix { component: String },
 
+    #[error("Path contains encoding-evasion sequence: {reason}")]
+    PathInvalidEncoding { reason: String },
+
     #[error("Path not in allowed list: {path}")]
     PathNotAllowed { path: String },
 
@@ -285,6 +296,11 @@ pub enum SafetyError {
     ContainerSshMount { mount: String },
 
     #[error(
+        "Dangerous container volume mount blocked: {mount} (mounts host credential directory)"
+    )]
+    ContainerCredentialMount { mount: String },
+
+    #[error(
         "Dangerous container volume mount blocked: {mount} (mounts system directory {directory})"
     )]
     ContainerSystemMount { mount: String, directory: String },
@@ -304,6 +320,9 @@ pub enum SafetyError {
 
     #[error("Blocked request to private network address: {ip}")]
     BlockedPrivateNetwork { ip: String },
+
+    #[error("Blocked URL containing shell substitution (potential exfiltration channel)")]
+    BlockedUrlShellSubstitution,
 
     #[error("Suspicious browser eval blocked: potential data exfiltration")]
     BlockedBrowserEval,

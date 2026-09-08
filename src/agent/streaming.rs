@@ -19,6 +19,34 @@ const SUPPRESSED_TAGS: &[(&str, &str)] = &[
     ("<|channel>", "<channel|>"),
 ];
 
+/// Char budget for one streaming response on a mutation task (~8k tokens).
+/// Past it with no tool call in flight, the response is a runaway monologue:
+/// measured 2026-08-24 on TB 3.0 `cli-2ph-simplex`, where two such responses
+/// (~1,059 log lines in the first) consumed a 2500s task timeout without a
+/// single edit. Cutting the stream lets the no-action escalation fire on
+/// schedule instead of after a 20-minute stall.
+pub(crate) const MONOLOGUE_CHAR_BUDGET: usize = 32_000;
+
+/// The cutoff condition: over budget, no tool call in flight (native calls
+/// parsed, or XML tool markup in the content), and a mutation task. Read-only
+/// tasks and plain chat are exempt — long prose is the deliverable there.
+pub(crate) fn is_runaway_monologue(
+    streamed_chars: usize,
+    tool_call_in_flight: bool,
+    requires_mutation: bool,
+) -> bool {
+    requires_mutation && !tool_call_in_flight && streamed_chars > MONOLOGUE_CHAR_BUDGET
+}
+
+/// Marker appended to truncated content so the model sees in its own history
+/// that the monologue was cut, and what to do instead.
+fn monologue_cut_notice(chars: usize) -> String {
+    format!(
+        "\n\n[selfware: response truncated at {chars} chars — long analysis produced \
+         no tool call; respond with the next tool call only]"
+    )
+}
+
 /// Find the earliest opening tag from `SUPPRESSED_TAGS` in `buf`.
 /// Returns `(byte_offset, tag_index)` or `None`.
 fn find_earliest_open_tag(buf: &str) -> Option<(usize, usize)> {
@@ -223,6 +251,15 @@ impl Agent {
     /// finish_reason / token usage when set to `Some(_)` by the caller. This
     /// is how the per-turn debug capture in `execute_step_internal` learns
     /// what was actually sent over the wire and how the model ended its turn.
+    /// True when the current task requires code changes — the monologue
+    /// cutoff applies only then. Empty task context (plain interactive chat)
+    /// is never cut: long prose answers are legitimate deliverables there.
+    fn task_requires_mutation_now(&self) -> bool {
+        !self.current_task_context.is_empty()
+            && !self.current_task_is_read_only()
+            && super::tool_dispatch::task_requires_mutation(self.task_context_for_classification())
+    }
+
     pub(super) async fn chat_streaming(
         &self,
         messages: Vec<Message>,
@@ -290,6 +327,9 @@ impl Agent {
         let mut captured_completion_tokens: Option<u32> = None;
         let mut captured_total_tokens: Option<u32> = None;
         let mut captured_cost: Option<f64> = None;
+        // Whole-call timer: request_meta.elapsed_ms measures time-to-headers
+        // for streaming, so the speed sample below needs its own clock.
+        let stream_started = std::time::Instant::now();
 
         let mut rx = stream.into_channel().await;
         let mut content = String::new();
@@ -331,6 +371,18 @@ impl Agent {
             };
 
             let chunk = chunk_result?;
+
+            // Runaway-monologue cutoff: checked per chunk, before processing.
+            if is_runaway_monologue(
+                content.len() + reasoning.len(),
+                !tool_calls.is_empty() || content.contains("<tool"),
+                self.task_requires_mutation_now(),
+            ) {
+                let streamed = content.len() + reasoning.len();
+                warn!("runaway monologue truncated at {streamed} chars (no tool call in flight)");
+                content.push_str(&monologue_cut_notice(streamed));
+                break;
+            }
 
             // Rotate loading phrase every 3 seconds while spinner is active
             if tui_active {
@@ -591,6 +643,20 @@ impl Agent {
                 .unwrap_or_else(|| "stream_end".into()),
             completion_tokens: captured_completion_tokens.unwrap_or(0),
         });
+
+        // Feed the endpoint's measured effective speed into the client's
+        // adaptive timeout. Non-streaming calls already do this (client.rs);
+        // streaming calls were invisible to the tracker, so streaming-only
+        // endpoints kept the conservative 3 t/s presumption and a 2h per-call
+        // ceiling instead of a measured one.
+        let stream_elapsed_secs = stream_started.elapsed().as_secs_f64();
+        if stream_elapsed_secs > 0.0 && captured_completion_tokens.unwrap_or(0) > 0 {
+            self.client
+                .speed_tracker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(captured_completion_tokens.unwrap_or(0) as f64 / stream_elapsed_secs);
+        }
 
         if let Some(slot) = meta_out {
             *slot = crate::api::types::ChatMetadata {

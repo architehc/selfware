@@ -364,8 +364,11 @@ impl Agent {
         )
     }
 
-    /// Build a hint message to guide the model after a tool failure.
-    /// This helps the model recover by suggesting alternative approaches.
+    /// Build the tool-specific recovery guidance for a failed tool call.
+    /// Returns guidance text WITHOUT a header — the caller
+    /// (`tool_dispatch::tool_error_feedback`) renders it inside the single
+    /// `Recovery:` section of the unified error message, so a second header
+    /// here would double the recovery blocks the model sees.
     pub(super) fn build_error_recovery_hint(&self, tool_name: &str, error: &str) -> String {
         let error_lower = error.to_lowercase();
 
@@ -384,7 +387,7 @@ impl Agent {
                 &error[..error.len().min(200)]
             );
             return format!(
-                "ERROR RECOVERY: Endpoint/connection issue detected for '{}'. \
+                "Endpoint/connection issue detected for '{}'. \
                  The LLM backend may be temporarily unavailable or overloaded. \
                  This is NOT a code problem — it's an infrastructure issue. \
                  Continue working with tools that don't require the LLM endpoint \
@@ -405,7 +408,7 @@ impl Agent {
                 tool_name,
                 &error[..error.len().min(200)]
             );
-            return "ERROR RECOVERY: Rate limit or quota exceeded. \
+            return "Rate limit or quota exceeded. \
                  Wait a moment, then continue with smaller requests. \
                  Reduce the scope of your next action — read smaller files, \
                  make smaller edits, or use grep_search instead of reading entire files."
@@ -418,19 +421,20 @@ impl Agent {
             && tool_name.contains("test")
         {
             warn!("Possible regression detected in test output");
-            return "ERROR RECOVERY: Tests are failing after your change. This may be a regression. \
+            return "Tests are failing after your change. This may be a regression. \
                  Steps to fix:\
                  1. Read the test error output carefully\
                  2. Use git_diff to review your changes\
                  3. If your edit introduced the failure, use file_edit to fix it\
                  4. Run the tests again to verify\
-                 Do NOT add more tests — fix the source code that caused the regression.".to_string();
+                 Do NOT add more tests — fix the source code that caused the regression."
+                .to_string();
         }
 
         // File not found errors - suggest alternatives
         if error_lower.contains("file not found") || error_lower.contains("no such file") {
             return format!(
-                "ERROR RECOVERY: The tool '{}' failed because the file was not found. \
+                "The tool '{}' failed because the file was not found. \
 Try ONE of these alternatives:\
 1. Use directory_tree to explore the directory structure first\
 2. Use glob_find to find the correct file path\
@@ -444,7 +448,7 @@ Try ONE of these alternatives:\
         // Permission errors
         if error_lower.contains("permission denied") || error_lower.contains("access denied") {
             return format!(
-                "ERROR RECOVERY: The tool '{}' failed due to permission issues. \
+                "The tool '{}' failed due to permission issues. \
 Try ONE of these alternatives:\
 1. Use glob_find or grep_search instead of reading protected files\
 2. Check available files with directory_tree\
@@ -457,7 +461,7 @@ Try ONE of these alternatives:\
         // Path traversal / safety errors
         if error_lower.contains("path traversal") || error_lower.contains("safety check") {
             return format!(
-                "ERROR RECOVERY: The tool '{}' failed because the path is outside allowed directories. \
+                "The tool '{}' failed because the path is outside allowed directories. \
 Try ONE of these alternatives:\
 1. Use a relative path within the project directory\
 2. Use directory_tree to see available files\
@@ -473,7 +477,7 @@ Try ONE of these alternatives:\
             || error_lower.contains("parameter")
         {
             return format!(
-                "ERROR RECOVERY: The tool '{}' failed due to invalid arguments. \
+                "The tool '{}' failed due to invalid arguments. \
 Try ONE of these alternatives:\
 1. Use a different tool that doesn't require complex arguments\
 2. Check the tool schema and try with simpler, valid arguments\
@@ -485,7 +489,7 @@ Try ONE of these alternatives:\
 
         // Generic error recovery hint
         format!(
-            "ERROR RECOVERY: The tool '{}' failed. \
+            "The tool '{}' failed. \
 You MUST try a DIFFERENT tool or approach - do not retry the same tool with the same arguments. \
 Try ONE of these strategies:\
 1. Use a different tool to achieve the same goal\

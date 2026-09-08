@@ -134,7 +134,7 @@ impl Tool for ToolSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search query to find tools. Can be a tool name (e.g., 'git', 'cargo') or description keyword (e.g., 'container', 'browser')."
+                    "description": "Search query to find tools. Can be a tool name (e.g., 'git', 'cargo') or description keyword (e.g., 'container', 'browser'). Category keywords: git, file, cargo, container, browser, process, package, vision, knowledge, lsp, http, code_intelligence, computer_control, shell, search."
                 },
                 "limit": {
                     "type": "integer",
@@ -205,6 +205,24 @@ impl Tool for ToolSearchTool {
     }
 }
 
+/// Classic Levenshtein distance over chars — tool names are short, so
+/// O(n·m) is fine. Shared by the zero-match suggestion path.
+pub(crate) fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut current = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            current[j + 1] = (previous[j] + usize::from(ca != cb))
+                .min(previous[j + 1] + 1)
+                .min(current[j] + 1);
+        }
+        previous = current;
+    }
+    previous[b.len()]
+}
+
 /// Helper function to categorize tools based on their name prefix.
 pub fn categorize_tool(name: &str) -> &'static str {
     if name.starts_with("git_") {
@@ -229,7 +247,16 @@ pub fn categorize_tool(name: &str) -> &'static str {
         "lsp"
     } else if name.starts_with("http_") {
         "http"
-    } else if name.starts_with("code_") || name.starts_with("context_") {
+    } else if name.starts_with("code_")
+        || name.starts_with("context_")
+        || name.starts_with("graph_")
+        || name == "hotspots"
+        || name == "impact"
+        || name == "neighbors"
+        || name == "test_map"
+        || name == "cycles"
+        || name == "dups"
+    {
         "code_intelligence"
     } else if name.starts_with("computer_") {
         "computer_control"

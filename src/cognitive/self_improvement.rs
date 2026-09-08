@@ -19,6 +19,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Global limit for record vectors to prevent unbounded memory growth in long-running sessions.
 const MAX_ENTRIES: usize = 10_000;
+/// Per-tool cap on tracked error patterns; on overflow only the most-seen
+/// half is kept, so long-running sessions can't grow the map without bound.
+const MAX_COMMON_ERRORS_PER_TOOL: usize = 256;
+/// Bayesian prior weight for a tool's first observation in a context: the
+/// first score is shrunk toward a neutral 0.5 so one lucky success cannot
+/// outrank a long-proven EMA track record.
+const FIRST_OBSERVATION_PRIOR_WEIGHT: f32 = 3.0;
 
 /// Outcome of a task or action
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -114,8 +121,14 @@ pub struct PromptPattern {
     pub avg_quality: f32,
     /// Usage count
     pub usage_count: usize,
-    /// Success rate
+    /// Observed success rate (`successful_uses / usage_count`) — 0.0 when
+    /// nothing has been observed. Never set from predicted scores.
     pub success_rate: f32,
+    /// Exact count of positive outcomes. Tracked as a counter (not derived
+    /// from success_rate * usage_count) so no rounding drift accumulates.
+    /// Defaults to 0 for legacy snapshots, which re-derive from zero.
+    #[serde(default)]
+    pub successful_uses: usize,
 }
 
 impl PromptPattern {
@@ -127,6 +140,7 @@ impl PromptPattern {
             avg_quality: 0.0,
             usage_count: 0,
             success_rate: 0.0,
+            successful_uses: 0,
         }
     }
 
@@ -136,18 +150,10 @@ impl PromptPattern {
         self.usage_count += 1;
         self.avg_quality = (old_total + quality) / self.usage_count as f32;
 
-        let previous_count = self.usage_count.saturating_sub(1);
-        let old_success = if self.success_rate.is_finite() {
-            (self.success_rate.clamp(0.0, 1.0) * previous_count as f32).round() as usize
-        } else {
-            0
-        };
-        let new_success = if outcome.is_positive() {
-            old_success + 1
-        } else {
-            old_success
-        };
-        self.success_rate = new_success as f32 / self.usage_count as f32;
+        if outcome.is_positive() {
+            self.successful_uses += 1;
+        }
+        self.success_rate = self.successful_uses as f32 / self.usage_count as f32;
     }
 }
 
@@ -290,10 +296,13 @@ impl PromptOptimizer {
         for pattern in best_patterns.iter().take(2) {
             suggestions.push(PromptSuggestion {
                 suggestion_type: SuggestionType::UsePattern,
+                // The rate is the pattern's GLOBAL record across task types —
+                // say so, and name the observation count it rests on.
                 description: format!(
-                    "Pattern '{}' has {:.0}% success rate for this task type",
+                    "Pattern '{}' succeeded {:.0}% across {} recorded uses",
                     pattern.id,
-                    pattern.success_rate * 100.0
+                    pattern.success_rate * 100.0,
+                    pattern.usage_count
                 ),
                 example: Some(pattern.template.clone()),
             });
@@ -302,7 +311,10 @@ impl PromptOptimizer {
         suggestions
     }
 
-    /// Run an A/B tournament with mutated variants and return the winner.
+    /// Rank mutated prompt variants by structural priors plus recorded history
+    /// and return the top candidate. NOTE: nothing is executed — the scores
+    /// are priors, not observations. This is deliberately NOT called an A/B
+    /// test: a real A/B tournament needs executed outcomes.
     pub fn evolve_prompt(
         &mut self,
         task_type: &str,
@@ -332,13 +344,14 @@ impl PromptOptimizer {
             predicted_quality: self.estimate_prompt_quality(task_type, baseline_prompt),
         });
 
-        // Persist the winner as a learned pattern so future tournaments have memory.
+        // Register the winner as an UNVERIFIED candidate — zero usage, zero
+        // observed quality/success. Nothing was executed, so no evidence may
+        // be fabricated: the candidate only becomes recommendable after real
+        // outcomes accumulate via PromptPattern::update (best_patterns_for
+        // requires usage_count >= 5).
         let pattern_id = format!("evo-{}-{}", task_type, winner.variant_id);
         let mut pattern = PromptPattern::new(&pattern_id, &winner.prompt);
         pattern.effective_for.push(task_type.to_string());
-        pattern.usage_count = 1;
-        pattern.avg_quality = winner.predicted_quality;
-        pattern.success_rate = winner.predicted_quality;
         self.register_pattern(pattern);
 
         PromptTournamentResult {
@@ -642,10 +655,16 @@ impl ToolSelectionLearner {
             }
         } else {
             stats.failure_count += 1;
-            // Track error patterns
+            // Track error patterns (bounded: on overflow keep the most-seen).
             if let Some(error) = &record.error {
                 let error_key = Self::normalize_error(error);
                 *stats.common_errors.entry(error_key).or_insert(0) += 1;
+                if stats.common_errors.len() > MAX_COMMON_ERRORS_PER_TOOL {
+                    let mut entries: Vec<_> = stats.common_errors.drain().collect();
+                    entries.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                    entries.truncate(MAX_COMMON_ERRORS_PER_TOOL / 2);
+                    stats.common_errors = entries.into_iter().collect();
+                }
             }
         }
 
@@ -656,7 +675,9 @@ impl ToolSelectionLearner {
             // Update existing score with exponential moving average
             *score = 0.8 * *score + 0.2 * record.outcome.score();
         } else {
-            tool_scores.push((record.tool.clone(), record.outcome.score()));
+            let shrunk = (0.5 * FIRST_OBSERVATION_PRIOR_WEIGHT + record.outcome.score())
+                / (FIRST_OBSERVATION_PRIOR_WEIGHT + 1.0);
+            tool_scores.push((record.tool.clone(), shrunk));
         }
 
         // Trim context_tools if it grows too large

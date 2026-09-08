@@ -36,6 +36,7 @@ pub mod file;
 pub mod fim;
 pub mod git;
 pub mod git_worktree;
+pub mod graph;
 pub mod grep_search;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
@@ -348,7 +349,9 @@ pub struct ToolRegistry {
 }
 
 /// List of critical tools that are always available.
-/// These are the minimal tools needed for basic operations.
+/// These cover basic file/shell/search operations plus the routine
+/// development tools (cargo check/test, git status/diff, symbol search)
+/// that must not be deferred behind `tool_search`.
 pub const CRITICAL_TOOLS: &[&str] = &[
     // File operations - essential for reading/writing files
     "file_read",
@@ -362,6 +365,12 @@ pub const CRITICAL_TOOLS: &[&str] = &[
     // Search operations - essential for finding code
     "grep_search",
     "glob_find",
+    "symbol_search",
+    // Routine development tools - always on, not deferred behind tool_search
+    "cargo_check",
+    "cargo_test",
+    "git_status",
+    "git_diff",
     // Tool search - essential for discovering deferred tools
     "tool_search",
 ];
@@ -415,12 +424,24 @@ impl ToolRegistry {
         // Critical: Search operations
         registry.register_critical(GrepSearch);
         registry.register_critical(GlobFind);
-        // SymbolSearch is deferred - less commonly used
+        registry.register_critical(SymbolSearch);
+
+        // Critical: Routine git operations (always on; the rest of the git
+        // toolset stays deferred behind tool_search)
+        if let Some(cfg) = safety_config {
+            registry.register_critical(GitStatus::with_safety_config(cfg.clone()));
+            registry.register_critical(GitDiff::with_safety_config(cfg.clone()));
+        } else {
+            registry.register_critical(GitStatus::new());
+            registry.register_critical(GitDiff::new());
+        }
+
+        // Critical: Routine cargo verification (cargo_clippy/cargo_fmt stay deferred)
+        registry.register_critical(CargoCheck);
+        registry.register_critical(CargoTest);
 
         // Deferred: Git operations (can be discovered via tool_search)
         if let Some(cfg) = safety_config {
-            registry.register_deferred(GitStatus::with_safety_config(cfg.clone()));
-            registry.register_deferred(GitDiff::with_safety_config(cfg.clone()));
             registry.register_deferred(GitCommit::with_safety_config(cfg.clone()));
             registry.register_deferred(GitPush::with_safety_config(cfg.clone()));
             registry.register_deferred(GitCheckpoint::with_safety_config(cfg.clone()));
@@ -428,27 +449,20 @@ impl ToolRegistry {
             registry.register_deferred(ExitWorktreeTool::with_safety_config(cfg.clone()));
             registry.register_deferred(ListWorktreesTool::with_safety_config(cfg.clone()));
         } else {
-            registry.register_deferred(GitStatus::new());
             registry.register_deferred(EnterWorktreeTool::new());
             registry.register_deferred(ExitWorktreeTool::new());
             registry.register_deferred(ListWorktreesTool::new());
-            registry.register_deferred(GitDiff::new());
             registry.register_deferred(GitCommit::new());
             registry.register_deferred(GitPush::new());
             registry.register_deferred(GitCheckpoint::new());
         }
 
         // Deferred: Cargo/Build operations
-        registry.register_deferred(CargoTest);
-        registry.register_deferred(CargoCheck);
         registry.register_deferred(CargoClippy);
         registry.register_deferred(CargoFmt);
 
         // Deferred: System operations
         registry.register_deferred(PtyShellTool);
-
-        // Deferred: Search operations
-        registry.register_deferred(SymbolSearch);
 
         // Deferred: HTTP/Web operations
         registry.register_deferred(HttpRequest);
@@ -530,7 +544,7 @@ impl ToolRegistry {
         registry.register_deferred(lsp_hover);
 
         let (lsp_diag, lsp_ws, lsp_impl) =
-            lsp_tools::create_extra_lsp_tools(project_root, safety_config.cloned());
+            lsp_tools::create_extra_lsp_tools(project_root.clone(), safety_config.cloned());
         registry.register_deferred(lsp_diag);
         registry.register_deferred(lsp_ws);
         registry.register_deferred(lsp_impl);
@@ -548,6 +562,17 @@ impl ToolRegistry {
         registry.register_deferred(codemap::CodeMapTool);
         registry.register_deferred(codemap::ContextBudgetTool);
         registry.register_deferred(codemap::ContextActionTool);
+
+        // Deferred: Evolve graph query tools (read-only views over the cached
+        // graph built by `selfware self-evolve`)
+        registry.register_deferred(graph::GraphSummaryTool::new(project_root.clone()));
+        registry.register_deferred(graph::HotspotsTool::new(project_root.clone()));
+        registry.register_deferred(graph::ContextPackTool::new(project_root.clone()));
+        registry.register_deferred(graph::ImpactTool::new(project_root.clone()));
+        registry.register_deferred(graph::NeighborsTool::new(project_root.clone()));
+        registry.register_deferred(graph::TestMapTool::new(project_root.clone()));
+        registry.register_deferred(graph::CyclesTool::new(project_root.clone()));
+        registry.register_deferred(graph::DupsTool::new(project_root));
 
         // Deferred: Patch apply tool
         registry.register_deferred(PatchApply);
@@ -740,22 +765,73 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Compact manifest of the deferred tools, for the system prompt: one
+    /// line per tool (name — first line of its description), measured to
+    /// `budget` tokens via `estimate_content_tokens` (AGENTS.md rule 4).
+    /// Degrades honestly: full one-liners first, names-only when those
+    /// don't fit, then a `+N more` tail. `None` when nothing is deferred.
+    pub fn deferred_manifest(&self, budget: usize) -> Option<String> {
+        let mut deferred: Vec<(&str, &str)> = self
+            .list_deferred()
+            .into_iter()
+            .map(|tool| (tool.name(), tool.description()))
+            .collect();
+        if deferred.is_empty() {
+            return None;
+        }
+        deferred.sort_by(|left, right| left.0.cmp(right.0));
+        let total = deferred.len();
+        let header = format!(
+            "## Deferred tools ({total}) — call any by exact name and it activates automatically (no tool_search needed)"
+        );
+        let one_liner = |description: &str| {
+            let first = description.lines().next().unwrap_or("").trim();
+            let mut line: String = first.chars().take(100).collect();
+            if first.chars().count() > 100 {
+                line.push('…');
+            }
+            line
+        };
+        let render = |names_only: bool, take: usize| {
+            let mut out = header.clone();
+            for (name, description) in deferred.iter().take(take) {
+                if names_only {
+                    out.push_str(&format!("\n- {name}"));
+                } else {
+                    out.push_str(&format!("\n- {name} — {}", one_liner(description)));
+                }
+            }
+            if take < total {
+                out.push_str(&format!("\n- … +{} more", total - take));
+            }
+            out
+        };
+        let full = render(false, total);
+        if crate::token_count::estimate_content_tokens(&full) <= budget {
+            return Some(full);
+        }
+        let names = render(true, total);
+        if crate::token_count::estimate_content_tokens(&names) <= budget {
+            return Some(names);
+        }
+        // Greedy names-only prefix that fits, with the remainder counted.
+        let mut take = total;
+        while take > 0 {
+            let candidate = render(true, take);
+            if crate::token_count::estimate_content_tokens(&candidate) <= budget {
+                return Some(candidate);
+            }
+            take -= 1;
+        }
+        Some(header)
+    }
+
     /// Search for tools by name or description.
     /// Returns up to `limit` matching tools.
     pub fn search(&self, query: &str, limit: usize) -> Vec<tool_search::ToolSearchResult> {
-        let query_lower = query.to_lowercase();
-        self.all_tools
+        let all: Vec<tool_search::ToolSearchResult> = self
+            .all_tools
             .values()
-            .filter(|info| {
-                let name_match = info.tool.name().to_lowercase().contains(&query_lower);
-                let desc_match = info
-                    .tool
-                    .description()
-                    .to_lowercase()
-                    .contains(&query_lower);
-                name_match || desc_match
-            })
-            .take(limit)
             .map(|info| tool_search::ToolSearchResult {
                 name: info.tool.name().to_string(),
                 description: info.tool.description().to_string(),
@@ -763,7 +839,55 @@ impl ToolRegistry {
                 is_critical: info.is_critical,
                 category: info.category.clone(),
             })
-            .collect()
+            .collect();
+        // Delegate to the tokenizing matcher: underscore-to-space
+        // normalization ("cargo check" finds cargo_check), ALL-tokens
+        // preferred with ANY-tokens fallback (qwen capstone).
+        tool_search::ToolSearchable::search(&all, query, limit)
+    }
+
+    /// Up to `k` closest tool names by edit distance, for the zero-match
+    /// "did you mean" path (a typo'd name should point somewhere useful,
+    /// not dead-end). Substring hits rank before raw distance.
+    pub fn search_suggestions(&self, query: &str, k: usize) -> Vec<String> {
+        let tokens: Vec<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() >= 2)
+            .map(String::from)
+            .collect();
+        if tokens.is_empty() {
+            return Vec::new();
+        }
+        let mut scored: Vec<(String, usize)> = self
+            .all_tools
+            .keys()
+            .map(|name| {
+                // Distance against the full name AND each `_` segment, so a
+                // long name isn't penalized for its prefix ("chek" →
+                // "cargo_check" via the "check" segment, distance 1).
+                let best = tokens
+                    .iter()
+                    .map(|t| {
+                        let full = tool_search::edit_distance(t, name);
+                        name.split('_')
+                            .map(|segment| tool_search::edit_distance(t, segment))
+                            .min()
+                            .unwrap_or(usize::MAX)
+                            .min(full)
+                    })
+                    .min()
+                    .unwrap_or(usize::MAX);
+                (name.clone(), best)
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.contains(tokens[0].as_str())
+                .cmp(&a.0.contains(tokens[0].as_str()))
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        scored.into_iter().take(k).map(|(name, _)| name).collect()
     }
 
     /// Get the count of all registered tools.

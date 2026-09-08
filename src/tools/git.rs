@@ -611,7 +611,10 @@ impl Tool for GitPush {
 
         // Determine branch
         let branch = if let Some(b) = args.get("branch").and_then(|v| v.as_str()) {
-            b.to_string()
+            // Normalize ref-qualified names: `refs/heads/main` must not slip
+            // past the protected-branch compare (same fix as the checker's
+            // git_push arm — red-team wave-11 finding).
+            b.strip_prefix("refs/heads/").unwrap_or(b).to_string()
         } else {
             let mut cmd = tokio::process::Command::new("git");
             crate::safety::process_env::sanitize_command_env(&mut cmd);

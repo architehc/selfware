@@ -1355,13 +1355,13 @@ impl HttpEmbeddingProvider {
         self
     }
 
-    fn request(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+    fn request(&self, body: &serde_json::Value) -> Result<reqwest::RequestBuilder> {
         let url = format!("{}/embeddings", self.endpoint.trim_end_matches('/'));
         let req = self.client.post(&url).json(body);
-        match &self.api_key {
-            Some(key) => req.bearer_auth(key),
-            None => req,
-        }
+        // Route through the shared authenticated-request choke point: it
+        // refuses to send the key over plaintext HTTP to a remote host (or
+        // via a userinfo URL) before attaching the bearer token.
+        crate::config::api_key::authorize_request(req, &self.endpoint, self.api_key.as_deref())
     }
 }
 
@@ -1373,7 +1373,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             "input": text,
         });
         let resp = self
-            .request(&body)
+            .request(&body)?
             .send()
             .await
             .context("HTTP embedding request failed")?;
@@ -1409,7 +1409,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             "input": texts,
         });
         let resp = self
-            .request(&body)
+            .request(&body)?
             .send()
             .await
             .context("HTTP batch embedding request failed")?;

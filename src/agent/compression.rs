@@ -255,13 +255,16 @@ impl FileAccessTracker {
     }
 }
 
-/// Estimate tokens for a message (simplified for compression)
+/// Token count of a message for compression sizing. Content and reasoning
+/// are MEASURED (AGENTS.md rule 4: `estimate_content_tokens`, never
+/// byte-fraction heuristics); tool calls keep a fixed structural overhead
+/// estimate — they are call envelopes, not content.
 fn estimate_tokens(msg: &Message) -> usize {
-    let content_tokens = msg.content.text().len() / 4;
+    let content_tokens = crate::token_count::estimate_content_tokens(msg.content.text());
     let reasoning_tokens = msg
         .reasoning_content
-        .as_ref()
-        .map(|r| r.len() / 4)
+        .as_deref()
+        .map(crate::token_count::estimate_content_tokens)
         .unwrap_or(0);
     let tool_call_tokens = msg.tool_calls.as_ref().map(|tc| tc.len() * 50).unwrap_or(0);
 

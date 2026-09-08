@@ -48,8 +48,10 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // AWS credentials
             compile_pattern("aws_access_key", r#"(?i)(AKIA[A-Z0-9]{16})"#),
             compile_pattern("aws_secret_key", r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[=:]\s*["']?([a-zA-Z0-9/+=]{40})["']?"#),
-            // GitHub classic tokens (ghp_)
-            compile_pattern("github_token", r#"(ghp_[a-zA-Z0-9]{36})"#),
+            // GitHub classic tokens (ghp_, gho_, ghu_, ghs_, ghr_) — widened to
+            // match the scanner's shape (review finding #4: the scanner
+            // recognized gho_/ghu_/ghs_/ghr_ that the redactor missed)
+            compile_pattern("github_token", r#"(gh[pousr]_[a-zA-Z0-9_]{16,})"#),
             // GitHub fine-grained personal access tokens (github_pat_)
             compile_pattern("github_fine_grained_token", r#"(github_pat_[a-zA-Z0-9_]{22,})"#),
             // GitLab tokens (glpat-)
@@ -67,14 +69,23 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             compile_pattern("stripe_key", r#"(sk_live_[a-zA-Z0-9]{24,}|rk_live_[a-zA-Z0-9]{24,}|pk_live_[a-zA-Z0-9]{24,})"#),
             // Slack tokens (xoxb-, xoxp-, xoxs-, xoxa-, xoxr-)
             compile_pattern("slack_token", r#"(xox[bpsar]-[a-zA-Z0-9\-]+)"#),
+            // Slack webhook URLs — anyone holding one can post (scanner had
+            // this; the redactor missed it — review finding #4)
+            compile_pattern("slack_webhook", r#"(hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+)"#),
+            // Azure storage account keys (scanner had this; redactor missed it)
+            compile_pattern("azure_account_key", r#"(AccountKey=[A-Za-z0-9+/=]{20,})"#),
+            // Twilio Account SIDs (AC + 32 hex; scanner had this too)
+            compile_pattern("twilio_sid", r#"(AC[0-9a-f]{32})"#),
             // Generic secret/password patterns
             // Value class excludes '[' so earlier patterns' own
             // `name=[REDACTED]` replacements are never re-matched as secrets.
             compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"'\[]{6,})["']?"#),
             // Private keys
             compile_pattern("private_key", r#"-----BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----"#),
-            // Database connection strings
-            compile_pattern("db_connection", r#"(?i)(mongodb|postgres|mysql|redis)://[^\s"'<>]+"#),
+            // Database connection strings — mongodb+srv and valkey included to
+            // match the scanner's shape (review finding #4: a mongodb+srv://
+            // URL with credentials sailed through output redaction)
+            compile_pattern("db_connection", r#"(?i)(mongodb(\+srv)?|postgres|postgresql|mysql|redis|valkey)://[^\s"'<>]+"#),
             // JWT tokens - full three-part tokens
             compile_pattern("jwt", r#"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"#),
             // JWT-like base64 tokens (eyJ prefix is base64 for {"): catch partial/header-only
@@ -88,11 +99,43 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
     })
 }
 
-/// Redact secrets from a string
-pub fn redact_secrets(input: &str) -> Cow<'_, str> {
+/// What kind of content is being redacted. First-party workspace Rust
+/// source gets the conservative carve-out (glm capstone: the generic
+/// keyword patterns mangle ordinary code — `let secret = compute()` — so
+/// the model reads redacted source and has to reconstruct it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionContext {
+    /// Unknown or mixed content — the full pattern set applies.
+    Generic,
+    /// First-party workspace Rust source (the trust gate's `rust_source`
+    /// classification, `tool_dispatch/trust_gate.rs:classification_for`).
+    /// Generic keyword patterns are OFF; high-signal key formats still
+    /// redact everywhere.
+    RustSource,
+}
+
+/// Pattern names exempted in [`RedactionContext::RustSource`] — the generic
+/// keyword patterns that fire on ordinary Rust (`api_key = some_fn()`,
+/// `let secret = compute()`, keyword-named consts). Everything else —
+/// PEM blocks, AWS/GitHub/GitLab/Google/Stripe/Slack/OpenAI key formats,
+/// sk-/key-/token- prefixes, JWTs, DB connection strings — still redacts
+/// everywhere, first-party source included.
+const RUST_SOURCE_EXEMPT: &[&str] = &[
+    "api_key",
+    "bearer_token",
+    "password",
+    "env_token",
+    "base64_secret",
+];
+
+/// Redact secrets from a string with a content-classification carve-out.
+pub fn redact_secrets_with_context(input: &str, context: RedactionContext) -> Cow<'_, str> {
     let mut result = Cow::Borrowed(input);
 
     for pattern in get_patterns() {
+        if context == RedactionContext::RustSource && RUST_SOURCE_EXEMPT.contains(&pattern.name) {
+            continue;
+        }
         if pattern.regex.is_match(&result) {
             let replacement = format!("{}={}", pattern.name, REDACTED);
             result = Cow::Owned(
@@ -105,6 +148,11 @@ pub fn redact_secrets(input: &str) -> Cow<'_, str> {
     }
 
     result
+}
+
+/// Redact secrets from a string
+pub fn redact_secrets(input: &str) -> Cow<'_, str> {
+    redact_secrets_with_context(input, RedactionContext::Generic)
 }
 
 /// Redact secrets from a JSON value (recursively)

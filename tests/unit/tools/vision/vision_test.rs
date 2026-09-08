@@ -28,8 +28,12 @@ fn test_vision_analyze_schema() {
     assert!(schema["properties"]["extra_body"].is_object());
     let required = schema["required"].as_array().unwrap();
     assert!(required.contains(&json!("prompt")));
-    assert!(required.contains(&json!("endpoint")));
-    assert!(required.contains(&json!("model")));
+    // endpoint/model are OPTIONAL since 2026-09-04 — the harness injects
+    // them from the configured vision profile at dispatch; the model must
+    // not be asked to guess infrastructure (TB4 cad-model finding).
+    assert_eq!(required.len(), 1);
+    assert!(!required.contains(&json!("endpoint")));
+    assert!(!required.contains(&json!("model")));
 }
 
 // ── VisionAnalyze execute error paths ─────────────────────────────

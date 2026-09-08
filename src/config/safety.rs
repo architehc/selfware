@@ -55,7 +55,20 @@ pub fn default_denied_paths() -> Vec<String> {
     vec![
         "**/.env".to_string(),
         "**/.env.local".to_string(),
+        // `.env.production`, `.env.staging`, … — the same credential file in
+        // a costume (red-team wave-3 finding).
+        "**/.env.*".to_string(),
+        // Suffix form too: `production.env` / `db.env` — the same credential
+        // file named the other way around (wave-25).
+        "**/*.env".to_string(),
+        // The .ssh DIRECTORY itself, not just its contents: `**/.ssh/**`
+        // needs a component below .ssh, so file_list/file_read on the bare
+        // dir (enumerate key filenames — recon) slipped past (red-team
+        // wave-11 finding).
+        "**/.ssh".to_string(),
         "**/.ssh/**".to_string(),
+        // Same bare-dir shape for secrets dirs (file_list on the dir itself).
+        "**/secrets".to_string(),
         "**/secrets/**".to_string(),
         // Block writing into git executable-config vectors: an agent could
         // plant a hook script or rewrite git config to later execute in the

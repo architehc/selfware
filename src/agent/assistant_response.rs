@@ -74,7 +74,7 @@ impl Agent {
                 "Using content from last assistant message ({} chars)",
                 last_msg.content.len()
             );
-            if self.config.agent.native_function_calling {
+            if self.effective_native_fc() {
                 native_tool_calls = last_msg.tool_calls.clone();
             }
             let content_text = last_msg.content.text().to_string();
@@ -275,7 +275,7 @@ impl Agent {
             {
                 Ok((content, reasoning, stream_tool_calls)) => {
                     chat_metadata = Some(local_meta);
-                    if self.config.agent.native_function_calling {
+                    if self.effective_native_fc() {
                         let has_native = stream_tool_calls
                             .as_ref()
                             .map(|t| !t.is_empty())
@@ -404,7 +404,7 @@ impl Agent {
                     let content = message.content.text().to_string();
                     let reasoning = message.reasoning_content.clone();
 
-                    if self.config.agent.native_function_calling && message.tool_calls.is_some() {
+                    if self.effective_native_fc() && message.tool_calls.is_some() {
                         native_tool_calls = message.tool_calls.clone();
                         info!(
                             "Received {} native tool calls from fallback API",
@@ -475,7 +475,7 @@ impl Agent {
             let content = message.content.text().to_string();
             let reasoning = message.reasoning_content.clone();
 
-            if self.config.agent.native_function_calling && message.tool_calls.is_some() {
+            if self.effective_native_fc() && message.tool_calls.is_some() {
                 native_tool_calls = message.tool_calls.clone();
                 info!(
                     "Received {} native tool calls from API",
@@ -507,6 +507,23 @@ impl Agent {
             chat_metadata = Some(sync_meta);
             (content, reasoning)
         };
+
+        // Tag-free abliterated models: the qwen3 reasoning parser can
+        // classify the ENTIRE response as reasoning_content, leaving content
+        // empty — a loop reading only content sees a zero-turn forever
+        // (server-side analysis 2026-09-04; matches the ablit-wave "zeros").
+        // The tool-call extractor already falls back to reasoning
+        // (tool_collect.rs); promote the turn text the same way.
+        let mut content = content;
+        if content.trim().is_empty() {
+            if let Some(r) = reasoning.as_ref().filter(|r| !r.trim().is_empty()) {
+                info!(
+                    "Content empty but reasoning_content non-empty ({} chars) — promoting reasoning to content (tag-free model output)",
+                    r.len()
+                );
+                content = r.clone();
+            }
+        }
 
         // Qwen3.5 best practice: "No Thinking Content in History — historical
         // model output should only include the final output part and does not

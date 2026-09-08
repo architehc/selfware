@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use tracing::{debug, info};
 
+use super::task_policy::{policy_envelope, PolicyKind};
 use super::*;
 use crate::errors::AgentError;
 use crate::hooks::HookContext;
@@ -211,7 +212,24 @@ impl Agent {
             return Ok(());
         }
         const MAX_MUTATION_ZERO_EDIT_STALLS: usize = 4;
+        const WRITE_EARLY_DIRECTIVE_AT: usize = 2;
         self.mutation_gate_rejections += 1;
+        // Write-early directive: at the halfway point, before the abort, push
+        // the model to commit — every zero-score probe run (27B on vero,
+        // northcode's FAKE_COMPLETE_LOOP) read forever and never wrote. A
+        // wrong first attempt it can fix beats perfect planning.
+        if self.mutation_gate_rejections == WRITE_EARLY_DIRECTIVE_AT {
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 You have made NO edits yet on a task that requires changing files. \
+                 Stop planning and make your FIRST concrete edit NOW: pick the most \
+                 promising file and write the change, even if imperfect — a wrong \
+                 attempt you can fix after verification beats more analysis. Do NOT \
+                 answer in prose without a tool call.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
         if self.mutation_gate_rejections >= MAX_MUTATION_ZERO_EDIT_STALLS {
             bail!(
                 "FAKE_COMPLETE_LOOP: {} no-tool turns on a mutation-required task with 0 mutating \
@@ -232,6 +250,13 @@ impl Agent {
     /// force-mutation recovery is pending, the guard is bypassed once and the
     /// pending flag is consumed.
     fn check_files_guard(&mut self, has_file_write_intent: bool) -> bool {
+        // Verified read-only task: no FILES: ceremony. The session intends
+        // zero edits — if the model edits anyway, the block+discard only
+        // burns turns re-issuing (qwen capstone: refused while complying on
+        // a read-only session, and the "edit not applied" misfire).
+        if self.current_task_is_read_only() {
+            return false;
+        }
         let blocked = has_file_write_intent
             && !self.has_written_any_file
             && !self.files_checklist_seen
@@ -473,7 +498,19 @@ impl Agent {
     /// no honest command to run.
     /// The tuple is `(tool_name, tool_args_json, display_command)`.
     fn stale_verification_rescue_call(&self) -> Option<(String, String, String)> {
-        let is_rust = super::current_project_root().join("Cargo.toml").exists();
+        let root = super::current_project_root();
+        // Lean 4 project: rescue with `lake build` (the proof check), never
+        // cargo_check — a Lean repo treated as Rust fails spuriously and
+        // wastes the recovery slot (gemini-3.8-flash vero probe finding).
+        let is_lean = root.join("lakefile.toml").exists() || root.join("lakefile.lean").exists();
+        if is_lean && self.tools.get("shell_exec").is_some() {
+            return Some((
+                "shell_exec".to_string(),
+                serde_json::json!({"command": "lake build"}).to_string(),
+                "lake build".to_string(),
+            ));
+        }
+        let is_rust = root.join("Cargo.toml").exists();
         if is_rust && self.tools.get("cargo_check").is_some() {
             return Some((
                 "cargo_check".to_string(),
@@ -502,6 +539,43 @@ impl Agent {
             serde_json::json!({"command": command}).to_string(),
             command,
         ))
+    }
+
+    /// Edit-failure loop handling after a successful mutation: the FIRST time
+    /// suppressions reach the threshold after a mutating call, recover (reset
+    /// the counter, clear the failed-tool cache, force a fresh read) instead of
+    /// killing the run — the old direct bail killed TB4 medical-claims at iter
+    /// 37 after a SUCCESSFUL mutation with zero recovery chance (kimi-k3 +
+    /// deepseek diagnoses). Only a recurrence after that recovery is fatal.
+    fn handle_edit_failure_loop(&mut self) -> Result<()> {
+        if !(self.current_task_requires_mutation()
+            && self.mutating_tool_call_count() > 0
+            && self.consecutive_suppressions >= 3)
+        {
+            return Ok(());
+        }
+        if self.edit_loop_recovery_used {
+            bail!(
+                "EDIT_FAILURE_LOOP_AFTER_EDIT: repeated stale edit retries after a successful mutation; stopping so the captured patch can be evaluated"
+            );
+        }
+        info!(
+            "Edit-failure loop after successful mutation — recovering once (reset + re-read directive) instead of bailing"
+        );
+        self.edit_loop_recovery_used = true;
+        self.consecutive_suppressions = 0;
+        self.clear_failed_tool_attempts();
+        self.messages.push(crate::api::types::Message::user(
+            "<selfware_system_directive>\n\
+             Your last edit SUCCEEDED, but your subsequent tool calls were suppressed as \
+             stale duplicates — you are retrying an old version of the file. STOP editing \
+             from memory: RE-READ the current file state with file_read first, then make \
+             only the remaining changes against what is actually on disk. If the task is \
+             already complete, explain why in plain text instead of calling tools.\n\
+             </selfware_system_directive>"
+                .to_string(),
+        ));
+        Ok(())
     }
 
     async fn execute_step_internal_inner(&mut self, use_last_message: bool) -> Result<bool> {
@@ -871,6 +945,14 @@ impl Agent {
                         self.consecutive_no_action_prompts
                     );
                     self.consecutive_no_action_prompts = 5;
+                    // Lifetime stall accounting: the pin at 5 returns below and
+                    // never reaches the FAKE_COMPLETE_LOOP machinery — measured on
+                    // TB 3.0 cli-2ph-simplex (temp 0): 10 identical 3-minute turns
+                    // to the task timeout. Pinned identical completions on a
+                    // zero-edit mutation task must abort early.
+                    self.note_mutation_zero_edit_stall(
+                        "identical completion pinned past the completion gate",
+                    )?;
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
                          You keep repeating the same response, but the task is NOT complete. \
@@ -906,7 +988,12 @@ impl Agent {
                     .unwrap_or(false);
                 if has_successful_tool_calls {
                     info!("Rejected false capability disclaimer after successful tool use");
-                    if self.pending_synthesis.is_none() {
+                    // Read-only task: do NOT arm phase-2 synthesis — its
+                    // consumer in task_runner auto-writes any extracted code
+                    // to disk (forced mutation on a "do NOT edit" task), and
+                    // the directive must not promise a pass that won't run.
+                    let read_only = self.current_task_is_read_only();
+                    if !read_only && self.pending_synthesis.is_none() {
                         let synthesis_task = self
                             .current_checkpoint
                             .as_ref()
@@ -914,15 +1001,19 @@ impl Agent {
                             .unwrap_or_else(|| self.learning_context().to_string());
                         self.pending_synthesis = Some(synthesis_task);
                     }
-                    self.messages.push(crate::api::types::Message::user(
+                    let synthesis_note = if read_only {
+                        ""
+                    } else {
+                        " A synthesis pass will answer from the tool results if needed."
+                    };
+                    self.messages.push(crate::api::types::Message::user(format!(
                         "<selfware_system_directive>\n\
                          You already executed tools successfully in this session. \
                          Use the tool results that are already in context and answer the task directly. \
-                         Do NOT claim you cannot access tools, files, or the local filesystem. \
-                         A synthesis pass will answer from the tool results if needed.\n\
-                         </selfware_system_directive>"
-                            .to_string(),
-                    ));
+                         Do NOT claim you cannot access tools, files, or the local filesystem.{}\n\
+                         </selfware_system_directive>",
+                        synthesis_note
+                    )));
                     return Ok(false);
                 }
             }
@@ -952,6 +1043,10 @@ impl Agent {
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate().await {
                 info!("Completion gate rejected: {}", gate_msg);
+                // Visible one-line marker: the rejection is pushed as a user
+                // message and the info! log is suppressed in run mode, so
+                // without this a benchmark log cannot show the gate fired.
+                output::gate_blocked(&gate_msg);
                 // Early hard-stop for the fake-complete loop: on a mutation-required
                 // task with zero mutating calls, the model alternating {final answer →
                 // gate rejection → read-only tool} resets every consecutive counter and
@@ -969,7 +1064,16 @@ impl Agent {
                         || gate_msg.contains("FailingTestsAccepted"));
                 if is_stale_verification {
                     self.consecutive_stale_verification += 1;
-                    if self.consecutive_stale_verification >= 2 {
+                    // verify-after-every-edit cadence: profiles opting in get
+                    // the rescue after ONE unverified edit — the build runs
+                    // and errors come back immediately (measured as the
+                    // gemini-3.8-flash winning cadence on vero).
+                    let stale_threshold = if self.config.agent.verify_after_edit.unwrap_or(false) {
+                        1
+                    } else {
+                        2
+                    };
+                    if self.consecutive_stale_verification >= stale_threshold {
                         if let Some((tool_name, tool_args, display_cmd)) =
                             self.stale_verification_rescue_call()
                         {
@@ -989,6 +1093,29 @@ impl Agent {
                             )));
                             return Ok(false);
                         }
+                        // No rescuable verification command was detected (non-Rust
+                        // task containers: no cargo project, no recognizable test
+                        // runner): the gate keeps refusing but the model cannot
+                        // guess HOW to verify, so it narrates and gets refused
+                        // again — TB4 production-planning spun 253 refused turns
+                        // in exactly this deadlock. Name the path out explicitly.
+                        info!(
+                            "StaleVerification churn with no rescuable verification command — directing the model to run verification itself"
+                        );
+                        self.consecutive_stale_verification = 0;
+                        self.messages.push(crate::api::types::Message::user(
+                            "<selfware_system_directive>\n\
+                             The completion gate requires a PASSING verification after your last edit, \
+                             but no default verification command could be detected in this environment. \
+                             Run the project's verification YOURSELF now with shell_exec: find the \
+                             test/check command from the task description, README, Makefile, or tests/ \
+                             directory (e.g. `cd /app && python -m pytest -x` or `make test`). If it \
+                             passes, give your final answer; if it fails, fix the errors and re-run it. \
+                             Do NOT answer in prose again without running it — that turn will be refused.\n\
+                             </selfware_system_directive>"
+                                .to_string(),
+                        ));
+                        return Ok(false);
                     }
                 } else {
                     self.consecutive_stale_verification = 0;
@@ -1214,14 +1341,8 @@ impl Agent {
         // When the model keeps emitting identical tool calls that are all
         // suppressed (retry suppressed / no-op), it is stuck in tool-calling
         // mode and cannot produce a final text response on its own.
-        if self.current_task_requires_mutation()
-            && self.mutating_tool_call_count() > 0
-            && self.consecutive_suppressions >= 3
-        {
-            bail!(
-                "EDIT_FAILURE_LOOP_AFTER_EDIT: repeated stale edit retries after a successful mutation; stopping so the captured patch can be evaluated"
-            );
-        } else if self.consecutive_suppressions >= 10 {
+        self.handle_edit_failure_loop()?;
+        if self.consecutive_suppressions >= 10 {
             // After many suppressed calls, nudge the model to try a different approach.
             // Do NOT abort or force completion — the task may still need work.
             // Also clear the failed-tool cache so the agent gets fresh chances.
@@ -1257,6 +1378,13 @@ impl Agent {
         }
 
         // TERMINAL PROGRESS GUARD: After N read-only steps, force synthesis.
+        // A read-only task (review/analysis/report) never mutates by design —
+        // reading IS the work — so the force-synthesis / scaffold machinery
+        // must not fire at all (4-model read-only study: every agent was
+        // killed fighting exactly this gate on a "do NOT edit" task).
+        if self.current_task_is_read_only() {
+            return Ok(false);
+        }
         // Use a relaxed threshold when the agent has already written source files —
         // verification loops (cargo check → cargo test → read output) are expected
         // after writing code and should not be punished.
@@ -1396,20 +1524,34 @@ impl Agent {
                 )];
                 self.consecutive_read_only_steps = 0;
                 self.seen_read_targets.clear();
-                self.has_written_any_file = true;
                 self.terminal_guard_hits = 0;
-                if let Err(e) = self.execute_tool_batch(calls).await {
-                    warn!("Scaffold write failed: {}", e);
+                match self.execute_tool_batch(calls).await {
+                    Ok(()) => {
+                        self.has_written_any_file = true;
+                        self.messages.push(crate::api::types::Message::user(
+                            "<selfware_system_directive>\n\
+                             A scaffold file was written to src/lib.rs. Now implement the full solution:\n\
+                             1. Use file_write to replace src/lib.rs with your complete implementation\n\
+                             2. Include unit tests in a #[cfg(test)] mod tests block\n\
+                             3. Run cargo test to verify\n\
+                             </selfware_system_directive>"
+                                .to_string(),
+                        ));
+                    }
+                    Err(e) => {
+                        // Honest status (AGENTS.md rule 3): the scaffold was NOT
+                        // written — do not claim it was or credit a file write.
+                        warn!("Scaffold write failed: {}", e);
+                        self.messages.push(crate::api::types::Message::user(format!(
+                            "<selfware_system_directive>\n\
+                                 Writing the scaffold to src/lib.rs FAILED: {e}. \
+                                 Nothing was written to disk. Create src/lib.rs yourself with \
+                                 file_write containing your complete implementation (including \
+                                 a #[cfg(test)] mod tests block), then run cargo test to verify.\n\
+                                 </selfware_system_directive>"
+                        )));
+                    }
                 }
-                self.messages.push(crate::api::types::Message::user(
-                    "<selfware_system_directive>\n\
-                     A scaffold file was written to src/lib.rs. Now implement the full solution:\n\
-                     1. Use file_write to replace src/lib.rs with your complete implementation\n\
-                     2. Include unit tests in a #[cfg(test)] mod tests block\n\
-                     3. Run cargo test to verify\n\
-                     </selfware_system_directive>"
-                        .to_string(),
-                ));
                 return Ok(false);
             }
 
@@ -1433,18 +1575,23 @@ impl Agent {
                 "Progress guard warning: {} read-only steps (threshold: {})",
                 self.consecutive_read_only_steps, terminal_threshold
             );
-            self.messages.push(crate::api::types::Message::user(format!(
-                "<selfware_system_directive>\n\
-                 You have spent {} consecutive steps reading without writing. \
-                 You have {} steps before forced synthesis. Write code NOW:\n\n\
-                 Use file_edit or file_write on an existing file you already read. \
-                 Do NOT create src/lib.rs unless this repository already has Cargo.toml.\n\n\
-                 <tool>\n<name>file_edit</name>\n\
-                 <arguments>{{\"path\": \"PATH_YOU_ALREADY_READ\", \"old_str\": \"EXACT OLD TEXT\", \"new_str\": \"EXACT NEW TEXT\"}}</arguments>\n\
-                 </tool>\n\
-                 </selfware_system_directive>",
-                self.consecutive_read_only_steps,
-                terminal_threshold - self.consecutive_read_only_steps
+            self.messages.push(crate::api::types::Message::user(policy_envelope(
+                PolicyKind::ForceMutation,
+                true,
+                "read-only streak approaching forced synthesis",
+                &format!(
+                    "<selfware_system_directive>\n\
+                     You have spent {} consecutive steps reading without writing. \
+                     You have {} steps before forced synthesis. Write code NOW:\n\n\
+                     Use file_edit or file_write on an existing file you already read. \
+                     Do NOT create src/lib.rs unless this repository already has Cargo.toml.\n\n\
+                     <tool>\n<name>file_edit</name>\n\
+                     <arguments>{{\"path\": \"PATH_YOU_ALREADY_READ\", \"old_str\": \"EXACT OLD TEXT\", \"new_str\": \"EXACT NEW TEXT\"}}</arguments>\n\
+                     </tool>\n\
+                     </selfware_system_directive>",
+                    self.consecutive_read_only_steps,
+                    terminal_threshold - self.consecutive_read_only_steps
+                ),
             )));
         }
 

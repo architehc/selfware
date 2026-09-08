@@ -375,3 +375,107 @@ fn test_redact_openssh_private_key() {
         "fake key material must not survive redaction"
     );
 }
+
+// ── First-party rust_source carve-out (glm capstone: generic keyword
+// patterns mangle ordinary workspace code the model must read verbatim) ──
+
+#[test]
+fn rust_source_keeps_ordinary_code_verbatim() {
+    // The exact mangle shapes from the capstone: keyword-named bindings
+    // whose "value" is a function call or a benign const.
+    let source = concat!(
+        "let secret = compute_hash();\n",
+        "let api_key = fetch_remote_api_key();\n",
+        "const TIMEOUT_KEY: &str = \"timeout\";\n",
+        "const API_TOKEN: &str = \"abcdefghijklmnop\";\n",
+        "let auth_token = \"dGVzdCB0b2tlbiBmb3IgZXhhbXBsZSBwdXJwb3Nl\";\n",
+    );
+    let output = redact_secrets_with_context(source, RedactionContext::RustSource);
+    assert_eq!(output, source, "workspace Rust must survive verbatim");
+}
+
+#[test]
+fn generic_context_still_redacts_the_same_code() {
+    // Proof the carve-out is what saves the code: the full pattern set
+    // mangles these exact lines (the pre-fix behavior).
+    let source = "let secret = compute_hash();\nlet api_key = fetch_remote_api_key();\n";
+    let output = redact_secrets_with_context(source, RedactionContext::Generic);
+    assert!(output.contains("[REDACTED]"));
+    assert!(!output.contains("secret = compute_hash()"));
+}
+
+#[test]
+fn rust_source_still_redacts_high_signal_key_formats() {
+    // An actual sk- key in first-party source must redact — the carve-out
+    // only covers generic keyword patterns, never real key formats.
+    let source = "let key = \"sk-abcdefghijklmnopqrstuvwxyz123456\";\n";
+    let output = redact_secrets_with_context(source, RedactionContext::RustSource);
+    assert!(output.contains("[REDACTED]"), "got: {output}");
+    assert!(!output.contains("sk-abcdefghijklmnopqrstuvwxyz123456"));
+
+    // PEM blocks redact everywhere too.
+    let pem = "-----BEGIN PRIVATE KEY-----\nMIIBog==\n-----END PRIVATE KEY-----";
+    let output = redact_secrets_with_context(pem, RedactionContext::RustSource);
+    assert!(output.contains("[REDACTED]"));
+    assert!(!output.contains("MIIBog=="));
+
+    // AWS access key ids redact everywhere.
+    let output = redact_secrets_with_context("AKIAIOSFODNN7EXAMPLE", RedactionContext::RustSource);
+    assert!(output.contains("[REDACTED]"));
+}
+
+#[test]
+fn plain_redact_secrets_unchanged_for_non_rust_content() {
+    // Backward compatibility: the context-free entry point keeps the full
+    // pattern set for non-workspace / unknown content.
+    let output = redact_secrets("let secret = compute_hash();");
+    assert!(output.contains("[REDACTED]"));
+}
+
+#[test]
+fn redacts_scanner_shapes_review_finding_4() {
+    // External review of 6e231e2e, finding #4: the secret scanner recognized
+    // credential shapes the output redactor missed. Each synthetic below
+    // matched NONE of the redactor's patterns before the fix.
+    // NOTE: the Slack webhook and Twilio SID literals are assembled from
+    // fragments — a full literal in source trips GitHub push protection
+    // (GH013) even though every value here is synthetic.
+    let slack_webhook = concat!(
+        "SLACK_WEBHOOK=https://hooks.slack.com/",
+        "services/T01ABCDEF23/B04CDEFGH67/",
+        "abcdefABCDEF1234567890ab"
+    );
+    let twilio_sid = concat!("TWILIO_SID=AC", "0123456789abcdef0123456789abcdef");
+    let cases = [
+        // MongoDB SRV connection string with credentials
+        "uri = \"mongodb+srv://admin:Sup3rSecretPass@cluster0.ab1cd.mongodb.net/prod\"",
+        // PostgreSQL (explicit scheme alias)
+        "DATABASE_URL=postgresql://svc:Sup3rSecretPass@db.internal:5432/app",
+        // Slack webhook URL — anyone holding one can post
+        slack_webhook,
+        // Azure storage account key
+        "DefaultEndpointsProtocol=https;AccountName=st;AccountKey=Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv==;EndpointSuffix=core.windows.net",
+        // Twilio Account SID
+        twilio_sid,
+        // GitHub OAuth / server-to-server / user-to-server / refresh tokens
+        "token = gho_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+        "token = ghs_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    ];
+    for input in cases {
+        let output = redact_secrets(input);
+        assert!(
+            output.contains("[REDACTED]"),
+            "not redacted: {input} -> {output}"
+        );
+        assert!(
+            !output.contains("Sup3rSecretPass"),
+            "password survived: {output}"
+        );
+    }
+    // The webhook path itself must not survive either.
+    let output = redact_secrets(cases[2]);
+    assert!(
+        !output.contains("abcdefABCDEF1234567890ab"),
+        "webhook secret survived: {output}"
+    );
+}

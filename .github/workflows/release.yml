@@ -25,8 +25,39 @@ permissions:
   id-token: write  # Required for cosign keyless signing
 
 jobs:
+  resolve:
+    name: Resolve release revision
+    runs-on: ubuntu-22.04
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      # Review finding: a manual dispatch could name a tag pointing at one
+      # commit while building artifacts from the dispatch revision. Bind the
+      # whole workflow to ONE immutable SHA up front: the existing tag's
+      # commit, or the current revision when the tag will be created by the
+      # release step. Every checkout below uses this SHA.
+      - name: Resolve tag to immutable commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          sha=$(gh api "repos/${{ github.repository }}/git/refs/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)
+          if [ -z "$sha" ]; then
+            sha="${{ github.sha }}"
+            echo "::notice::tag ${tag} does not exist yet; releasing current revision ${sha} under it"
+          fi
+          echo "tag=${tag}" >> $GITHUB_OUTPUT
+          echo "sha=${sha}" >> $GITHUB_OUTPUT
+
   build:
     name: Build ${{ matrix.target }}
+    needs: resolve
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -66,6 +97,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -147,10 +180,13 @@ jobs:
 
   sbom:
     name: Generate SBOM
+    needs: resolve
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -171,7 +207,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, sbom]
+    needs: [build, sbom, resolve]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -179,6 +215,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -247,15 +285,16 @@ jobs:
 
   sign-release:
     name: Sign Release Artifacts
-    needs: release
+    needs: [release, resolve]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     permissions:
       id-token: write  # Required for keyless signing
       contents: write  # Required to attach signatures to release
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -279,7 +318,7 @@ jobs:
       - name: Upload signatures to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.resolve.outputs.tag }}
           files: |
             artifacts/selfware-*/*.sig
             artifacts/selfware-*/*.cert

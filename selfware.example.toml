@@ -44,3 +44,13 @@ max_recovery_attempts = 3
 max_retries = 5
 base_delay_ms = 1000
 max_delay_ms = 60000
+
+# Named model profiles route swarm/sub-agent traffic to a different endpoint:
+# a swarm agent built with .with_model("qwen38") resolves this section.
+# Verified 2026-08-24: 4-agent multi-chat fan-out, 23s, $0.0045.
+# [models.qwen38]
+# endpoint = "https://openrouter.ai/api/v1"
+# model = "qwen/qwen3.8-27b"
+# max_tokens = 8192
+# temperature = 0.0
+# context_length = 1000000

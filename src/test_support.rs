@@ -211,6 +211,7 @@ pub(crate) fn mock_agent_config(endpoint: &str) -> crate::config::Config {
         agent: crate::config::AgentConfig {
             max_iterations: 50,
             step_timeout_secs: 10,
+            stream_stall_timeout_secs: None,
             streaming: false,
             native_function_calling: false,
             min_completion_steps: 0,

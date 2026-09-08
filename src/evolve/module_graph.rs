@@ -127,10 +127,9 @@ fn cfg_feature(line: &str) -> Option<String> {
 fn mod_decl(line: &str) -> Option<(String, String)> {
     let (visibility, rest) = if let Some(r) = line.strip_prefix("pub(crate) mod ") {
         ("pub(crate)", r)
-    } else if let Some(r) = line.strip_prefix("pub mod ") {
-        ("pub", r)
     } else {
-        return None;
+        let r = line.strip_prefix("pub mod ")?;
+        ("pub", r)
     };
     let name: String = rest
         .chars()

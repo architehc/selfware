@@ -37,7 +37,50 @@ pub(super) fn is_fatal_loop_error(error: &anyhow::Error) -> bool {
         || msg.contains("NONTERM_PROSE_NO_TOOL")
 }
 
+/// Human-facing end-of-run summary (headless text mode). Every field comes
+/// from tracked run state — no invented numbers (AGENTS.md rule 3): token
+/// and cost totals are the API-usage accumulators, files changed is the
+/// file tracker's written/edited set, verification is the gate's last
+/// report or an honest `None` ("not performed").
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    /// Iterations consumed (loop counter after the final turn).
+    pub iterations: usize,
+    /// The iteration cap, including any adaptive extension.
+    pub max_iterations: usize,
+    /// At least one adaptive budget extension fired this run.
+    pub budget_extended: bool,
+    /// Files written/edited by the agent this run, sorted.
+    pub files_changed: Vec<String>,
+    /// (overall passed, check count) from the verification gate's last
+    /// report; `None` when no verification ran.
+    pub verification: Option<(bool, usize)>,
+    /// Total API tokens consumed (input + output).
+    pub total_tokens: usize,
+    /// Total USD cost, `Some` only when the endpoint billed anything.
+    pub cost_usd: Option<f64>,
+}
+
 impl Agent {
+    /// Snapshot the run state for the end-of-run summary.
+    pub fn run_summary(&self) -> RunSummary {
+        let mut files_changed: Vec<String> =
+            self.file_tracker.stale_files.iter().cloned().collect();
+        files_changed.sort();
+        RunSummary {
+            iterations: self.loop_control.current_iteration(),
+            max_iterations: self.loop_control.max_iterations(),
+            budget_extended: self.loop_control.extension_was_used(),
+            files_changed,
+            verification: self
+                .verification_gate
+                .last_results()
+                .map(|report| (report.overall_passed, report.checks.len())),
+            total_tokens: self.cumulative_token_usage.total,
+            cost_usd: (self.cumulative_cost_usd > 0.0).then_some(self.cumulative_cost_usd),
+        }
+    }
+
     fn set_loop_state(&mut self, state: AgentState) -> Result<()> {
         self.loop_control.transition_to(state).map_err(Into::into)
     }
@@ -81,9 +124,39 @@ impl Agent {
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
         self.clear_failed_tool_attempts();
+        self.edit_loop_recovery_used = false;
         self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
         self.total_no_action_prompts = 0;
+        self.requirements_audit_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.leak_check_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.input_census_note = None;
+        self.input_census_suspicious.clear();
+        self.failed_install_streak = 0;
+        self.last_workspace_fingerprint = None;
+        self.stagnation_streak = 0;
+        self.stagnation_warned
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.best_snapshot.clear();
+        self.commit_mode_65_fired
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.commit_mode_85_fired
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.audit_findings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.audit_rejected_attempts
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.output_key_check_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.verification_deadline_directive_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.probe_pivot_done
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.probe_command_counts.clear();
         self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         self.cumulative_token_usage = crate::observability::dashboard::TokenUsage::default();
@@ -196,7 +269,7 @@ impl Agent {
         // so the model sees it BEFORE the tool list, not after.
         let task_type = crate::tools::task_focus::classify_task(&task_description);
         let preamble = task_type.preamble();
-        if !preamble.is_empty() && !self.messages.is_empty() && self.messages[0].role == "system" {
+        if !self.messages.is_empty() && self.messages[0].role == "system" {
             // Extract file paths mentioned in the task for explicit targeting.
             let mentioned_files: Vec<&str> = task_description
                 .split_whitespace()
@@ -240,20 +313,103 @@ impl Agent {
                 )
             };
 
-            let focus_block = format!(
-                "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
-                preamble,
-                file_hint,
-                explicit_tool_guidance,
-                task_type.primary_tools().join(", ")
-            );
-            let current = self.messages[0].content.to_string();
-            self.messages[0] = Message::system(format!("{}{}", focus_block, current));
+            // Modality gate (capstone: gemini/qwen got IMPLEMENT→VERIFY
+            // mandates on explicit read-only tasks — the same hijack class
+            // as the census, fixed the same way). Verified read-only tasks
+            // get NO mutation mandates: no MANDATORY WORKFLOW, no
+            // task-type preamble, no primary-tools steering — only the
+            // file hint and explicit tool requirements stay.
+            let focus_block = if self.current_task_is_read_only() {
+                if file_hint.is_empty() && explicit_tool_guidance.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\n## TASK FOCUS\n{file_hint}{explicit_tool_guidance}")
+                }
+            } else {
+                // The MANDATORY WORKFLOW block moved here from the static
+                // system prompt so read-only tasks can be spared it (it is
+                // identical text for mutation tasks, now per-task).
+                let project_type = super::detect_project_type().await;
+                let (verify_step, test_step, _) = super::verification_instructions(project_type);
+                let workflow = format!(
+                    "## MANDATORY WORKFLOW\n\
+                     1. PLAN: Understand what needs to change — read relevant files first\n\
+                     2. IMPLEMENT: Make code changes using file_edit or file_write\n\
+                     {verify_step}\n\
+                     4. FIX: If verification fails, fix errors before proceeding\n\
+                     {test_step}\n"
+                );
+                format!(
+                    "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
+                    workflow,
+                    preamble,
+                    file_hint,
+                    explicit_tool_guidance,
+                    task_type.primary_tools().join(", ")
+                )
+            };
+            if !focus_block.is_empty() {
+                let current = self.messages[0].content.to_string();
+                self.messages[0] = Message::system(format!("{}{}", focus_block, current));
+            }
         }
 
         let msg = Message::user(task);
         self.memory.add_message(&msg);
         self.messages.push(msg);
+
+        // Input census (loop 7): the environment's data contract, enumerated
+        // deterministically at task start. The hidden verifier grades the full
+        // contract — the instruction text is a subset (measured: the cargo and
+        // bun TB 3.0 misses were fields the instruction never names).
+        // Self-contained document payloads skip it (see census_applies).
+        if super::input_census::census_applies(task) {
+            let census = super::input_census::census_task_inputs(&super::current_project_root());
+            self.input_census_suspicious = census.suspicious_identifiers.clone();
+            self.input_census_note = census.render();
+            if let Some(note) = &self.input_census_note {
+                let note_msg = Message::user(format!(
+                    "<selfware_system_directive>\n{note}\nAccount for every field above: consume it or consciously waive it. Fields the instruction never mentions still count.\n</selfware_system_directive>"
+                ));
+                self.messages.push(note_msg);
+            }
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "input_census".to_string(),
+                detail: "applied".to_string(),
+            });
+        } else {
+            self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+                decision: "input_census".to_string(),
+                detail: "skipped: self-contained document payload".to_string(),
+            });
+        }
+
+        // L0 graph orientation: the repo's architectural map, injected at
+        // EVERY task start (unlike the census, it is independent of task
+        // size) so the model knows the evolve graph exists and what it says.
+        // Silent absence when no graph has been built — never an error
+        // surfaced to the model, and the graph is never built here. Off the
+        // async hot path: the first call may parse the YAML graph.
+        {
+            let root = super::current_project_root();
+            if let Ok(Some(note)) =
+                tokio::task::spawn_blocking(move || crate::tools::graph::graph_summary_note(&root))
+                    .await
+            {
+                self.messages.push(Message::user(note));
+            }
+        }
+
+        // Deferred-tool manifest (capstone: all three completers' #1 ask) —
+        // names + one-liners in the prompt kill the per-capability discovery
+        // tax. Measured budget; pinned critical like the L0 note (the
+        // selfware_context_note marker keeps it alive under trim).
+        const TOOL_MANIFEST_BUDGET_TOKENS: usize = 500;
+        if let Some(manifest) = self.tools.deferred_manifest(TOOL_MANIFEST_BUDGET_TOKENS) {
+            self.messages.push(Message::user(format!(
+                "<selfware_context_note kind=tool_manifest>\n{manifest}\n</selfware_context_note>"
+            )));
+        }
 
         self.run_execution_loop(&task_description, LoopMode::NewTask)
             .await
@@ -610,6 +766,84 @@ impl Agent {
     /// final answer, unlock input. Previously most success exits emitted no
     /// terminal event (leaving the stream dangling) and the one that did sent
     /// failure-mode evidence instead of the answer.
+    /// Wall-clock commit-mode bands (six-model consult, Opus 5 deadline
+    /// policy): at 65% of `agent.max_wall_secs` push COMMIT MODE once, at 85%
+    /// FINAL STRETCH once — the run must ship something before the hard stop.
+    /// No-op when no wall budget is configured. Latches reset in run_task.
+    pub(super) fn maybe_inject_commit_mode_directive(&mut self) {
+        let Some(max_wall) = self.config.agent.max_wall_secs else {
+            return;
+        };
+        let elapsed = self.task_start_time.elapsed().as_secs();
+        let pct = elapsed.saturating_mul(100) / max_wall.max(1);
+        if pct >= 85
+            && !self
+                .commit_mode_85_fired
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.messages.push(Message::user(
+                "<selfware_system_directive>\n\
+                 FINAL STRETCH: 85% of the wall-clock budget is gone. Complete with the best \
+                 working state you have NOW — do not start new approaches.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        } else if pct >= 65
+            && !self
+                .commit_mode_65_fired
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.messages.push(Message::user(
+                "<selfware_system_directive>\n\
+                 COMMIT MODE: 65% of the wall-clock budget is used. Stop exploring; produce the \
+                 minimal working deliverable now, verify once, then refine only if time remains.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
+    }
+
+    /// Adaptive turn budget (loop 13, multi-fire since the TB4 diagnosis): the
+    /// iteration cap just tripped. When the last turns each show real forward
+    /// progress — a non-error tool result and no identical call repeated —
+    /// grant ONE bounded extension (+25% of the original cap, up to a +100%
+    /// total ceiling) and resume Executing. Returns the state to continue
+    /// with, or `None` to fail as before. Conservative by construction:
+    /// error-only streaks, repeated calls, and thin evidence all abort; the
+    /// ceiling lives in `AgentLoop::extend_budget_once`.
+    fn maybe_extend_iteration_budget(&mut self) -> Option<AgentState> {
+        const PROGRESS_WINDOW: usize = 5;
+        if !super::loop_control::productive_streak(&self.recent_turn_progress, PROGRESS_WINDOW) {
+            return None;
+        }
+        let added = self.loop_control.extend_budget_once()?;
+        let new_cap = self.loop_control.max_iterations();
+        info!(
+            "Adaptive iteration budget: +{} iterations (new cap {}) after {} productive turns",
+            added, new_cap, PROGRESS_WINDOW
+        );
+        self.emit_progress(super::progress::ProgressEvent::GuardFired {
+            kind: "budget_extension".to_string(),
+            count: 1,
+        });
+        self.emit_progress(super::progress::ProgressEvent::TurnDecision {
+            decision: "budget_extension".to_string(),
+            detail: format!("+{} iterations (new cap {})", added, new_cap),
+        });
+        self.emit_event(AgentEvent::Status {
+            message: format!(
+                "Iteration budget extended by +{} (cap {}) — productive streak detected",
+                added, new_cap
+            ),
+        });
+        // next_state() already parked the loop in Failed; resume Executing
+        // with the counters as they stand (iteration now fits the new cap).
+        let step = self.loop_control.current_step();
+        let iteration = self.loop_control.current_iteration();
+        self.loop_control.restore_progress(step, iteration);
+        Some(AgentState::Executing { step })
+    }
+
     async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         let result = self.run_execution_loop_inner(task_description, mode).await;
         match &result {
@@ -629,6 +863,18 @@ impl Agent {
                 if self.is_cancelled() {
                     if let Err(ce) = self.save_checkpoint(task_description) {
                         warn!("Failed to save cancelled checkpoint: {}", ce);
+                    }
+                } else if self.best_snapshot.has_snapshot() {
+                    // Submit the best state, not the last state (six-model
+                    // consult, Opus 5: a task 80% green at minute 30 submits
+                    // a broken edit at minute 60 without this).
+                    let paths = self.written_paths();
+                    match self.best_snapshot.restore_written(&paths) {
+                        Ok(()) => info!(
+                            "restored best snapshot ({} files) after failed run",
+                            paths.len()
+                        ),
+                        Err(e2) => warn!("best snapshot restore failed: {e2}"),
                     }
                 }
                 self.emit_terminal_event_once(AgentEvent::Error {
@@ -740,6 +986,20 @@ impl Agent {
         // messages and wasted context — GLM-5.2 finding on task_runner.rs).
         let mut last_warned_band = 0u8;
         while let Some(state) = self.loop_control.next_state() {
+            // Adaptive turn budget: the iteration cap just tripped. If the
+            // recent turns show real forward progress, grant ONE bounded
+            // extension and keep working instead of aborting productive
+            // deep-review runs (qwen capstone: died at the 30-turn cap with
+            // 23 productive tool calls and no derailment).
+            let state = match state {
+                AgentState::Failed { ref reason } if reason == "Max iterations exceeded" => {
+                    match self.maybe_extend_iteration_budget() {
+                        Some(resumed) => resumed,
+                        None => state.clone(),
+                    }
+                }
+                other => other,
+            };
             // Liveness heartbeat: a turning loop stays healthy on the health
             // endpoint; a hung process stops pinging and goes stale so a
             // systemd/k8s watchdog can restart it.
@@ -751,6 +1011,11 @@ impl Agent {
                 }
                 last_warned_band = band;
             }
+            // Loop 12: one-time verification-deadline directive — at 60% of the
+            // iteration budget with no passing verification, converge NOW.
+            self.maybe_inject_verification_deadline_directive();
+            // Wall-clock commit-mode bands (65% / 85%), each once per task.
+            self.maybe_inject_commit_mode_directive();
             self.trim_message_history();
 
             // Surface the current step in the live TUI status bar so a
@@ -1068,18 +1333,32 @@ impl Agent {
                                             )];
                                         self.consecutive_read_only_steps = 0;
                                         self.seen_read_targets.clear();
-                                        self.has_written_any_file = true;
                                         self.terminal_guard_hits = 0;
-                                        if let Err(e) = self.execute_tool_batch(calls).await {
-                                            warn!("Auto-write from synthesis failed: {}", e);
+                                        match self.execute_tool_batch(calls).await {
+                                            Ok(()) => {
+                                                self.has_written_any_file = true;
+                                                self.messages.push(Message::user(
+                                                    "<selfware_system_directive>\n\
+                                                     Code from your response was auto-written to file. \
+                                                     Now run cargo check or cargo test to verify.\n\
+                                                     </selfware_system_directive>"
+                                                        .to_string(),
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                // Honest status (AGENTS.md rule 3): the write
+                                                // did not happen, so say so — do NOT claim the
+                                                // code is on disk or credit a file write.
+                                                warn!("Auto-write from synthesis failed: {}", e);
+                                                self.messages.push(Message::user(format!(
+                                                    "<selfware_system_directive>\n\
+                                                     Auto-writing the code from your response FAILED: {e}. \
+                                                     Nothing was written to disk. Write the code yourself \
+                                                     with file_write, then run cargo check or cargo test to verify.\n\
+                                                     </selfware_system_directive>"
+                                                )));
+                                            }
                                         }
-                                        self.messages.push(Message::user(
-                                            "<selfware_system_directive>\n\
-                                             Code from your response was auto-written to file. \
-                                             Now run cargo check or cargo test to verify.\n\
-                                             </selfware_system_directive>"
-                                                .to_string(),
-                                        ));
                                         // Don't complete — let the agent verify
                                         continue;
                                     }
@@ -1102,6 +1381,9 @@ impl Agent {
                                         "Synthesis answer rejected by completion gate: {}",
                                         gate_msg
                                     );
+                                    // Same visibility gap as the normal path:
+                                    // the rejection only reaches the model.
+                                    output::gate_blocked(&gate_msg);
                                     self.messages.push(Message::user(format!(
                                         "<selfware_system_directive>\n{}\n</selfware_system_directive>",
                                         gate_msg

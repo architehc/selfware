@@ -474,3 +474,64 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 #[path = "../../tests/unit/session/edit_history/edit_history_test.rs"]
 mod tests;
+
+/// Outcome of restoring one file from a checkpoint, reported per file so
+/// callers can render honestly (never claim a restore that didn't happen).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// Snapshot bytes written back atomically.
+    Restored,
+    /// The file already holds the snapshot's content — nothing to revert.
+    AlreadyCurrent,
+    /// The checkpoint's own snapshot failed its integrity hash.
+    SkippedCorrupt,
+    /// The atomic write failed.
+    WriteFailed,
+}
+
+/// Restore a checkpoint's files with an integrity guard: the snapshot's
+/// recorded hash must match its own content before it is written back
+/// (temp file + rename, never a torn write). Files already holding the
+/// snapshot content are reported as AlreadyCurrent instead of rewritten.
+/// NOTE: there is deliberately no drift check — only pre-edit snapshots
+/// exist, and comparing the current file against the pre-edit hash blocks
+/// exactly the restore undo exists to perform (that was the old guard's
+/// bug). Shared by the interactive /restore handler and agent undo/redo.
+pub(crate) async fn restore_checkpoint_guarded(
+    files: &std::collections::HashMap<PathBuf, FileSnapshot>,
+) -> Vec<(PathBuf, RestoreOutcome)> {
+    let mut outcomes = Vec::new();
+    for (path, snapshot) in files {
+        // Snapshot integrity: the recorded hash must match the snapshot's
+        // own content, or the checkpoint is corrupt and must not be trusted.
+        if compute_hash(&snapshot.content) != snapshot.hash {
+            outcomes.push((path.clone(), RestoreOutcome::SkippedCorrupt));
+            continue;
+        }
+        if let Ok(current) = tokio::fs::read_to_string(path).await {
+            if current == snapshot.content {
+                outcomes.push((path.clone(), RestoreOutcome::AlreadyCurrent));
+                continue;
+            }
+        }
+        // Atomic write: temp file + rename, never a torn write.
+        let tmp = path.with_extension(format!(
+            "{}.undo-tmp",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("bak")
+        ));
+        let written = tokio::fs::write(&tmp, &snapshot.content).await.is_ok()
+            && tokio::fs::rename(&tmp, path).await.is_ok();
+        if !written {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        outcomes.push((
+            path.clone(),
+            if written {
+                RestoreOutcome::Restored
+            } else {
+                RestoreOutcome::WriteFailed
+            },
+        ));
+    }
+    outcomes
+}

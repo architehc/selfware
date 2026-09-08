@@ -221,3 +221,166 @@ fn test_approaching_limit_warning_zero_max() {
     let loop_ctrl = AgentLoop::new(0);
     assert!(loop_ctrl.approaching_limit_warning().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Adaptive iteration budget (loop 13)
+// ---------------------------------------------------------------------------
+
+fn progress_turn(had_success: bool, sigs: &[(&str, u64)]) -> TurnProgress {
+    TurnProgress {
+        had_success,
+        signatures: sigs
+            .iter()
+            .map(|(name, hash)| (name.to_string(), *hash))
+            .collect(),
+    }
+}
+
+fn streak_of(turns: Vec<TurnProgress>) -> std::collections::VecDeque<TurnProgress> {
+    turns.into_iter().collect()
+}
+
+#[test]
+fn productive_streak_extends_when_all_turns_productive() {
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(productive_streak(&turns, 5));
+    // A longer history is fine — only the last `window` turns are judged.
+    let mut longer = streak_of(vec![progress_turn(false, &[("file_read", 1)])]);
+    longer.extend(turns);
+    assert!(productive_streak(&longer, 5));
+}
+
+#[test]
+fn productive_streak_needs_full_window_of_evidence() {
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("file_read", 2)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn repeated_identical_call_is_not_progress() {
+    // The same tool+args repeats across the window (turn 1 and turn 5).
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 1)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+
+    // A duplicated call inside a single turn also disqualifies it.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1), ("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn error_only_streak_is_not_progress() {
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[("grep_search", 2)]),
+        progress_turn(false, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+
+    // A tool-less turn (no calls at all) is no evidence of progress.
+    let turns = streak_of(vec![
+        progress_turn(true, &[("file_read", 1)]),
+        progress_turn(true, &[]),
+        progress_turn(true, &[("file_read", 3)]),
+        progress_turn(true, &[("symbol_search", 4)]),
+        progress_turn(true, &[("file_read", 5)]),
+    ]);
+    assert!(!productive_streak(&turns, 5));
+}
+
+#[test]
+fn extension_is_quarter_of_original_and_grants_up_to_four() {
+    let mut loop_ctrl = AgentLoop::new(30);
+    // Multi-fire policy (TB4: the one-shot +50% still left productive tasks
+    // dead at the cap): each grant is +25% of the ORIGINAL cap, at most 4
+    // grants (+100% total).
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(7));
+    assert_eq!(loop_ctrl.max_iterations(), 58);
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        None,
+        "total extension is capped at +100% of the original cap"
+    );
+    assert_eq!(loop_ctrl.max_iterations(), 58);
+}
+
+#[test]
+fn extension_of_tiny_cap_extends_by_at_least_one() {
+    let mut loop_ctrl = AgentLoop::new(1);
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(1));
+    assert_eq!(loop_ctrl.max_iterations(), 2);
+}
+
+#[test]
+fn extension_lets_the_loop_run_past_the_original_cap() {
+    let mut loop_ctrl = AgentLoop::new(8);
+    loop_ctrl.next_state(); // Planning
+    loop_ctrl
+        .transition_to(AgentState::Executing { step: 0 })
+        .unwrap();
+    for _ in 0..8 {
+        loop_ctrl.next_state(); // iterations 1-8
+    }
+    let capped = loop_ctrl.next_state(); // 9 > 8 — cap tripped
+    assert!(matches!(capped, Some(AgentState::Failed { .. })));
+
+    // Each grant adds 8/4 = 2; sustained productivity re-earns budget up to
+    // the +100% ceiling (4 grants: cap 8 → 16).
+    for expected_cap in [10, 12, 14, 16] {
+        assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
+        assert_eq!(loop_ctrl.max_iterations(), expected_cap);
+        let step = loop_ctrl.current_step();
+        let iteration = loop_ctrl.current_iteration();
+        loop_ctrl.restore_progress(step, iteration);
+        assert!(matches!(
+            loop_ctrl.next_state(), // fits within the new cap
+            Some(AgentState::Executing { .. })
+        ));
+        let tripped = loop_ctrl.next_state(); // past the new cap
+        assert!(matches!(tripped, Some(AgentState::Failed { .. })));
+    }
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        None,
+        "after four grants the extension ceiling is reached"
+    );
+}
+
+#[test]
+fn reset_for_task_restores_original_budget_and_extension() {
+    let mut loop_ctrl = AgentLoop::new(10);
+    assert_eq!(loop_ctrl.extend_budget_once(), Some(2));
+    assert_eq!(loop_ctrl.max_iterations(), 12);
+    loop_ctrl.reset_for_task();
+    assert_eq!(loop_ctrl.max_iterations(), 10);
+    assert_eq!(
+        loop_ctrl.extend_budget_once(),
+        Some(2),
+        "a new task gets its own extension budget"
+    );
+}

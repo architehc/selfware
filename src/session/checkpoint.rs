@@ -661,6 +661,21 @@ pub struct CheckpointManager {
     checkpoints_dir: PathBuf,
 }
 
+/// Outcome of loading a checkpoint with explicit recovery semantics (review
+/// finding: unrecoverable corruption was reported as a successful fresh
+/// "resume", erasing the distinction between continuation and a new task).
+#[derive(Debug)]
+pub enum CheckpointLoad {
+    /// Primary file (plus deltas) loaded cleanly.
+    Clean(TaskCheckpoint),
+    /// Primary was unreadable; restored from the `.json.bak` backup.
+    RecoveredFromBackup(TaskCheckpoint),
+    /// Primary and backup are both unreadable (or the task does not exist).
+    /// A fresh start must be an explicit operator decision, never a silent
+    /// substitute for the requested resume.
+    RecoveryRequired { task_id: String, reason: String },
+}
+
 /// Maximum number of incremental deltas before forcing a compacted full write.
 const MAX_DELTA_ENTRIES_BEFORE_COMPACT: usize = 24;
 /// Maximum delta log size before forcing compaction.
@@ -1184,13 +1199,34 @@ impl CheckpointManager {
     /// integrity check), this automatically attempts recovery via
     /// [`recover_from_corruption`](Self::recover_from_corruption).
     pub fn load(&self, task_id: &str) -> Result<TaskCheckpoint> {
+        match self.load_with_status(task_id)? {
+            CheckpointLoad::Clean(checkpoint) | CheckpointLoad::RecoveredFromBackup(checkpoint) => {
+                Ok(checkpoint)
+            }
+            CheckpointLoad::RecoveryRequired { task_id, reason } => {
+                // Honest status over optimistic success (AGENTS.md rule 3): a
+                // fresh checkpoint is NOT a successful resume. The caller
+                // decides whether to start a new task explicitly.
+                Err(anyhow::anyhow!(
+                    "checkpoint for task '{task_id}' is unrecoverable ({reason}); \
+                     refusing to report a blank checkpoint as a resume — start a \
+                     new task explicitly if you intend to"
+                ))
+            }
+        }
+    }
+
+    /// Load a checkpoint with explicit recovery semantics (review finding:
+    /// checkpoint loss was reported as a successful fresh "resume", erasing
+    /// the distinction between continuation and a new task).
+    pub fn load_with_status(&self, task_id: &str) -> Result<CheckpointLoad> {
         let path = self.checkpoint_path(task_id)?;
 
         match self.try_load_from_path(&path).and_then(|mut checkpoint| {
             self.apply_deltas(task_id, &mut checkpoint)?;
             Ok(checkpoint)
         }) {
-            Ok(checkpoint) => Ok(checkpoint),
+            Ok(checkpoint) => Ok(CheckpointLoad::Clean(checkpoint)),
             Err(primary_err) => {
                 // The primary file is missing or corrupt -- attempt recovery.
                 tracing::warn!(
@@ -1198,12 +1234,13 @@ impl CheckpointManager {
                     path,
                     primary_err
                 );
-                self.recover_from_corruption(task_id).with_context(|| {
-                    format!(
-                        "Recovery also failed for task '{}'. Original error: {}",
-                        task_id, primary_err
-                    )
-                })
+                match self.recover_from_corruption(task_id)? {
+                    Some(checkpoint) => Ok(CheckpointLoad::RecoveredFromBackup(checkpoint)),
+                    None => Ok(CheckpointLoad::RecoveryRequired {
+                        task_id: task_id.to_string(),
+                        reason: format!("{primary_err}"),
+                    }),
+                }
             }
         }
     }
@@ -1285,9 +1322,11 @@ impl CheckpointManager {
     ///
     /// Strategy:
     /// 1. Try loading from the `.json.bak` backup (created by [`Self::save`]).
-    /// 2. If the backup is also unusable, create a fresh checkpoint with the
-    ///    task ID preserved so the caller can resume from a clean state.
-    pub fn recover_from_corruption(&self, task_id: &str) -> Result<TaskCheckpoint> {
+    /// 2. If the backup is also unusable, return `None` — the caller decides
+    ///    how to surface recovery-required state. No fresh checkpoint is
+    ///    created here: a blank checkpoint must never masquerade as a resume
+    ///    (review finding), and creating one would overwrite the evidence.
+    pub fn recover_from_corruption(&self, task_id: &str) -> Result<Option<TaskCheckpoint>> {
         let backup_path = self.checkpoint_path(task_id)?.with_extension("json.bak");
 
         // Attempt 1: try the backup file
@@ -1308,7 +1347,7 @@ impl CheckpointManager {
                             e
                         );
                     }
-                    return Ok(checkpoint);
+                    return Ok(Some(checkpoint));
                 }
                 Err(e) => {
                     tracing::warn!("Backup checkpoint {:?} is also corrupt: {}", backup_path, e);
@@ -1316,22 +1355,17 @@ impl CheckpointManager {
             }
         }
 
-        // Attempt 2: create a fresh checkpoint so the caller can continue.
-        // This is a lossy fallback: the task description, message history, and
-        // audit trail are gone, and any filesystem changes made before the crash
-        // are now ORPHANED (the fresh checkpoint does not know about them). Surface
-        // that loudly so an operator can reconcile the working tree if needed.
+        // Both primary and backup are unreadable. The task description, message
+        // history, and audit trail are gone, and any filesystem changes made
+        // before the crash are ORPHANED. Surface that loudly — and return None
+        // so the caller reports RecoveryRequired instead of a fake resume.
         tracing::warn!(
-            "DATA LOSS: checkpoint for task '{}' and its backup are both unreadable; \
-             creating a blank fresh checkpoint. Prior messages/audit are lost and any \
-             uncommitted file changes from before the crash are now untracked — review \
-             the working tree manually.",
+            "DATA LOSS: checkpoint for task '{}' and its backup are both unreadable. \
+             Prior messages/audit are lost and any uncommitted file changes from \
+             before the crash are now untracked — review the working tree manually.",
             task_id
         );
-        let fresh = TaskCheckpoint::new(task_id.to_string(), String::new());
-        self.save(&fresh)
-            .with_context(|| format!("Failed to save fresh checkpoint for '{}'", task_id))?;
-        Ok(fresh)
+        Ok(None)
     }
 
     /// Save a checkpoint with retry and exponential backoff.

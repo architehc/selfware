@@ -249,7 +249,7 @@ impl CodeIntrospect {
                     let name = name.to_string_lossy();
                     if matches!(
                         name.as_ref(),
-                        "target" | "node_modules" | ".git" | "__pycache__" | ".venv"
+                        "target" | "node_modules" | ".git" | "__pycache__" | ".venv" | "scratchpad"
                     ) {
                         continue;
                     }
@@ -505,7 +505,7 @@ impl CodeQuery {
                 let name = name.to_string_lossy();
                 if matches!(
                     name.as_ref(),
-                    "target" | "node_modules" | ".git" | "__pycache__"
+                    "target" | "node_modules" | ".git" | "__pycache__" | "scratchpad"
                 ) {
                     continue;
                 }

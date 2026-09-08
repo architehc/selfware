@@ -174,6 +174,8 @@ fn test_agent_config_serde_roundtrip() {
     let cfg = AgentConfig {
         max_iterations: 42,
         step_timeout_secs: 99,
+        verify_after_edit: None,
+        stream_stall_timeout_secs: None,
         token_budget: 12345,
         token_safety_margin: 4096,
         native_function_calling: true,
@@ -214,10 +216,12 @@ fn test_agent_config_serde_roundtrip() {
     assert!(back.disable_turn_artifacts);
     assert_eq!(back.prompt_profile, "swe_bench");
     assert_eq!(back.post_edit_test_command, Some("cargo test".to_string()));
-    // serde(skip) fields should reset to their Default value on deserialize
-    assert_eq!(back.max_budget_tokens, None);
-    assert_eq!(back.max_wall_secs, None);
-    assert_eq!(back.max_cost_usd, None);
+    // Budget fields persist in config files (benchmark profiles need them —
+    // found by the harness proposer: max_wall_secs under [agent] was ignored
+    // on every Harbor run because the fields were serde(skip) CLI-only).
+    assert_eq!(back.max_budget_tokens, Some(99999));
+    assert_eq!(back.max_wall_secs, Some(600));
+    assert_eq!(back.max_cost_usd, Some(1.5));
 }
 
 #[test]
@@ -229,10 +233,10 @@ fn test_agent_config_serde_skip_fields_not_in_json() {
         ..AgentConfig::default()
     };
     let json = serde_json::to_string(&cfg).unwrap();
-    // The skip fields should not appear in the JSON output
-    assert!(!json.contains("max_budget_tokens"));
-    assert!(!json.contains("max_wall_secs"));
-    assert!(!json.contains("max_cost_usd"));
+    // The budget fields are persisted now (benchmark profiles set them).
+    assert!(json.contains("max_budget_tokens"));
+    assert!(json.contains("max_wall_secs"));
+    assert!(json.contains("max_cost_usd"));
 }
 
 #[test]

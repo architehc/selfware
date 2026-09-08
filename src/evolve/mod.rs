@@ -27,6 +27,8 @@ pub mod fn_dedup;
 pub mod gate;
 pub mod git;
 pub mod graph;
+pub mod graph_cache;
+pub mod graph_index;
 pub mod graphrag;
 pub mod ide;
 pub mod logical;
@@ -44,6 +46,7 @@ pub mod server;
 pub mod skeleton;
 pub mod structure;
 pub mod summary;
+pub mod symbols;
 pub mod xray;
 
 pub use actions::{Action, ActionEngine, ActionResult};
@@ -59,7 +62,8 @@ pub use context_fit::{fit_tier, FitBudget, FitOutcome, RequestedMode, TierMeasur
 pub use context_reduce::{dedup_context, reduce_source, strip_cfg_test_blocks, strip_comments};
 pub use context_selector::{select as select_context, ContextSelection, SelectedFile, TaskKind};
 pub use context_trust::{
-    analyze_source, scan_injection, InjectionFinding, SourceKind, TrustLevel, TrustReport,
+    analyze_source, scan_injection, GateDecision, InjectionFinding, SourceKind, TrustLevel,
+    TrustReport,
 };
 pub use dead_code::{DeadCodeAnalyzer, DeadSymbol};
 pub use dedup::{DeduplicationAnalyzer, DuplicateKind, DuplicatePair};
@@ -67,6 +71,8 @@ pub use envelope::{build_envelope, ContextEnvelope, ProjectedDocument};
 pub use fn_dedup::{DuplicateFnPair, FnDedupAnalyzer, FnLocation};
 pub use gate::{GateResult, Gatekeeper};
 pub use graph::GraphBuilder;
+pub use graph_cache::shared_graph_index;
+pub use graph_index::{GraphIndex, Metric};
 pub use graphrag::{GraphRag, GroundedFact};
 pub use ide::{DocumentSnapshot, FileClass, FileInfo, IdeEngine, WriteResult};
 pub use logical::{build_logical_model, Capability, LogicalEdge, LogicalModel};
@@ -143,6 +149,18 @@ pub struct Node {
     /// `generated`, or `other`. Defaults to `rust_source` for older graphs.
     #[serde(default = "default_classification")]
     pub classification: String,
+    /// Symbol-level fields — present only on symbol nodes (schema v2).
+    /// `Option` + serde defaults keep older YAMLs (file-level only) loading
+    /// unchanged; no schema bump is needed because deserialization fills
+    /// `None` when the fields are absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol_kind: Option<String>,
+    /// Id of the parent file node for symbol nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// 1-based inclusive (start, end) source lines for symbol nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_range: Option<(usize, usize)>,
 }
 
 fn default_classification() -> String {
@@ -159,6 +177,10 @@ pub enum NodeLayer {
     /// Non-source repository files (data, config, scripts, vendored, generated).
     /// Excluded from code token tiers so counts reflect real source.
     Auxiliary,
+    /// Function/type-level nodes inside a Rust source file (schema v2).
+    /// Kept out of file-layer rollups (hotspots, clusters, context tiers) so
+    /// file-level queries are unchanged unless a caller asks for symbols.
+    Symbol,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -196,6 +218,9 @@ impl Node {
             inline_test_lines: 0,
             inline_test_tokens: 0,
             classification: default_classification(),
+            symbol_kind: None,
+            parent_id: None,
+            line_range: None,
         }
     }
 
@@ -219,6 +244,28 @@ impl Node {
         node.layer = NodeLayer::Structure;
         node.path = None;
         node.classification = "structure".to_string();
+        node
+    }
+
+    /// A symbol-level node inside a Rust source file (schema v2).
+    /// `id` is `<parent_id>::<name>`; `path` mirrors the parent file so
+    /// path-based lookups (expand, mirror rules) keep working.
+    pub fn symbol(
+        id: &str,
+        parent_id: &str,
+        kind: &str,
+        path: &str,
+        line_range: (usize, usize),
+        tokens: usize,
+    ) -> Self {
+        let mut node = Self::code(id, path);
+        node.layer = NodeLayer::Symbol;
+        node.classification = "symbol".to_string();
+        node.symbol_kind = Some(kind.to_string());
+        node.parent_id = Some(parent_id.to_string());
+        node.line_range = Some(line_range);
+        node.tokens = tokens;
+        node.lines = line_range.1.saturating_sub(line_range.0) + 1;
         node
     }
 }

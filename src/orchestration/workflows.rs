@@ -861,7 +861,15 @@ impl WorkflowContext {
 }
 
 /// Type alias for tool handler function
-pub type ToolHandler = Box<dyn Fn(&str, &HashMap<String, String>) -> Result<String> + Send + Sync>;
+/// Async tool handler for workflow Tool steps (review finding: the previous
+/// sync handler type forced a `block_in_place`/`block_on` bridge inside the
+/// workflow executor, which froze a runtime worker and defeated the
+/// workflow's `tokio::select!` timeout).
+pub type ToolHandler = Box<
+    dyn Fn(&str, &HashMap<String, String>) -> futures::future::BoxFuture<'static, Result<String>>
+        + Send
+        + Sync,
+>;
 
 /// Type alias for LLM handler function
 pub type LlmHandler = Box<dyn Fn(&str, &[String]) -> Result<LlmCallOutput> + Send + Sync>;
@@ -1666,7 +1674,7 @@ impl WorkflowExecutor {
                         format!("Calling tool: {} with {:?}", name, resolved_args),
                         None,
                     );
-                    let result = handler(name, &resolved_args)?;
+                    let result = handler(name, &resolved_args).await?;
                     Ok(VarValue::String(result))
                 } else {
                     Err(anyhow!(
