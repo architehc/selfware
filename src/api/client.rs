@@ -147,6 +147,24 @@ pub struct ApiClient {
     /// deadline, so N calls (and every retry) each received a full-length
     /// budget and the run could bill long past expiry. Shared across clones
     /// so derived clients observe the same anchor.
+    ///
+    /// The anchor follows the TASK boundary, not the client lifetime: the
+    /// agent calls [`Self::reset_wall_budget`] from `run_task` so a queued
+    /// follow-up task gets its own budget window (previously the anchor
+    /// latched once per ApiClient, so every request after the first task's
+    /// budget elapsed failed even though the agent had reset its own
+    /// per-task clock).
+    ///
+    /// Mid-run client rebuilds DO happen — the recovery tree's endpoint
+    /// switch and credential reload (`src/agent/mod.rs`) and the session
+    /// `switch_model` all replace the client with a fresh `ApiClient::new`.
+    /// A rebuild silently resets BOTH this anchor (the next request latches
+    /// a full new window, so the wall budget restarts) and the
+    /// `native_fc_disabled` latch (native FC is retried against the new
+    /// endpoint/credentials). The FC-latch reset is deliberate for an
+    /// endpoint switch — the rejection was the OLD provider's — but it also
+    /// fires on a same-endpoint credential reload; accepted behavior,
+    /// documented here so nobody "fixes" it by accident.
     wall_budget_start: Arc<std::sync::Mutex<Option<Instant>>>,
     /// Latched when a provider 400s on the native tool-call payload — the
     /// session flips to XML tool calling permanently (works-with-any-model:
@@ -348,6 +366,25 @@ impl ApiClient {
         Some(*start + Duration::from_secs(limit))
     }
 
+    /// Reset the run-level wall-clock anchor: the NEXT billable request
+    /// latches a fresh budget window.
+    ///
+    /// Called by the agent at task start (`run_task`), where the agent also
+    /// resets its own per-task clock (`task_start_time` /
+    /// `prior_elapsed_secs`). Without this the anchor latched once per
+    /// ApiClient, so in a multi-task session every request after the FIRST
+    /// task's budget elapsed failed with [`WallClockBudgetExceeded`] — the
+    /// shared client never observed the task boundary. Resume /
+    /// `continue_execution` deliberately does NOT reset: the checkpoint
+    /// restores the accumulated budget and the anchor must keep measuring
+    /// the same window.
+    pub fn reset_wall_budget(&self) {
+        *self
+            .wall_budget_start
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     /// Return a [`WallClockBudgetExceeded`] error when the run-level wall
     /// budget has already elapsed. Checked BEFORE every new billable request
     /// (and before every retry) so no request is issued after expiry — the
@@ -372,6 +409,56 @@ impl ApiClient {
             }
             .into(),
         )
+    }
+
+    /// The `[models.X]` profile the client's main endpoint runs under.
+    ///
+    /// The loader synthesizes a `"default"` profile from the top-level
+    /// endpoint/model fields, and an explicit `[models.default]` section is
+    /// how the MAIN endpoint gets per-endpoint knobs (`max_retries`,
+    /// `response_timeout_floor_secs`). Those knobs are per-endpoint intent,
+    /// so they apply only while the client's effective endpoint still
+    /// matches the profile's — after a recovery endpoint switch rebuilds
+    /// the client, the old endpoint's retry shape must not leak onto the
+    /// fallback.
+    fn active_profile(&self) -> Option<&crate::config::ModelProfile> {
+        self.config
+            .resolve_model(None)
+            .filter(|p| p.endpoint == self.base_url)
+    }
+
+    /// Retry count for requests through the main endpoint: the active
+    /// profile's `max_retries` wins over the global `retry.max_retries`.
+    fn effective_max_retries(&self) -> u32 {
+        self.active_profile()
+            .map(|p| p.effective_max_retries(self.retry_config.max_retries))
+            .unwrap_or(self.retry_config.max_retries)
+    }
+
+    /// Header-wait timeout (secs) for the streaming path: at least 120 s (or
+    /// the agent step timeout if larger), raised to the active profile's
+    /// `response_timeout_floor_secs` when configured. Bounded per attempt;
+    /// the caller further caps it by the remaining run wall budget.
+    fn stream_header_timeout_secs(&self) -> u64 {
+        let mut secs = self.config.agent.step_timeout_secs.max(120);
+        if let Some(floor) = self
+            .active_profile()
+            .and_then(|p| p.response_timeout_floor_secs)
+        {
+            secs = secs.max(floor);
+        }
+        secs
+    }
+
+    /// Response-wait timeout (secs) for one non-streaming call: the
+    /// speed-adaptive budget raised to the given profile's
+    /// `response_timeout_floor_secs` when configured.
+    fn response_timeout_secs_for(&self, profile: Option<&crate::config::ModelProfile>) -> u64 {
+        let mut secs = self.adaptive_response_timeout_secs();
+        if let Some(floor) = profile.and_then(|p| p.response_timeout_floor_secs) {
+            secs = secs.max(floor);
+        }
+        secs
     }
 
     /// True when the user's `extra_body` already pins reasoning behavior
@@ -742,7 +829,10 @@ impl ApiClient {
         debug!("Starting streaming request to {}", url);
 
         let mut delay_ms = self.retry_config.initial_delay_ms;
-        let max_attempts = self.retry_config.max_retries + 1;
+        // Per-profile retry-count override ([models.default] max_retries)
+        // wins over the global retry config — previously only consumed by
+        // chat_with_profile, leaving the knob inert on the streaming path.
+        let max_attempts = self.effective_max_retries() + 1;
 
         // One absolute deadline for the WHOLE run (all calls + retries + body
         // streaming), latched at the first billable request — previously each
@@ -772,10 +862,11 @@ impl ApiClient {
             // `connect_timeout` only covers TCP connect; a server that accepts
             // the connection then stalls before sending headers would hang
             // forever.  We use a header timeout of at least 120 s (or the
-            // agent step timeout if larger) so slow-but-healthy models are
+            // agent step timeout if larger, or the active profile's
+            // response-timeout floor) so slow-but-healthy models are
             // unaffected.  The body is then streamed as before (per-chunk
             // timeout only — NO total timeout on the body).
-            let mut hdr_timeout_secs = self.config.agent.step_timeout_secs.max(120);
+            let mut hdr_timeout_secs = self.stream_header_timeout_secs();
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit), so the
                 // sum across retries stays within max_wall_secs.
@@ -838,7 +929,7 @@ impl ApiClient {
                         }
 
                         let retry_after = Self::parse_retry_after(response.headers());
-                        let text = response.text().await.unwrap_or_default();
+                        let text = Self::read_error_body(response).await;
                         // Provider rejects the native tool-call payload:
                         // latch XML mode for the session and retry — the
                         // alternative is a guaranteed dead run on models
@@ -995,6 +1086,44 @@ impl ApiClient {
             .and_then(|s| s.trim().parse::<u64>().ok())
     }
 
+    /// Read an error-status response body with a time bound and a byte cap.
+    ///
+    /// `stream_client` is built WITHOUT a total reqwest timeout, so a proxy
+    /// that sends 429/5xx (or 400) headers and then stalls mid-body would
+    /// hang a headless run forever on a bare `response.text().await`. Ten
+    /// seconds is generous for an error body; 64 KiB caps what a
+    /// misbehaving gateway can make us buffer. On timeout or read error the
+    /// body degrades to empty — the status code still drives the typed
+    /// outcome (retry, XML-mode latch, or `http_status_error`).
+    async fn read_error_body(response: reqwest::Response) -> String {
+        /// Time bound for the whole error-body read.
+        const TIMEOUT: Duration = Duration::from_secs(10);
+        /// Byte cap: error bodies are diagnostic, not data.
+        const MAX_BYTES: usize = 64 * 1024;
+
+        let read = async move {
+            let mut response = response;
+            let mut buf: Vec<u8> = Vec::new();
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        let remaining = MAX_BYTES.saturating_sub(buf.len());
+                        buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                        if buf.len() >= MAX_BYTES {
+                            break;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => return String::new(),
+                }
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+        tokio::time::timeout(TIMEOUT, read)
+            .await
+            .unwrap_or_default()
+    }
+
     /// Backoff sleep for a retry: honor the server's `Retry-After` (capped at
     /// max_delay) when present, otherwise the current exponential `delay_ms` with
     /// ±25% jitter so many clients don't retry in lockstep against a rate-limited
@@ -1030,7 +1159,11 @@ impl ApiClient {
             body.clone(),
             &self.base_url,
             self.config.api_key.as_ref(),
-            None,
+            // Requests through the main endpoint run under the resolved
+            // [models.default] profile, so its max_retries /
+            // response_timeout_floor_secs apply here too — previously this
+            // passed None and the knobs were inert outside chat_with_profile.
+            self.active_profile(),
         )
         .await
     }
@@ -1077,6 +1210,14 @@ impl ApiClient {
                 );
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 
+                // The backoff sleep may have consumed the rest of the wall
+                // budget (a server Retry-After past the deadline, or a long
+                // exponential delay): re-check BEFORE posting so an expired
+                // retry never launches one more billable request.
+                if let Some(stop) = self.wall_budget_stop() {
+                    return Err(stop);
+                }
+
                 // If the server explicitly told us how long to wait, do not
                 // also apply exponential backoff doubling for this iteration.
                 if honored_retry_after {
@@ -1115,10 +1256,7 @@ impl ApiClient {
             // (or the step timeout if larger), clamped at 2 hours, and raced
             // against shutdown so Ctrl-C / SIGTERM interrupts promptly.
             let call_started = Instant::now();
-            let mut response_timeout_secs = self.adaptive_response_timeout_secs();
-            if let Some(floor) = timeout_overrides.and_then(|p| p.response_timeout_floor_secs) {
-                response_timeout_secs = response_timeout_secs.max(floor);
-            }
+            let mut response_timeout_secs = self.response_timeout_secs_for(timeout_overrides);
             if let Some(d) = deadline {
                 // Cap by the REMAINING wall budget (<= the full limit).
                 let remaining = d.saturating_duration_since(Instant::now()).as_secs().max(1);
@@ -1252,7 +1390,7 @@ impl ApiClient {
                             .and_then(|s| s.trim().parse::<u64>().ok())
                             .map(|s| s.min(300));
 
-                        let error_text = response.text().await.unwrap_or_default();
+                        let error_text = Self::read_error_body(response).await;
                         // Some OpenAI-compatible gateways echo the offending
                         // API key back in error bodies — and 429/5xx bodies are
                         // no exception. Redact before the warn! log fires on
@@ -1288,7 +1426,7 @@ impl ApiClient {
                     }
 
                     let status_code = status;
-                    let error_text = response.text().await.unwrap_or_default();
+                    let error_text = Self::read_error_body(response).await;
                     // Provider rejects the native tool-call payload: latch
                     // XML mode for the session and retry instead of dying —
                     // the alternative is a guaranteed dead run on models

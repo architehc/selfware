@@ -126,6 +126,54 @@ impl Config {
             );
         }
 
+        // --- Sentinel values that crash or disable the API client ---
+        // u64::MAX panics on `Instant + Duration` at the first billable
+        // request; anything past 30 days is a misconfiguration, not a budget.
+        const MAX_WALL_SECS_LIMIT: u64 = 30 * 24 * 60 * 60;
+        if let Some(max_wall) = self.agent.max_wall_secs {
+            if max_wall > MAX_WALL_SECS_LIMIT {
+                bail!(
+                    "Config error: agent.max_wall_secs ({}) exceeds maximum allowed ({} = 30 days)",
+                    max_wall,
+                    MAX_WALL_SECS_LIMIT
+                );
+            }
+        }
+        // A zero stall timeout times out every stream on the first chunk
+        // wait — every streamed request fails and the retry loop re-bills it.
+        if let Some(stall) = self.agent.stream_stall_timeout_secs {
+            if stall == 0 {
+                bail!(
+                    "Config error: agent.stream_stall_timeout_secs must be greater than 0 when set \
+                     (0 would time out every stream immediately)"
+                );
+            }
+        }
+        // u32::MAX overflows `max_retries + 1` (debug panic; release wraps to
+        // zero attempts). Past 100 the exponential backoff is meaningless.
+        const MAX_RETRIES_LIMIT: u32 = 100;
+        if self.retry.max_retries > MAX_RETRIES_LIMIT {
+            bail!(
+                "Config error: retry.max_retries ({}) exceeds maximum allowed ({})",
+                self.retry.max_retries,
+                MAX_RETRIES_LIMIT
+            );
+        }
+        // Same overflow class through the per-profile override, which feeds
+        // the same `max_retries + 1` arithmetic on both chat paths.
+        for (name, profile) in &self.models {
+            if let Some(retries) = profile.max_retries {
+                if retries > MAX_RETRIES_LIMIT {
+                    bail!(
+                        "Config error: models.{}.max_retries ({}) exceeds maximum allowed ({})",
+                        name,
+                        retries,
+                        MAX_RETRIES_LIMIT
+                    );
+                }
+            }
+        }
+
         // --- UI animation speed ---
         if self.ui.animation_speed <= 0.0 {
             bail!(

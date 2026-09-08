@@ -265,3 +265,424 @@ fn http_status_error_ignores_short_or_absent_key() {
     );
     assert!(err.to_string().contains("bad request"));
 }
+
+// ---------------------------------------------------------------------------
+// Wall-budget task boundary (review finding #6): the anchor is latched once
+// per ApiClient; the agent resets it at each run_task so a multi-task
+// session does not fail every request after the first task's budget elapses.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reset_wall_budget_relatches_a_fresh_window() {
+    let client = wall_budget_client(Some(1));
+    expire_wall_budget(&client, 1).await;
+    assert!(
+        client.wall_budget_stop().is_some(),
+        "budget must report exhausted before the reset"
+    );
+
+    // Task boundary: run_task resets the client anchor alongside the agent's
+    // own per-task clock. The next billable request must latch a NEW window
+    // instead of failing on the previous task's exhausted budget.
+    client.reset_wall_budget();
+    assert!(
+        client.wall_budget_stop().is_none(),
+        "a fresh window must open after the reset"
+    );
+    let deadline = client.run_wall_deadline().expect("deadline relatched");
+    assert!(
+        deadline > Instant::now(),
+        "relatched deadline must lie in the future"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Bounded error-body reads (review finding #11): stream_client has no total
+// reqwest timeout, so error-status bodies are read with a time bound and a
+// byte cap. A proxy that sends 429/5xx headers then stalls must terminate
+// with the typed status, not hang a headless run forever.
+// ---------------------------------------------------------------------------
+
+/// Local copy of the api::tests helper: drain the request headers before
+/// responding (writing without reading resets the connection on Windows).
+async fn drain_request(socket: &mut tokio::net::TcpStream) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    let mut total = Vec::new();
+    loop {
+        let n = socket.read(&mut buf).await.unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        total.extend_from_slice(&buf[..n]);
+        // End of HTTP headers is marked by \r\n\r\n. The request body (a
+        // small JSON payload) may follow in the same or a later read — the
+        // client waits for our response either way, so headers suffice.
+        if total.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn stalled_error_body_terminates_with_typed_status() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_request(&mut socket).await;
+        // 429 headers, then stall forever with the connection open — the
+        // error body never arrives.
+        socket
+            .write_all(
+                b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let mut config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    config.retry.max_retries = 0; // fail fast: a single attempt
+    let client = ApiClient::new(&config).unwrap();
+
+    let started = Instant::now();
+    let err = client
+        .chat_stream(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect_err("a stalled error body must not hang the run");
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "the error-body read must be time-bounded, took {:?}",
+        started.elapsed()
+    );
+    let status = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<ApiError>())
+        .and_then(|e| match e {
+            ApiError::HttpStatus { status, .. } => Some(*status),
+            _ => None,
+        });
+    assert_eq!(status, Some(429), "typed 429 outcome, got: {err:?}");
+
+    let _ = server.await;
+}
+
+#[tokio::test]
+async fn endless_error_body_is_capped_and_typed() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        drain_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        // Stream body bytes forever; the client must stop at the byte cap
+        // (which also closes the connection and ends this loop).
+        let chunk = format!("{:X}\r\n{}\r\n", 1024, "x".repeat(1024));
+        loop {
+            if socket.write_all(chunk.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    config.retry.max_retries = 0;
+    let client = ApiClient::new(&config).unwrap();
+
+    let started = Instant::now();
+    let err = client
+        .chat(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect_err("an endless error body must not be buffered forever");
+    assert!(
+        started.elapsed() < Duration::from_secs(25),
+        "the byte cap must bound the read, took {:?}",
+        started.elapsed()
+    );
+    let status = err
+        .chain()
+        .find_map(|c| c.downcast_ref::<ApiError>())
+        .and_then(|e| match e {
+            ApiError::HttpStatus { status, .. } => Some(*status),
+            _ => None,
+        });
+    assert_eq!(status, Some(500), "typed 500 outcome, got: {err:?}");
+
+    let _ = server.await;
+}
+
+/// A server `Retry-After` that lands past the wall deadline must not launch
+/// one more billable request after the backoff sleep (review finding #11).
+#[tokio::test]
+async fn retry_after_past_wall_deadline_never_posts_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let hits_server = std::sync::Arc::clone(&hits);
+
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            hits_server.fetch_add(1, Ordering::SeqCst);
+            drain_request(&mut socket).await;
+            let body = "rate limited";
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: text/plain\r\nRetry-After: 3\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if socket.write_all(response.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut config = crate::config::Config {
+        endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        ..Default::default()
+    };
+    config.retry.max_retries = 3;
+    config.retry.base_delay_ms = 100;
+    config.retry.max_delay_ms = 10_000;
+    config.agent.max_wall_secs = Some(1); // expires during the 3s Retry-After
+    let client = ApiClient::new(&config).unwrap();
+
+    let err = client
+        .chat(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await
+        .expect_err("the run must stop as a budget stop, not retry forever");
+    assert!(
+        err.chain()
+            .any(|c| c.downcast_ref::<WallClockBudgetExceeded>().is_some()),
+        "expected WallClockBudgetExceeded after the expired retry wait, got: {err:?}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "no expired retry may launch a second billable request"
+    );
+
+    server.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Profile knob wiring (review finding #12): when the client's main endpoint
+// matches the resolved [models.default] profile, its max_retries and
+// response_timeout_floor_secs override the global defaults on BOTH the
+// streaming and non-streaming paths.
+// ---------------------------------------------------------------------------
+
+/// Client whose `[models.default]` profile points at the same endpoint as
+/// the top-level config (the loader-synthesized shape), with the given
+/// per-profile knobs.
+fn profiled_client(
+    endpoint: &str,
+    profile_max_retries: Option<u32>,
+    profile_floor: Option<u64>,
+) -> ApiClient {
+    let mut config = crate::config::Config {
+        endpoint: endpoint.to_string(),
+        ..Default::default()
+    };
+    config.models.insert(
+        "default".to_string(),
+        crate::config::ModelProfile {
+            endpoint: endpoint.to_string(),
+            model: config.model.clone(),
+            api_key: None,
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: config.context_length,
+            extra_body: None,
+            native_function_calling: None,
+            max_retries: profile_max_retries,
+            response_timeout_floor_secs: profile_floor,
+        },
+    );
+    ApiClient::new(&config).unwrap()
+}
+
+#[test]
+fn active_profile_requires_matching_endpoint() {
+    let client = profiled_client("http://127.0.0.1:9/v1", Some(0), None);
+    assert!(
+        client.active_profile().is_some(),
+        "same-endpoint default profile must be active"
+    );
+
+    // A profile for a DIFFERENT endpoint must not leak its knobs onto this
+    // client (e.g. after a recovery endpoint switch).
+    let mut config = crate::config::Config {
+        endpoint: "http://127.0.0.1:9/v1".to_string(),
+        ..Default::default()
+    };
+    config.models.insert(
+        "default".to_string(),
+        crate::config::ModelProfile {
+            endpoint: "http://127.0.0.1:9999/v1".to_string(),
+            model: config.model.clone(),
+            api_key: None,
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: config.context_length,
+            extra_body: None,
+            native_function_calling: None,
+            max_retries: Some(0),
+            response_timeout_floor_secs: None,
+        },
+    );
+    let client = ApiClient::new(&config).unwrap();
+    assert!(
+        client.active_profile().is_none(),
+        "mismatched-endpoint profile must stay inactive"
+    );
+}
+
+#[test]
+fn profile_floor_raises_stream_header_timeout() {
+    let client = profiled_client("http://127.0.0.1:9/v1", None, Some(1800));
+    assert_eq!(client.stream_header_timeout_secs(), 1800);
+
+    let no_floor = profiled_client("http://127.0.0.1:9/v1", None, None);
+    assert_eq!(
+        no_floor.stream_header_timeout_secs(),
+        no_floor.config.agent.step_timeout_secs.max(120),
+        "without a floor the legacy max(step_timeout, 120) applies"
+    );
+}
+
+#[test]
+fn profile_floor_raises_nonstreaming_response_timeout() {
+    let client = profiled_client("http://127.0.0.1:9/v1", None, Some(7200));
+    assert!(
+        client.response_timeout_secs_for(client.active_profile()) >= 7200,
+        "profile floor must raise the adaptive non-streaming timeout"
+    );
+}
+
+/// Regression: a profile with `max_retries = 0` fails fast on BOTH paths —
+/// one billable attempt each, even when the global retry budget is larger.
+#[tokio::test]
+async fn profile_max_retries_zero_fails_fast_on_both_paths() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+    let hits = std::sync::Arc::new(AtomicUsize::new(0));
+    let hits_server = std::sync::Arc::clone(&hits);
+
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            hits_server.fetch_add(1, Ordering::SeqCst);
+            drain_request(&mut socket).await;
+            let body = "server error";
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            if socket.write_all(response.as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut config = crate::config::Config {
+        endpoint: endpoint.clone(),
+        ..Default::default()
+    };
+    // Global budget would allow 6 attempts; the profile must override it.
+    config.retry.max_retries = 5;
+    config.retry.base_delay_ms = 1;
+    config.retry.max_delay_ms = 5;
+    config.models.insert(
+        "default".to_string(),
+        crate::config::ModelProfile {
+            endpoint: endpoint.clone(),
+            model: config.model.clone(),
+            api_key: None,
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            modalities: vec!["text".to_string()],
+            context_length: config.context_length,
+            extra_body: None,
+            native_function_calling: None,
+            max_retries: Some(0),
+            response_timeout_floor_secs: None,
+        },
+    );
+    let client = ApiClient::new(&config).unwrap();
+
+    let _ = client
+        .chat(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "non-streaming: profile max_retries=0 must fail fast"
+    );
+
+    let _ = client
+        .chat_stream(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "streaming: profile max_retries=0 must fail fast"
+    );
+
+    // Control: without the profile override the global retry budget applies
+    // (1 initial attempt + 2 retries = 3 more hits).
+    let mut plain_config = crate::config::Config {
+        endpoint,
+        ..Default::default()
+    };
+    plain_config.retry.max_retries = 2;
+    plain_config.retry.base_delay_ms = 1;
+    plain_config.retry.max_delay_ms = 5;
+    let plain = ApiClient::new(&plain_config).unwrap();
+    let _ = plain
+        .chat(vec![Message::user("hi")], None, ThinkingMode::Disabled)
+        .await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2 + 3,
+        "control: global max_retries=2 must still retry when no profile overrides it"
+    );
+
+    server.abort();
+}

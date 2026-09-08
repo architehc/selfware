@@ -131,8 +131,8 @@ impl Agent {
         self.total_no_action_prompts = 0;
         self.requirements_audit_done
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.leak_check_done
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.leak_check_scanned_mutation_sequence
+            .store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
         self.input_census_note = None;
         self.input_census_suspicious.clear();
         self.failed_install_streak = 0;
@@ -165,6 +165,12 @@ impl Agent {
         self.task_start_time = std::time::Instant::now();
         // Fresh task → no prior segments; the budget starts at zero.
         self.prior_elapsed_secs = 0;
+        // The shared API client must observe the task boundary too: its
+        // wall-budget anchor is latched on the first billable request and
+        // would otherwise keep measuring (and exhausting) the PREVIOUS
+        // task's window. Resume does not go through run_task and keeps
+        // its accumulated window, matching prior_elapsed_secs above.
+        self.client.reset_wall_budget();
         // Arm the single-terminal-event guard for this run.
         self.terminal_event_emitted = false;
         self.last_run_failure_mode = None;
