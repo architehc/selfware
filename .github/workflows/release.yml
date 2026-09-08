@@ -129,6 +129,10 @@ jobs:
           sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          # libc6:arm64 must match the runner's amd64 libc6 exactly; the runner
+          # takes it from jammy-security, so arm64 needs that pocket too
+          # (v0.7.3 first run: "libc6:arm64 (>= 2.34) is not going to be installed").
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config \
             libdbus-1-dev:arm64 libxcb1-dev:arm64 libxcb-randr0-dev:arm64 \
