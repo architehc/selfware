@@ -482,12 +482,20 @@ def main() -> int:
     ap.add_argument("--count", type=int, default=10,
                     help="cases to request per class")
     ap.add_argument("--streams", type=int, default=8)
+    ap.add_argument("--probe", action="store_true",
+                    help="write all output to a timestamped probe_ file instead "
+                         "of the gate corpus — new waves are untriaged by "
+                         "definition and the gate corpus only grows through "
+                         "dual-source triage (corpus integrity rule)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print cases, do not write corpus files")
     args = ap.parse_args()
 
     classes = {args.only_class: ATTACK_CLASSES[args.only_class]} if args.only_class \
         else ATTACK_CLASSES
+    if args.probe:
+        probe_target = f"probe_wave_{int(time.time())}.jsonl"
+        classes = {k: (v[0], probe_target) for k, v in classes.items()}
     CORPUS_DIR.mkdir(parents=True, exist_ok=True)
     known = existing_keys()
 
