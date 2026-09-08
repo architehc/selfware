@@ -12,10 +12,11 @@
 //! Policy:
 //! - `hidden_unicode` findings sanitize in EVERY classification (bidi
 //!   overrides / zero-width chars are never legitimate content).
-//! - other high-severity findings sanitize in every classification EXCEPT
-//!   trusted first-party Rust source (`rust_source`), where the scanner
-//!   already downgrades them and safety modules legitimately discuss these
-//!   patterns — those are report-only.
+//! - other high-severity findings sanitize in every classification. Content
+//!   type is not authority: a `.rs` extension says what the content IS, not
+//!   who produced it (review finding). The scanner's own downgrade rules
+//!   keep first-party safety-module patterns readable without an
+//!   extension-based trust carve-out.
 //! - medium/low findings are left alone (the marker would cry wolf on
 //!   benign content like long base64 blobs).
 
@@ -95,24 +96,17 @@ pub(crate) fn trust_gate_tool_result(
         return passthrough();
     }
 
-    // Trusted first-party code is report-only; everything else sanitizes
-    // high-severity findings. hidden_unicode sanitizes everywhere.
-    //
-    // Accepted residual risk (2026-08-23 hardening pass): `trusted_code` keys
-    // off the extension-derived classification alone, so a hostile `.rs` file
-    // read through a tool stays report-only (its high-severity findings are
-    // surfaced, not rewritten). Tightening this needs verified-origin
-    // plumbing (is this path actually workspace-first-party?) rather than the
-    // extension check; until then the carve-out keeps the agent able to read
-    // its own safety modules without self-sanitizing. The report path no
-    // longer downgrades severity for untrusted rust_source, so the signal
-    // is always visible.
-    let trusted_code = classification == "rust_source";
+    // Equal authority for equal content (review finding): a `.rs` extension
+    // answers "what kind of content is this?", not "who produced it". The
+    // scanner already downgrades the patterns our own safety modules discuss,
+    // so those stay readable without an extension-based trust carve-out —
+    // while a hostile `.rs` file in an arbitrary repo no longer gets a free
+    // pass for its high-severity findings. hidden_unicode sanitizes
+    // everywhere regardless.
     let mut lines_to_replace: BTreeSet<usize> = BTreeSet::new();
     let mut kinds: Vec<String> = Vec::new();
     for finding in &report.findings {
-        let sanitize =
-            finding.kind == "hidden_unicode" || (!trusted_code && finding.severity == "high");
+        let sanitize = finding.kind == "hidden_unicode" || finding.severity == "high";
         if sanitize {
             lines_to_replace.insert(finding.line);
             kinds.push(finding.kind.clone());
