@@ -1226,6 +1226,108 @@ mod completion_gate_tests {
             "expected VerifierTainted, got: {message}"
         );
     }
+
+    // Review finding #13, regression (a): the FIRST gate-reaching snapshot is
+    // scanned — a census-discovered identifier in a changed file blocks
+    // completion with zero model calls.
+    #[tokio::test]
+    async fn leak_check_scans_first_gate_reaching_snapshot() {
+        let (_dir, _guard) = git_repo(&[("src/main.py", "print('ok')\n")]);
+        std::fs::create_dir_all("dist").unwrap();
+        std::fs::write(
+            "dist/bundle.js",
+            "module.exports = require('private-internal-module');\n",
+        )
+        .unwrap();
+
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.input_census_suspicious = vec!["private-internal-module".to_string()];
+
+        let msg = agent
+            .check_completion_gate()
+            .await
+            .expect("a census identifier in the changed files must block completion");
+        assert!(msg.contains("LEAK CHECK"), "got: {msg}");
+        assert!(msg.contains("private-internal-module"), "got: {msg}");
+    }
+
+    // Review finding #13, regression (b): the latch keys on the mutation
+    // sequence, not a global once-per-task bool. A clean first snapshot
+    // passes; a LATER rebuild (sequence advanced) that embeds a census
+    // identifier is a DISTINCT snapshot and is scanned on the next
+    // completion attempt. Under the old bool latch this second scan never
+    // ran and the leak completed unchecked.
+    #[tokio::test]
+    async fn leak_check_rescans_distinct_snapshot_after_mutation() {
+        let (_dir, _guard) = git_repo(&[("src/main.py", "print('ok')\n")]);
+        std::fs::create_dir_all("dist").unwrap();
+        std::fs::write("dist/bundle.js", "module.exports = require('./public');\n").unwrap();
+
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.input_census_suspicious = vec!["private-internal-module".to_string()];
+
+        // First snapshot: clean — the gate passes and records the scanned
+        // sequence (0).
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "a clean first snapshot must complete"
+        );
+        assert_eq!(
+            agent
+                .leak_check_scanned_mutation_sequence
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the scan must record the mutation sequence it covered"
+        );
+
+        // The model rebuilds the bundle — a NEW snapshot. Verification credit
+        // is refreshed so only the leak check can block.
+        std::fs::write(
+            "dist/bundle.js",
+            "module.exports = require('private-internal-module');\n",
+        )
+        .unwrap();
+        agent.note_mutating_tool_call();
+        agent.note_verification_outcome("shell_exec", r#"{"command":"cargo test"}"#, true, "ok");
+
+        let msg = agent
+            .check_completion_gate()
+            .await
+            .expect("a leak introduced by a later rebuild must be caught");
+        assert!(msg.contains("LEAK CHECK"), "got: {msg}");
+        assert!(msg.contains("private-internal-module"), "got: {msg}");
+    }
+
+    // Review finding #13, regression (c): the perf/livelock contract — an
+    // UNCHANGED snapshot is NOT rescanned. After a blocked attempt the model
+    // may state why the identifier is safe to publish and complete without
+    // another scan; only a new mutation re-arms the check.
+    #[tokio::test]
+    async fn leak_check_does_not_rescan_unchanged_snapshot() {
+        let (_dir, _guard) = git_repo(&[("src/main.py", "print('ok')\n")]);
+        std::fs::create_dir_all("dist").unwrap();
+        std::fs::write(
+            "dist/bundle.js",
+            "module.exports = require('private-internal-module');\n",
+        )
+        .unwrap();
+
+        let mut agent = agent_with_checkpoint(vec![shell_exec("cargo test", true)]).await;
+        agent.input_census_suspicious = vec!["private-internal-module".to_string()];
+
+        let first = agent
+            .check_completion_gate()
+            .await
+            .expect("the first attempt at this snapshot must be scanned and blocked");
+        assert!(first.contains("LEAK CHECK"), "got: {first}");
+
+        // No mutation since the scan: the same snapshot is not rescanned, so
+        // the gate does not re-block (the model may justify and complete).
+        assert!(
+            agent.check_completion_gate().await.is_none(),
+            "an unchanged snapshot must not be rescanned"
+        );
+    }
 }
 
 // --- Requirements audit completion gate (TB 3.0 failure class, 2026-08-24) ---

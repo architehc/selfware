@@ -1441,17 +1441,27 @@ impl Agent {
             }
         }
 
-        // Leak check (deterministic, once per task): census-discovered
-        // sensitive identifiers must not appear in files changed this run —
-        // the sourcemap private-* failure class, caught with zero model calls.
+        // Leak check (deterministic, once per mutation snapshot):
+        // census-discovered sensitive identifiers must not appear in files
+        // changed this run — the sourcemap private-* failure class, caught
+        // with zero model calls. The latch is the mutation sequence the last
+        // scan covered, NOT a global once-per-task bool: re-completing at the
+        // same snapshot skips the rescan (so a model that justified a hit is
+        // not re-blocked and the gate cannot livelock), but any mutation
+        // after a scan — e.g. a rebuild that embeds a census identifier —
+        // advances the sequence and the new snapshot is scanned on the next
+        // completion attempt (review finding #13).
         if !is_read_only
-            && !self
-                .leak_check_done
+            && self
+                .leak_check_scanned_mutation_sequence
                 .load(std::sync::atomic::Ordering::Relaxed)
+                != self.mutation_sequence
             && !self.input_census_suspicious.is_empty()
         {
-            self.leak_check_done
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // Capture the sequence BEFORE the scan and store it after: a
+            // mutation landing mid-scan leaves the stored sequence stale, so
+            // the next evaluation rescans rather than trusting a partial read.
+            let scanned_sequence = self.mutation_sequence;
             let root = super::current_project_root();
             // Git-less task roots (benchmark containers) return no diff —
             // fall back to the conventional output dirs, where generated
@@ -1462,9 +1472,11 @@ impl Agent {
                 &self.input_census_suspicious,
                 &outputs,
             );
+            self.leak_check_scanned_mutation_sequence
+                .store(scanned_sequence, std::sync::atomic::Ordering::Relaxed);
             if !hits.is_empty() {
                 return Some(format!(
-                    "LEAK CHECK — completion blocked (fires once per task). Output artifacts \
+                    "LEAK CHECK — completion blocked (fires once per code snapshot). Output artifacts \
                      contain input-side sensitive identifiers:\n{}\n\
                      Remove each leak (or state precisely why the identifier is safe to \
                      publish), then complete.",
