@@ -96,18 +96,11 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
     // Handle gemma-4 format: <|channel>thought...<channel|> blocks
     let content = strip_gemma_thinking(content);
 
-    // Handle Qwen3.5 format: extensive thinking followed by </think> marker
-    // The model outputs thinking as regular text, then </think>, then the answer.
-    // Only strip if there is a matching <think> start tag; otherwise preserve
-    // the content so an unclosed think tag does not erase the actual answer.
-    if let Some(start_think) = content.find("<think>") {
-        if let Some(end_think) = content[start_think..].find("</think>") {
-            let after_think = &content[start_think + end_think + 8..];
-            return after_think.trim().to_string();
-        }
-    }
-
-    // Handle explicit <think>...</think> tags (for other models)
+    // Remove every paired <think>...</think> block while preserving ALL
+    // non-think text in order — both before the first block and after it.
+    // An unmatched </think> with no opening tag (Qwen3.5-style: thinking as
+    // plain text, then </think>, then the answer) is left untouched so the
+    // answer is not erased.
     let mut result = String::with_capacity(content.len());
     let mut rest = content.as_str();
     while let Some(start) = rest.find("<think>") {
@@ -123,7 +116,7 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
         }
     }
     result.push_str(rest);
-    result
+    result.trim().to_string()
 }
 
 /// Strip gemma `<|channel>thought...<channel|>` blocks from content.
@@ -384,7 +377,7 @@ impl Agent {
             warn!(
                 "Endpoint error detected for tool '{}': {}",
                 tool_name,
-                &error[..error.len().min(200)]
+                super::interactive::safe_truncate(error, 200)
             );
             return format!(
                 "Endpoint/connection issue detected for '{}'. \
@@ -406,7 +399,7 @@ impl Agent {
             warn!(
                 "Rate limit detected for tool '{}': {}",
                 tool_name,
-                &error[..error.len().min(200)]
+                super::interactive::safe_truncate(error, 200)
             );
             return "Rate limit or quota exceeded. \
                  Wait a moment, then continue with smaller requests. \
