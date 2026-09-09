@@ -673,6 +673,9 @@ pub struct ChatMetadata {
     pub total_tokens: Option<u32>,
     /// Provider-reported cost in USD for this call, when available.
     pub cost: Option<f64>,
+    /// Usage charged for this operation, including explicitly measured
+    /// fallbacks. Provider-only fields above stay None when unreported.
+    pub accounted_usage: Option<Usage>,
 }
 
 /// A streaming chunk of a chat completion response.

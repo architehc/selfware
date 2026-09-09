@@ -325,10 +325,17 @@ async fn test_expand_file_references_nonexistent_file() {
 #[tokio::test]
 async fn test_expand_file_references_existing_file() {
     let server = MockLlmServer::builder().with_response("ok").build().await;
-    let agent = make_test_agent(&server).await;
+    let mut agent = make_test_agent(&server).await;
 
     // Create a temporary file with known content
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+    // Authorize this external fixture directory; the production reader keeps
+    // enforcing the same workspace policy as direct tools.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let file_path = dir.path().join("sample.txt");
     std::fs::write(&file_path, "hello world\n").expect("failed to write temp file");
 
@@ -359,9 +366,16 @@ async fn test_expand_file_references_existing_file() {
 #[tokio::test]
 async fn test_expand_file_references_includes_size_label() {
     let server = MockLlmServer::builder().with_response("ok").build().await;
-    let agent = make_test_agent(&server).await;
+    let mut agent = make_test_agent(&server).await;
 
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+    // Authorize this external fixture directory; the production reader keeps
+    // enforcing the same workspace policy as direct tools.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let file_path = dir.path().join("tiny.rs");
     std::fs::write(&file_path, "fn main() {}").expect("write failed");
 
@@ -381,9 +395,16 @@ async fn test_expand_file_references_includes_size_label() {
 #[tokio::test]
 async fn test_expand_file_references_multiple_refs() {
     let server = MockLlmServer::builder().with_response("ok").build().await;
-    let agent = make_test_agent(&server).await;
+    let mut agent = make_test_agent(&server).await;
 
     let dir = tempfile::tempdir().expect("failed to create temp dir");
+    // Authorize this external fixture directory; the production reader keeps
+    // enforcing the same workspace policy as direct tools.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let f1 = dir.path().join("a.txt");
     let f2 = dir.path().join("b.txt");
     std::fs::write(&f1, "content A").unwrap();
@@ -1388,6 +1409,13 @@ async fn test_refresh_stale_context_files_updates_message_content() {
 
     // Write a real file we can refresh.
     let dir = tempfile::tempdir().unwrap();
+    // Authorize this external fixture directory; the production reader keeps
+    // enforcing the same workspace policy as direct tools.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let file_path = dir.path().join("data.txt");
     std::fs::write(&file_path, "original content").unwrap();
     let path_str = file_path.display().to_string();
@@ -1454,6 +1482,13 @@ async fn test_reload_context_re_reads_existing_files() {
 
     // Create a real file.
     let dir = tempfile::tempdir().unwrap();
+    // Authorize this external fixture directory; the production reader keeps
+    // enforcing the same workspace policy as direct tools.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let file_path = dir.path().join("reload_me.txt");
     std::fs::write(&file_path, "v1 content").unwrap();
     let path_str = file_path.display().to_string();
@@ -1506,6 +1541,13 @@ async fn test_reload_context_removes_file_messages_not_conversation() {
     let mut agent = make_test_agent(&server).await;
 
     let dir = tempfile::tempdir().unwrap();
+    // Authorize this external fixture directory; the production reader keeps
+    // enforcing the same workspace policy as direct tools.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let file_path = dir.path().join("reloaded.rs");
     std::fs::write(&file_path, "fn main() {}").unwrap();
     let path_str = file_path.display().to_string();
@@ -1717,6 +1759,13 @@ async fn test_parallel_bulk_read_loads_after_compression() {
     }
     assert_eq!(content.len(), 3_300);
     std::fs::write(&file, &content).expect("write temp file");
+    // This fixture intentionally lives outside the workspace; grant that one
+    // directory explicitly now that bulk reads enforce the real path policy.
+    agent
+        .config
+        .safety
+        .allowed_paths
+        .push(format!("{}/**", dir.path().display()));
     let estimate_tokens = agent
         .context_map
         .can_load(&file, ContextMode::Full)

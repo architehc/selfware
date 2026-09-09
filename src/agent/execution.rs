@@ -490,14 +490,32 @@ impl Agent {
 
     /// Pick the verification command to auto-run when the model keeps
     /// answering without re-verifying (the StaleVerification churn breaker).
-    /// Rust projects keep the original `cargo_check` rescue; for any other
-    /// project the language-agnostic signal is the project's own test/check
-    /// command — the most recent verification-framed shell command the model
-    /// itself already ran this run is re-executed so the gate gains fresh
-    /// evidence and the run converges (P0-2). Returns `None` when there is
-    /// no honest command to run.
+    /// Reuse the most recent verification call with its original arguments;
+    /// otherwise prefer language manifests over generic directory heuristics.
+    /// Returns `None` when there is no honest command to run.
     /// The tuple is `(tool_name, tool_args_json, display_command)`.
     fn stale_verification_rescue_call(&self) -> Option<(String, String, String)> {
+        // A verifier the run already used is stronger evidence than a guessed
+        // ecosystem default. Keep its full arguments (notably working_dir).
+        if let Some(call) = self.current_checkpoint.as_ref().and_then(|checkpoint| {
+            checkpoint.tool_calls.iter().rev().find(|call| {
+                self.tools.get(&call.tool_name).is_some()
+                    && super::tool_dispatch::tool_call_is_verification(
+                        &call.tool_name,
+                        &call.arguments,
+                    )
+            })
+        }) {
+            let display = serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|args| {
+                    args.get("command")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| call.tool_name.clone());
+            return Some((call.tool_name.clone(), call.arguments.clone(), display));
+        }
         let root = super::current_project_root();
         // Lean 4 project: rescue with `lake build` (the proof check), never
         // cargo_check — a Lean repo treated as Rust fails spuriously and
@@ -522,21 +540,22 @@ impl Agent {
         // finding): without these, a Python/Node/Go/C++ project with no prior
         // model-run verification command deadlocks on StaleVerification —
         // the model completes in prose, the gate refuses, the run burns its
-        // budget apologizing. Ordered by signal strength; Makefile last
-        // (weakest — `make test` may not exist).
+        // budget apologizing. Manifests take precedence over the generic
+        // tests-directory fallback; `make test` remains a best-effort guess.
         if self.tools.get("shell_exec").is_some() {
             let ecosystem: Option<&str> = if root.join("go.mod").exists() {
                 Some("go test ./...")
             } else if root.join("pyproject.toml").exists()
                 || root.join("pytest.ini").exists()
                 || root.join("setup.cfg").exists()
-                || root.join("tests").is_dir()
             {
                 Some("python -m pytest")
             } else if root.join("package.json").exists() {
                 Some("npm test")
             } else if root.join("Makefile").exists() {
                 Some("make test")
+            } else if root.join("tests").is_dir() {
+                Some("python -m pytest")
             } else {
                 None
             };
@@ -548,27 +567,7 @@ impl Agent {
                 ));
             }
         }
-        let command = self
-            .current_checkpoint
-            .as_ref()?
-            .tool_calls
-            .iter()
-            .rev()
-            .filter(|tc| matches!(tc.tool_name.as_str(), "shell_exec" | "pty_shell"))
-            .filter_map(|tc| {
-                serde_json::from_str::<serde_json::Value>(&tc.arguments)
-                    .ok()?
-                    .get("command")?
-                    .as_str()
-                    .map(str::to_string)
-            })
-            .find(|cmd| super::tool_dispatch::shell_command_is_verification(cmd))?;
-        self.tools.get("shell_exec")?;
-        Some((
-            "shell_exec".to_string(),
-            serde_json::json!({"command": command}).to_string(),
-            command,
-        ))
+        None
     }
 
     /// Edit-failure loop handling after a successful mutation: the FIRST time
@@ -629,6 +628,9 @@ impl Agent {
             response.reasoning_content.as_deref(),
             response.native_tool_calls.as_ref(),
         );
+        if !tool_calls.is_empty() {
+            self.readonly_no_tool_streak = 0;
+        }
 
         // Detect a FILES: checklist in the assistant response. Small models often
         // jump straight to editing; requiring them to name the files first
@@ -851,18 +853,25 @@ impl Agent {
                 // satisfied — otherwise we would emit a capability-disclaimer or a
                 // response missing a required tool as the "final answer" (found and
                 // fixed by GLM-5.2's own cycle-2 self-improvement pass; folded in).
-                // But keep a higher hard cap so a gate that keeps rejecting can't
-                // spin the read-only task to MAX_ITERATIONS — termination is still
-                // guaranteed as a last resort.
-                let gate_ok = self.check_completion_gate().await.is_none();
-                if gate_ok || self.readonly_no_tool_streak >= 12 {
+                // A hard cap guarantees termination, but cannot turn missing
+                // required evidence into a successful completion.
+                let rejection = self.check_completion_gate().await;
+                if rejection.is_none() {
                     info!(
-                        "Read-only task: force-finalizing after {} no-tool turns (gate_ok={})",
-                        self.readonly_no_tool_streak, gate_ok
+                        "Read-only task: finalizing after {} no-tool turns (gate passed)",
+                        self.readonly_no_tool_streak
                     );
                     let best = self.last_assistant_response.clone();
                     output::final_answer(&best);
                     return Ok(true);
+                }
+                if self.readonly_no_tool_streak >= 12 {
+                    return Err(AgentError::TaskFailed {
+                        message: format!(
+                            "READ_ONLY_INCOMPLETE: completion requirements remain unsatisfied after 12 no-tool responses: {}",
+                            rejection.unwrap_or_default()
+                        ),
+                    }.into());
                 }
                 // Gate rejected and under the hard cap — fall through so the gate's
                 // rejection nudge is injected and the model can correct.

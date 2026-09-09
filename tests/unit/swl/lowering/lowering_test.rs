@@ -1,9 +1,18 @@
 use super::*;
 use crate::swl::parse_document;
 
+fn workflow_source(name: &str) -> String {
+    std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("workflows")
+            .join(name),
+    )
+    .unwrap()
+}
+
 #[test]
 fn lower_code_review_produces_executor_workflow() {
-    let source = std::fs::read_to_string("workflows/code_review.swl").unwrap();
+    let source = workflow_source("code_review.swl");
     let doc = parse_document(&source).unwrap();
     let lowered = lower_document(&doc).unwrap();
 
@@ -22,7 +31,7 @@ fn lower_code_review_produces_executor_workflow() {
 
 #[test]
 fn lower_multi_agent_swarm_emits_reduce_output() {
-    let source = std::fs::read_to_string("workflows/multi_agent_swarm.swl").unwrap();
+    let source = workflow_source("multi_agent_swarm.swl");
     let doc = parse_document(&source).unwrap();
     let lowered = lower_document(&doc).unwrap();
 
@@ -36,7 +45,7 @@ fn lower_multi_agent_swarm_emits_reduce_output() {
 
 #[test]
 fn lower_legacy_test_execution_emits_log_steps() {
-    let source = std::fs::read_to_string("workflows/test_execution.swl").unwrap();
+    let source = workflow_source("test_execution.swl");
     let doc = parse_document(&source).unwrap();
     let lowered = lower_document(&doc).unwrap();
 

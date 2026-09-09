@@ -32,6 +32,8 @@ jobs:
       sha: ${{ steps.resolve.outputs.sha }}
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
+      - name: Checkout release resolver
+        uses: actions/checkout@v6
       # Review finding: a manual dispatch could name a tag pointing at one
       # commit while building artifacts from the dispatch revision. Bind the
       # whole workflow to ONE immutable SHA up front: the existing tag's
@@ -41,19 +43,8 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${GITHUB_REF#refs/tags/}"
-          fi
-          sha=$(gh api "repos/${{ github.repository }}/git/refs/tags/${tag}" --jq '.object.sha' 2>/dev/null || true)
-          if [ -z "$sha" ]; then
-            sha="${{ github.sha }}"
-            echo "::notice::tag ${tag} does not exist yet; releasing current revision ${sha} under it"
-          fi
-          echo "tag=${tag}" >> $GITHUB_OUTPUT
-          echo "sha=${sha}" >> $GITHUB_OUTPUT
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: python3 scripts/resolve_release.py
 
   build:
     name: Build ${{ matrix.target }}
@@ -232,17 +223,15 @@ jobs:
 
       - name: Get version from tag
         id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: echo "version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
+          target_commitish: ${{ needs.resolve.outputs.sha }}
           name: Selfware ${{ steps.version.outputs.version }}
           draft: ${{ github.event.inputs.draft || false }}
           prerelease: ${{ contains(steps.version.outputs.version, 'alpha') || contains(steps.version.outputs.version, 'beta') || contains(steps.version.outputs.version, 'rc') }}
@@ -257,19 +246,16 @@ jobs:
 
   verify-release:
     name: Verify release assets are downloadable
-    needs: release
+    needs: [release, resolve]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
     steps:
       - name: Get version
         id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-          fi
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+        run: echo "version=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
       # Regression guard: v0.3.0 shipped with zero assets and the README's
       # prebuilt-binary URLs 404'd. Fail the workflow if any expected asset
@@ -277,11 +263,12 @@ jobs:
       - name: Download every expected asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -e
           for asset in selfware-linux-x86_64.tar.gz selfware-linux-aarch64.tar.gz selfware-macos-aarch64.zip selfware-macos-x86_64.zip selfware-windows-x86_64.zip selfware-sbom.json; do
             echo "checking $asset"
-            gh release download "${{ steps.version.outputs.version }}" \
+            gh release download "$RELEASE_TAG" \
               --repo "${{ github.repository }}" \
               -p "$asset" --dir /tmp/verify-assets --clobber
           done
@@ -323,6 +310,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.sha }}
           files: |
             artifacts/selfware-*/*.sig
             artifacts/selfware-*/*.cert

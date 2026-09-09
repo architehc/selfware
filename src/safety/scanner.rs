@@ -231,7 +231,7 @@ impl SecretScanner {
         }
     }
 
-    fn default_patterns() -> Vec<SecretPattern> {
+    pub(crate) fn default_patterns() -> Vec<SecretPattern> {
         vec![
             SecretPattern::new(
                 "AWS Access Key",

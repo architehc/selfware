@@ -14,7 +14,7 @@
 # the gate (failing the pass) if the tree's gate test would race a cargo lock.
 #
 # Env: E2_ENDPOINT / E2_MODEL / E3_ENDPOINT / E3_MODEL override the defaults.
-set -u
+set -euo pipefail
 cd "$(dirname "$0")/.."
 SELFDEV="${SELFDEV:-$HOME/selfdev}"
 E2_ENDPOINT="${E2_ENDPOINT:-http://localhost:31000/v1}"
@@ -27,19 +27,42 @@ flock -n 9 || { echo "pipeline already running"; exit 0; }
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
-# 1. checker verdicts for waves missing them
+mkdir -p "$SELFDEV"
+
+# 1. Require complete current-input checker receipts, including after interrupted dumps.
 for f in tests/redteam/corpus/probe_wave_1*.jsonl; do
     [ -e "$f" ] || continue
     ts=$(basename "$f" .jsonl | sed 's/probe_wave_//')
     v="$SELFDEV/chkv_$ts.jsonl"
-    [ -f "$v" ] && continue
+    if python3 scripts/redteam_verdicts.py --kind checker --probe-file "$f" \
+        --verdicts-file "$v" >/dev/null; then
+        continue
+    fi
     log "checker dump $ts"
     PROBE_DUMP_INPUT="$f" PROBE_DUMP_OUTPUT="$v" \
         cargo test -q --test redteam_probe_dump -- --ignored >/dev/null 2>&1
+    python3 scripts/redteam_verdicts.py --kind checker --probe-file "$f" \
+        --verdicts-file "$v" >/dev/null
 done
 
-# 2. model verdicts for waves missing them (skip endpoints that fail a probe)
+# 2. Resume missing input-bound verdicts, including partially written files.
 endpoint_ok() { curl -s -m 10 -o /dev/null -w '%{http_code}' "$1/models" | grep -q 200; }
+triage_incomplete=0
+triage_wave() {
+    local label="$1" endpoint="$2" model="$3" lanes="$4" probe="$5" verdicts="$6"
+    if python3 scripts/redteam_triage.py --shard 0/1 --probe-file "$probe" \
+        --verdicts-file "$verdicts" --check-complete >/dev/null; then
+        return 0
+    fi
+    if ! endpoint_ok "$endpoint"; then
+        log "$label unavailable; wave remains incomplete: $probe"
+        return 1
+    fi
+    log "$label triage $probe"
+    python3 scripts/redteam_triage.py --endpoint "$endpoint" --model "$model" \
+        --lanes "$lanes" --shard 0/1 --probe-file "$probe" \
+        --verdicts-file "$verdicts"
+}
 # The first five waves predate the e2v_/e3v_ naming scheme; honor their files.
 early_name() { case "$1" in
     1788908382) echo wave94;; 1788909297) echo wave59;; 1788910515) echo wave85;; \
@@ -48,18 +71,16 @@ for f in tests/redteam/corpus/probe_wave_1*.jsonl; do
     [ -e "$f" ] || continue
     ts=$(basename "$f" .jsonl | sed 's/probe_wave_//')
     en=$(early_name "$ts")
-    if [ ! -f "$SELFDEV/e2v_$ts.jsonl" ] && { [ -z "$en" ] || [ ! -f "$SELFDEV/${en}_e2_verdicts.jsonl" ]; } && endpoint_ok "$E2_ENDPOINT"; then
-        log "E2 triage $ts"
-        python3 scripts/redteam_triage.py --endpoint "$E2_ENDPOINT" --model "$E2_MODEL" \
-            --lanes 12 --shard 0/1 --probe-file "$f" \
-            --verdicts-file "$SELFDEV/e2v_$ts.jsonl" >/dev/null 2>&1
+    e2v="$SELFDEV/e2v_$ts.jsonl"
+    e3v="$SELFDEV/e3v_$ts.jsonl"
+    if [ ! -f "$e2v" ] && [ -n "$en" ] && [ -f "$SELFDEV/${en}_e2_verdicts.jsonl" ]; then
+        e2v="$SELFDEV/${en}_e2_verdicts.jsonl"
     fi
-    if [ ! -f "$SELFDEV/e3v_$ts.jsonl" ] && { [ -z "$en" ] || [ ! -f "$SELFDEV/${en}_e3_verdicts.jsonl" ]; } && endpoint_ok "$E3_ENDPOINT"; then
-        log "E3 triage $ts"
-        python3 scripts/redteam_triage.py --endpoint "$E3_ENDPOINT" --model "$E3_MODEL" \
-            --lanes 16 --shard 0/1 --probe-file "$f" \
-            --verdicts-file "$SELFDEV/e3v_$ts.jsonl" >/dev/null 2>&1
+    if [ ! -f "$e3v" ] && [ -n "$en" ] && [ -f "$SELFDEV/${en}_e3_verdicts.jsonl" ]; then
+        e3v="$SELFDEV/${en}_e3_verdicts.jsonl"
     fi
+    triage_wave E2 "$E2_ENDPOINT" "$E2_MODEL" 12 "$f" "$e2v" || triage_incomplete=1
+    triage_wave E3 "$E3_ENDPOINT" "$E3_MODEL" 16 "$f" "$e3v" || triage_incomplete=1
 done
 
 # 3. join + promote dual-source agreements
@@ -79,4 +100,9 @@ if [ "$PROMOTED" -gt 0 ]; then
     fi
 else
     log "nothing promoted; gate skipped"
+fi
+
+if [ "$triage_incomplete" -ne 0 ]; then
+    log "TRIAGE_INCOMPLETE — rerun to resume missing verdicts"
+    exit 1
 fi

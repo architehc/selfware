@@ -417,3 +417,164 @@ async fn abort_broadcasts_terminal_event_exactly_once() {
         "abort must emit exactly one terminal event"
     );
 }
+
+#[tokio::test]
+async fn abort_preserves_completed_and_failed_statuses() {
+    let sup = RunSupervisor::new();
+    for expected in [RunStatus::Completed, RunStatus::Failed] {
+        let id = sup
+            .spawn("settled".into(), async move {
+                if expected == RunStatus::Failed {
+                    anyhow::bail!("original failure");
+                }
+                Ok(())
+            })
+            .await;
+        assert!(wait_for_status(&sup, &id, expected, Duration::from_secs(2)).await);
+        let mut rx = sup.attach(&id).await.unwrap();
+        assert!(sup.abort(&id).await);
+        assert_eq!(sup.status(&id).await, Some(expected));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn agent_terminal_event_is_settled_once_with_original_message() {
+    let sup = RunSupervisor::new();
+    for failed in [false, true] {
+        let emitter = Arc::new(SupervisedEmitter::new());
+        let mut agent =
+            crate::agent::Agent::new(crate::test_support::mock_agent_config("http://127.0.0.1:1"))
+                .await
+                .unwrap()
+                .with_event_emitter(emitter.clone());
+        let expected = if failed {
+            AgentEvent::Error {
+                message: "specific failure".into(),
+            }
+        } else {
+            AgentEvent::Completed {
+                message: "review findings".into(),
+            }
+        };
+        let terminal = expected.clone();
+        let (release, ready) = tokio::sync::oneshot::channel();
+        let id = sup
+            .spawn_with_events(
+                "agent terminal".into(),
+                emitter,
+                Arc::new(AtomicBool::new(false)),
+                false,
+                async move {
+                    ready.await?;
+                    agent.emit_terminal_event_once(terminal);
+                    if failed {
+                        anyhow::bail!("generic fallback");
+                    }
+                    Ok(())
+                },
+            )
+            .await;
+        let mut rx = sup.attach(&id).await.unwrap();
+        release.send(()).unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, expected);
+        assert_eq!(
+            sup.status(&id).await,
+            Some(if failed {
+                RunStatus::Failed
+            } else {
+                RunStatus::Completed
+            })
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn wait_for_terminal_drains_events_already_queued_at_settlement() {
+    let sup = RunSupervisor::new();
+    let (release, ready) = tokio::sync::oneshot::channel();
+    let id = sup
+        .spawn("queued completion".into(), async {
+            ready.await?;
+            Ok(())
+        })
+        .await;
+    let rx = sup.attach(&id).await.unwrap();
+    release.send(()).unwrap();
+    assert!(wait_for_status(&sup, &id, RunStatus::Completed, Duration::from_secs(2)).await);
+    let mut events = Vec::new();
+    assert_eq!(
+        sup.wait_for_terminal(&id, rx, |event| events.push(event))
+            .await,
+        Some(RunStatus::Completed)
+    );
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], AgentEvent::Completed { .. }));
+}
+
+#[tokio::test]
+async fn start_abort_persists_checkpoint_before_terminal_event() {
+    let workspace = tempfile::tempdir().unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(workspace.path());
+    let server = crate::testing::mock_api::MockLlmServer::builder()
+        .with_latency(30_000)
+        .build()
+        .await;
+    let mut config = crate::test_support::mock_agent_config(&format!("{}/v1", server.url()));
+    config.continuous_work.enabled = true;
+    config.continuous_work.checkpoint_interval_tools = 1000;
+    config.continuous_work.checkpoint_interval_secs = 3600;
+    let task = format!(
+        "Inspect this project without changing files. Cancellation test {}",
+        uuid::Uuid::new_v4()
+    );
+    let sup = RunSupervisor::new();
+    let id = sup.start(task.clone(), config).await;
+    let mut rx = sup.attach(&id).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while server.captured_request_bodies().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent must reach the provider request");
+    assert!(sup.abort(&id).await);
+    assert_eq!(sup.status(&id).await, Some(RunStatus::Aborted));
+    let manager = crate::checkpoint::CheckpointManager::default_path().unwrap();
+    let saved = manager
+        .list_tasks()
+        .unwrap()
+        .into_iter()
+        .find(|checkpoint| checkpoint.task_description == task)
+        .expect("abort must save this run's checkpoint");
+    let checkpoint = manager.load(&saved.task_id).unwrap();
+    manager.delete(&saved.task_id).unwrap();
+    assert_eq!(checkpoint.task_description, task);
+    assert!(
+        !checkpoint.messages.is_empty(),
+        "checkpoint must retain conversation state"
+    );
+    let mut terminal_count = 0;
+    while let Ok(event) = rx.try_recv() {
+        if matches!(&event, AgentEvent::Status { message } if message.contains("Aborted")) {
+            terminal_count += 1;
+        }
+        assert!(
+            !matches!(event, AgentEvent::Completed { .. }),
+            "cancelled run cannot complete"
+        );
+    }
+    assert_eq!(terminal_count, 1);
+    server.stop().await;
+}

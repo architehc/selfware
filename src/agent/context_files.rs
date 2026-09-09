@@ -29,7 +29,12 @@ impl Agent {
         let mut refreshed = 0;
         for path_str in &stale_in_context {
             let file_marker = format!("// FILE: {}", path_str);
+            if let Err(error) = self.validate_context_path(std::path::Path::new(path_str)) {
+                warn!("Skipping unsafe context file {path_str}: {error}");
+                continue;
+            }
             if let Ok(content) = tokio::fs::read_to_string(path_str).await {
+                let content = self.sanitize_context_data(std::path::Path::new(path_str), &content);
                 let file_header = format!(
                     "\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n",
                     path_str
@@ -189,7 +194,12 @@ impl Agent {
 
         for path in paths {
             let path_str = path.display().to_string();
+            if let Err(error) = self.validate_context_path(&path) {
+                warn!("Skipping unsafe context file {}: {error}", path.display());
+                continue;
+            }
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                let content = self.sanitize_context_data(&path, &content);
                 let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
                 let full_content = format!("{}{}", file_header, content);
                 let file_tokens =
@@ -257,7 +267,12 @@ impl Agent {
 
         let mut loaded = 0;
         for path_str in &files {
+            if let Err(error) = self.validate_context_path(std::path::Path::new(path_str)) {
+                warn!("Skipping unsafe context file {path_str}: {error}");
+                continue;
+            }
             if let Ok(content) = tokio::fs::read_to_string(path_str).await {
+                let content = self.sanitize_context_data(std::path::Path::new(path_str), &content);
                 let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
                 self.messages
                     .push(Message::user(format!("{}{}", file_header, content)));
@@ -310,7 +325,12 @@ impl Agent {
 
         for path in paths {
             let path_str = path.display().to_string();
+            if let Err(error) = self.validate_context_path(&path) {
+                warn!("Skipping unsafe context file {}: {error}", path.display());
+                continue;
+            }
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                let content = self.sanitize_context_data(&path, &content);
                 output.push_str(&format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n{}\n", path_str, content));
             }
         }
@@ -388,7 +408,14 @@ impl Agent {
                     file_path.trim_end_matches('/'),
                     file_count
                 ));
-            } else if let Ok(content) = tokio::fs::read_to_string(file_path).await {
+            } else if self
+                .validate_context_path(std::path::Path::new(file_path))
+                .is_ok()
+            {
+                let Ok(content) = tokio::fs::read_to_string(file_path).await else {
+                    continue;
+                };
+                let content = self.sanitize_context_data(std::path::Path::new(file_path), &content);
                 let file_block = format!(
                     "\n```{} ({})\n{}\n```\n",
                     file_path,
@@ -428,7 +455,7 @@ impl Agent {
 
         println!("{} Compressing context...", "🗜️".bright_cyan());
 
-        let (compressed, usage) = self
+        let (compressed, _usage) = self
             .compressor
             .compress(&self.client, &self.messages)
             .await?;
@@ -437,12 +464,7 @@ impl Agent {
         // Delta-add (never total = input + output): after a resume, `total`
         // carries the restored prior-run budget whose input/output split was
         // not persisted.
-        self.cumulative_token_usage.input += usage.prompt_tokens;
-        self.cumulative_token_usage.output += usage.completion_tokens;
-        self.cumulative_token_usage.total += usage.prompt_tokens + usage.completion_tokens;
-        if let Some(cost) = usage.cost {
-            self.cumulative_cost_usd += cost;
-        }
+        self.sync_api_usage();
 
         let after = self.compressor.estimate_tokens(&self.messages);
         let saved = before.saturating_sub(after);

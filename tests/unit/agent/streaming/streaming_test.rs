@@ -351,3 +351,70 @@ async fn long_answer_is_not_cut_on_read_only_task() {
     );
     server.stop().await;
 }
+
+#[test]
+fn cumulative_stream_usage_snapshots_emit_only_new_token_deltas() {
+    let mut previous = crate::api::Usage::default();
+    let mut added = (0, 0);
+    for (prompt, completion) in [(10, 5), (10, 7), (10, 7), (9, 6), (10, 9)] {
+        let usage = crate::api::Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            cost: None,
+        };
+        let delta = streaming_usage_delta(&mut previous, &usage);
+        added.0 += delta.0;
+        added.1 += delta.1;
+    }
+    assert_eq!(added, (10, 9));
+    assert_eq!(previous.total_tokens, 19);
+}
+
+#[tokio::test]
+async fn streaming_session_usage_events_match_run_ledger_for_repeated_snapshots() {
+    #[derive(Default)]
+    struct Events(std::sync::Mutex<Vec<AgentEvent>>);
+    impl super::super::tui_events::EventEmitter for Events {
+        fn emit(&self, event: AgentEvent) {
+            self.0.lock().unwrap().push(event);
+        }
+    }
+    const SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":7,\"total_tokens\":17}}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":7,\"total_tokens\":17}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":9,\"total_tokens\":19}}\n\n";
+    let (endpoint, _, server) =
+        crate::api::client::review_regressions::server(vec![(200, SSE)]).await;
+    let events = std::sync::Arc::new(Events::default());
+    let mut config = crate::config::Config {
+        endpoint,
+        ..Default::default()
+    };
+    config.cache.enabled = false;
+    let agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_event_emitter(events.clone());
+    agent
+        .chat_streaming(
+            vec![Message::user("Explain accounting")],
+            None,
+            ThinkingMode::Enabled,
+            None,
+        )
+        .await
+        .unwrap();
+    let (prompt, completion) = events
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .fold((0, 0), |(p, c), event| match event {
+            AgentEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            } => (p + prompt_tokens, c + completion_tokens),
+            _ => (p, c),
+        });
+    assert_eq!((prompt, completion), (10, 9));
+    assert_eq!(agent.run_summary().total_tokens, 19);
+    server.await.unwrap();
+}

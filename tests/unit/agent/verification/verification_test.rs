@@ -1158,6 +1158,99 @@ mod completion_gate_tests {
         );
     }
 
+    #[tokio::test]
+    async fn verifier_tainted_rejects_inserted_skip_on_existing_test() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "import unittest\nclass Checks(unittest.TestCase):\n    def test_div(self):\n        self.assertEqual(1, 2)\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write("tests/test_calc.py", "import unittest\nclass Checks(unittest.TestCase):\n    @unittest.skip('disabled')\n    def test_div(self):\n        self.assertEqual(1, 2)\n").unwrap();
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let rejection = agent
+            .mutation_completion_gate()
+            .await
+            .expect("insertion-only suppression must be rejected");
+        assert!(rejection.contains("VerifierTainted"), "{rejection}");
+    }
+
+    #[tokio::test]
+    async fn verifier_tainted_rejects_inserted_return_in_existing_test() {
+        let (_dir, _cwd) = git_repo(&[
+            ("src/calc.py", "def div(a, b):\n    return a / b\n"),
+            ("tests/test_calc.py", "def test_div():\n    assert 1 == 2\n"),
+        ]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::write(
+            "tests/test_calc.py",
+            "def test_div():\n    return\n    assert 1 == 2\n",
+        )
+        .unwrap();
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let rejection = agent
+            .mutation_completion_gate()
+            .await
+            .expect("an inserted return bypasses existing assertions");
+        assert!(rejection.contains("VerifierTainted"), "{rejection}");
+    }
+
+    #[tokio::test]
+    async fn verifier_tainted_rejects_runner_additions_under_test_directory() {
+        let (_dir, _cwd) = git_repo(&[("src/calc.py", "def div(a, b):\n    return a / b\n")]);
+        std::fs::write("src/calc.py", "def div(a, b):\n    return a // b\n").unwrap();
+        std::fs::create_dir("tests").unwrap();
+        std::fs::write(
+            "tests/conftest.py",
+            "def pytest_collection_modifyitems(items):\n    items.clear()\n",
+        )
+        .unwrap();
+        let agent = mutation_task_agent("Fix the calc module division").await;
+        let rejection = agent
+            .mutation_completion_gate()
+            .await
+            .expect("runner files cannot receive an additive-test exemption");
+        assert!(rejection.contains("VerifierTainted"), "{rejection}");
+    }
+
+    #[test]
+    fn additive_test_execution_controls_require_review_across_runners() {
+        for added in [
+            "@unittest.skipUnless(False, 'disabled')",
+            "pytestmark = pytest.mark.skip(reason='disabled')",
+            "__test__ = False",
+            "test.only('one case', () => {})",
+            "#[ignore]",
+            "@Disabled",
+            "[Fact(Skip = \"disabled\")]",
+            "sys.exit(0)",
+        ] {
+            let diff = format!("@@ -1 +1,2 @@\n+{added}\n def test_existing():");
+            assert!(additions_change_test_execution(&diff), "{added}");
+        }
+        assert!(additions_change_test_execution(
+            "@@ -1 +1,2 @@\n+@aliased_decorator\n def test_existing():"
+        ));
+        assert!(!additions_change_test_execution("@@ -2 +2,5 @@\n     assert result == 1\n+\n+@pytest.mark.parametrize('n', [1, 2])\n+def test_more(n):\n+    assert n > 0"));
+        for added in [
+            "    return",
+            "    return Ok(());",
+            "    raise unittest.SkipTest('disabled')",
+            "    expected = actual",
+            "    assert True",
+        ] {
+            assert!(
+                additions_change_test_execution(&format!(
+                    "@@ -1,2 +1,3 @@\n def test_existing():\n+{added}\n     assert result == 1"
+                )),
+                "body insertion: {added}"
+            );
+        }
+        assert!(!additions_change_test_execution("@@ -2 +2,5 @@\n }\n+#[test]\n+fn test_added() -> Result<(), Error> {\n+    assert_eq!(answer(), 42);\n+    return Ok(());\n+}"));
+        assert!(!additions_change_test_execution("@@ -2 +2,5 @@\n });\n+test('added case', () => {\n+    expect(answer()).toBe(42);\n+});"));
+        assert!(additions_change_test_execution("@@ -1,2 +1,4 @@\n def test_existing():\n+    def helper(): pass\n+    return\n     assert 1 == 2"));
+        assert!(additions_change_test_execution("@@ -1,2 +1,4 @@\n fn test_existing() {\n+    fn helper() {}\n+    return;\n     assert_eq!(1, 2);"));
+    }
+
     /// Finding 12 (b): weakening an existing assertion rewrites a `-` line
     /// and keeps the strict rejection, whatever the task says.
     #[tokio::test]
@@ -1373,6 +1466,57 @@ mod requirements_audit_tests {
         agent.current_task_context = instruction.to_string();
         agent.has_written_any_file = true;
         agent
+    }
+
+    #[tokio::test]
+    async fn audit_reported_usage_enforces_hard_budget_and_is_counted_once() {
+        let server = MockLlmServer::builder()
+            .with_response("AUDIT: ALL ADDRESSED")
+            .build()
+            .await;
+        let mut agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
+        agent.config.agent.max_budget_tokens = Some(1);
+        agent.client = agent.client.rebuild(&agent.config).unwrap();
+        let directive = agent
+            .maybe_requirements_audit(false)
+            .await
+            .expect("audit spend must block completion");
+        assert!(directive.contains("Token budget exhausted"), "{directive}");
+        let reported = agent.client.accounted_usage().total_tokens;
+        assert!(reported > 0);
+        assert_eq!(agent.run_summary().total_tokens, reported);
+        agent.sync_api_usage();
+        agent.sync_api_usage();
+        assert_eq!(
+            agent.cumulative_token_usage.total, reported,
+            "reconciliation must not double-charge audit usage"
+        );
+        assert!(agent
+            .check_completion_gate()
+            .await
+            .unwrap()
+            .contains("Token budget exhausted"));
+        assert_eq!(server.captured_request_bodies().await.len(), 1);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn audit_does_not_start_after_an_existing_hard_budget() {
+        let server = MockLlmServer::builder()
+            .with_response("AUDIT: ALL ADDRESSED")
+            .build()
+            .await;
+        let mut agent = build_agent(&server, LONG_MUTATION_INSTRUCTION).await;
+        agent.config.agent.max_budget_tokens = Some(50);
+        agent.cumulative_token_usage.total = 50;
+        agent.client = agent.client.rebuild(&agent.config).unwrap();
+        assert!(agent
+            .maybe_requirements_audit(false)
+            .await
+            .unwrap()
+            .contains("Token budget exhausted"));
+        assert!(server.captured_request_bodies().await.is_empty());
+        server.stop().await;
     }
 
     #[test]

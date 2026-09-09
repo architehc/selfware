@@ -76,6 +76,12 @@ pub enum AgentEvent {
 /// This decouples the core agent logic from TUI-specific implementations.
 pub trait EventEmitter: Send + Sync {
     fn emit(&self, event: AgentEvent);
+
+    /// Authoritative end-of-run event, distinct from diagnostic errors emitted
+    /// while work continues. Supervisors may defer it until status is settled.
+    fn emit_terminal(&self, event: AgentEvent) {
+        self.emit(event);
+    }
 }
 
 /// A no-op event emitter that does nothing.

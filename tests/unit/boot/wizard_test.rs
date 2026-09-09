@@ -3,6 +3,35 @@ use super::{
 };
 use crate::boot::cards::find_card;
 
+#[tokio::test]
+async fn real_model_probe_runs_outside_async_runtime() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 2048];
+        let size = stream.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET /v1/models "));
+        let body = r#"{"data":[{"id":"served-fixture","max_model_len":65536}]}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+    });
+    let (_, plan) = super::interview_off_runtime(ScriptedIo::new(["2", "2"]), move |_| {
+        super::detect_model_at(&endpoint)
+    })
+    .await
+    .unwrap();
+    let plan = plan.unwrap();
+    assert_eq!(plan.model_override.as_deref(), Some("served-fixture"));
+    assert_eq!(plan.context_override, Some(65536));
+    server.await.unwrap();
+}
+
 fn no_detect() -> impl Fn(&crate::boot::cards::RecipeCard) -> Option<DetectedModel> {
     |_| None
 }

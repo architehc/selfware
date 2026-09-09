@@ -303,23 +303,42 @@ where
 /// model wins. Any failure (server down, non-JSON, empty list) is `None` and
 /// the wizard falls back to asking.
 fn detect_served_model(card: &RecipeCard) -> Option<DetectedModel> {
-    let url = format!("{}/models", card.endpoint.trim_end_matches('/'));
+    detect_model_at(card.endpoint)
+}
+
+fn detect_model_at(endpoint: &str) -> Option<DetectedModel> {
+    let url = format!("{}/models", endpoint.trim_end_matches('/'));
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
         .build()
         .ok()?;
     let body: serde_json::Value = client.get(&url).send().ok()?.json().ok()?;
-    let id = body
-        .get("data")?
-        .as_array()?
-        .first()?
-        .get("id")?
-        .as_str()?
-        .to_string();
+    let model = body.get("data")?.as_array()?.first()?;
+    let id = model.get("id")?.as_str()?.to_string();
     Some(DetectedModel {
         id,
-        context_length: None,
+        context_length: model
+            .get("max_model_len")
+            .or_else(|| model.get("context_length"))
+            .and_then(|value| value.as_u64())
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0),
     })
+}
+
+// Both terminal input and reqwest's blocking detector must execute outside
+// the Tokio runtime. Keep this adapter shared by the real wizard and tests.
+async fn interview_off_runtime<I, D>(mut io: I, detect: D) -> Result<(I, Option<WizardPlan>)>
+where
+    I: BootIo + Send + 'static,
+    D: Fn(&RecipeCard) -> Option<DetectedModel> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let plan = interview(&mut io, &detect)?;
+        Ok((io, plan))
+    })
+    .await
+    .context("running the setup interview")?
 }
 
 /// Load the config boot just wrote and run the full doctor against it. An
@@ -352,6 +371,11 @@ async fn doctor_for_path(path: &Path) -> Result<DoctorOutcome> {
 
 /// `selfware boot` with no flags: interview → emit → verify loop.
 pub async fn run_boot_wizard() -> Result<()> {
+    run_boot_wizard_for_path(None).await
+}
+
+/// Repair an explicitly selected configuration, or use the global default.
+pub async fn run_boot_wizard_for_path(config_path: Option<PathBuf>) -> Result<()> {
     // Same fail-fast as `selfware init`: without a terminal every answer is
     // EOF and the wizard would persist an all-defaults config the user never
     // asked for.
@@ -362,10 +386,13 @@ pub async fn run_boot_wizard() -> Result<()> {
         );
     }
 
-    let mut io = StdinIo;
-    let Some(mut plan) = interview(&mut io, &detect_served_model)? else {
+    let (mut io, plan) = interview_off_runtime(StdinIo, detect_served_model).await?;
+    let Some(mut plan) = plan else {
         return Ok(());
     };
+    if let Some(path) = config_path {
+        plan.config_path = path;
+    }
 
     if plan.config_path.exists() {
         let answer = io.ask(&format!(

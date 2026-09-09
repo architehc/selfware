@@ -2,8 +2,8 @@
 //!
 //! The model is grounded by a system prompt that pins it to setup topics and
 //! — critically — tells it that CONFIGS COME FROM RECIPE CARDS, so it never
-//! invents endpoints or TOML. A top-1 keyword snippet from the repo's `docs/`
-//! is added as retrieval context.
+//! invents endpoints or TOML. Retrieval uses setup documentation bundled
+//! with the binary, never documentation from the current checkout.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -24,6 +24,7 @@ Rules:\n\
 - If a DOCUMENTATION SNIPPET is provided, prefer it over your own knowledge; if you don't know, say so.";
 
 const MAX_SNIPPET_CHARS: usize = 1200;
+const SETUP_GUIDE: &str = include_str!("setup_guide.md");
 
 /// Tiny stopword list — enough to keep "how do I" from dominating the score.
 const STOPWORDS: &[&str] = &[
@@ -43,19 +44,10 @@ pub fn keywords(text: &str) -> Vec<String> {
     out
 }
 
-/// Where to look for markdown docs: `docs/` under the current directory
-/// first (running from a checkout), then the compile-time repo path.
-fn docs_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let cwd_docs = PathBuf::from("docs");
-    if cwd_docs.is_dir() {
-        dirs.push(cwd_docs);
-    }
-    let manifest_docs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs");
-    if manifest_docs.is_dir() && !dirs.contains(&manifest_docs) {
-        dirs.push(manifest_docs);
-    }
-    dirs
+/// Retrieve only application-owned setup documentation, available in both
+/// packaged binaries and source installations regardless of working directory.
+pub fn retrieve_bundled_snippet(question: &str) -> Option<String> {
+    select_snippet([SETUP_GUIDE], question)
 }
 
 fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -64,9 +56,12 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
             collect_markdown(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+        } else if kind.is_file() && path.extension().and_then(|e| e.to_str()) == Some("md") {
             out.push(path);
         }
     }
@@ -74,20 +69,28 @@ fn collect_markdown(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Keyword retrieval over markdown docs: split every file into paragraphs,
 /// score by DISTINCT keyword hits, return the best paragraph (capped at
-/// [`MAX_SNIPPET_CHARS`]). `None` when nothing matches — the chat then runs
-/// on the grounding prompt alone.
+/// 1200 characters). This utility accepts explicit local data; the boot chat
+/// itself uses bundled documentation instead.
 pub fn retrieve_snippet(docs_dir: &Path, question: &str) -> Option<String> {
+    let mut files = Vec::new();
+    collect_markdown(docs_dir, &mut files);
+    let documents: Vec<String> = files
+        .into_iter()
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .collect();
+    select_snippet(documents.iter().map(String::as_str), question)
+}
+
+fn select_snippet<'a>(
+    documents: impl IntoIterator<Item = &'a str>,
+    question: &str,
+) -> Option<String> {
     let keys = keywords(question);
     if keys.is_empty() {
         return None;
     }
-    let mut files = Vec::new();
-    collect_markdown(docs_dir, &mut files);
     let mut best: Option<(usize, String)> = None;
-    for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else {
-            continue;
-        };
+    for content in documents {
         for para in content.split("\n\n") {
             let lower = para.to_ascii_lowercase();
             let score = keys.iter().filter(|k| lower.contains(k.as_str())).count();
@@ -113,7 +116,7 @@ pub fn build_messages(question: &str, snippet: Option<&str>) -> serde_json::Valu
         Some(s) => format!("{}\n\nDOCUMENTATION SNIPPET:\n{}", GROUNDING_PROMPT, s),
         None => GROUNDING_PROMPT.to_string(),
     };
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model::SERVER_ALIAS,
         "messages": [
             {"role": "system", "content": system},
@@ -122,7 +125,9 @@ pub fn build_messages(question: &str, snippet: Option<&str>) -> serde_json::Valu
         "temperature": 0.7,
         "max_tokens": 512,
         "stream": false,
-    })
+    });
+    crate::safety::redact::redact_json(&mut body);
+    body
 }
 
 /// One round-trip against the boot-assistant server; returns the reply text.
@@ -185,9 +190,7 @@ pub async fn run_boot_chat() -> Result<()> {
         if matches!(question, "exit" | "quit" | ":q") {
             break;
         }
-        let snippet = docs_dirs()
-            .iter()
-            .find_map(|dir| retrieve_snippet(dir, question));
+        let snippet = retrieve_bundled_snippet(question);
         let body = build_messages(question, snippet.as_deref());
         match ask_once(&client, &server.base_url(), &body).await {
             Ok(reply) => println!("\n{}\n", reply),

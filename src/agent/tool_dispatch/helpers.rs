@@ -653,6 +653,22 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         return false;
     }
 
+    // A plain formatter check does not write. Limit this special case to
+    // known flags so shell operators, substitutions, and comments cannot hide
+    // a mutating suffix or turn a commented-out --check into approval.
+    let words: Vec<_> = normalized.split_whitespace().collect();
+    if words.starts_with(&["cargo", "fmt"])
+        && words[2..].contains(&"--check")
+        && words[2..].iter().all(|word| {
+            matches!(
+                *word,
+                "--" | "--check" | "--all" | "--verbose" | "-v" | "--quiet" | "-q"
+            )
+        })
+    {
+        return true;
+    }
+
     let mutating_markers = [
         "| tee",
         " tee ",
@@ -842,6 +858,9 @@ pub(crate) fn tool_call_writes_file(name: &str) -> bool {
 }
 
 pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> bool {
+    if name == "cargo_fmt" {
+        return !args.get("check").and_then(Value::as_bool).unwrap_or(false);
+    }
     if matches!(
         name,
         "file_edit"
@@ -1292,6 +1311,10 @@ pub(crate) fn tool_call_is_verification(name: &str, args_str: &str) -> bool {
 
 pub(crate) fn tool_call_is_observational(name: &str, args_str: &str) -> bool {
     match name {
+        "cargo_fmt" => serde_json::from_str::<Value>(args_str)
+            .ok()
+            .and_then(|args| args.get("check").and_then(Value::as_bool))
+            .unwrap_or(false),
         "file_read"
         | "directory_tree"
         | "glob_find"

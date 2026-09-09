@@ -1299,7 +1299,7 @@ fn test_load_full_config_all_sections() {
 #[test]
 fn test_load_denied_paths_union_keeps_defaults() {
     let _guard = clear_env();
-    let (_dir, path) = write_temp_config(
+    let (dir, path) = write_temp_config(
         r#"
         endpoint = "http://localhost:8000/v1"
         model = "test"
@@ -1328,8 +1328,12 @@ fn test_load_denied_paths_union_keeps_defaults() {
 
     // Behavior-level: the paths the stale 3-entry list re-exposed stay denied,
     // and so does the explicitly added custom path.
-    let cwd = std::env::current_dir().unwrap();
-    let validator = crate::safety::path_validator::PathValidator::new(&config.safety, cwd);
+    // Use a controlled workspace: in a Git worktree `.git` is a file, so
+    // `.git/config` cannot be resolved before the deny-glob assertion runs.
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+    let validator =
+        crate::safety::path_validator::PathValidator::new(&config.safety, dir.path().to_path_buf());
     for p in [
         ".env.production",
         "secrets",

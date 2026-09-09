@@ -169,7 +169,11 @@ fn decode_path_escapes(path: &str) -> Result<String> {
 }
 
 fn resolve_missing_path(path: &Path) -> Result<PathBuf> {
-    for ancestor in path.ancestors() {
+    // Bound only unresolved ancestry work. Existing deep paths still use the
+    // direct descriptor resolution; a missing thousand-component path must not
+    // cause a platform-dependent unbounded sequence of filesystem probes.
+    const MAX_UNRESOLVED_ANCESTORS: usize = 128;
+    for ancestor in path.ancestors().take(MAX_UNRESOLVED_ANCESTORS) {
         match open_nofollow_and_resolve(ancestor) {
             Ok(real) => {
                 let suffix = path
@@ -299,6 +303,26 @@ impl PathValidator {
         } else {
             self.working_dir.join(path_buf)
         };
+
+        // Check the lexical input BEFORE following magic links. /proc/self/cwd
+        // and /proc/self/fd/N can canonicalize into an allowed workspace, which
+        // must not erase the caller's use of a protected system namespace.
+        let lexical = normalize_lexical(&resolved);
+        if [
+            "/proc",
+            "/sys",
+            "/dev/fd",
+            "/dev/stdin",
+            "/dev/stdout",
+            "/dev/stderr",
+        ]
+        .iter()
+        .any(|protected| lexical.starts_with(protected))
+        {
+            return Err(SelfwareError::Safety(SafetyError::PathProtectedSystem {
+                path: lexical.display().to_string(),
+            }));
+        }
 
         // SECURITY: Use O_NOFOLLOW atomic open to eliminate TOCTOU symlink races.
         // Try to open with O_NOFOLLOW and resolve from the fd directly.

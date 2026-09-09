@@ -154,7 +154,19 @@ async fn test_api_context_endpoint_separates_code_from_non_code_layers() {
 
 #[tokio::test]
 async fn test_workspace_bootstraps_session_and_grounded_capabilities() {
-    let server = EvolveServer::new(sample_graph());
+    // Keep the expected workspace identity independent of the checkout's
+    // directory name (isolated review worktrees need not be named selfware).
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("selfware");
+    std::fs::create_dir(&root).unwrap();
+    let repository = git2::Repository::init(&root).unwrap();
+    let tree_id = repository.index().unwrap().write_tree().unwrap();
+    let tree = repository.find_tree(tree_id).unwrap();
+    let signature = git2::Signature::now("Selfware Test", "selfware@example.test").unwrap();
+    repository
+        .commit(Some("HEAD"), &signature, &signature, "fixture", &tree, &[])
+        .unwrap();
+    let server = EvolveServer::for_project(sample_graph(), &root).unwrap();
     let (status, json) = get_json(&server, "/api/workspace").await;
 
     assert_eq!(status, StatusCode::OK);

@@ -13,6 +13,17 @@ use crate::errors::ApiError;
 /// Semaphore to limit concurrent streaming API tasks to prevent resource exhaustion.
 static STREAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
 
+fn observe_attempt(attempt: &Option<super::usage::AttemptGuard>, chunk: &StreamChunk) {
+    if let Some(attempt) = attempt {
+        match chunk {
+            StreamChunk::Usage(usage) => attempt.record(usage),
+            StreamChunk::Done => attempt.complete(),
+            StreamChunk::Error(_) => attempt.fail(),
+            _ => {}
+        }
+    }
+}
+
 /// A streaming response that yields chunks as they arrive
 pub struct StreamingResponse {
     response: reqwest::Response,
@@ -22,6 +33,8 @@ pub struct StreamingResponse {
     /// server that keeps emitting chunks just under `chunk_timeout` cannot
     /// stream forever. `None` means no wall-clock bound (per-chunk only).
     deadline: Option<Instant>,
+    attempt: Option<super::usage::AttemptGuard>,
+    prior_attempts: Vec<super::usage::UsageReceipt>,
 }
 
 impl std::fmt::Debug for StreamingResponse {
@@ -44,7 +57,19 @@ impl StreamingResponse {
             response,
             chunk_timeout,
             deadline,
+            attempt: None,
+            prior_attempts: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_attempt(
+        mut self,
+        attempt: super::usage::AttemptGuard,
+        prior_attempts: Vec<super::usage::UsageReceipt>,
+    ) -> Self {
+        self.attempt = Some(attempt);
+        self.prior_attempts = prior_attempts;
+        self
     }
 
     /// Process the stream and send chunks through a channel
@@ -73,12 +98,15 @@ impl StreamingResponse {
         // Spawn the stream processor with a permit to limit concurrent tasks
         tokio::spawn(async move {
             let _permit = permit;
+            let attempt = self.attempt;
+            let prior_usage = super::usage::aggregate_receipts(&self.prior_attempts);
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
             let mut pending_utf8 = Vec::new();
             let mut accumulator = ToolCallAccumulator::new();
             let chunk_timeout = self.chunk_timeout;
             let deadline = self.deadline;
+            let mut saw_valid_event = false;
 
             loop {
                 // Bound each chunk wait by BOTH the per-chunk timeout and the
@@ -109,7 +137,16 @@ impl StreamingResponse {
                     },
                     None => chunk_timeout,
                 };
-                let chunk_opt = match tokio::time::timeout(effective_timeout, stream.next()).await {
+                let next = tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    _ = crate::shutdown_requested() => {
+                        let _ = tx.send(Err(ApiError::Network("Shutdown requested during provider stream".into()).into())).await;
+                        return;
+                    },
+                    result = tokio::time::timeout(effective_timeout, stream.next()) => result,
+                };
+                let chunk_opt = match next {
                     Ok(Some(result)) => Some(result),
                     Ok(None) => None, // Stream ended
                     Err(_elapsed) => {
@@ -143,7 +180,12 @@ impl StreamingResponse {
                             let event = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
 
-                            for chunk in parse_sse_event(&event, &mut accumulator) {
+                            for mut chunk in parse_sse_event(&event, &mut accumulator) {
+                                saw_valid_event = true;
+                                observe_attempt(&attempt, &chunk);
+                                if let StreamChunk::Usage(usage) = &mut chunk {
+                                    super::usage::add_response_usage(usage, &prior_usage);
+                                }
                                 if tx.send(Ok(chunk)).await.is_err() {
                                     warn!(
                                         "Streaming receiver dropped while forwarding parsed stream chunk"
@@ -181,7 +223,12 @@ impl StreamingResponse {
             // Flush trailing buffer (data without final \n\n)
             let remaining = buffer.trim().to_string();
             if !remaining.is_empty() {
-                for chunk in parse_sse_event(&remaining, &mut accumulator) {
+                for mut chunk in parse_sse_event(&remaining, &mut accumulator) {
+                    saw_valid_event = true;
+                    observe_attempt(&attempt, &chunk);
+                    if let StreamChunk::Usage(usage) = &mut chunk {
+                        super::usage::add_response_usage(usage, &prior_usage);
+                    }
                     if tx.send(Ok(chunk)).await.is_err() {
                         warn!("Streaming receiver dropped while sending trailing buffered chunk");
                         return;
@@ -191,9 +238,17 @@ impl StreamingResponse {
 
             // Flush any remaining accumulated tool calls
             for call in accumulator.flush() {
+                saw_valid_event = true;
                 if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
                     warn!("Streaming receiver dropped while flushing final tool calls");
                     return;
+                }
+            }
+            // A clean EOF after valid SSE events is accepted by collect(),
+            // including providers that finish with finish_reason but no [DONE].
+            if saw_valid_event {
+                if let Some(attempt) = &attempt {
+                    attempt.complete();
                 }
             }
         });
@@ -546,6 +601,14 @@ pub(crate) fn parse_sse_event(
         };
 
         if let Some(err) = json.get("error") {
+            // Gateways can include billable usage with their terminal error.
+            // Preserve it before the error causes collection to stop.
+            if let Some(usage) = json
+                .get("usage")
+                .and_then(|value| serde_json::from_value::<Usage>(value.clone()).ok())
+            {
+                chunks.push(StreamChunk::Usage(usage));
+            }
             let msg = err
                 .get("message")
                 .and_then(|m| m.as_str())

@@ -1536,6 +1536,10 @@ async fn test_api_client_chat_with_tools_in_body() {
 
     let config = crate::config::Config {
         endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+        agent: crate::config::AgentConfig {
+            native_function_calling: true,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -1558,7 +1562,7 @@ async fn test_api_client_chat_with_tools_in_body() {
         .await;
     assert!(result.is_ok());
 
-    let _ = server.await;
+    server.await.unwrap();
 }
 
 #[tokio::test]

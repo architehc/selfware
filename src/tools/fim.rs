@@ -80,6 +80,41 @@ fn sanitize_fim_instruction(raw: &str) -> String {
     }
 }
 
+/// FIM must retain the original prefix/suffix verbatim when writing. If these
+/// contain secrets or hostile control text, refuse before requesting a model
+/// completion instead of silently writing a redacted version of the user's file.
+fn validate_fim_context(
+    path: &str,
+    prefix: &str,
+    suffix: &str,
+    safety: &SafetyConfig,
+) -> Result<()> {
+    let args = serde_json::json!({"path": path}).to_string();
+    for content in [prefix, suffix] {
+        let gated = crate::safety::source_context::sanitize_tool_context(
+            "file_fim_edit",
+            &args,
+            content,
+            safety.trust_gate_tool_results,
+        );
+        let lower = content.to_ascii_lowercase();
+        if gated.content != content
+            || [
+                "<|fim_",
+                "<|im_start|>",
+                "<|im_end|>",
+                "<|endoftext|>",
+                "[selfware_fim_metadata_",
+            ]
+            .iter()
+            .any(|token| lower.contains(token))
+        {
+            return Err(anyhow!("FIM context contains credentials or unsafe control text. Use a targeted file_edit that does not send this context to the model."));
+        }
+    }
+    Ok(())
+}
+
 /// A tool that uses Fill-in-the-Middle (FIM) to intelligently edit code.
 /// Supports optional per-instance safety configuration for multi-agent
 /// scenarios via [`FileFimEdit::with_safety_config`].
@@ -172,6 +207,7 @@ impl Tool for FileFimEdit {
 
         let prefix = lines[..start_line - 1].join("\n");
         let suffix = lines[end_line..].join("\n");
+        validate_fim_context(path, &prefix, &suffix, &safety)?;
 
         // Format prompt using Qwen's specific FIM tokens (or standard FIM).
         // The instruction is placed inside a clearly-delimited metadata block
@@ -209,6 +245,18 @@ impl Tool for FileFimEdit {
             ));
         }
 
+        // Apply the direct edit write policy to the actual generated replacement.
+        // This includes encoded-secret evasions and path-specific content rules.
+        crate::safety::SafetyChecker::new(&safety).check_tool_call(
+            &crate::api::types::ToolCall {
+                id: "fim-generated-edit".to_string(),
+                call_type: "function".to_string(),
+                function: crate::api::types::ToolFunction {
+                    name: "file_edit".to_string(),
+                    arguments: serde_json::json!({"path": path, "new_str": middle}).to_string(),
+                },
+            },
+        )?;
         let new_content = format!("{}{}{}", prefix, middle, suffix);
 
         // For Rust files, run a quick syntax check before writing

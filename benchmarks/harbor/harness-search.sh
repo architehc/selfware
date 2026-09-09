@@ -22,6 +22,8 @@ SEARCH_TASKS="${SEARCH_TASKS:-terminal-bench/cargo-flight-dispatch terminal-benc
 SEED_CONFIG="${SEED_CONFIG:-/home/rig/selfware/benchmarks/harbor/selfware-harbor-medium.toml}"
 HARBOR_BIN="${HARBOR_BIN:-$HOME/.local/bin/harbor}"
 SELFWARE="/home/rig/selfware/target/release/selfware"
+EVALUATED_BINARY="${SELFWARE_BINARY:-/home/rig/harbor-agents/dist/selfware-bullseye}"
+ARCHIVE_TOOL="$(cd "$(dirname "$0")" && pwd)/harness_archive.py"
 
 mkdir -p "$ARCHIVE/candidates"
 
@@ -32,69 +34,14 @@ next_id() {
 }
 
 record_candidate() {
-  # $1=id  $2=parent_id  $3=config path  $4=harbor job dir
+  # $1=id $2=parent_id $3=config $4=job dir $5=pre-run binary SHA256
   local id="$1" parent="$2" cfg="$3" jobdir="$4"
   if [ -z "$jobdir" ] || [ ! -d "$jobdir" ]; then
     echo "ERROR: no job dir for $id — evaluation did not produce trials; refusing to record" >&2
     return 1
   fi
-  python3 - "$ARCHIVE" "$id" "$parent" "$cfg" "$jobdir" "$SEARCH_TASKS" <<'PYEOF'
-import json, sys, pathlib, hashlib, subprocess
-archive, cid, parent, cfg, jobdir, planned = sys.argv[1:7]
-jobdir = pathlib.Path(jobdir)
-# Basenames: trial dirs cannot contain the "terminal-bench/" prefix.
-planned = [t.split("/")[-1] for t in planned.split()]
-rewards, traces, cost = {}, {}, None
-for trial in sorted(jobdir.glob("*/")):
-    task = trial.name.split("__")[0]
-    rw = trial / "verifier" / "reward.txt"
-    r = float(rw.read_text().strip()) if rw.exists() else None
-    # Keep every replicate: two trials of one task must NOT collapse into
-    # the last-seen reward (external review finding 10).
-    rewards.setdefault(task, []).append(r)
-    agent_log = trial / "agent" / "selfware.txt"
-    ver_out = trial / "verifier" / "test-stdout.txt"
-    traces.setdefault(task, []).append([str(agent_log), str(ver_out)])
-result = jobdir / "result.json"
-if result.exists():
-    # Preserve "unknown": a missing cost is NOT $0.00 — recording 0.0 would
-    # make un-metered runs indistinguishable from free ones and silently
-    # improve every cost comparison (external review of 6e231e2e, #7).
-    raw = json.loads(result.read_text()).get("total_cost_usd")
-    cost = float(raw) if raw is not None else None
-try:
-    rev = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
-        capture_output=True, text=True, check=True,
-    ).stdout.strip()
-except Exception:
-    rev = "unknown"
-# A candidate is complete only if every PLANNED task produced a reward;
-# one observed success out of 8 planned must not read as mean 1.000.
-missing = [t for t in planned
-           if not any(r is not None for r in rewards.get(t, []))]
-complete = not missing
-flat = [r for rs in rewards.values() for r in rs if r is not None]
-mean = sum(flat) / len(flat) if flat else None
-rec = {
-    "id": cid,
-    "parent": parent,
-    "config_sha256": hashlib.sha256(pathlib.Path(cfg).read_bytes()).hexdigest()[:16],
-    "selfware_rev": rev,
-    "rewards": rewards,
-    "mean_reward": mean,
-    "complete": complete,
-    "missing_tasks": missing,
-    "total_cost_usd": cost,
-    "trace_paths": traces,
-}
-with open(pathlib.Path(archive) / "candidates.jsonl", "a") as f:
-    f.write(json.dumps(rec) + "\n")
-cost_str = f"${cost:.2f}" if cost is not None else "unknown"
-mean_str = f"{mean:.3f}" if mean is not None else "unknown"
-flag = "" if complete else f" INCOMPLETE (missing: {', '.join(missing)})"
-print(f"recorded {cid}: mean_reward={mean_str} cost={cost_str}{flag}")
-PYEOF
+  python3 "$ARCHIVE_TOOL" record "$ARCHIVE" "$id" "$parent" "$cfg" "$jobdir" \
+      "$SEARCH_TASKS" "$EVALUATED_BINARY" "$5"
 }
 
 evaluate() {
@@ -119,7 +66,7 @@ evaluate() {
   sg docker -c "cd /home/rig/harbor-agents && \
     SELFWARE_HARBOR_CONFIG='$cfg' PYTHONPATH=/home/rig/harbor-agents \
     SELFWARE_BINARY='${SELFWARE_BINARY:-/home/rig/harbor-agents/dist/selfware-bullseye}' \
-    SELFWARE_API_KEY='$SELFWARE_API_KEY' \
+    SELFWARE_API_KEY=\"\$SELFWARE_API_KEY\" \
     '$HARBOR_BIN' run -d terminal-bench/terminal-bench@latest \
       --agent selfware_agent:SelfwareAgent -k 1 -n $n_conc --env docker \
       --job-name '$jobtag' \
@@ -135,25 +82,18 @@ evaluate() {
 
 # --- iteration 0: seed the archive with the current profile ---
 seed_id="c000"
-if [ ! -s "$ARCHIVE/candidates.jsonl" ]; then
+if ! python3 "$ARCHIVE_TOOL" select "$ARCHIVE" "$SEARCH_TASKS" "$EVALUATED_BINARY" >/dev/null; then
+  seed_id=$(next_id)
   mkdir -p "$ARCHIVE/candidates/$seed_id"
   cp "$SEED_CONFIG" "$ARCHIVE/candidates/$seed_id/config.toml"
   echo "evaluating seed $seed_id..."
+  binary_sha=$(python3 "$ARCHIVE_TOOL" fingerprint "$EVALUATED_BINARY")
   jobdir=$(evaluate "$seed_id" "$SEED_CONFIG" | tail -1)
-  record_candidate "$seed_id" "" "$SEED_CONFIG" "$jobdir"
+  record_candidate "$seed_id" "" "$SEED_CONFIG" "$jobdir" "$binary_sha"
 fi
 
 for i in $(seq 1 "$ITERATIONS"); do
-  parent_id=$(python3 -c "
-import json, sys
-recs = [json.loads(l) for l in open('$ARCHIVE/candidates.jsonl')]
-# Incomplete candidates stay in the archive for diagnosis but must never
-# be promoted to parent (missing planned tasks would inflate their mean).
-eligible = [r for r in recs if r.get('complete', True) and r['mean_reward'] is not None]
-if not eligible:
-    sys.exit('no complete candidate in archive — cannot select a parent')
-best = max(eligible, key=lambda r: r['mean_reward'])
-print(best['id'])")
+  parent_id=$(python3 "$ARCHIVE_TOOL" select "$ARCHIVE" "$SEARCH_TASKS" "$EVALUATED_BINARY")
   parent_cfg="$ARCHIVE/candidates/$parent_id/config.toml"
   cid=$(next_id)
   work="$ARCHIVE/candidates/$cid"
@@ -193,8 +133,9 @@ PYEOF
     echo "no proposal.diff — candidate $cid keeps parent config"
   fi
 
+  binary_sha=$(python3 "$ARCHIVE_TOOL" fingerprint "$EVALUATED_BINARY")
   jobdir=$(evaluate "$cid" "$work/config.toml" | tail -1)
-  record_candidate "$cid" "$parent_id" "$work/config.toml" "$jobdir"
+  record_candidate "$cid" "$parent_id" "$work/config.toml" "$jobdir" "$binary_sha"
 done
 
 echo "=== archive state ==="
@@ -208,6 +149,6 @@ for r in recs:
     mean_str = f'{mean:.3f}' if mean is not None else 'unknown'
     cost = r['total_cost_usd']
     cost_str = f'\${cost:.2f}' if cost is not None else 'unknown'
-    flag = '' if r.get('complete', True) else ' INCOMPLETE'
+    flag = '' if r.get('complete') is True else ' INCOMPLETE_OR_UNVERIFIED'
     print(f\"{r['id']} parent={r['parent'] or '-':5} mean={mean_str} cost={cost_str}{flag}\")
 "

@@ -12,6 +12,7 @@ pub mod client;
 pub mod streaming;
 pub mod tool_calling;
 pub mod types;
+pub mod usage;
 
 pub use client::{ApiClient, RetryConfig};
 pub use streaming::{StreamChunk, StreamingResponse};

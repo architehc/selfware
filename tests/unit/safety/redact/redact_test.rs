@@ -479,3 +479,141 @@ fn redacts_scanner_shapes_review_finding_4() {
         "webhook secret survived: {output}"
     );
 }
+
+#[test]
+fn every_builtin_secret_detector_has_redaction_coverage() {
+    // Independent examples force review when a new detector is added; sharing
+    // regexes alone must not make this assertion pass without a real fixture.
+    // Construct these synthetic values at runtime so GitHub push protection
+    // does not mistake the test source for committed credentials.
+    let gitlab_token = ["glpat", "A1b2C3d4E5f6G7h8I9j0"].join("-");
+    let twilio_sid = format!("AC{}", "0123456789abcdef".repeat(2));
+    let cases = [
+        (
+            "AWS Access Key",
+            "AKIA7H3M9Q2V6N8C4R5T",
+            "AKIA7H3M9Q2V6N8C4R5T",
+        ),
+        (
+            "AWS Secret Key",
+            "AWS_SECRET_ACCESS_KEY = \"Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A\"",
+            "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A",
+        ),
+        (
+            "GitHub Token",
+            "ghp_A1b2C3d4E5f6G7h8I9j0",
+            "ghp_A1b2C3d4E5f6G7h8I9j0",
+        ),
+        (
+            "GitHub Fine-Grained Token",
+            "github_pat_A1b2C3d4E5f6G7h8I9j0K1L2",
+            "github_pat_A1b2C3d4E5f6G7h8I9j0K1L2",
+        ),
+        ("GitLab Token", gitlab_token.as_str(), gitlab_token.as_str()),
+        (
+            "npm Token",
+            "npm_H9vz3E8Kq5X2Mf7Yb6Cd4Nr8Q2Az5W7P",
+            "npm_H9vz3E8Kq5X2Mf7Yb6Cd4Nr8Q2Az5W7P",
+        ),
+        (
+            "Generic API Key",
+            "api_key = \"A1b2C3d4E5f6G7h8I9j0\"",
+            "A1b2C3d4E5f6G7h8I9j0",
+        ),
+        (
+            "Private Key",
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate_key_material_without_end_marker",
+            "private_key_material_without_end_marker",
+        ),
+        (
+            "Google API Key",
+            "AIzaAb3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx",
+            "AIzaAb3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx",
+        ),
+        (
+            "Stripe Key",
+            "sk_test_H9vz3E8Kq5X2Mf7Yb",
+            "sk_test_H9vz3E8Kq5X2Mf7Yb",
+        ),
+        (
+            "Password in Code",
+            "password = \"H9vz3E8Kq5X2\"",
+            "H9vz3E8Kq5X2",
+        ),
+        ("Bearer Token", "Bearer B7q2", "B7q2"),
+        (
+            "JWT Token",
+            "eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYSJ9.c2ln",
+            "eyJhbGciOiJub25lIn0.eyJ1c2VyIjoiYSJ9.c2ln",
+        ),
+        (
+            "Database URL",
+            "mongodb+srv://reader:H9vz3E8Kq5@db.invalid/data",
+            "H9vz3E8Kq5",
+        ),
+        (
+            "Slack Token",
+            "xoxb-H9vz3E8Kq5X2Mf7Yb",
+            "xoxb-H9vz3E8Kq5X2Mf7Yb",
+        ),
+        (
+            "JWT Partial",
+            "eyJhbGciOiJub25lIiwidXNlciI6ImFiY2RlZiJ9",
+            "eyJhbGciOiJub25lIiwidXNlciI6ImFiY2RlZiJ9",
+        ),
+        (
+            "Slack Webhook",
+            "hooks.slack.com/services/T12ABC/B34DEF/H9vz3E8Kq5X2",
+            "H9vz3E8Kq5X2",
+        ),
+        (
+            "Azure Account Key",
+            "AccountKey=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv",
+            "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv",
+        ),
+        ("Twilio SID", twilio_sid.as_str(), twilio_sid.as_str()),
+        (
+            "Base64 Secret",
+            "auth=Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A",
+            "Ab3Cd4Ef5Gh6Ij7Kl8Mn9Op0Qr1St2Uv3Wx4Yz5A",
+        ),
+    ];
+    for pattern in crate::safety::scanner::SecretScanner::default_patterns() {
+        let (_, input, secret) = cases
+            .iter()
+            .find(|(name, _, _)| *name == pattern.name)
+            .expect("new detector needs an independent redaction fixture");
+        assert!(
+            pattern.compiled.as_ref().unwrap().is_match(input),
+            "invalid fixture for {}",
+            pattern.name
+        );
+        let output = redact_secrets(input);
+        assert!(
+            output.contains("[REDACTED]"),
+            "{} must redact",
+            pattern.name
+        );
+        assert!(
+            !output.contains(*secret),
+            "{} secret survived",
+            pattern.name
+        );
+    }
+}
+
+#[test]
+fn npm_and_all_stripe_modes_are_redacted_in_source_and_output() {
+    for context in [RedactionContext::Generic, RedactionContext::RustSource] {
+        for kind in ["sk", "rk", "pk"] {
+            for mode in ["live", "test"] {
+                let key = format!("{kind}_{mode}_H9vz3E8Kq5X2Mf7Yb");
+                let output = redact_secrets_with_context(&key, context);
+                assert!(!output.contains(&key));
+                assert!(output.contains("[REDACTED]"));
+            }
+        }
+        let key = "npm_H9vz3E8Kq5X2Mf7Yb6Cd4Nr8Q2Az5W7P";
+        assert!(!redact_secrets_with_context(key, context).contains(key));
+    }
+}

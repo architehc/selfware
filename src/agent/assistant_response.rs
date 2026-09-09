@@ -126,19 +126,13 @@ impl Agent {
         if self.compressor.should_compress(&self.messages) {
             info!("Context compression triggered");
             match self.compressor.compress(&self.client, &self.messages).await {
-                Ok((compressed, usage)) => {
+                Ok((compressed, _usage)) => {
                     self.messages = compressed;
                     // Account the summarizer LLM call against the budget.
                     // Delta-add (never total = input + output): after a resume,
                     // `total` carries the restored prior-run budget whose
                     // input/output split was not persisted.
-                    self.cumulative_token_usage.input += usage.prompt_tokens;
-                    self.cumulative_token_usage.output += usage.completion_tokens;
-                    self.cumulative_token_usage.total +=
-                        usage.prompt_tokens + usage.completion_tokens;
-                    if let Some(cost) = usage.cost {
-                        self.cumulative_cost_usd += cost;
-                    }
+                    self.sync_api_usage();
                     self.log_context_compression_event(
                         super::session_log::ContextCompressionLogDetails {
                             strategy: "summary",
@@ -392,7 +386,12 @@ impl Agent {
 
                     // The fallback is a NON-streaming response: its usage never
                     // passes through the SSE usage arm, so record it here.
-                    self.record_nonstreaming_usage(&response.usage);
+                    self.record_nonstreaming_usage(
+                        fallback_meta
+                            .accounted_usage
+                            .as_ref()
+                            .unwrap_or(&response.usage),
+                    );
 
                     let choice = response
                         .choices
@@ -463,7 +462,12 @@ impl Agent {
 
             // A non-streaming response never produces a `StreamChunk::Usage`
             // event, so accumulate its usage into the session totals here.
-            self.record_nonstreaming_usage(&response.usage);
+            self.record_nonstreaming_usage(
+                sync_meta
+                    .accounted_usage
+                    .as_ref()
+                    .unwrap_or(&response.usage),
+            );
 
             let choice = response
                 .choices
@@ -586,7 +590,6 @@ impl Agent {
             .as_ref()
             .and_then(|m| m.completion_tokens)
             .map(|c| c as usize);
-        let reported_total = chat_metadata.as_ref().and_then(|m| m.total_tokens);
 
         let output_estimate = crate::token_count::estimate_content_tokens(&content)
             + reasoning
@@ -600,22 +603,27 @@ impl Agent {
             output_estimate,
         );
 
-        self.cumulative_token_usage.input += input_tokens;
-        self.cumulative_token_usage.output += output_tokens;
-        // Trust a provider-reported total only when it also reported both
-        // components; otherwise account the step's (possibly estimated)
-        // tokens. Always DELTA-ADD — never `total = input + output`: after a
-        // resume, `total` carries the restored prior-run budget whose
-        // input/output split was not persisted, so a from-parts recompute
-        // would silently erase it (the budget-reset bug).
-        let step_total = match (reported_prompt, reported_completion, reported_total) {
-            (Some(_), Some(_), Some(total)) => total as usize,
-            _ => input_tokens + output_tokens,
+        self.sync_api_usage();
+        // Missing provider fields still use the measured content-token fallback.
+        // Reported components have already been charged by the attempt ledger.
+        let already_accounted = chat_metadata
+            .as_ref()
+            .is_some_and(|meta| meta.accounted_usage.is_some());
+        let estimated_input = if !already_accounted && reported_prompt.is_none() {
+            input_tokens
+        } else {
+            0
         };
-        self.cumulative_token_usage.total += step_total;
-        if let Some(cost) = chat_metadata.as_ref().and_then(|m| m.cost) {
-            self.cumulative_cost_usd += cost;
-        }
+        let estimated_output = if !already_accounted && reported_completion.is_none() {
+            output_tokens
+        } else {
+            0
+        };
+        self.cumulative_token_usage.input += estimated_input;
+        self.cumulative_token_usage.output += estimated_output;
+        self.cumulative_token_usage.total += estimated_input + estimated_output;
+        self.client
+            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
 
         let response = AssistantStepResponse {
             content_chars: content.len(),
@@ -661,6 +669,9 @@ pub(super) fn is_terminal_api_client_error(e: &anyhow::Error) -> bool {
         if cause
             .downcast_ref::<crate::api::client::WallClockBudgetExceeded>()
             .is_some()
+            || cause
+                .downcast_ref::<crate::api::client::UsageBudgetExceeded>()
+                .is_some()
         {
             return true;
         }

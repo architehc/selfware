@@ -81,7 +81,7 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // `name=[REDACTED]` replacements are never re-matched as secrets.
             compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"'\[]{6,})["']?"#),
             // Private keys
-            compile_pattern("private_key", r#"-----BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----"#),
+            compile_pattern("private_key", r#"-----BEGIN\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----[\s\S]*?(?:-----END\s+(?:[A-Z0-9]+\s+)?PRIVATE\s+KEY-----|\z)"#),
             // Database connection strings — mongodb+srv and valkey included to
             // match the scanner's shape (review finding #4: a mongodb+srv://
             // URL with credentials sailed through output redaction)
@@ -95,11 +95,27 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
             // Generic high-entropy base64-encoded strings that look like API keys
             compile_pattern("base64_secret", r#"(?i)(?:key|token|secret|password|credential|auth)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{40,})["']?"#),
         ];
-        candidates.into_iter().flatten().collect()
+        let mut patterns: Vec<SecretPattern> = candidates.into_iter().flatten().collect();
+        // Detection is the canonical minimum coverage. Keep the broader log
+        // patterns above, and automatically inherit every built-in detector so
+        // newly recognized vendor formats cannot silently miss redaction.
+        for pattern in super::scanner::SecretScanner::default_patterns() {
+            let name = match pattern.name.as_str() {
+                // Quoted literal detectors are safe for source too: unlike
+                // broad keyword heuristics they do not match function calls.
+                "Bearer Token" => "bearer_token",
+                "Base64 Secret" => "base64_secret",
+                _ => "detected_secret",
+            };
+            if let Some(regex) = pattern.compiled {
+                patterns.push(SecretPattern { name, regex });
+            }
+        }
+        patterns
     })
 }
 
-/// What kind of content is being redacted. First-party workspace Rust
+/// What kind of content is being redacted. Rust
 /// source gets the conservative carve-out (glm capstone: the generic
 /// keyword patterns mangle ordinary code — `let secret = compute()` — so
 /// the model reads redacted source and has to reconstruct it).
@@ -107,9 +123,9 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
 pub enum RedactionContext {
     /// Unknown or mixed content — the full pattern set applies.
     Generic,
-    /// First-party workspace Rust source (the trust gate's `rust_source`
+    /// Rust source (the trust gate's `rust_source`
     /// classification, `tool_dispatch/trust_gate.rs:classification_for`).
-    /// Generic keyword patterns are OFF; high-signal key formats still
+    /// Broad keyword heuristics are OFF; quoted secret literals and key formats still
     /// redact everywhere.
     RustSource,
 }

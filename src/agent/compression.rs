@@ -535,6 +535,23 @@ pub async fn full_compact(
     file_tracker: &FileAccessTracker,
     _target_budget: usize,
 ) -> Result<CompressionMetrics> {
+    full_compact_with_safety(
+        client,
+        messages,
+        file_tracker,
+        _target_budget,
+        &crate::config::SafetyConfig::default(),
+    )
+    .await
+}
+
+async fn full_compact_with_safety(
+    client: &ApiClient,
+    messages: &mut Vec<Message>,
+    file_tracker: &FileAccessTracker,
+    _target_budget: usize,
+    safety: &crate::config::SafetyConfig,
+) -> Result<CompressionMetrics> {
     let start = std::time::Instant::now();
     let tokens_before = messages.iter().map(estimate_tokens).sum::<usize>();
     let messages_before = messages.len();
@@ -604,9 +621,23 @@ pub async fn full_compact(
     let recent_files = file_tracker.get_recent_files(5);
     if !recent_files.is_empty() {
         let mut file_context = String::from("\n## Recently Accessed Files:\n");
+        let validator = crate::safety::path_validator::PathValidator::new(
+            safety,
+            super::current_project_root(),
+        );
         for path in recent_files {
-            // Try to read file content (best effort)
+            if validator.validate(&path).is_err() {
+                continue;
+            }
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                let args = serde_json::json!({"path": path}).to_string();
+                let content = super::tool_dispatch::sanitize_tool_context(
+                    "compact_file",
+                    &args,
+                    &content,
+                    safety.trust_gate_tool_results,
+                )
+                .content;
                 let total_chars = content.chars().count();
                 let truncated = if total_chars > 20_000 {
                     format!(
@@ -617,7 +648,16 @@ pub async fn full_compact(
                 } else {
                     content
                 };
-                file_context.push_str(&format!("\n### {}\n```\n{}\n```\n", path, truncated));
+                let section = format!("\n### {}\n```\n{}\n```\n", path, truncated);
+                file_context.push_str(
+                    &super::tool_dispatch::sanitize_tool_context(
+                        "compact_file",
+                        &args,
+                        &section,
+                        safety.trust_gate_tool_results,
+                    )
+                    .content,
+                );
             } else {
                 file_context.push_str(&format!("\n### {} (unavailable)\n", path));
             }
@@ -715,11 +755,22 @@ impl CompressionOrchestrator {
         client: &ApiClient,
         messages: &mut Vec<Message>,
     ) -> Result<CompressionMetrics> {
-        let metrics = full_compact(
+        self.run_full_with_safety(client, messages, &crate::config::SafetyConfig::default())
+            .await
+    }
+
+    pub async fn run_full_with_safety(
+        &mut self,
+        client: &ApiClient,
+        messages: &mut Vec<Message>,
+        safety: &crate::config::SafetyConfig,
+    ) -> Result<CompressionMetrics> {
+        let metrics = full_compact_with_safety(
             client,
             messages,
             &self.file_tracker,
             50_000, // Leave 50K budget
+            safety,
         )
         .await?;
         self.metrics_history.push(metrics.clone());

@@ -1153,6 +1153,8 @@ fn sample_summary() -> crate::agent::RunSummary {
         verification: Some((true, 4)),
         total_tokens: 123_456,
         cost_usd: Some(0.0123),
+        cost_complete: true,
+        unmetered_attempts: 0,
     }
 }
 
@@ -1272,6 +1274,8 @@ fn render_cost_line_honest_about_missing_billing() {
         verification: None,
         total_tokens: 12_345,
         cost_usd: None,
+        cost_complete: false,
+        unmetered_attempts: 1,
     };
     let rendered = render_cost_line(&summary);
     assert!(rendered.contains("tokens: 12345 total"), "{rendered}");
@@ -1600,4 +1604,18 @@ async fn workflow_tool_handler_fails_step_on_nonzero_exit() {
     );
     let ok = handler("shell_exec", &workflow_args(&[("command", "echo ok")])).await;
     assert!(ok.is_ok(), "zero exit must pass: {ok:?}");
+}
+
+#[test]
+fn run_summary_labels_partial_provider_costs() {
+    let mut summary = sample_summary();
+    summary.cost_complete = false;
+    summary.unmetered_attempts = 2;
+    let line = render_cost_line(&summary);
+    assert!(line.contains("known cost $0.0123"), "{line}");
+    assert!(line.contains("incomplete billing"), "{line}");
+    assert!(line.contains("2 attempts"), "{line}");
+    let report = render_run_summary(&summary, None);
+    assert!(report.contains("known cost $0.0123"), "{report}");
+    assert!(report.contains("billing incomplete"), "{report}");
 }

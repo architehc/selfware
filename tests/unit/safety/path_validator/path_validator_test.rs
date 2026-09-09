@@ -438,3 +438,50 @@ fn test_allow_list_globstar_pattern_canonicalizes_symlinked_parent() {
         "<symlink>/** must match a canonical child of the real dir"
     );
 }
+
+#[test]
+fn protected_magic_link_namespace_is_refused_before_canonicalization() {
+    let dir = tempfile::tempdir().unwrap();
+    let validator = PathValidator::new(&make_config(vec!["/**"], vec![]), dir.path().to_path_buf());
+    for path in [
+        "/proc/self/cwd",
+        "/proc/self/cwd/new.txt",
+        "/proc/self/exe",
+        "/proc/self/fd/0",
+        "/proc/thread-self/cwd",
+        "/proc/123/fd/4",
+        "../../../../../../proc/self/cwd",
+        "/%70roc/self/cwd",
+        "/sys/kernel",
+        "/dev/fd/0",
+    ] {
+        assert!(
+            matches!(
+                validator.validate(path),
+                Err(SelfwareError::Safety(
+                    SafetyError::PathProtectedSystem { .. }
+                ))
+            ),
+            "must reject protected input before OS-dependent resolution: {path}"
+        );
+    }
+    // A local directory with the same name is ordinary workspace data.
+    assert!(validator.validate("proc/self/cwd").is_ok());
+}
+
+#[test]
+fn missing_path_ancestry_has_a_bounded_resolution_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let validator = PathValidator::new(&make_config(vec!["/**"], vec![]), dir.path().to_path_buf());
+    let deep = (0..1000)
+        .map(|i| format!("missing_{i}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    assert!(matches!(
+        validator.validate(&deep),
+        Err(SelfwareError::Safety(
+            SafetyError::PathCanonicalizationFailed { .. }
+        ))
+    ));
+    assert!(validator.validate("new/nested/module/file.rs").is_ok());
+}

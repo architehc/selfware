@@ -1601,6 +1601,69 @@ async fn stale_verification_rescue_detects_python_node_go_ecosystems() {
 }
 
 #[tokio::test]
+async fn stale_verification_rescue_prefers_node_manifest_over_tests_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("package.json"), "{}\n").unwrap();
+    std::fs::create_dir(tmp.path().join("tests")).unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(tmp.path());
+    let agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    assert_eq!(
+        agent.stale_verification_rescue_call().unwrap().2,
+        "npm test"
+    );
+}
+
+#[tokio::test]
+async fn stale_verification_rescue_keeps_known_command_and_working_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("package.json"), "{}\n").unwrap();
+    std::fs::create_dir(tmp.path().join("tests")).unwrap();
+    let _cwd = crate::test_support::CwdGuard::enter(tmp.path());
+    let mut agent = Agent::new(test_config("http://127.0.0.1:1".to_string()))
+        .await
+        .unwrap();
+    let mut checkpoint =
+        crate::checkpoint::TaskCheckpoint::new("known".into(), "Fix the app".into());
+    let mut call = checkpoint_shell_call("npm test -- --runInBand", false);
+    call.arguments = serde_json::json!({
+        "command": "npm test -- --runInBand", "working_dir": "packages/app"
+    })
+    .to_string();
+    let expected_args = call.arguments.clone();
+    checkpoint.log_tool_call(call);
+    agent.current_checkpoint = Some(checkpoint);
+    let (name, args, display) = agent.stale_verification_rescue_call().unwrap();
+    assert_eq!(name, "shell_exec");
+    assert_eq!(args, expected_args);
+    assert_eq!(display, "npm test -- --runInBand");
+}
+
+#[tokio::test]
+async fn read_only_retry_cap_preserves_unsatisfied_requirements() {
+    let answer = "The review found no problems based on the available context.";
+    let server = MockLlmServer::builder().with_response(answer).build().await;
+    let mut config = test_config(format!("{}/v1", server.url()));
+    config.agent.min_completion_steps = 0;
+    let mut agent = Agent::new(config).await.unwrap();
+    agent.start_learning_session("review", "Review the repository. Do not edit files.");
+    agent
+        .required_task_tools
+        .insert("vision_analyze".to_string());
+    agent.readonly_no_tool_streak = 11;
+    let error = agent
+        .execute_step_internal(false)
+        .await
+        .expect_err("missing evidence cannot become success at the retry cap");
+    assert!(error.downcast_ref::<crate::errors::AgentError>().is_some());
+    assert!(error.to_string().contains("READ_ONLY_INCOMPLETE"));
+    assert!(error.to_string().contains("vision_analyze"));
+    assert_eq!(agent.last_assistant_response, answer);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn stale_verification_rescue_rust_still_wins_over_node() {
     // Precedence: a Rust repo that also has a package.json (like selfware
     // itself) still rescues with the dedicated cargo_check tool.

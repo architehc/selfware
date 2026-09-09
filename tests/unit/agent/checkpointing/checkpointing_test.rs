@@ -42,3 +42,39 @@ fn no_persisted_caps_leaves_config_uncapped() {
     assert_eq!(config.agent.max_wall_secs, None);
     assert_eq!(config.agent.max_cost_usd, None);
 }
+
+#[tokio::test]
+async fn cancellation_bypasses_continuous_checkpoint_cadence() {
+    let mut config = crate::test_support::mock_agent_config("http://127.0.0.1:1");
+    config.continuous_work.enabled = true;
+    config.continuous_work.checkpoint_interval_tools = 1000;
+    config.continuous_work.checkpoint_interval_secs = 3600;
+    let mut agent = crate::agent::Agent::new(config).await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    agent.checkpoint_manager =
+        Some(crate::checkpoint::CheckpointManager::new(directory.path().to_path_buf()).unwrap());
+    agent.current_checkpoint = Some(TaskCheckpoint::new(
+        "cancel-cadence".into(),
+        "Review files".into(),
+    ));
+    agent.save_checkpoint("Review files").unwrap();
+    assert!(!agent.should_persist_checkpoint());
+    agent.messages.push(crate::api::types::Message::user(
+        "latest resumable evidence",
+    ));
+    agent
+        .cancel_token()
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(agent.should_persist_checkpoint());
+    agent.save_checkpoint("Review files").unwrap();
+    let saved = agent
+        .checkpoint_manager
+        .as_ref()
+        .unwrap()
+        .load("cancel-cadence")
+        .unwrap();
+    assert!(saved
+        .messages
+        .iter()
+        .any(|message| message.content.contains("latest resumable evidence")));
+}

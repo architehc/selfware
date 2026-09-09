@@ -158,10 +158,22 @@ async fn check_current_config(config: &Config) -> BootCheck {
 /// Run all checks; never returns Err. `true` when nothing failed (SKIP is
 /// fine — the model is optional).
 pub async fn run_boot_check(config: &Config) -> (Vec<BootCheck>, bool) {
+    run_boot_check_with_config(Ok(config)).await
+}
+
+/// Configuration load errors are diagnostic results, so the remaining
+/// recovery checks are still available when the current TOML is broken.
+pub async fn run_boot_check_with_config(config: Result<&Config, &str>) -> (Vec<BootCheck>, bool) {
     let model_check = check_model_file(&model::boot_dir());
     let server_check = check_llama_server();
     let round_trip = check_round_trip(plan_round_trip(&model_check, &server_check)).await;
-    let doctor = check_current_config(config).await;
+    let doctor = match config {
+        Ok(config) => check_current_config(config).await,
+        Err(error) => BootCheck::fail(
+            "current config",
+            crate::safety::redact::redact_secrets(error).into_owned(),
+        ),
+    };
 
     let checks = vec![model_check, server_check, round_trip, doctor];
     let ok = checks.iter().all(|c| c.status != BootCheckStatus::Fail);

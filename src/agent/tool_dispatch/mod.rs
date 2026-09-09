@@ -479,13 +479,25 @@ impl Agent {
             .retain(|existing| existing.tool_name != tool_name);
     }
 
+    /// Capture explicit file targets, or observe already tracked identities
+    /// around shell/git/formatter mutations whose target list is not explicit.
+    fn snapshot_mutation_paths(&self, name: &str, args: &Value) -> Vec<std::path::PathBuf> {
+        let paths = written_paths_for_tool_call(name, args);
+        if paths.is_empty() && tool_call_is_mutating(name, args) {
+            self.best_snapshot.tracked_paths()
+        } else {
+            paths
+        }
+    }
+
     /// Paths the agent wrote/edited this task (from checkpoint tool calls).
     /// Covers the full mutating file-tool set — not just file_edit/file_write —
     /// so best-snapshot capture and restore never operate on a subset of the
     /// run's edits (a run editing only via patch_apply or file_multi_edit used
     /// to get no snapshot at all).
     pub(super) fn written_paths(&self) -> Vec<std::path::PathBuf> {
-        self.current_checkpoint
+        let paths: Vec<std::path::PathBuf> = self
+            .current_checkpoint
             .as_ref()
             .map(|cp| {
                 cp.tool_calls
@@ -500,7 +512,22 @@ impl Agent {
                     .into_iter()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Historical relative arguments belong to the cwd at dispatch time.
+        // Worktree switching may change cwd later; retain the identities that
+        // the pre-mutation hook actually observed in each workspace.
+        let mut by_identity = std::collections::BTreeMap::new();
+        for path in paths {
+            let identity = super::best_snapshot::AgentSnapshot::identity(&path)
+                .unwrap_or_else(|_| path.clone());
+            by_identity.entry(identity).or_insert(path);
+        }
+        for path in self.best_snapshot.tracked_paths() {
+            by_identity.entry(path.clone()).or_insert(path);
+        }
+        let mut paths: Vec<_> = by_identity.into_values().collect();
+        paths.sort();
+        paths
     }
 
     /// Stagnation accounting (loop 13d): count consecutive tool calls that
@@ -1011,7 +1038,17 @@ impl Agent {
                     // can't masquerade as a missing file; cap the injection at
                     // ESCALATION_CONTENT_CHAR_BUDGET so large targets can't
                     // bloat the message history without bound.
-                    let read_result = match tokio::fs::read_to_string(path).await {
+                    let file_read = if let Err(error) =
+                        self.validate_context_path(std::path::Path::new(path))
+                    {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            error.to_string(),
+                        ))
+                    } else {
+                        tokio::fs::read_to_string(path).await
+                    };
+                    let read_result = match file_read {
                         Ok(content) => {
                             let lines = content.lines().count();
                             if content.chars().count() > ESCALATION_CONTENT_CHAR_BUDGET {
@@ -1543,6 +1580,13 @@ impl Agent {
             cli_println!("  {} {}", "↪".bright_black(), activity.dimmed());
         }
 
+        let snapshot_paths: Vec<_> = validated
+            .iter()
+            .map(|vt| self.snapshot_mutation_paths(&vt.name, &vt.args))
+            .collect();
+        let all_snapshot_paths: Vec<_> = snapshot_paths.iter().flatten().cloned().collect();
+        self.best_snapshot.before_mutation(&all_snapshot_paths)?;
+
         // Execute all validated tools concurrently using the tool registry
         let mut results: Vec<(usize, (bool, String, String))> = Vec::with_capacity(validated.len());
 
@@ -1630,6 +1674,9 @@ impl Agent {
         // Post-process all results
         for (idx, (success, result_str, summary)) in results {
             let vt = &validated[idx];
+            if let Err(error) = self.best_snapshot.after_mutation(&snapshot_paths[idx]) {
+                warn!(%error, "Could not record parallel post-mutation state for rollback");
+            }
 
             let duration_ms = vt.start_time.elapsed().as_millis() as u64;
             self.emit_event(AgentEvent::ToolCompleted {
@@ -2114,7 +2161,7 @@ impl Agent {
         Ok(())
     }
 
-    /// Execute a context management tool (operates on agent state, not filesystem).
+    /// Execute context management, validating filesystem reads like direct tools.
     async fn execute_context_tool_async(
         &mut self,
         name: &str,
@@ -2190,8 +2237,12 @@ impl Agent {
                 let root = super::current_project_root();
                 let mut loaded = Vec::new();
                 for path in &to_promote {
+                    if self.validate_context_path(path).is_err() {
+                        continue;
+                    }
                     let full_path = root.join(path);
                     if let Ok(content) = tokio::fs::read_to_string(&full_path).await {
+                        let content = self.sanitize_context_data(path, &content);
                         self.context_map.load_full(path, content);
                         loaded.push(path.to_string_lossy().to_string());
                     }
@@ -2238,11 +2289,15 @@ impl Agent {
             CONTEXT_LOAD_SKELETON => {
                 let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let path = std::path::Path::new(path_str);
+                if let Err(error) = self.validate_context_path(path) {
+                    return serde_json::json!({"error": format!("Context read refused: {}", error)});
+                }
                 let root = super::current_project_root();
                 let full_path = root.join(path);
 
                 match tokio::fs::read_to_string(&full_path).await {
                     Ok(content) => {
+                        let content = self.sanitize_context_data(path, &content);
                         let skeleton = super::context_map::extract_rust_skeleton(path, &content);
                         let rendered = skeleton.render();
                         let token_count = skeleton.token_count;
@@ -2721,9 +2776,19 @@ impl Agent {
             args_short: super::progress::short_args_for(name, args),
         });
 
-        let result = self
-            .execute_single_tool_inner(name, args_str, args, start_time)
-            .await;
+        let written_paths = self.snapshot_mutation_paths(name, args);
+        let result = match self.best_snapshot.before_mutation(&written_paths) {
+            Ok(()) => {
+                let result = self
+                    .execute_single_tool_inner(name, args_str, args, start_time)
+                    .await;
+                if let Err(error) = self.best_snapshot.after_mutation(&written_paths) {
+                    warn!(%error, "Could not record post-mutation state for rollback");
+                }
+                result
+            }
+            Err(error) => Err(error.into()),
+        };
         let elapsed_ms = start_time.elapsed().as_millis() as u64;
         let ok = matches!(&result, Ok((true, _, _)));
         self.emit_progress(super::progress::ProgressEvent::ToolCallCompleted {
@@ -3141,6 +3206,14 @@ impl Agent {
         if success {
             if let Some(base64_png) = super::execution::try_extract_base64_png(result) {
                 let summary = super::execution::build_image_result_summary(result);
+                let gate = sanitize_tool_context(
+                    tool_name,
+                    args_str,
+                    &summary,
+                    self.config.safety.trust_gate_tool_results,
+                );
+                self.trust_gate_findings += gate.sanitized;
+                let summary = gate.content;
                 let content =
                     crate::api::types::MessageContent::from_text(&summary).with_image(&base64_png);
                 if use_native_fc {
@@ -3178,28 +3251,7 @@ impl Agent {
             }
         };
 
-        // Redact any secrets (API keys, tokens, credentials) the tool output may
-        // contain BEFORE it enters the model's conversation context — otherwise a
-        // command that echoes a secret (or a mis-run `cat .env`) would leak
-        // credentials into context and every downstream log/exfil path.
-        // Redact with the trust gate's content classification: first-party
-        // workspace Rust gets the conservative carve-out (generic keyword
-        // patterns off — they mangle ordinary code the model must read
-        // verbatim); key-format patterns still redact everywhere.
-        let redaction_context = if classification_for(args_str) == "rust_source" {
-            crate::safety::redact::RedactionContext::RustSource
-        } else {
-            crate::safety::redact::RedactionContext::Generic
-        };
-        let result_to_store =
-            crate::safety::redact::redact_secrets_with_context(&result_to_store, redaction_context)
-                .into_owned();
-
-        // Trust gate: scan untrusted tool output for prompt-injection
-        // patterns and neutralize high-severity findings in place (the loop
-        // cannot refuse a tool result, so the offending lines are replaced
-        // and flagged instead of the result being dropped).
-        let gate = trust_gate_tool_result(
+        let gate = sanitize_tool_context(
             tool_name,
             args_str,
             &result_to_store,

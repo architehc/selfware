@@ -8,6 +8,27 @@ use super::*;
 use crate::analysis::vector_store::EmbeddingProvider;
 use crate::session::cache::LlmCacheEntry;
 
+/// Providers may repeat cumulative snapshots or briefly send smaller ones.
+/// Session counters and events must add only new tokens, like the run ledger.
+fn streaming_usage_delta(
+    previous: &mut crate::api::Usage,
+    current: &crate::api::Usage,
+) -> (u64, u64) {
+    let prompt = current.prompt_tokens.saturating_sub(previous.prompt_tokens) as u64;
+    let completion = current
+        .completion_tokens
+        .saturating_sub(previous.completion_tokens) as u64;
+    previous.prompt_tokens = previous.prompt_tokens.max(current.prompt_tokens);
+    previous.completion_tokens = previous.completion_tokens.max(current.completion_tokens);
+    previous.total_tokens = previous.total_tokens.max(current.total_tokens).max(
+        previous
+            .prompt_tokens
+            .saturating_add(previous.completion_tokens),
+    );
+    previous.cost = current.cost;
+    (prompt, completion)
+}
+
 /// All XML tag pairs that local models may emit and should be hidden from
 /// display.  Each entry is `(open_tag, close_tag)`.  The streaming renderer
 /// suppresses everything between (and including) these tags.
@@ -335,6 +356,7 @@ impl Agent {
         let mut captured_completion_tokens: Option<u32> = None;
         let mut captured_total_tokens: Option<u32> = None;
         let mut captured_cost: Option<f64> = None;
+        let mut reported_usage = crate::api::Usage::default();
         // Whole-call timer: request_meta.elapsed_ms measures time-to-headers
         // for streaming, so the speed sample below needs its own clock.
         let stream_started = std::time::Instant::now();
@@ -569,18 +591,23 @@ impl Agent {
                         "Token usage: {} prompt, {} completion",
                         u.prompt_tokens, u.completion_tokens
                     );
-                    sticky_state.add_tokens(u.completion_tokens as u64);
-                    output::record_tokens(u.prompt_tokens as u64, u.completion_tokens as u64);
-                    output::print_token_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
+                    let (prompt_delta, completion_delta) =
+                        streaming_usage_delta(&mut reported_usage, &u);
+                    sticky_state.add_tokens(completion_delta);
+                    output::record_tokens(prompt_delta, completion_delta);
+                    output::print_token_usage(
+                        reported_usage.prompt_tokens as u64,
+                        reported_usage.completion_tokens as u64,
+                    );
 
-                    captured_prompt_tokens = Some(u.prompt_tokens as u32);
-                    captured_completion_tokens = Some(u.completion_tokens as u32);
-                    captured_total_tokens = Some(u.total_tokens as u32);
-                    captured_cost = u.cost;
+                    captured_prompt_tokens = Some(reported_usage.prompt_tokens as u32);
+                    captured_completion_tokens = Some(reported_usage.completion_tokens as u32);
+                    captured_total_tokens = Some(reported_usage.total_tokens as u32);
+                    captured_cost = reported_usage.cost;
 
                     self.emit_event(AgentEvent::TokenUsage {
-                        prompt_tokens: u.prompt_tokens as u64,
-                        completion_tokens: u.completion_tokens as u64,
+                        prompt_tokens: prompt_delta,
+                        completion_tokens: completion_delta,
                     });
                 }
                 StreamChunk::FinishReason(reason) => {
@@ -675,6 +702,7 @@ impl Agent {
                 completion_tokens: captured_completion_tokens,
                 total_tokens: captured_total_tokens,
                 cost: captured_cost,
+                accounted_usage: None,
             };
         }
 

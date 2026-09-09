@@ -49,17 +49,29 @@ fn assert_credential_endpoint_safe_rules() {
 fn plaintext_remote_opt_in_allows_trusted_lan() {
     // SELFWARE_ALLOW_PLAINTEXT_REMOTE=1 opts in to plaintext HTTP to a remote
     // (trusted LAN) endpoint; the embedded-userinfo refusal still applies.
-    // Env is process-global; this test mutates it and must not run in parallel
-    // with assert_credential_endpoint_safe_rules — both are in one test binary,
-    // so keep the mutation scoped and restore it before returning.
-    let prev = std::env::var("SELFWARE_ALLOW_PLAINTEXT_REMOTE").ok();
-    std::env::set_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE", "1");
+    // Give the opt-in its own process: restoring an environment variable in
+    // this process would still race concurrent tests of the default refusal.
+    const CHILD: &str = "SELFWARE_TEST_PLAINTEXT_OPT_IN_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "plaintext_remote_opt_in_allows_trusted_lan",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("SELFWARE_ALLOW_PLAINTEXT_REMOTE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
     let lan = assert_credential_endpoint_safe("http://192.168.137.1:8000/v1", true);
     let userinfo = assert_credential_endpoint_safe("http://user:pass@192.168.137.1:8000/v1", true);
-    match prev {
-        Some(v) => std::env::set_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE", v),
-        None => std::env::remove_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE"),
-    }
     assert!(lan.is_ok());
     assert!(userinfo.is_err());
 }

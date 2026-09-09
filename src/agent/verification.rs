@@ -396,6 +396,150 @@ fn task_is_test_writing_task(task_desc: &str) -> bool {
             || task_lower.contains("improve"))
 }
 
+/// A conservative syntax check for independent additions. Existing test bodies
+/// are not safe to modify merely because the diff removes no lines: an inserted
+/// return, reassignment, or fixture override can bypass every assertion.
+fn independent_test_insertion(block: &[&str]) -> bool {
+    let mut saw_annotation = false;
+    let mut declaration_indent = None;
+    for line in block {
+        let text = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        if text.is_empty()
+            || text.starts_with("//")
+            || (text.starts_with('#') && !text.starts_with("#["))
+        {
+            continue;
+        }
+        if declaration_indent.is_some_and(|base| indent > base) {
+            // An ordinary body of a wholly new declaration remains additive.
+            continue;
+        }
+        if declaration_indent.is_some()
+            && text
+                .chars()
+                .all(|c| matches!(c, '}' | ')' | ']' | ';' | ','))
+        {
+            continue;
+        }
+        if text.starts_with('@')
+            || text.starts_with("#[")
+            || (text.starts_with('[') && text.ends_with(']'))
+        {
+            saw_annotation = true;
+            continue;
+        }
+        if !saw_annotation
+            && ["import ", "from ", "use "]
+                .iter()
+                .any(|prefix| text.starts_with(prefix))
+        {
+            continue;
+        }
+        let declaration = [
+            "def ",
+            "async def ",
+            "class ",
+            "fn ",
+            "pub fn ",
+            "async fn ",
+            "pub async fn ",
+            "func ",
+            "fun ",
+            "function ",
+            "async function ",
+            "mod ",
+            "pub mod ",
+            "impl ",
+        ]
+        .iter()
+        .any(|prefix| text.starts_with(prefix));
+        let compact: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let test_case = [
+            "test(",
+            "it(",
+            "describe(",
+            "test.each(",
+            "it.each(",
+            "describe.each(",
+            "TEST(",
+            "TEST_F(",
+            "TEST_P(",
+        ]
+        .iter()
+        .any(|prefix| compact.starts_with(prefix));
+        let annotated_method = saw_annotation
+            && text.contains('(')
+            && ["public ", "private ", "void ", "async "]
+                .iter()
+                .any(|prefix| text.starts_with(prefix));
+        if !(declaration || test_case || annotated_method) {
+            return false;
+        }
+        // A dedent ends this new declaration. Subsequent code must start
+        // another independent declaration, not return from an existing test.
+        declaration_indent = Some(indent);
+        saw_annotation = false;
+    }
+    !saw_annotation
+}
+
+/// Reject body insertions and known runner suppression. This is a conservative
+/// syntax screen, not a proof that arbitrary test code preserves coverage.
+fn additions_change_test_execution(diff: &str) -> bool {
+    let mut additions = String::new();
+    let mut block = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if let Some(added) = line.strip_prefix('+') {
+            block.push(added);
+            let text = added.trim();
+            if !text.starts_with("//") && (!text.starts_with('#') || text.starts_with("#[")) {
+                additions.push_str(text);
+                additions.push('\n');
+            }
+        } else if !block.is_empty() {
+            if !independent_test_insertion(&block) {
+                return true;
+            }
+            block.clear();
+        }
+    }
+    if !independent_test_insertion(&block) {
+        return true;
+    }
+    let compact: String = additions
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect();
+    [
+        ".skip",
+        ".xfail",
+        ".only(",
+        ".todo(",
+        ".fixme(",
+        "pytestmark=",
+        "__test__=false",
+        "#[ignore",
+        "@disabled",
+        "@ignore",
+        "[ignore",
+        "skip=",
+        "skip:",
+        "skiptest(",
+        "assert.ignore(",
+        "process.exit(",
+        "os._exit(",
+        "sys.exit(",
+        "pytest.exit(",
+    ]
+    .iter()
+    .any(|marker| compact.contains(marker))
+}
+
 fn task_has_source_change_intent(task: &str) -> bool {
     let lower = task.to_ascii_lowercase();
     let mentions_extension = |extension: &str| {
@@ -676,10 +820,11 @@ impl Agent {
     /// any of these can manufacture a passing verification — the slop gate
     /// freezes them at grade time (vero anti-cheat template).
     pub(crate) fn gate_path_is_verifier_region(path: &str) -> bool {
+        Self::gate_path_is_test(path) || Self::gate_path_is_verifier_runner(path)
+    }
+
+    fn gate_path_is_verifier_runner(path: &str) -> bool {
         let lower = path.trim_matches('"').to_ascii_lowercase();
-        if Self::gate_path_is_test(&lower) {
-            return true;
-        }
         let parts: Vec<&str> = lower.split('/').filter(|p| !p.is_empty()).collect();
         if parts
             .iter()
@@ -706,8 +851,8 @@ impl Agent {
     ///
     /// A test path counts as additive when `git diff HEAD -- <path>` carries
     /// no removed lines: an untracked new test file yields an empty diff, and
-    /// an existing test file passes only when every hunk inserts lines (a new
-    /// test function/case added alongside a source fix). Any `-` content
+    /// an existing test file passes only for independent inserted declarations
+    /// without known skip/focus controls. Any `-` content
     /// line — removed or rewritten assertions, deleted fixtures — keeps the
     /// strict rejection, as does any change to CI/build-runner files, which
     /// define HOW verification runs and are never additive-exempt. When the
@@ -717,7 +862,7 @@ impl Agent {
         let root = super::current_project_root();
         let mut tainted = Vec::new();
         for path in verifier_paths {
-            if !Self::gate_path_is_test(path) {
+            if !Self::gate_path_is_test(path) || Self::gate_path_is_verifier_runner(path) {
                 tainted.push((*path).clone());
                 continue;
             }
@@ -733,7 +878,7 @@ impl Agent {
                     diff.lines().any(|line| {
                         (line.starts_with('-') && !line.starts_with("---"))
                             || line.starts_with("Binary files")
-                    })
+                    }) || additions_change_test_execution(&diff)
                 }
                 _ => true,
             };
@@ -1209,6 +1354,11 @@ impl Agent {
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) async fn check_completion_gate(&self) -> Option<String> {
+        self.client
+            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
+        if let Some(stop) = self.client.budget_stop() {
+            return Some(stop.to_string());
+        }
         let context_target =
             (!self.current_task_context.is_empty()).then_some(self.current_task_context.as_str());
         let literal_target = self
@@ -1571,7 +1721,17 @@ impl Agent {
         }
         self.requirements_audit_done
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.requirements_audit(instruction).await
+        self.client
+            .ensure_budget_floor(self.cumulative_token_usage.total, self.cumulative_cost_usd);
+        if let Some(stop) = self.client.budget_stop() {
+            return Some(stop.to_string());
+        }
+        let directive = self.requirements_audit(instruction).await;
+        // The advisory audit cannot approve completion after spending the hard cap.
+        self.client
+            .budget_stop()
+            .map(|stop| stop.to_string())
+            .or(directive)
     }
 
     /// Deterministic re-check of the audit ledger on every completion attempt
@@ -1707,9 +1867,8 @@ impl Agent {
         // Meter the audit call (external review of 6e231e2e, finding #5): the
         // audit burns a real request every run, and discarding its usage made
         // reported totals incomplete. Feed the session token counter and the
-        // event stream like any other model call. (The per-run
-        // `cumulative_token_usage` budget is untouched — this path is &self;
-        // an audit is one bounded call per run.)
+        // event stream like any other model call. The API attempt ledger also
+        // retains it for hard budgets and checkpoint/run-summary accounting.
         crate::output::record_tokens(
             response.usage.prompt_tokens as u64,
             response.usage.completion_tokens as u64,

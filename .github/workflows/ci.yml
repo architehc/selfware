@@ -81,6 +81,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Test release and evaluation integrity
+        run: |
+          python3 -m unittest discover -s scripts/tests -v
+          bash -n scripts/redteam_wave_pipeline.sh
+          bash -n benchmarks/harbor/harness-search.sh
+
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
 

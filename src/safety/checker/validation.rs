@@ -456,22 +456,42 @@ fn eval_substitution_is_blocked(cmd: &str) -> bool {
     }
 }
 
+/// Select the payload the executor writes, including an intentionally empty
+/// replacement. Malformed calls cannot execute, but historically the safety
+/// gate also screened mutation-like input before the executor reports a schema
+/// error. Preserve that screening only when the executed field is not a string;
+/// an unused field must never shadow a valid executed payload.
+fn mutation_content_candidates<'a>(
+    args: &'a serde_json::Value,
+    written_field: &str,
+) -> Vec<&'a str> {
+    if let Some(content) = args.get(written_field).and_then(|value| value.as_str()) {
+        return vec![content];
+    }
+    ["content", "new_str"]
+        .into_iter()
+        .filter_map(|field| args.get(field).and_then(|value| value.as_str()))
+        .collect()
+}
+
 impl SafetyChecker {
     /// Create a safety checker with the given configuration
     pub fn new(config: &SafetyConfig) -> Self {
-        Self {
-            config: config.clone(),
-            working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            security_scanner: crate::safety::scanner::SecurityScanner::new(),
-        }
+        Self::with_working_dir(
+            config,
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        )
     }
 
-    /// Create a safety checker with a specific working directory (test helper)
-    #[cfg(test)]
+    /// Create a safety checker rooted in an explicit working directory.
     pub fn with_working_dir(config: &SafetyConfig, working_dir: PathBuf) -> Self {
         Self {
             config: config.clone(),
-            working_dir,
+            // Shell operands are resolved lexically before the allow-list
+            // comparison, whose workspace root is canonical. Normalize here
+            // too so symlink aliases (including macOS /var -> /private/var)
+            // produce the same identity even for files not created yet.
+            working_dir: super::normalize_path(&working_dir),
             security_scanner: crate::safety::scanner::SecurityScanner::new(),
         }
     }
@@ -499,21 +519,16 @@ impl SafetyChecker {
                 if !file_path.is_empty() {
                     self.check_path(file_path)?;
                 }
-                // Scan content of file_write and file_edit for secrets.
-                // An explicit `"content": null` — or EMPTY string — must NOT
-                // shadow `new_str` (red-team: null content + malicious
-                // new_str slipped past the scan; then `content: ""` did the
-                // same — Some(Null)/Some("") both defeat .or_else).
+                // Inspect the field the selected tool actually writes. Unknown fields
+                // must not shadow the executed payload (e.g. file_edit content:"ok"
+                // alongside a credential in new_str).
                 if tool_name == "file_write" || tool_name == "file_edit" {
-                    let content = args
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| args.get("new_str").and_then(|v| v.as_str()))
-                        .unwrap_or("");
-                    if !content.is_empty() {
-                        self.check_content_for_secrets(content)?;
-                        self.check_file_content_evasions(file_path, content)?;
+                    let field = if tool_name == "file_edit" { "new_str" } else { "content" };
+                    for content in mutation_content_candidates(&args, field) {
+                        if !content.is_empty() {
+                            self.check_content_for_secrets(content)?;
+                            self.check_file_content_evasions(file_path, content)?;
+                        }
                     }
                 }
             }
@@ -923,14 +938,19 @@ impl SafetyChecker {
                     self.check_path(path)?;
                 }
             }
+            "context_load_skeleton" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    self.check_path(path)?;
+                }
+            }
             "context_status"
             | "context_focus"
             | "context_evict"
             | "context_recommend"
-            | "context_load_skeleton"
             | "context_bulk_read"
             | "context_summary" => {
-                // Context tools interact with internal state only
+                // Focus/bulk resolve multiple paths; their loaders validate each path before I/O.
             }
             "computer_mouse" | "computer_keyboard" => {
                 // These manipulate the desktop
@@ -960,12 +980,14 @@ impl SafetyChecker {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
                     for edit in edits {
-                        if let Some(path) = edit.get("path").and_then(|v| v.as_str()) {
+                        let path = edit.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        if !path.is_empty() {
                             self.check_path(path)?;
                         }
-                        if let Some(new_str) = edit.get("new_str").and_then(|v| v.as_str()) {
+                        for new_str in mutation_content_candidates(edit, "new_str") {
                             if !new_str.is_empty() {
                                 self.check_content_for_secrets(new_str)?;
+                                self.check_file_content_evasions(path, new_str)?;
                             }
                         }
                     }

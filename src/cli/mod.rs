@@ -544,6 +544,46 @@ fn tui_launch_block_reason(stdin_is_tty: bool, stdout_is_tty: bool) -> Option<&'
     }
 }
 
+fn apply_session_model_overrides(cli: &Cli, config: &mut Config) -> Result<()> {
+    // ── Apply named configuration profile (if requested) ──
+    // `--profile architect|swarm-8|batch-16|batch-32|visual|quick` applies
+    // built-in overrides for max_tokens / temperature from `ProfileManager`.
+    if let Some(ref profile_name) = cli.profile {
+        let pm = crate::profiles::ProfileManager::new();
+        match pm.apply_profile(config, profile_name) {
+            Ok(()) => {
+                tracing::info!(
+                    "Applied configuration profile '{}' (max_tokens={}, \
+                     temperature={})",
+                    profile_name,
+                    config.max_tokens,
+                    config.temperature
+                );
+            }
+            Err(e) => {
+                anyhow::bail!(
+                    "Unknown --profile '{}': {}. Available profiles: architect, swarm-8, batch-16, batch-32, visual, quick.",
+                    profile_name, e
+                );
+            }
+        }
+    }
+
+    // ── Global --model override (Claude Code / Codex / Gemini parity) ──
+    // Overrides the config `model` key for this session. Long-only on
+    // purpose: `-m` stays --mode for existing scripts.
+    if let Some(ref model) = cli.model {
+        let model = model.trim();
+        anyhow::ensure!(
+            !model.is_empty(),
+            "--model must not be empty — it overrides the `model` key in the configuration"
+        );
+        config.model = model.to_string();
+    }
+
+    Ok(())
+}
+
 pub async fn run() -> Result<()> {
     // Initialize telemetry
     init_tracing();
@@ -616,43 +656,40 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // Recovery must remain reachable even when the selected configuration
+    // cannot be parsed or trusted. Load it only for the diagnostic branch.
+    if let Some(Commands::Boot { chat, check }) = &cli.command {
+        if *check {
+            let loaded = Config::load(config_path.as_deref()).and_then(|mut config| {
+                apply_session_model_overrides(&cli, &mut config)?;
+                Ok(config)
+            });
+            let config_error = loaded.as_ref().err().map(|error| format!("{error:#}"));
+            let current = loaded
+                .as_ref()
+                .map_err(|_| config_error.as_deref().unwrap());
+            let (checks, ok) = crate::boot::check::run_boot_check_with_config(current).await;
+            println!();
+            for check in checks {
+                println!("  {}", check.render());
+            }
+            if !ok {
+                anyhow::bail!("boot --check: one or more checks FAILED");
+            }
+        } else if *chat {
+            crate::boot::chat::run_boot_chat().await?;
+        } else {
+            crate::boot::wizard::run_boot_wizard_for_path(
+                config_path.map(std::path::PathBuf::from),
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
     let mut config = Config::load(config_path.as_deref())?;
 
-    // ── Apply named configuration profile (if requested) ──
-    // `--profile architect|swarm-8|batch-16|batch-32|visual|quick` applies
-    // built-in overrides for max_tokens / temperature from `ProfileManager`.
-    if let Some(ref profile_name) = cli.profile {
-        let pm = crate::profiles::ProfileManager::new();
-        match pm.apply_profile(&mut config, profile_name) {
-            Ok(()) => {
-                tracing::info!(
-                    "Applied configuration profile '{}' (max_tokens={}, \
-                     temperature={})",
-                    profile_name,
-                    config.max_tokens,
-                    config.temperature
-                );
-            }
-            Err(e) => {
-                anyhow::bail!(
-                    "Unknown --profile '{}': {}. Available profiles: architect, swarm-8, batch-16, batch-32, visual, quick.",
-                    profile_name, e
-                );
-            }
-        }
-    }
-
-    // ── Global --model override (Claude Code / Codex / Gemini parity) ──
-    // Overrides the config `model` key for this session. Long-only on
-    // purpose: `-m` stays --mode for existing scripts.
-    if let Some(ref model) = cli.model {
-        let model = model.trim();
-        anyhow::ensure!(
-            !model.is_empty(),
-            "--model must not be empty — it overrides the `model` key in the configuration"
-        );
-        config.model = model.to_string();
-    }
+    apply_session_model_overrides(&cli, &mut config)?;
 
     // Tell the tokenizer which model is configured so it can pick a matching
     // HF tokenizer. It must NOT reload the config itself: a mid-session
@@ -4146,22 +4183,7 @@ max_recovery_attempts = 3
             }
         }
 
-        Commands::Boot { chat, check } => {
-            if check {
-                let (checks, ok) = crate::boot::check::run_boot_check(&config).await;
-                println!();
-                for c in &checks {
-                    println!("  {}", c.render());
-                }
-                if !ok {
-                    anyhow::bail!("boot --check: one or more checks FAILED");
-                }
-            } else if chat {
-                crate::boot::chat::run_boot_chat().await?;
-            } else {
-                crate::boot::wizard::run_boot_wizard().await?;
-            }
-        }
+        Commands::Boot { .. } => unreachable!("boot is dispatched before configuration loading"),
 
         Commands::Runs { command } => {
             use crate::supervision::run_registry::{AbortOutcome, RunRecord, RunRegistry};
@@ -4461,9 +4483,10 @@ pub(crate) fn session_status_text(agent: &crate::agent::Agent) -> String {
 /// endpoint actually billed (rule 3: no invented numbers).
 pub(crate) fn render_cost_line(summary: &crate::agent::RunSummary) -> String {
     match summary.cost_usd {
-        Some(cost) => format!("tokens: {} total · cost ${:.4}", summary.total_tokens, cost),
+        Some(cost) if summary.cost_complete => format!("tokens: {} total · cost ${:.4}", summary.total_tokens, cost),
+        Some(cost) => format!("tokens: {} total · known cost ${:.4} (incomplete billing; {} attempts without reported cost)", summary.total_tokens, cost, summary.unmetered_attempts),
         None => format!(
-            "tokens: {} total · cost not tracked (endpoint reports no billing)",
+            "tokens: {} total · cost not tracked (provider billing unavailable)",
             summary.total_tokens
         ),
     }
@@ -4791,9 +4814,18 @@ fn render_run_summary(summary: &crate::agent::RunSummary, failure: Option<&str>)
     lines.push(format!("verification: {verification}"));
     let cost = summary
         .cost_usd
-        .map(|c| format!(", cost ${c:.4}"))
+        .map(|c| {
+            if summary.cost_complete {
+                format!(", cost ${c:.4}")
+            } else {
+                format!(", known cost ${c:.4} (incomplete billing)")
+            }
+        })
         .unwrap_or_default();
     lines.push(format!("tokens: {} total{cost}", summary.total_tokens));
+    if !summary.cost_complete {
+        lines.push(format!("billing incomplete: {} attempts without reported cost; restored or estimated usage may also lack billing provenance", summary.unmetered_attempts));
+    }
     lines.join("\n")
 }
 

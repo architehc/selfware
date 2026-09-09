@@ -1484,7 +1484,8 @@ impl Agent {
                     println!("{} Usage: /chat resume <name>", "ℹ".bright_yellow());
                 } else {
                     match self.chat_store.load(name) {
-                        Ok(chat) => {
+                        Ok(mut chat) => {
+                            self.sanitize_restored_tool_messages(&mut chat.messages, &[]);
                             self.messages = chat.messages;
 
                             // Restore memory system from recovered messages so that
@@ -2066,7 +2067,11 @@ impl Agent {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        if self.validate_context_path(&path).is_err() {
+                            continue;
+                        }
                         if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                            let content = self.sanitize_context_data(&path, &content);
                             let concepts = extractor.extract_from_code(&content, &path);
                             all_concepts.extend(concepts);
                         }
@@ -2132,13 +2137,17 @@ impl Agent {
 
         // /explain <path> — explain a file
         let file_path = std::path::Path::new(args);
+        if let Err(error) = self.validate_context_path(file_path) {
+            println!("{} Cannot load file: {}", "!!".bright_red(), error);
+            return;
+        }
         if !tokio::fs::try_exists(file_path).await.unwrap_or(false) {
             println!("{} File not found: {}", "!!".bright_red(), args);
             return;
         }
 
         let content = match tokio::fs::read_to_string(file_path).await {
-            Ok(c) => c,
+            Ok(c) => self.sanitize_context_data(file_path, &c),
             Err(e) => {
                 println!("{} Cannot read file: {}", "!!".bright_red(), e);
                 return;

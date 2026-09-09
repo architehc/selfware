@@ -12,20 +12,19 @@
 //! touching [`crate::agent::Agent`], which requires a configured API client.
 //!
 //! Cancellation uses [`std::sync::atomic::AtomicBool`] (no `tokio_util`
-//! dependency). An `abort()` flips the flag **and** calls `JoinHandle::abort`,
-//! so cooperatively-polling futures can observe the flag while also receiving an
-//! immediate hard-cancel.
+//! dependency). Agent runs share that flag and save a checkpoint before settling
+//! an abort. Generic futures, which have no checkpoint contract, are hard-cancelled.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use crate::agent::tui_events::{AgentEvent, BroadcastEmitter, EventEmitter};
+use crate::agent::tui_events::{AgentEvent, EventEmitter};
 
 /// Lifecycle status of a single run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,11 +92,57 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 /// or a run whose sender is otherwise silent).
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+const CANCELLATION_GRACE: Duration = Duration::from_secs(2);
+
+/// Forward progress immediately, but let the supervisor publish the terminal
+/// event after committing the final status. Diagnostic Error events still flow.
+struct SupervisedEmitter {
+    tx: tokio::sync::broadcast::Sender<AgentEvent>,
+    terminal: Mutex<Option<AgentEvent>>,
+}
+
+impl SupervisedEmitter {
+    fn new() -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        Self {
+            tx,
+            terminal: Mutex::new(None),
+        }
+    }
+
+    fn take_terminal(&self) -> Option<AgentEvent> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
+
+impl EventEmitter for SupervisedEmitter {
+    fn emit(&self, event: AgentEvent) {
+        let _ = self.tx.send(event);
+    }
+
+    fn emit_terminal(&self, event: AgentEvent) {
+        self.terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(event);
+    }
+}
+
+async fn wait_for_cancellation(cancel: &AtomicBool) {
+    while !cancel.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 /// Internal handle for a single run.
 struct RunHandle {
     status: Arc<RwLock<RunStatus>>,
     cancel: Arc<AtomicBool>,
     join: JoinHandle<()>,
+    cooperative_abort: bool,
     /// Human-readable task description for diagnostics/listing.
     #[allow(dead_code)]
     task: String,
@@ -162,22 +207,23 @@ impl RunSupervisor {
     where
         F: Future<Output = anyhow::Result<()>> + Send + 'static,
     {
-        let (event_tx, _event_rx) =
-            tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
-        self.spawn_with_events(task, event_tx, run).await
+        self.spawn_with_events(
+            task,
+            Arc::new(SupervisedEmitter::new()),
+            Arc::new(AtomicBool::new(false)),
+            false,
+            run,
+        )
+        .await
     }
 
-    /// Like [`spawn`](Self::spawn) but uses a caller-provided broadcast sender
-    /// for the run's event channel instead of creating a new one.
-    ///
-    /// This lets [`start`](Self::start) pre-create the channel, wire a
-    /// [`BroadcastEmitter`] onto the agent, and then pass the *same* sender
-    /// here so that [`attach`](Self::attach) subscribers receive events the
-    /// agent emits.
+    /// Shared status and event settlement for generic futures and agent runs.
     async fn spawn_with_events<F>(
         &self,
         task: String,
-        event_tx: tokio::sync::broadcast::Sender<AgentEvent>,
+        emitter: Arc<SupervisedEmitter>,
+        cancel: Arc<AtomicBool>,
+        cooperative_abort: bool,
         run: F,
     ) -> RunId
     where
@@ -185,20 +231,20 @@ impl RunSupervisor {
     {
         let id = RunId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let status = Arc::new(RwLock::new(RunStatus::Running));
-        let cancel = Arc::new(AtomicBool::new(false));
 
         let status_clone = Arc::clone(&status);
         let cancel_clone = Arc::clone(&cancel);
-        let settle_tx = event_tx.clone();
+        let event_tx = emitter.tx.clone();
 
         let join = tokio::spawn(async move {
             let result = run.await;
+            let mut status = status_clone.write().await;
             // If the cancel flag was flipped (abort), treat the outcome as
             // Aborted regardless of what the future returned.
             let final_status = if cancel_clone.load(Ordering::Relaxed) {
                 RunStatus::Aborted
             } else {
-                match result {
+                match &result {
                     Ok(()) => RunStatus::Completed,
                     Err(_) => RunStatus::Failed,
                 }
@@ -207,14 +253,25 @@ impl RunSupervisor {
             // by the event must already observe the final status. The send
             // may fail when no subscribers exist — that is fine, waiters
             // also poll the status (see `wait_for_terminal`).
-            *status_clone.write().await = final_status;
-            let _ = settle_tx.send(final_status.terminal_event());
+            if !status.is_terminal() {
+                *status = final_status;
+                let terminal = match (final_status, emitter.take_terminal()) {
+                    (RunStatus::Completed, Some(event @ AgentEvent::Completed { .. }))
+                    | (RunStatus::Failed, Some(event @ AgentEvent::Error { .. })) => event,
+                    (RunStatus::Failed, _) => AgentEvent::Error {
+                        message: result.expect_err("failed result").to_string(),
+                    },
+                    _ => final_status.terminal_event(),
+                };
+                emitter.emit(terminal);
+            }
         });
 
         let handle = RunHandle {
             status,
             cancel,
             join,
+            cooperative_abort,
             task,
             events: event_tx,
         };
@@ -230,57 +287,81 @@ impl RunSupervisor {
     /// LLM** (a configured API client); tests should use [`spawn`](Self::spawn)
     /// instead.
     ///
-    /// A per-run `tokio::sync::broadcast` channel is created and a
-    /// [`BroadcastEmitter`] is wired onto the agent via
+    /// A per-run `tokio::sync::broadcast` channel is created and an emitter
+    /// is wired onto the agent via
     /// [`Agent::with_event_emitter`](crate::agent::Agent::with_event_emitter)
     /// before `run_task` is called, so that [`attach`](Self::attach) returns a
     /// live subscriber that receives the agent's `AgentEvent`s.
     pub async fn start(&self, task: String, config: crate::config::Config) -> RunId {
-        let task_for_run = task.clone();
-        // We create the broadcast channel here and clone the sender into the
-        // RunHandle (via spawn) while also wrapping a clone in a
-        // BroadcastEmitter for the agent.
-        let (event_tx, _event_rx) =
-            tokio::sync::broadcast::channel::<AgentEvent>(EVENT_CHANNEL_CAPACITY);
-        let emitter: Arc<dyn EventEmitter> = Arc::new(BroadcastEmitter::new(event_tx.clone()));
-
-        let task_for_spawn = task.clone();
-        // Call spawn but override its internal channel with our pre-built one
-        // by using a lower-level path: we can't easily inject into spawn, so
-        // instead we use spawn_with_events.
-        let id = self
-            .spawn_with_events(task_for_spawn, event_tx, async move {
-                let mut agent = crate::agent::Agent::new(config).await?;
-                agent = agent.with_event_emitter(emitter);
-                agent.run_task(&task_for_run).await
-            })
-            .await;
-        id
+        let emitter = Arc::new(SupervisedEmitter::new());
+        let agent_emitter = emitter.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let agent_cancel = cancel.clone();
+        self.spawn_with_events(task.clone(), emitter, cancel, true, async move {
+            let mut agent = crate::agent::Agent::new(config)
+                .await?
+                .with_event_emitter(agent_emitter.clone())
+                .with_cancel_token(agent_cancel.clone());
+            // Normal cancellation checks get a chance to persist and exit.
+            // If a provider/tool is unresponsive, drop its future and persist
+            // the last resumable state before the supervisor announces abort.
+            let result = tokio::select! {
+                result = agent.run_task(&task) => result,
+                _ = async {
+                    wait_for_cancellation(&agent_cancel).await;
+                    tokio::time::sleep(CANCELLATION_GRACE).await;
+                } => {
+                    Err(crate::errors::AgentError::Cancelled.into())
+                }
+            };
+            if agent_cancel.load(Ordering::Relaxed) {
+                if let Err(error) = agent.save_checkpoint(&task) {
+                    agent_emitter.emit(AgentEvent::Error {
+                        message: format!("Cancellation checkpoint save failed: {error}"),
+                    });
+                    return Err(error);
+                }
+            }
+            result
+        })
+        .await
     }
 
-    /// Abort a run: set the cancel flag, abort the `JoinHandle`, and mark the
-    /// status [`RunStatus::Aborted`].
+    /// Abort a run, allowing an agent to save its checkpoint before settlement.
     ///
     /// Returns `true` if the run existed, `false` otherwise. Aborting an
-    /// already-completed run is harmless (it just re-sets an already-finished
-    /// status).
+    /// already-settled run preserves its final status and event.
     pub async fn abort(&self, id: &RunId) -> bool {
-        let runs = self.runs.write().await;
-        let Some(handle) = runs.get(id) else {
-            return false;
+        let (status, abort_handle, events, cooperative) = {
+            let runs = self.runs.read().await;
+            let Some(handle) = runs.get(id) else {
+                return false;
+            };
+            let status = handle.status.write().await;
+            if status.is_terminal() {
+                return true;
+            }
+            handle.cancel.store(true, Ordering::Relaxed);
+            (
+                handle.status.clone(),
+                handle.join.abort_handle(),
+                handle.events.clone(),
+                handle.cooperative_abort,
+            )
         };
-        handle.cancel.store(true, Ordering::Relaxed);
-        handle.join.abort();
-        let was_terminal = {
-            let mut st = handle.status.write().await;
-            let prev = *st;
-            *st = RunStatus::Aborted;
-            prev.is_terminal()
-        };
-        // P0-3: wake event waiters — but only if the run hadn't already
-        // settled, so each run emits exactly one terminal event.
-        if !was_terminal {
-            let _ = handle.events.send(RunStatus::Aborted.terminal_event());
+        if cooperative {
+            let _ = tokio::time::timeout(CANCELLATION_GRACE + Duration::from_secs(1), async {
+                while !status.read().await.is_terminal() {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            })
+            .await;
+        }
+        let mut status = status.write().await;
+        if !status.is_terminal() {
+            abort_handle.abort();
+            *status = RunStatus::Aborted;
+            let _ = events.send(RunStatus::Aborted.terminal_event());
         }
         true
     }
@@ -356,7 +437,18 @@ impl RunSupervisor {
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             match self.status(id).await {
-                Some(st) if st.is_terminal() => return Some(st),
+                Some(st) if st.is_terminal() => {
+                    // The status lock is released only after the terminal send,
+                    // so drain queued events before reporting the settled run.
+                    loop {
+                        match rx.try_recv() {
+                            Ok(event) => on_event(event),
+                            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => continue,
+                            Err(_) => break,
+                        }
+                    }
+                    return Some(st);
+                }
                 Some(_) => {}
                 None => return None,
             }

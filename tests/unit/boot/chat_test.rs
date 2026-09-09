@@ -1,5 +1,33 @@
 use super::{build_messages, keywords, retrieve_snippet, GROUNDING_PROMPT};
 
+#[test]
+fn bundled_setup_docs_are_available_without_a_checkout() {
+    let snippet = super::retrieve_bundled_snippet("endpoint setup").unwrap();
+    assert!(snippet.contains("selfware boot"));
+    assert!(snippet.contains("recipe"));
+    assert!(super::retrieve_bundled_snippet("xyzzy frobnicate").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn retrieval_does_not_follow_symlink_cycles_or_external_files() {
+    use std::os::unix::fs::symlink;
+    let docs = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("inject.md"),
+        "endpoint EXTERNAL_OVERRIDE",
+    )
+    .unwrap();
+    symlink(docs.path(), docs.path().join("cycle")).unwrap();
+    symlink(
+        outside.path().join("inject.md"),
+        docs.path().join("linked.md"),
+    )
+    .unwrap();
+    assert!(retrieve_snippet(docs.path(), "endpoint").is_none());
+}
+
 fn write_docs(dir: &tempfile::TempDir) {
     std::fs::write(
         dir.path().join("configuration.md"),

@@ -3465,3 +3465,125 @@ fn ssh_remote_credential_read_is_blocked() {
         assert!(r.is_ok(), "{label} must be allowed: {cmd}: {r:?}");
     }
 }
+
+#[test]
+fn file_edit_scans_only_its_executed_replacement_field() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+    for decoy in [
+        serde_json::Value::Null,
+        serde_json::json!(""),
+        serde_json::json!("harmless"),
+    ] {
+        let args = serde_json::json!({"path":"src/config.rs", "content":decoy, "old_str":"old", "new_str":"AKIA7H3M9Q2V6N8C4R5T"});
+        assert!(
+            checker
+                .check_tool_call(&create_test_call("file_edit", &args.to_string()))
+                .is_err(),
+            "ignored content field must not shadow new_str"
+        );
+    }
+    // Removing an existing secret is allowed; ignored fields are not written.
+    let args = serde_json::json!({"path":"src/config.rs", "old_str":"AKIA7H3M9Q2V6N8C4R5T", "content":"AKIA7H3M9Q2V6N8C4R5T", "new_str":"std::env::var(\"API_KEY\")"});
+    assert!(checker
+        .check_tool_call(&create_test_call("file_edit", &args.to_string()))
+        .is_ok());
+    let args = serde_json::json!({"path":"src/config.rs", "content":"AKIA7H3M9Q2V6N8C4R5T", "new_str":"harmless"});
+    assert!(checker
+        .check_tool_call(&create_test_call("file_write", &args.to_string()))
+        .is_err());
+}
+
+#[test]
+fn malformed_mutation_calls_still_screen_supplied_payloads() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+    let secret = "AKIA7H3M9Q2V6N8C4R5T";
+    for (tool, written, decoy) in [
+        ("file_edit", "new_str", "content"),
+        ("file_write", "content", "new_str"),
+    ] {
+        for invalid in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!(4)),
+        ] {
+            let mut args = serde_json::json!({"path":"src/config.rs", "old_str":"old"});
+            args[decoy] = serde_json::json!(secret);
+            if let Some(invalid) = invalid {
+                args[written] = invalid;
+            }
+            assert!(
+                checker
+                    .check_tool_call(&create_test_call(tool, &args.to_string()))
+                    .is_err(),
+                "malformed {tool} must still screen supplied mutation text: {args}"
+            );
+        }
+        // A string, even an empty string, is the complete executed payload.
+        // A credential in an unused field must not block deletion or a safe write.
+        for valid in ["", "safe replacement"] {
+            let mut args = serde_json::json!({"path":"src/config.rs", "old_str":secret});
+            args[written] = serde_json::json!(valid);
+            args[decoy] = serde_json::json!(secret);
+            assert!(
+                checker
+                    .check_tool_call(&create_test_call(tool, &args.to_string()))
+                    .is_ok(),
+                "valid {tool} must inspect only its executed field: {args}"
+            );
+        }
+    }
+    // Schema validity remains the executor's responsibility, preserving benign
+    // malformed gate controls without claiming that these calls can execute.
+    for (tool, args) in [
+        ("file_write", serde_json::json!({"path":"src/config.rs"})),
+        (
+            "file_edit",
+            serde_json::json!({"path":"src/config.rs", "content":"safe"}),
+        ),
+    ] {
+        assert!(checker
+            .check_tool_call(&create_test_call(tool, &args.to_string()))
+            .is_ok());
+    }
+}
+
+#[test]
+fn multi_edit_matches_single_edit_payload_policy() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+    for new_str in [
+        "AKIA7H3M9Q2V6N8C4R5T",
+        "let key = 'AKIA' + '7H3M9Q2V6N8C4R5T';",
+    ] {
+        let args = serde_json::json!({"edits":[
+            {"path":"src/first.rs", "old_str":"old", "new_str":"safe"},
+            {"path":"src/second.rs", "old_str":"old", "new_str":new_str, "content":null}
+        ]});
+        assert!(checker
+            .check_tool_call(&create_test_call("file_multi_edit", &args.to_string()))
+            .is_err());
+    }
+    for replacement in [serde_json::Value::Null, serde_json::json!("")] {
+        let args = serde_json::json!({"edits":[{"path":"src/config.rs", "old_str":"old", "new_str":replacement, "content":"AKIA7H3M9Q2V6N8C4R5T"}]});
+        let allowed = checker
+            .check_tool_call(&create_test_call("file_multi_edit", &args.to_string()))
+            .is_ok();
+        assert_eq!(allowed, replacement.is_string());
+    }
+}
+
+#[test]
+fn skeleton_context_tool_obeys_direct_read_path_policy() {
+    let checker = SafetyChecker::new(&SafetyConfig::default());
+    for path in [".env", "secrets/config.rs", "../../../../etc/passwd"] {
+        let args = serde_json::json!({"path":path}).to_string();
+        assert!(checker
+            .check_tool_call(&create_test_call("context_load_skeleton", &args))
+            .is_err());
+    }
+    assert!(checker
+        .check_tool_call(&create_test_call(
+            "context_load_skeleton",
+            r#"{"path":"src/main.rs"}"#
+        ))
+        .is_ok());
+}

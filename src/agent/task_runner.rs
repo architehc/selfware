@@ -58,8 +58,12 @@ pub struct RunSummary {
     pub verification: Option<(bool, usize)>,
     /// Total API tokens consumed (input + output).
     pub total_tokens: usize,
-    /// Total USD cost, `Some` only when the endpoint billed anything.
+    /// Known USD charges; may be incomplete when providers omit billing.
     pub cost_usd: Option<f64>,
+    /// Every attempt's cost is known and no legacy/estimated usage lacks provenance.
+    pub cost_complete: bool,
+    /// Requests in this segment that did not report a provider cost.
+    pub unmetered_attempts: usize,
 }
 
 impl Agent {
@@ -77,8 +81,20 @@ impl Agent {
                 .verification_gate
                 .last_results()
                 .map(|report| (report.overall_passed, report.checks.len())),
-            total_tokens: self.cumulative_token_usage.total,
-            cost_usd: (self.cumulative_cost_usd > 0.0).then_some(self.cumulative_cost_usd),
+            total_tokens: self
+                .cumulative_token_usage
+                .total
+                .saturating_add(self.client.pending_usage().total_tokens),
+            cost_usd: {
+                let cost =
+                    self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
+                (cost > 0.0
+                    || (self.client.cost_accounting_status().0
+                        && !self.client.usage_attempts().is_empty()))
+                .then_some(cost)
+            },
+            cost_complete: self.client.cost_accounting_status().0,
+            unmetered_attempts: self.client.cost_accounting_status().1,
         }
     }
 
@@ -600,11 +616,12 @@ impl Agent {
 
     /// Review code in a specific file
     pub async fn review(&mut self, file_path: &str) -> Result<()> {
-        // Read the file first
+        self.validate_context_path(std::path::Path::new(file_path))?;
         let content = tokio::fs::read_to_string(file_path)
             .await
             .with_context(|| format!("Failed to read file: {}", file_path))?;
 
+        let content = self.sanitize_context_data(std::path::Path::new(file_path), &content);
         let task = Planner::review_prompt(file_path, &content);
         self.run_task(&task).await
     }
@@ -827,6 +844,7 @@ impl Agent {
     /// pushes cumulative usage past a cap stops the run instead of letting the
     /// over-budget response report success.
     pub(super) async fn enforce_hard_budgets(&mut self, task_description: &str) -> Result<()> {
+        self.sync_api_usage();
         if let Some(max_budget) = self.config.agent.max_budget_tokens {
             let total = self.cumulative_token_usage.total;
             if total >= max_budget {

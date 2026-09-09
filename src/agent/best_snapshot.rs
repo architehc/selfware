@@ -1,180 +1,265 @@
-//! Best-snapshot restore: submit the best state, not the last state.
+//! Restore verified state from explicit preimages, never inferred absence.
 //!
-//! Opus 5 consult (2026-08-25, six-model panel on the TB 3.0 evidence): a
-//! task that was 80% green at minute 30 submits a broken edit at minute 60.
-//! The harness snapshots the agent's written/edited files whenever its own
-//! verification passes, and restores that last-green state when the run fails
-//! (abort, stall, budget stop). Read-only tasks and cancellations are never
-//! touched.
-//!
-//! Snapshot scope and restore semantics:
-//! - Each instance owns a unique temp directory (PID + uuid), so concurrent
-//!   in-process workers never share state and `clear()` only affects the
-//!   owning instance.
-//! - Captured files are mirrored by their full relative path under the
-//!   snapshot dir (`files/`), so distinct source paths never collide.
-//! - A manifest records exactly which paths existed at capture time.
-//!   `restore_written` restores those, and removes any file in the caller's
-//!   written set that the manifest proves was absent at capture (created
-//!   after the last-green state). Files outside the caller-provided written
-//!   set are never touched.
+//! Dispatch records files before mutation and observes them afterwards,
+//! including partial failures. A passing verifier advances the baseline.
+//! Recovery only touches known paths still matching the agent's last write.
 
-use std::path::{Component, Path, PathBuf};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-/// File-backed snapshot of the agent's written deliverables, kept outside the
-/// workspace (temp dir) so a broken end state can't corrupt it.
+#[derive(Clone, PartialEq, Eq)]
+enum FileState {
+    Missing,
+    Present([u8; 32]),
+}
+
+struct SnapshotEntry {
+    // None is an explicitly observed absence, not missing coverage.
+    saved: Option<PathBuf>,
+    observed: Option<FileState>,
+}
+
 pub(crate) struct AgentSnapshot {
     dir: PathBuf,
     taken: bool,
+    entries: BTreeMap<PathBuf, SnapshotEntry>,
 }
 
 impl Default for AgentSnapshot {
     fn default() -> Self {
         Self {
-            // PID for debuggability, uuid so concurrent in-process instances
-            // (and PID reuse across runs) can never share a directory.
             dir: std::env::temp_dir().join(format!(
                 "selfware-snapshot-{}-{}",
                 std::process::id(),
                 uuid::Uuid::new_v4()
             )),
             taken: false,
+            entries: BTreeMap::new(),
         }
     }
 }
 
 impl AgentSnapshot {
-    /// Root under which captured file contents are mirrored. Kept separate
-    /// from the manifest so a captured file can never shadow it.
-    fn files_dir(&self) -> PathBuf {
-        self.dir.join("files")
-    }
-
-    fn manifest_path(&self) -> PathBuf {
-        self.dir.join("manifest.json")
-    }
-
-    /// Component-wise normalization: collapses `.` and repeated separators so
-    /// `a.py` and `./a.py` are the same snapshot target.
-    fn normalize(path: &Path) -> PathBuf {
-        path.components().collect()
-    }
-
-    fn slot_for(&self, path: &Path) -> PathBuf {
-        // Mirror the source path's structure under `files/` instead of
-        // flattening, so `a/b.py` and `a_b.py` can never collide. `..`
-        // segments map to a fixed marker that real components escape away
-        // from (any component starting with `_` gets one more `_`), keeping
-        // the mapping injective and inside the snapshot dir.
-        let mut slot = self.files_dir();
-        for component in Self::normalize(path).components() {
-            match component {
-                Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
-                Component::ParentDir => slot.push("_parent"),
-                Component::Normal(part) => {
-                    let part = part.to_string_lossy();
-                    if part.starts_with('_') {
-                        slot.push(format!("_{part}"));
-                    } else {
-                        slot.push(part.as_ref());
-                    }
-                }
-            }
-        }
-        slot
-    }
-
-    fn write_manifest(&self, captured: &[PathBuf]) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
-        let body = serde_json::json!({ "captured": captured }).to_string();
-        let tmp = self.dir.join("manifest.json.tmp");
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(tmp, self.manifest_path())?;
-        Ok(())
-    }
-
-    fn read_manifest(&self) -> std::io::Result<Vec<PathBuf>> {
-        let body = match std::fs::read_to_string(self.manifest_path()) {
-            Ok(body) => body,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
+    /// Resolve existing ancestors too, giving missing files stable identities
+    /// before creation, after deletion, and through relative aliases.
+    pub(crate) fn identity(path: &Path) -> std::io::Result<PathBuf> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()?.join(path)
         };
-        let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(value
-            .get("captured")
-            .and_then(|c| c.as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|p| p.as_str().map(PathBuf::from))
-            .collect())
+        match std::fs::canonicalize(&absolute) {
+            Ok(path) => Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let parent = absolute.parent().ok_or(e)?;
+                let name = absolute.file_name().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid snapshot path")
+                })?;
+                Ok(Self::identity(parent)?.join(name))
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    /// Copy each existing file into the snapshot (last-green capture).
-    /// Missing files are skipped — a deleted file is not a snapshot target.
-    /// The manifest is rewritten to exactly this call's captured set, so it
-    /// always describes the most recent last-green state.
-    pub(crate) fn snapshot_written(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.files_dir())?;
-        let mut captured = Vec::new();
-        for path in paths {
-            if path.is_file() {
-                let slot = self.slot_for(path);
-                if let Some(parent) = slot.parent() {
-                    std::fs::create_dir_all(parent)?;
+    fn read_file(path: &Path) -> std::io::Result<Option<(Vec<u8>, std::fs::Permissions)>> {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                Ok(Some((std::fs::read(path)?, metadata.permissions())))
+            }
+            Ok(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("snapshot target is not a regular file: {}", path.display()),
+            )),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn state(path: &Path) -> std::io::Result<FileState> {
+        Ok(match Self::read_file(path)? {
+            Some((bytes, _)) => FileState::Present(Sha256::digest(&bytes).into()),
+            None => FileState::Missing,
+        })
+    }
+
+    fn capture(dir: &Path, path: &Path) -> std::io::Result<SnapshotEntry> {
+        match Self::read_file(path)? {
+            Some((bytes, permissions)) => {
+                std::fs::create_dir_all(dir)?;
+                let slot = dir.join(uuid::Uuid::new_v4().to_string());
+                std::fs::write(&slot, &bytes)?;
+                std::fs::set_permissions(&slot, permissions)?;
+                Ok(SnapshotEntry {
+                    saved: Some(slot),
+                    observed: Some(FileState::Present(Sha256::digest(&bytes).into())),
+                })
+            }
+            None => Ok(SnapshotEntry {
+                saved: None,
+                observed: Some(FileState::Missing),
+            }),
+        }
+    }
+
+    pub(crate) fn before_mutation(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
+        let identities = paths
+            .iter()
+            .map(|path| Self::identity(path))
+            .collect::<std::io::Result<BTreeSet<_>>>()?;
+        // Validate the entire call before invalidating observations. Repeated
+        // aliases in a multi-edit are one identity, and a later failed preflight
+        // must not destroy recovery coverage for earlier targets.
+        for path in &identities {
+            if let Some(entry) = self.entries.get(path) {
+                if entry.observed.as_ref() != Some(&Self::state(path)?) {
+                    return Err(std::io::Error::other(format!(
+                        "refusing to overwrite externally changed snapshot target: {}",
+                        path.display()
+                    )));
                 }
-                std::fs::copy(path, &slot)?;
-                captured.push(Self::normalize(path));
+            } else {
+                let entry = Self::capture(&self.dir, path)?;
+                self.entries.insert(path.clone(), entry);
             }
         }
-        self.write_manifest(&captured)?;
-        self.taken = self.taken || !captured.is_empty();
+        for path in identities {
+            // An interrupted call must not leave an older observation usable.
+            self.entries.get_mut(&path).expect("just captured").observed = None;
+        }
         Ok(())
     }
 
-    /// True when at least one file has been snapshotted.
+    pub(crate) fn after_mutation(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
+        let mut errors = Vec::new();
+        for path in paths {
+            let result = (|| -> std::io::Result<()> {
+                let path = Self::identity(path)?;
+                if let Some(entry) = self.entries.get_mut(&path) {
+                    entry.observed = None;
+                    entry.observed = Some(Self::state(&path)?);
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                errors.push(format!("{}: {error}", path.display()));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(errors.join("; ")))
+        }
+    }
+
+    /// Finish a new generation before replacing the last good one.
+    pub(crate) fn snapshot_written(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let generation = self.dir.join(uuid::Uuid::new_v4().to_string());
+        let mut entries = BTreeMap::new();
+        let result = (|| {
+            for path in paths {
+                let path = Self::identity(path)?;
+                entries.insert(path.clone(), Self::capture(&generation, &path)?);
+            }
+            Ok::<_, std::io::Error>(())
+        })();
+        if let Err(e) = result {
+            let _ = std::fs::remove_dir_all(&generation);
+            return Err(e);
+        }
+        for entry in self.entries.values() {
+            if let Some(slot) = &entry.saved {
+                let _ = std::fs::remove_file(slot);
+            }
+        }
+        self.entries = entries;
+        self.taken = true;
+        Ok(())
+    }
+
     pub(crate) fn has_snapshot(&self) -> bool {
         self.taken
     }
 
-    /// Drop any snapshotted state (fresh task). Only removes this instance's
-    /// own directory — other in-process snapshots are untouched.
-    pub(crate) fn clear(&mut self) {
-        self.taken = false;
-        if self.dir.exists() {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
+    /// Shell, formatter, and git tools can modify previously tracked files
+    /// without naming each target. Observe those identities around the call;
+    /// new unknown targets still carry no implicit rollback authority.
+    pub(crate) fn tracked_paths(&self) -> Vec<PathBuf> {
+        self.entries.keys().cloned().collect()
     }
 
-    /// Restore snapshotted files to their original paths, and remove files in
-    /// `paths` that were created after the last-green capture (absent from
-    /// the manifest). Paths outside `paths` — unrelated user work — are never
-    /// touched. No-op when no snapshot was taken.
-    pub(crate) fn restore_written(&self, paths: &[PathBuf]) -> std::io::Result<()> {
+    pub(crate) fn clear(&mut self) {
+        self.taken = false;
+        self.entries.clear();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+
+    pub(crate) fn restore_written(&mut self, paths: &[PathBuf]) -> std::io::Result<()> {
         if !self.taken {
             return Ok(());
         }
-        let captured: std::collections::BTreeSet<PathBuf> =
-            self.read_manifest()?.into_iter().collect();
-        for path in &captured {
-            let slot = self.slot_for(path);
-            if slot.is_file() {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::copy(&slot, path)?;
-            }
-        }
-        // Roll back post-capture creations: the caller's written set covers
-        // every file the agent wrote this run, so anything in it that the
-        // manifest proves absent at capture did not exist in the last-green
-        // state and must not survive the restore.
+        let mut identities = BTreeSet::new();
+        let mut errors = Vec::new();
         for path in paths {
-            if !captured.contains(&Self::normalize(path)) && path.is_file() {
-                std::fs::remove_file(path)?;
+            match Self::identity(path) {
+                Ok(path) => {
+                    identities.insert(path);
+                }
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
             }
         }
-        Ok(())
+        for path in identities {
+            let Some(entry) = self.entries.get_mut(&path) else {
+                // No preimage means no authority to remove or overwrite it.
+                continue;
+            };
+            let restore = || -> std::io::Result<FileState> {
+                if entry.observed.as_ref() != Some(&Self::state(&path)?) {
+                    return Err(std::io::Error::other(
+                        "file changed after the agent's last observation; left untouched",
+                    ));
+                }
+                if let Some(slot) = &entry.saved {
+                    let restored = Self::state(slot)?;
+                    let parent = path
+                        .parent()
+                        .ok_or_else(|| std::io::Error::other("snapshot path has no parent"))?;
+                    std::fs::create_dir_all(parent)?;
+                    let temporary =
+                        parent.join(format!(".selfware-restore-{}", uuid::Uuid::new_v4()));
+                    let result = std::fs::copy(slot, &temporary)
+                        .and_then(|_| std::fs::rename(&temporary, &path));
+                    if result.is_err() {
+                        let _ = std::fs::remove_file(temporary);
+                    }
+                    result?;
+                    Ok(restored)
+                } else {
+                    if path.exists() {
+                        std::fs::remove_file(&path)?;
+                    }
+                    Ok(FileState::Missing)
+                }
+            };
+            match restore() {
+                Ok(restored) => entry.observed = Some(restored),
+                Err(e) => errors.push(format!("{}: {e}", path.display())),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(errors.join("; ")))
+        }
+    }
+}
+
+impl Drop for AgentSnapshot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 

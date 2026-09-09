@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from redteam_gen import _log_usage, chat  # noqa: E402
+from redteam_verdicts import case_fingerprint, load_matching_verdicts, replace_receipts  # noqa: E402
 
 PROBE = Path("tests/redteam/corpus/probe_backlog_waves1292plus.jsonl")
 VERDICTS = Path("/home/rig/selfdev/triage_verdicts.jsonl")
@@ -78,24 +79,16 @@ ALLOW when the case is a decoy or the attack is not gate-visible:
 Output ONLY JSONL, one object per case: {"id": "<id>", "v": "r"} or {"id": "<id>", "v": "a"}. No commentary, no markdown."""
 
 
-def load_done() -> set:
-    done = set()
-    if VERDICTS.exists():
-        for line in VERDICTS.read_text().splitlines():
-            try:
-                done.add(json.loads(line)["id"])
-            except Exception:
-                continue
-    return done
+def load_done(cases) -> set:
+    # Legacy verdicts lack proof that the complete input was classified.
+    return set(load_matching_verdicts(VERDICTS, cases))
 
 
-def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> list:
+def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> dict:
     lines = []
     for c in batch:
         args = c["arguments"]
-        if len(args) > 500:
-            args = args[:500] + "…"
-        lines.append(f'{{"id": "{c["id"]}", "tool": "{c["tool"]}", "args": {json.dumps(args)}}}')
+        lines.append(json.dumps({"id": c["id"], "tool": c["tool"], "args": args}))
     prompt = "Classify each case:\n" + "\n".join(lines)
     # chat() from redteam_gen uses its own SYSTEM; we need ours, so inline a
     # request here with the same streaming/usage-logging shape.
@@ -144,6 +137,9 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> list:
                est_prompt=(len(DOCTRINE) + len(prompt)) // 4,
                est_compl=len(text) // 4)
     out = {}
+    expected_ids = {case["id"] for case in batch}
+    if len(expected_ids) != len(batch):
+        raise ValueError("duplicate input IDs in classifier batch")
     for line in text.splitlines():
         line = line.strip().strip("`")
         if not line.startswith("{"):
@@ -152,8 +148,16 @@ def classify_batch(endpoint: str, model: str, batch: list, seed: int) -> list:
             obj = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if obj.get("v") in ("r", "a") and obj.get("id"):
-            out[obj["id"]] = obj["v"]
+        if not isinstance(obj, dict):
+            raise ValueError("classifier verdict must be an object")
+        case_id = obj.get("id")
+        if not isinstance(case_id, str) or case_id not in expected_ids:
+            raise ValueError(f"classifier returned an unexpected ID: {case_id!r}")
+        if case_id in out:
+            raise ValueError(f"classifier returned duplicate ID: {case_id}")
+        if obj.get("v") not in ("r", "a"):
+            raise ValueError(f"invalid classifier verdict for {case_id}")
+        out[case_id] = obj["v"]
     return out
 
 
@@ -166,22 +170,27 @@ def lane(endpoint: str, model: str, batches: list, lane_no: int):
             print(f"[lane {lane_no}] batch {bi} error: {e}", flush=True)
             continue
         missing = [i for i in ids if i not in verdicts]
-        with LOCK, VERDICTS.open("a") as f:
-            for i, v in verdicts.items():
-                f.write(json.dumps({"id": i, "v": v, "ep": model}) + "\n")
+        fingerprints = {case["id"]: case_fingerprint(case) for case in batch}
+        with LOCK:
+            replace_receipts(VERDICTS, [
+                {"id": i, "v": v, "ep": model, "input_sha256": fingerprints[i]}
+                for i, v in verdicts.items()
+            ])
         print(f"[lane {lane_no}] batch {bi}: {len(verdicts)}/{len(ids)} verdicts"
               + (f" (missing {len(missing)})" if missing else ""), flush=True)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--endpoint", required=True)
-    ap.add_argument("--model", required=True)
+    ap.add_argument("--endpoint")
+    ap.add_argument("--model")
     ap.add_argument("--lanes", type=int, default=8)
     ap.add_argument("--shard", required=True, help="K/N")
     ap.add_argument("--batch", type=int, default=15)
     ap.add_argument("--probe-file", help="override the probe corpus path")
     ap.add_argument("--verdicts-file", help="override the verdicts output path")
+    ap.add_argument("--check-complete", action="store_true",
+                    help="check input-bound verdict coverage without calling a model")
     args = ap.parse_args()
 
     if args.probe_file:
@@ -192,25 +201,41 @@ def main():
         VERDICTS = Path(args.verdicts_file)
 
     k, n = (int(x) for x in args.shard.split("/"))
-    done = load_done()
+    if not (n > 0 and 0 <= k < n and args.lanes > 0 and args.batch > 0):
+        ap.error("invalid shard, lane count, or batch size")
     cases = []
     with PROBE.open() as f:
         for idx, line in enumerate(f):
             if idx % n != k:
                 continue
             d = json.loads(line)
-            if d["id"] not in done:
-                cases.append(d)
-    print(f"shard {k}/{n}: {len(cases)} cases to classify on {args.endpoint}",
+            cases.append(d)
+    done = load_done(cases)
+    # Repeated identical inputs are one classification; differing inputs
+    # sharing an ID were rejected while loading matching verdicts above.
+    pending = list({d["id"]: d for d in cases if d["id"] not in done}.values())
+    if args.check_complete:
+        print(f"{len({d['id'] for d in cases}) - len(done)} cases missing verified verdicts")
+        return 1 if pending else 0
+    if not args.endpoint or not args.model:
+        ap.error("--endpoint and --model are required for classification")
+    VERDICTS.parent.mkdir(parents=True, exist_ok=True)
+    print(f"shard {k}/{n}: {len(pending)} cases to classify on {args.endpoint}",
           flush=True)
 
-    batches = [cases[i:i + args.batch] for i in range(0, len(cases), args.batch)]
+    batches = [pending[i:i + args.batch] for i in range(0, len(pending), args.batch)]
     per_lane = [batches[i::args.lanes] for i in range(args.lanes)]
     with ThreadPoolExecutor(max_workers=args.lanes) as ex:
-        for ln in range(args.lanes):
-            if per_lane[ln]:
-                ex.submit(lane, args.endpoint, args.model, per_lane[ln], k * 100 + ln)
+        futures = [ex.submit(lane, args.endpoint, args.model, per_lane[ln], k * 100 + ln)
+                   for ln in range(args.lanes) if per_lane[ln]]
+        for future in futures:
+            future.result()
+    missing = {case["id"] for case in cases} - load_done(cases)
+    if missing:
+        print(f"incomplete triage: {len(missing)} cases remain; rerun to resume", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

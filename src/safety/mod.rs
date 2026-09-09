@@ -12,6 +12,7 @@ pub mod permissions;
 pub mod process_env;
 pub mod redact;
 pub mod scanner;
+pub(crate) mod source_context;
 pub mod tool_metadata;
 
 #[cfg(feature = "execution-modes")]

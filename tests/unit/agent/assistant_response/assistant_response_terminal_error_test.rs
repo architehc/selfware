@@ -274,3 +274,66 @@ async fn streaming_fallback_accumulates_session_token_totals() {
         );
     server.stop().await;
 }
+
+#[tokio::test]
+async fn missing_usage_nonstream_step_accounts_measured_tokens_and_stops_next_request() {
+    const BODY: &str = r#"{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"Measured answer"},"finish_reason":"stop"}]}"#;
+    let (endpoint, captured, server) =
+        crate::api::client::review_regressions::server(vec![(200, BODY)]).await;
+    let mut config = mock_agent_config(endpoint, false);
+    config.agent.max_budget_tokens = Some(1);
+    let mut agent = Agent::new(config).await.unwrap();
+    agent
+        .messages
+        .push(Message::user("Explain token accounting"));
+    let response = agent.get_assistant_step_response(false).await.unwrap();
+    let meta = response.metadata.unwrap();
+    assert!(meta.prompt_tokens.is_none());
+    assert!(meta.completion_tokens.is_none());
+    let measured = meta.accounted_usage.unwrap();
+    assert!(measured.prompt_tokens > 0);
+    assert_eq!(
+        measured.completion_tokens,
+        crate::token_count::estimate_content_tokens("Measured answer")
+    );
+    assert_eq!(
+        agent.run_summary().total_tokens,
+        measured.total_tokens,
+        "no double accounting between API fallback and agent fallback"
+    );
+    assert_eq!(
+        agent
+            .to_checkpoint("missing-usage", "Explain token accounting")
+            .cumulative_tokens,
+        measured.total_tokens
+    );
+    let error = agent
+        .get_assistant_step_response(false)
+        .await
+        .err()
+        .expect("measured tokens must exhaust the hard cap");
+    assert!(is_terminal_api_client_error(&error));
+    assert!(error.to_string().contains("Token budget exhausted"));
+    assert_eq!(captured.lock().unwrap().len(), 1);
+    assert_eq!(agent.client.usage_attempts().len(), 1);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn explicitly_free_usage_is_displayed_as_zero_cost() {
+    const BODY: &str = r#"{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"Free answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":10,"total_tokens":15,"cost":0}}"#;
+    let (endpoint, _, server) =
+        crate::api::client::review_regressions::server(vec![(200, BODY)]).await;
+    let mut agent = Agent::new(mock_agent_config(endpoint, false))
+        .await
+        .unwrap();
+    agent
+        .messages
+        .push(Message::user("Explain token accounting"));
+    agent.get_assistant_step_response(false).await.unwrap();
+    let summary = agent.run_summary();
+    assert!(summary.cost_complete);
+    assert_eq!(summary.cost_usd, Some(0.0));
+    assert!(crate::cli::render_cost_line(&summary).contains("cost $0.0000"));
+    server.await.unwrap();
+}

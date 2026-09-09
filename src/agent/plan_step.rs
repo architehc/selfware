@@ -253,20 +253,7 @@ impl Agent {
         // total = input + output): after a resume, `total` carries the
         // restored prior-run budget whose input/output split was not
         // persisted, so a from-parts recompute would silently erase it.
-        let step_input = plan_meta.prompt_tokens.map(|p| p as usize).unwrap_or(0);
-        let step_output = plan_meta.completion_tokens.map(|c| c as usize).unwrap_or(0);
-        self.cumulative_token_usage.input += step_input;
-        self.cumulative_token_usage.output += step_output;
-        self.cumulative_token_usage.total += plan_meta
-            .total_tokens
-            .map(|t| t as usize)
-            .unwrap_or(step_input + step_output);
-
-        // Accumulate cost from this planning call so USD caps account for
-        // planning spend, not just execution spend.
-        if let Some(cost) = plan_meta.cost {
-            self.cumulative_cost_usd += cost;
-        }
+        self.sync_api_usage();
 
         // Return whether there are tool calls to execute
         Ok(has_tool_calls)

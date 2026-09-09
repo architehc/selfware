@@ -1013,13 +1013,30 @@ async fn test_agent_new_rejects_tiny_context_budget() {
 async fn test_apply_recovery_action_fallback_switches_endpoint() {
     let server = MockLlmServer::builder().with_response("done").build().await;
     let remote_endpoint = format!("{}/v1", server.url());
-    let config = Config {
+    let mut config = Config {
         endpoint: remote_endpoint.clone(),
         model: "mock-model".to_string(),
         context_length: 500_000,
         max_tokens: 8192,
         ..Default::default()
     };
+    config.api_key = Some(crate::config::RedactedString::new("hosted-provider-secret"));
+    config.models.insert(
+        "fallback".into(),
+        crate::config::ModelProfile {
+            endpoint: "http://localhost:11434/v1".into(),
+            model: "local-fallback-model".into(),
+            api_key: None,
+            max_tokens: 2048,
+            temperature: 0.2,
+            modalities: vec!["text".into()],
+            context_length: 32768,
+            extra_body: None,
+            native_function_calling: Some(false),
+            max_retries: Some(1),
+            response_timeout_floor_secs: Some(900),
+        },
+    );
     let mut agent = Agent::new(config).await.unwrap();
 
     let target = "http://localhost:11434/v1".to_string();
@@ -1038,6 +1055,15 @@ async fn test_apply_recovery_action_fallback_switches_endpoint() {
         agent.config.endpoint, target,
         "endpoint should have been switched to the fallback target"
     );
+    assert_eq!(agent.config.model, "local-fallback-model");
+    assert!(
+        agent.config.api_key.is_none(),
+        "hosted credentials must never follow endpoint fallback"
+    );
+    assert_eq!(agent.config.context_length, 32768);
+    assert_eq!(agent.config.max_tokens, 2048);
+    assert!(!agent.config.agent.native_function_calling);
+    assert_eq!(agent.config.models["default"].max_retries, Some(1));
     server.stop().await;
 }
 

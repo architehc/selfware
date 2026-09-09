@@ -11,6 +11,186 @@ use crate::cognitive::metrics::{MetricsStore, PerformanceSnapshot};
 use crate::self_healing::ErrorOccurrence;
 
 impl Agent {
+    /// Re-apply today's source policy to persisted tool data. User-authored
+    /// instructions are not a sanitization target: legacy XML results require
+    /// an adjacent assistant call or an exact execution-log match as provenance.
+    pub(super) fn sanitize_restored_tool_messages(
+        &mut self,
+        messages: &mut [Message],
+        logs: &[crate::checkpoint::ToolCallLog],
+    ) {
+        use crate::api::types::{ContentBlock, MessageContent};
+        let mut native_calls = std::collections::HashMap::<String, (String, String)>::new();
+        let mut pending_xml = std::collections::VecDeque::<(String, String)>::new();
+        for message in messages {
+            if message.role == "assistant" {
+                pending_xml.clear();
+                if let Some(calls) = &message.tool_calls {
+                    for call in calls {
+                        native_calls.insert(
+                            call.id.clone(),
+                            (call.function.name.clone(), call.function.arguments.clone()),
+                        );
+                    }
+                }
+                if message.tool_calls.as_ref().is_none_or(Vec::is_empty) {
+                    for call in
+                        crate::tool_parser::parse_tool_calls(&message.content.text_all()).tool_calls
+                    {
+                        pending_xml.push_back((call.tool_name, call.arguments.to_string()));
+                    }
+                }
+                continue;
+            }
+            let text = message.content.text_all();
+            let xml_body = text
+                .strip_prefix("<tool_result>")
+                .and_then(|body| body.strip_suffix("</tool_result>"));
+            let provenance = if message.role == "tool" {
+                Some(
+                    message
+                        .tool_call_id
+                        .as_ref()
+                        .and_then(|id| native_calls.get(id))
+                        .cloned()
+                        .or_else(|| {
+                            logs.iter()
+                                .rev()
+                                .find(|log| log.result.as_deref() == Some(text.as_str()))
+                                .map(|log| (log.tool_name.clone(), log.arguments.clone()))
+                        })
+                        .unwrap_or_else(|| ("restored_tool".to_string(), "{}".to_string())),
+                )
+            } else if message.role == "user" && (xml_body.is_some() || message.content.has_images())
+            {
+                pending_xml.pop_front().or_else(|| {
+                    let body = xml_body?;
+                    let body = body
+                        .strip_prefix("<error>")
+                        .and_then(|b| b.strip_suffix("</error>"))
+                        .unwrap_or(body);
+                    logs.iter()
+                        .rev()
+                        .find(|log| log.result.as_deref() == Some(body))
+                        .map(|log| (log.tool_name.clone(), log.arguments.clone()))
+                })
+            } else {
+                pending_xml.clear();
+                None
+            };
+            let Some((tool_name, arguments)) = provenance else {
+                continue;
+            };
+            // A remote/MCP tool's `path` may be an API resource identifier,
+            // not a host filesystem source. Only known local readers/writers
+            // inherit the workspace path policy.
+            let local_paths = tool_name.starts_with("file_")
+                || tool_name.starts_with("context_")
+                || tool_name.starts_with("git_")
+                || tool_name.starts_with("lsp_")
+                || matches!(
+                    tool_name.as_str(),
+                    "directory_tree"
+                        | "symbol_search"
+                        | "search"
+                        | "grep_search"
+                        | "glob_find"
+                        | "analyze"
+                        | "tech_debt_report"
+                        | "code_introspect"
+                        | "code_query"
+                        | "code_plan"
+                        | "vision_analyze"
+                        | "vision_compare"
+                );
+            let paths_allowed = !local_paths
+                || serde_json::from_str::<serde_json::Value>(&arguments)
+                    .ok()
+                    .is_none_or(|args| {
+                        let mut paths: Vec<&str> = [
+                            "path",
+                            "file_path",
+                            "file",
+                            "filename",
+                            "target",
+                            "image_path",
+                            "image_a",
+                            "image_b",
+                        ]
+                        .iter()
+                        .filter_map(|key| args.get(*key).and_then(|v| v.as_str()))
+                        .collect();
+                        // Include legacy bulk-loader arrays and multi-file tool schemas.
+                        for key in ["paths", "files"] {
+                            if let Some(values) = args.get(key).and_then(|v| v.as_array()) {
+                                paths.extend(values.iter().filter_map(|v| v.as_str()));
+                            }
+                        }
+                        if let Some(edits) = args.get("edits").and_then(|v| v.as_array()) {
+                            paths.extend(
+                                edits
+                                    .iter()
+                                    .filter_map(|edit| edit.get("path").and_then(|v| v.as_str())),
+                            );
+                        }
+                        paths.into_iter().all(|path| {
+                            self.validate_context_path(std::path::Path::new(path))
+                                .is_ok()
+                        })
+                    });
+            if !paths_allowed {
+                let removed = "[trust-gate: restored tool output withheld because its source path is no longer allowed]";
+                message.content = if xml_body.is_some() {
+                    format!("<tool_result>{removed}</tool_result>").into()
+                } else {
+                    removed.into()
+                };
+                continue;
+            }
+            let xml_error = xml_body.and_then(|body| {
+                body.strip_prefix("<error>")
+                    .and_then(|b| b.strip_suffix("</error>"))
+            });
+            let source_text = xml_error.or(xml_body).unwrap_or(&text);
+            let gate = super::tool_dispatch::sanitize_tool_context(
+                &tool_name,
+                &arguments,
+                source_text,
+                self.config.safety.trust_gate_tool_results,
+            );
+            self.trust_gate_findings += gate.sanitized;
+            if gate.content == source_text {
+                continue;
+            }
+            let content_to_store = if xml_error.is_some() {
+                format!("<tool_result><error>{}</error></tool_result>", gate.content)
+            } else if xml_body.is_some() {
+                format!("<tool_result>{}</tool_result>", gate.content)
+            } else {
+                gate.content
+            };
+            match &mut message.content {
+                MessageContent::Text(content) => *content = content_to_store,
+                MessageContent::Blocks(blocks) => {
+                    // Scan all text together (credentials can span blocks), and
+                    // retain allowed images rather than flattening multimodal data.
+                    let mut replacement = Some(content_to_store);
+                    blocks.retain_mut(|block| match block {
+                        ContentBlock::Text { text } => {
+                            if let Some(content) = replacement.take() {
+                                *text = content;
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => true,
+                    });
+                }
+            }
+        }
+    }
+
     /// Resume a task from a checkpoint
     pub async fn resume(mut config: Config, task_id: &str) -> Result<Self> {
         // Wrap the sync CheckpointManager::default_path() in spawn_blocking to
@@ -64,7 +244,7 @@ impl Agent {
 
         // Build all restored state in temporary variables first, then commit
         // atomically to the agent. This prevents partial state if any step fails.
-        let restored_messages = checkpoint.messages.clone();
+        let mut restored_messages = checkpoint.messages.clone();
         let mut restored_loop = AgentLoop::new(config.agent.max_iterations);
 
         // Restore exact loop progress when available.
@@ -95,6 +275,7 @@ impl Agent {
 
         // Create the agent and commit all restored state at once
         let mut agent = Self::new(config).await?;
+        agent.sanitize_restored_tool_messages(&mut restored_messages, &checkpoint.tool_calls);
         agent.messages = restored_messages;
         agent.loop_control = restored_loop;
         agent.current_checkpoint = Some(checkpoint.clone());
@@ -110,6 +291,13 @@ impl Agent {
         // this restored budget on the first step after resume.
         agent.cumulative_token_usage.total = checkpoint.cumulative_tokens;
         agent.cumulative_cost_usd = checkpoint.cumulative_cost_usd;
+        agent
+            .client
+            .restore_wall_budget(checkpoint.elapsed_wall_secs);
+        agent.client.mark_restored_usage();
+        agent
+            .client
+            .ensure_budget_floor(checkpoint.cumulative_tokens, checkpoint.cumulative_cost_usd);
         // Restore anti-thrash guard counters so a crash-looping task can't reset
         // its way out of the guards on every resume.
         agent.consecutive_no_action_prompts =
@@ -140,11 +328,21 @@ impl Agent {
         // the previous run. Without this, the agent loses all accumulated context
         // on resume and starts with an empty memory.
         if !checkpoint.memory_entries.is_empty() {
-            for entry in &checkpoint.memory_entries {
+            let mut memory_messages: Vec<Message> = checkpoint
+                .memory_entries
+                .iter()
+                .map(|entry| {
+                    let mut message = Message::user(entry.content.clone());
+                    message.role = entry.role.clone();
+                    message
+                })
+                .collect();
+            agent.sanitize_restored_tool_messages(&mut memory_messages, &checkpoint.tool_calls);
+            for (entry, message) in checkpoint.memory_entries.iter().zip(memory_messages) {
                 agent.memory.add_raw_entry(
                     entry.timestamp.clone(),
                     entry.role.clone(),
-                    entry.content.clone(),
+                    message.content.text_all(),
                     entry.token_estimate,
                 );
             }
@@ -248,9 +446,13 @@ impl Agent {
         // Persist cumulative budget so a resumed run continues from where the
         // budget stood, instead of resetting it (which would let N resumes
         // consume N× the configured token/wall budget).
-        checkpoint.cumulative_tokens = self.cumulative_token_usage.total;
+        checkpoint.cumulative_tokens = self
+            .cumulative_token_usage
+            .total
+            .saturating_add(self.client.pending_usage().total_tokens);
         checkpoint.elapsed_wall_secs = self.budget_elapsed_secs();
-        checkpoint.cumulative_cost_usd = self.cumulative_cost_usd;
+        checkpoint.cumulative_cost_usd =
+            self.cumulative_cost_usd + self.client.pending_usage().cost.unwrap_or(0.0);
         // Persist anti-thrash guard counters so they survive resume — otherwise
         // an auto-resumed crash-looping task resets them to 0 every restart.
         checkpoint.guard_counters = crate::checkpoint::GuardCounters {
@@ -303,6 +505,11 @@ impl Agent {
     }
 
     pub(super) fn should_persist_checkpoint(&self) -> bool {
+        // Cancellation is the last chance to persist resumable state; normal
+        // continuous-work cadence must never suppress this final save.
+        if self.is_cancelled() {
+            return true;
+        }
         if !self.config.continuous_work.enabled {
             return true;
         }
@@ -689,6 +896,7 @@ impl Agent {
             "task_description": task_description,
             "current_step": self.loop_control.current_step(),
             "messages": self.messages,
+            "tool_calls": self.current_checkpoint.as_ref().map(|checkpoint| &checkpoint.tool_calls),
         });
 
         let checkpoint_id = self.self_healing.checkpoint("agent_loop_checkpoint", state);
@@ -705,9 +913,17 @@ impl Agent {
             return false;
         };
 
-        let Ok(messages) = serde_json::from_value::<Vec<Message>>(messages_value) else {
+        let Ok(mut messages) = serde_json::from_value::<Vec<Message>>(messages_value) else {
             return false;
         };
+        let logs = state
+            .get("tool_calls")
+            .cloned()
+            .and_then(|value| {
+                serde_json::from_value::<Vec<crate::checkpoint::ToolCallLog>>(value).ok()
+            })
+            .unwrap_or_default();
+        self.sanitize_restored_tool_messages(&mut messages, &logs);
         self.messages = messages;
 
         if let Some(step) = state.get("current_step").and_then(|v| v.as_u64()) {
@@ -826,3 +1042,7 @@ mod resume_budget_tests;
 #[cfg(all(test, feature = "consolidation"))]
 #[path = "../../tests/unit/agent/checkpointing/checkpointing_consolidate_utf8_test.rs"]
 mod consolidate_utf8_tests;
+
+#[cfg(test)]
+#[path = "../../tests/unit/agent/checkpointing/checkpointing_trust_test.rs"]
+mod trust_tests;
