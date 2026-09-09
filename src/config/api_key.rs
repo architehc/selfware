@@ -62,6 +62,14 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
     }
 }
 
+/// Whether the user opted in to plaintext-HTTP remote endpoints (trusted LAN
+/// inference boxes). `SELFWARE_ALLOW_PLAINTEXT_REMOTE=1` (or true/yes).
+pub fn plaintext_remote_allowed() -> bool {
+    std::env::var("SELFWARE_ALLOW_PLAINTEXT_REMOTE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 /// Assert it is safe to send a credential to `endpoint`. Fails when a credential
 /// is present AND the endpoint would leak it — plaintext HTTP to a remote host,
 /// or a URL embedding userinfo (user:pass@host). The single choke point every
@@ -72,10 +80,7 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
 /// (e.g. an sglang box on the home network). The embedded-userinfo refusal is
 /// NOT bypassed — a userinfo URL is a host-spoofing vector regardless.
 pub fn assert_credential_endpoint_safe(endpoint: &str, has_credential: bool) -> Result<()> {
-    let plaintext_ok = std::env::var("SELFWARE_ALLOW_PLAINTEXT_REMOTE")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-        .unwrap_or(false);
-    let insecure_remote = is_insecure_remote_endpoint(endpoint) && !plaintext_ok;
+    let insecure_remote = is_insecure_remote_endpoint(endpoint) && !plaintext_remote_allowed();
     if has_credential && (endpoint_has_userinfo(endpoint) || insecure_remote) {
         anyhow::bail!(
             "Refusing to send the API key to endpoint '{}': it would go over plaintext HTTP to a \

@@ -402,6 +402,11 @@ async fn run_llm_doctor_inner(config: &Config) -> Result<(DoctorReport, bool)> {
                 "!!".red().bold(),
                 e.to_string().red()
             );
+            // A reached-but-failed completion (401 bad key, 500, timeout) is a
+            // real failure — the report must not say verified. (Was printed but
+            // never OR'd into had_fail; found via `selfware boot` accepting a
+            // fake key.)
+            had_fail = true;
         }
     }
     println!();

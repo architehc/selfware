@@ -38,7 +38,7 @@ use std::path::PathBuf;
 
 use super::api_key::{
     endpoint_has_userinfo, is_insecure_remote_endpoint, is_local_endpoint, is_openrouter_endpoint,
-    load_api_key_from_keyring, ApiKeySource,
+    load_api_key_from_keyring, plaintext_remote_allowed, ApiKeySource,
 };
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
@@ -686,7 +686,7 @@ impl Config {
                     config.endpoint
                 );
             }
-            if is_insecure_remote_endpoint(&config.endpoint) {
+            if is_insecure_remote_endpoint(&config.endpoint) && !plaintext_remote_allowed() {
                 bail!(
                     "Refusing to send the API key over plaintext HTTP to a remote endpoint '{}'. \
                      Use https:// or a local endpoint (localhost / 127.0.0.1).",
@@ -706,7 +706,7 @@ impl Config {
                         profile.endpoint
                     );
                 }
-                if is_insecure_remote_endpoint(&profile.endpoint) {
+                if is_insecure_remote_endpoint(&profile.endpoint) && !plaintext_remote_allowed() {
                     bail!(
                         "Refusing to send the API key over plaintext HTTP to a remote profile \
                          endpoint '{}'. Use https:// or a local endpoint (localhost / 127.0.0.1).",
