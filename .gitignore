@@ -135,8 +135,8 @@ check.json
 # swe-bench sample datasets (kept locally, not in repo)
 system_tests/swe_bench_pro/*.jsonl
 
-# TQEC hands-on lessons: local Python virtual environment (runtime artifact)
-tqec/tools-env/
+# TQEC hands-on lessons
+tqec/
 
 # deep-research run artifacts (reports live in Open WebUI / on disk)
 research/

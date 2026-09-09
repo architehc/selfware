@@ -33,6 +33,10 @@ exclude = [
     "editors/",
     "vscode-selfware/",
     "selfware-27b-concurrency16.toml",
+    "deploy/",
+    "benchmarks/",
+    "tests/",
+    "tqec/",
 ]
 
 [dependencies]
