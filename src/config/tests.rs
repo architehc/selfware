@@ -16,7 +16,7 @@ use std::path::PathBuf;
 fn test_config_default() {
     let config = Config::default();
     assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
-    assert_eq!(config.model, "z-ai/glm-5.2");
+    assert_eq!(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
     assert_eq!(config.max_tokens, 65536);
     assert!((config.temperature - 1.0).abs() < f32::EPSILON);
     assert!(config.api_key.is_none());
@@ -202,7 +202,7 @@ fn test_config_partial_deserialization() {
         "#;
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.endpoint, "http://custom:1234/v1");
-    assert_eq!(config.model, "z-ai/glm-5.2"); // default
+    assert_eq!(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free"); // default
     assert_eq!(config.max_tokens, 65536); // default
 }
 
@@ -424,7 +424,7 @@ fn test_empty_config_uses_all_defaults() {
     let toml_str = "";
     let config: Config = toml::from_str(toml_str).unwrap();
     assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
-    assert_eq!(config.model, "z-ai/glm-5.2");
+    assert_eq!(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
     assert_eq!(config.max_tokens, 65536);
     assert!(!config.yolo.enabled);
 }
@@ -612,7 +612,7 @@ fn test_config_empty_protected_branches() {
 #[test]
 fn test_default_helpers() {
     assert_eq!(default_endpoint(), "https://openrouter.ai/api/v1");
-    assert_eq!(default_model(), "z-ai/glm-5.2");
+    assert_eq!(default_model(), "nvidia/nemotron-3-ultra-550b-a55b:free");
     assert_eq!(default_max_tokens(), 65536);
     assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
     assert_eq!(default_max_iterations(), 100);
@@ -1810,12 +1810,12 @@ fn test_config_load_empty_file() {
 
     let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
-    assert_eq!(config.model, "z-ai/glm-5.2");
-    // The default model "z-ai/glm-5.2" matches the built-in glm-5.2 profile,
-    // which fills reasoning-mode defaults (temperature=1.0, max_tokens=65536,
-    // top_p=0.95, enable_thinking) for any field the empty config omits.
+    assert_eq!(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
+    // The default model matches the built-in nemotron-3-ultra profile,
+    // which fills native_function_calling and the 65,536 completion cap
+    // (the free tier's max) for any field the empty config omits.
     assert_eq!(config.max_tokens, 65536);
-    assert_eq!(config.matched_profile.as_deref(), Some("glm-5.2"));
+    assert_eq!(config.matched_profile.as_deref(), Some("nemotron-3-ultra"));
     assert!(config.models.contains_key("default"));
 }
 

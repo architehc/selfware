@@ -77,9 +77,9 @@ Selfware looks for configuration in this order:
 4. `~/.config/selfware/config.toml`
 
 If no config file is found, built-in defaults are used: the hosted OpenRouter
-endpoint (`https://openrouter.ai/api/v1`) with model `z-ai/glm-5.2`, which
-requires an API key (see below). For a local backend, write a config file
-pointing at it.
+endpoint (`https://openrouter.ai/api/v1`) with model
+`nvidia/nemotron-3-ultra-550b-a55b:free`, which requires an API key (see
+below). For a local backend, write a config file pointing at it.
 
 ### Create your config
 

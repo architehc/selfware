@@ -15,7 +15,7 @@
       \|     |/
 ```
 
-An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware, or point it at a hosted endpoint (e.g. OpenRouter + GLM‑5.2) when you don't have the GPU. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
+An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** — run it entirely on your own hardware, or point it at a hosted endpoint (e.g. OpenRouter + Nemotron 3 Ultra, free tier) when you don't have the GPU. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot.
 
 > **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it work a tool-use (ReAct) loop — reading, editing, running tests, and committing. A lightweight Plan→Execute phase structures each run; it is not a full task decomposer, so scope large goals into concrete tasks. Then let the evolution engine iterate.
 
@@ -100,11 +100,11 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 
 ## Quick Start
 
-> ### ⚡ Fastest path — hosted, no GPU: OpenRouter + GLM‑5.2
+> ### ⚡ Fastest path — hosted, no GPU, free: OpenRouter + Nemotron 3 Ultra
 >
 > Want to try Selfware in two minutes with a frontier model and **no local server**?
-> Point it at [OpenRouter](https://openrouter.ai) and run GLM‑5.2. All you provide is
-> an API key.
+> Point it at [OpenRouter](https://openrouter.ai) and run Nemotron 3 Ultra on the
+> **free tier** — all you provide is an API key, no credits needed.
 >
 > **1. Get a key** at <https://openrouter.ai/keys> (starts with `sk-or-...`).
 >
@@ -112,24 +112,16 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 >
 > ```toml
 > endpoint = "https://openrouter.ai/api/v1"
-> model    = "z-ai/glm-5.2"        # or z-ai/glm-4.7, z-ai/glm-4.6, etc.
-> max_tokens      = 32768          # GLM-5.2 completion cap
-> context_length  = 1048576        # GLM-5.2 is a 1M-token model
-> temperature     = 0.6
+> model    = "nvidia/nemotron-3-ultra-550b-a55b:free"   # free tier; drop ":free" for the paid variant
+> max_tokens      = 65536          # free-tier completion cap
+> context_length  = 1000000        # Nemotron 3 Ultra free tier serves 1M tokens
+> temperature     = 1.0
 >
 > [agent]
-> native_function_calling = true   # OpenRouter/GLM support OpenAI tool calling
+> native_function_calling = true   # Nemotron 3 Ultra supports OpenAI tool calling
 >
 > [safety]
 > allowed_paths = ["./**", "~/**", "/tmp/**"]
->
-> # Optional but recommended on OpenRouter: pin providers that serve the FULL
-> # 1M context AND honor tool calls (verified for GLM-5.2). This avoids being
-> # routed to a provider that silently caps context at 131k/262k, and avoids
-> # "describes intent without calling tools".
-> [extra_body.provider]
-> only = ["fireworks", "morph", "friendli", "inceptron", "deepinfra"]
-> require_parameters = true
 > ```
 >
 > **3. Provide the key** (either way works):
@@ -146,7 +138,7 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 > ```
 >
 > A healthy setup prints `[PASS] api_key present`, `[PASS] endpoint reachable`,
-> `Model: z-ai/glm-5.2`, and a passing connection + tool-calling test. Then just:
+> `Model: nvidia/nemotron-3-ultra-550b-a55b:free`, and a passing connection + tool-calling test. Then just:
 >
 > ```bash
 > cd ~/my-project
@@ -159,18 +151,63 @@ An **agentic coding harness** for LLMs that's **local-first, cloud-compatible** 
 > |---------|-------------|
 > | `api_key: no key found` / 401 Unauthorized | Key not seen. `export SELFWARE_API_KEY=sk-or-...` in the shell you run from, or put `api_key=` in `config.toml`. Precedence: `SELFWARE_API_KEY` env → OS keyring → config file. |
 > | `endpoint … not reachable` | No network / wrong URL. It must be exactly `https://openrouter.ai/api/v1` (no trailing `/chat/completions`). |
-> | `model not found` / 400 | Check the exact slug at <https://openrouter.ai/models> — e.g. `z-ai/glm-5.2`, not `glm5.2`. |
-> | `402 / insufficient credits` | Add credit at <https://openrouter.ai/credits> (GLM‑5.2 is inexpensive but not free). |
+> | `model not found` / 400 | Check the exact slug at <https://openrouter.ai/models> — e.g. `nvidia/nemotron-3-ultra-550b-a55b:free` (the `:free` suffix is part of the slug). |
+> | `429 / rate limited` | Free-tier throughput caps (requests per minute/day). Wait and retry, or switch to the paid slug (`nvidia/nemotron-3-ultra-550b-a55b`, no `:free`) after adding credit at <https://openrouter.ai/credits>. |
 > | Config isn't picked up | Discovery order: `--config <file>` → `SELFWARE_CONFIG` env → `./selfware.toml` (cwd) → `~/.config/selfware/config.toml`. Run `selfware config show` to see the effective config + where each value came from. |
-> | Slow output (a few tok/s) | Normal — that's the hosted provider's speed for a 1M‑token reasoning model. Interactive `chat` is fine; long autonomous runs will take a while. |
-> | Context seems trimmed around ~128–262k despite a 1M model | That's the **OpenRouter provider's** own limit, not Selfware (Selfware honors `context_length`). Providers for the same model differ — see them at `https://openrouter.ai/models` → the model's *Providers* tab. Pin full-context ones with `[extra_body.provider] order = ["DeepInfra", "Morph", ...]` (or `only = [...]`). The `provider` block in the response tells you who served you. |
+> | Slow output (a few tok/s) | Normal on the free tier — shared capacity. Interactive `chat` is fine; long autonomous runs will take a while (the paid variant is faster). |
+> | Context seems trimmed despite a 1M model | That's the **OpenRouter provider's** own limit, not Selfware (Selfware honors `context_length`). Providers for the same model differ — see them at `https://openrouter.ai/models` → the model's *Providers* tab. The `provider` block in the response tells you who served you. |
 > | Headless `-p` stops with *"requires confirmation … Use --yolo"* | Mutating tools need approval. Add `--yolo` to auto-approve in headless mode, or use interactive `selfware chat` and confirm each edit. |
-> | `FAKE_COMPLETE` / "produced final answer but executed 0 mutating calls" | The model answered in prose instead of editing. Add `--yolo` (headless), keep `native_function_calling = true` + `[extra_body.provider] require_parameters = true`, and phrase the task as a concrete change ("edit X to do Y"), not a question. |
+> | `FAKE_COMPLETE` / "produced final answer but executed 0 mutating calls" | The model answered in prose instead of editing. Add `--yolo` (headless), keep `native_function_calling = true`, and phrase the task as a concrete change ("edit X to do Y"), not a question. |
 > | `NONTERM_PROSE_NO_TOOL` / "kept describing intent without using tools" | The model narrated instead of calling a tool. Make sure `native_function_calling = true`, keep `selfware` up to date (older builds mis-detected some models' `**FILES:**` planning headers), and give a concrete, single-goal task. Re-run — recovery usually proceeds. |
 >
 > Still stuck? `selfware llm-doctor` prints a step-by-step diagnosis, and
 > `selfware config show` shows exactly which config file and key source are in effect.
 > </details>
+
+> **Other free hosted options.** Any OpenRouter `:free` slug works the same way —
+> e.g. Thinking Machines' Inkling (1M context, tool calling):
+>
+> ```toml
+> endpoint = "https://openrouter.ai/api/v1"
+> model    = "thinkingmachines/inkling:free"
+> max_tokens      = 262144         # free-tier completion cap
+> context_length  = 1000000
+> temperature     = 1.0
+>
+> [agent]
+> native_function_calling = true
+> ```
+>
+> Browse the full free list at <https://openrouter.ai/models?q=%3Afree>.
+
+> ### 🌱 Boot assistant — a tiny local model that helps you set Selfware up
+>
+> No API key at all? Run
+> [`google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant`](https://huggingface.co/google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant)
+> — a 0.16 GB instruction-tuned model whose job is to be your **setup buddy**:
+> it explains Selfware's settings, helps you write `config.toml` for your
+> endpoint (local server, OpenRouter, or a provider of choice), and walks you
+> through `llm-doctor` output when something fails validation. It is an
+> onboarding assistant, not a coding model — use it to get configured, then
+> switch to a real model for agent work.
+>
+> ```bash
+> # 1. Serve it (any OpenAI-compatible server works; transformers is enough here):
+> pip install "transformers[serve]"
+> transformers serve google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant   # http://localhost:8000
+>
+> # 2. Point Selfware at it (boot.toml):
+> #    endpoint = "http://localhost:8000/v1"
+> #    model    = "google/gemma-4-E2B-it-qat-q4_0-unquantized-assistant"
+> #    context_length = 32768
+> selfware --config boot.toml chat
+> ```
+>
+> Ask it things like *"I have an OpenRouter key and no GPU — write my config"*
+> or *"llm-doctor says endpoint not reachable, what do I check?"* — then run
+> `selfware llm-doctor` to verify the result mechanically. A 2B-class model
+> can give wrong answers; `llm-doctor` is the source of truth for whether a
+> config actually works.
 
 ### 1. Install Selfware
 
@@ -1048,7 +1085,7 @@ bash system_tests/projecte2e/run_full_sab.sh
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SELFWARE_ENDPOINT` | LLM API endpoint | `https://openrouter.ai/api/v1` |
-| `SELFWARE_MODEL` | Model name | `z-ai/glm-5.2` |
+| `SELFWARE_MODEL` | Model name | `nvidia/nemotron-3-ultra-550b-a55b:free` |
 | `SELFWARE_API_KEY` | API key (if required) | None |
 | `SELFWARE_MAX_TOKENS` | Max tokens per response | `65536` |
 | `SELFWARE_TEMPERATURE` | Sampling temperature | `1.0` |

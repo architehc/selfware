@@ -380,7 +380,7 @@ fn test_load_empty_file_uses_defaults() {
     let (_dir, path) = write_temp_config("", "empty.toml");
     let config = Config::load(Some(path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "https://openrouter.ai/api/v1");
-    assert_eq!(config.model, "z-ai/glm-5.2");
+    assert_eq!(config.model, "nvidia/nemotron-3-ultra-550b-a55b:free");
     assert_eq!(config.max_tokens, 65536);
 }
 

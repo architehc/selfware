@@ -94,7 +94,22 @@ impl AppliedFields {
 /// wins.  Keep more-specific patterns before more-general ones.
 pub fn builtin_profiles() -> Vec<ModelDefaultsProfile> {
     vec![
-        // GLM-5.2 (z-ai) — the project's default model.  Card-recommended
+        // Nemotron 3 Ultra (nvidia) — the project's default model via the
+        // OpenRouter free tier (`nvidia/nemotron-3-ultra-550b-a55b:free`):
+        // 1M context, 65,536 completion cap, $0, tools + tool_choice
+        // supported (verified against the OpenRouter model catalog
+        // 2026-09-08).  No model-specific sampling kit is pinned yet —
+        // global defaults (temperature 1.0) apply.
+        ModelDefaultsProfile {
+            name: "nemotron-3-ultra",
+            pattern: "*nemotron-3-ultra*",
+            native_function_calling: Some(true),
+            streaming: None,
+            temperature: None,
+            max_tokens: Some(65536),
+            extra_body: json!({}),
+        },
+        // GLM-5.2 (z-ai) — card-recommended
         // reasoning-mode sampling: temperature=1.0, top_p=0.95, with the
         // model's thinking enabled via the chat template.  selfware parses the
         // resulting reasoning_content automatically, so no client change is

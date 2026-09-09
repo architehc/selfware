@@ -87,7 +87,7 @@ pub fn default_endpoint() -> String {
     "https://openrouter.ai/api/v1".to_string()
 }
 pub fn default_model() -> String {
-    "z-ai/glm-5.2".to_string()
+    "nvidia/nemotron-3-ultra-550b-a55b:free".to_string()
 }
 pub fn default_max_tokens() -> usize {
     65536

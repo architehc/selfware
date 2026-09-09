@@ -881,8 +881,8 @@ fn test_default_endpoint_is_openrouter() {
 }
 
 #[test]
-fn test_default_model_is_glm52() {
-    assert_eq!(default_model(), "z-ai/glm-5.2");
+fn test_default_model_is_nemotron_ultra_free() {
+    assert_eq!(default_model(), "nvidia/nemotron-3-ultra-550b-a55b:free");
 }
 
 #[test]

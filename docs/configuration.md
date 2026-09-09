@@ -19,7 +19,7 @@ built-in defaults  <  model-defaults profile  <  TOML file  <  env var  <  CLI f
 | Layer | Example source | Notes |
 |-------|----------------|-------|
 | 1. Built-in defaults | `default_endpoint()`, `default_temperature()` | Compiled in |
-| 2. Model-defaults profile | Built-in rule matched by the configured model name (e.g. GLM-5.2, Qwen3.6) | Fills only fields you did **not** set explicitly via TOML or env |
+| 2. Model-defaults profile | Built-in rule matched by the configured model name (e.g. Nemotron 3 Ultra, GLM-5.2, Qwen3.6) | Fills only fields you did **not** set explicitly via TOML or env |
 | 3. TOML file | `selfware.toml` top-level fields | Loaded once |
 | 4. Env var | `SELFWARE_TEMPERATURE=0.2` | Per-process |
 | 5. CLI flag | `selfware --max-turns 20` | Per-invocation; only some settings have flags |
@@ -59,7 +59,7 @@ with the source (default / TOML / env / CLI) of every value.
 ### Model-defaults profiles and the unknown-model fallback
 
 Layer 2 matches the configured `model` against built-in glob patterns
-(`qwen3.6-*`, `*glm-5.2*`, `claude-*`, `gpt-*`, ...). Matching is
+(`*nemotron-3-ultra*`, `qwen3.6-*`, `*glm-5.2*`, `claude-*`, `gpt-*`, ...). Matching is
 case-insensitive and tries the full model id **and** its last `/`-separated
 segment, so provider-prefixed ids (`qwen/qwen3.6-27b`) and path-qualified
 local ids (`/home/rig/models/qwen3.6-27b`, as served by sglang/vLLM) match
@@ -94,7 +94,7 @@ over the fallback.
 endpoint = "http://localhost:8000/v1"
 
 # Model identifier sent to the API
-# Default: "z-ai/glm-5.2"
+# Default: "nvidia/nemotron-3-ultra-550b-a55b:free"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 
 # Maximum tokens in the model response
