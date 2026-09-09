@@ -315,6 +315,14 @@ impl Agent {
         let mut phrase_rotation = tokio::time::Instant::now();
         let _last_bar_update = tokio::time::Instant::now();
 
+        // Acquire concurrency governor permit before sending the streaming request.
+        // The permit is held for the duration of the streaming response and released on drop.
+        let _stream_permit = self
+            .governor
+            .acquire_stream()
+            .await
+            .map_err(|e| anyhow::anyhow!("concurrency governor error: {}", e))?;
+
         let (stream, request_meta) = self
             .client
             .chat_stream_with_meta(messages, tools, thinking)

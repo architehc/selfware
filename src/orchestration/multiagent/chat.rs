@@ -296,38 +296,6 @@ impl MultiAgentChat {
 
         let start = Instant::now();
 
-        // Budget gate (P0-3): check before doing any paid work. A skip is
-        // recorded honestly but is NOT an error — it must not trip FailFast
-        // and cancel sibling agents that are legitimately in flight.
-        if let Err(reason) = budget.try_reserve() {
-            let (agent_name, role) = {
-                let agents = agents.read().await;
-                match agents.get(agent_id) {
-                    Some(a) => (a.name.clone(), a.role),
-                    None => return Ok(()),
-                }
-            };
-            tracing::info!("multi-chat: agent {} not launched: {}", agent_id, reason);
-            if let Some(ref tx) = event_tx {
-                let _ = tx.try_send(MultiAgentEvent::AgentFailed {
-                    agent_id,
-                    error: reason.clone(),
-                });
-            }
-            let mut results = results.lock().await;
-            results.push(AgentResult {
-                agent_id,
-                agent_name,
-                role,
-                content: String::new(),
-                usage: None,
-                duration: start.elapsed(),
-                success: false,
-                error: Some(reason),
-            });
-            return Ok(());
-        }
-
         // Get agent info and update status + heartbeat
         let (agent_name, role, mut messages) = {
             let mut agents = agents.write().await;
@@ -336,7 +304,48 @@ impl MultiAgentChat {
                 agent.last_heartbeat = Instant::now();
                 (agent.name.clone(), agent.role, agent.messages.clone())
             } else {
-                budget.settle(None);
+                return Ok(());
+            }
+        };
+
+        // Add user task to messages
+        messages.push(Message::user(&task));
+
+        // Measure prompt tokens (measured, not estimated per Rule 4)
+        let prompt_tokens: usize = messages
+            .iter()
+            .map(|m| crate::token_count::estimate_content_tokens(m.content.text()))
+            .sum();
+
+        // Budget gate (P0-3): check before doing any paid work. A skip is
+        // recorded honestly but is NOT an error — it must not trip FailFast
+        // and cancel sibling agents that are legitimately in flight.
+        let reservation = match budget.try_reserve(prompt_tokens) {
+            Ok(res) => res,
+            Err(reason) => {
+                let mut agents = agents.write().await;
+                if let Some(agent) = agents.get_mut(agent_id) {
+                    agent.status = AgentStatus::Idle;
+                }
+                drop(agents);
+                tracing::info!("multi-chat: agent {} not launched: {}", agent_id, reason);
+                if let Some(ref tx) = event_tx {
+                    let _ = tx.try_send(MultiAgentEvent::AgentFailed {
+                        agent_id,
+                        error: reason.clone(),
+                    });
+                }
+                let mut results = results.lock().await;
+                results.push(AgentResult {
+                    agent_id,
+                    agent_name,
+                    role,
+                    content: String::new(),
+                    usage: None,
+                    duration: start.elapsed(),
+                    success: false,
+                    error: Some(reason),
+                });
                 return Ok(());
             }
         };
@@ -350,9 +359,6 @@ impl MultiAgentChat {
             });
         }
 
-        // Add user task to messages
-        messages.push(Message::user(&task));
-
         // Call the API with timeout
         let result =
             tokio::time::timeout(timeout, client.chat(messages, None, ThinkingMode::Disabled))
@@ -362,10 +368,13 @@ impl MultiAgentChat {
         // record actual provider-reported usage, when we got a response.
         // (A timed-out call may still have been billed by the provider, but
         // we only account what we can see.)
-        budget.settle(match &result {
-            Ok(Ok(response)) => Some(&response.usage),
-            _ => None,
-        });
+        budget.settle(
+            reservation,
+            match &result {
+                Ok(Ok(response)) => Some(&response.usage),
+                _ => None,
+            },
+        );
 
         let duration = start.elapsed();
 
@@ -590,17 +599,17 @@ impl BudgetGuard {
         }
     }
 
-    /// Try to reserve budget for one new call. Returns a human-readable
-    /// reason when launching the call would exceed a configured limit.
-    fn try_reserve(&self) -> Result<(), String> {
+    /// Try to reserve budget for one new call. Returns the reserved token count,
+    /// or a human-readable reason when launching the call would exceed a configured limit.
+    fn try_reserve(&self, prompt_tokens: usize) -> Result<usize, String> {
         let mut tracker = self.tracker.lock().unwrap();
+        let call_estimate = self.estimate + prompt_tokens;
         if let Some(max) = self.limits.max_budget_tokens {
             let committed = tracker.actual_tokens + tracker.reserved_tokens;
-            if committed + self.estimate > max {
+            if committed + call_estimate > max {
                 return Err(format!(
                     "skipped to stay within --max-budget-tokens={max}: \
-                     {committed} tokens used/reserved + ~{} estimated for this call",
-                    self.estimate
+                     {committed} tokens used/reserved + ~{call_estimate} estimated for this call",
                 ));
             }
         }
@@ -613,15 +622,15 @@ impl BudgetGuard {
                 ));
             }
         }
-        tracker.reserved_tokens += self.estimate;
-        Ok(())
+        tracker.reserved_tokens += call_estimate;
+        Ok(call_estimate)
     }
 
     /// Settle a finished (or abandoned) call: release its reservation and
     /// record actual provider-reported usage, when available.
-    fn settle(&self, usage: Option<&Usage>) {
+    fn settle(&self, reserved: usize, usage: Option<&Usage>) {
         let mut tracker = self.tracker.lock().unwrap();
-        tracker.reserved_tokens = tracker.reserved_tokens.saturating_sub(self.estimate);
+        tracker.reserved_tokens = tracker.reserved_tokens.saturating_sub(reserved);
         if let Some(usage) = usage {
             tracker.actual_tokens += usage.total_tokens;
             if let Some(cost) = usage.cost {
