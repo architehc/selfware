@@ -217,6 +217,10 @@ pub(crate) enum Commands {
         /// Ask what to build, then scaffold it into the current directory
         #[arg(long)]
         scaffold: bool,
+        /// Also download the boot-assistant model (Qwen3-0.6B GGUF) so
+        /// `selfware boot --chat` works offline afterwards
+        #[arg(long)]
+        with_boot_assistant: bool,
     },
 
     /// Start an interactive chat session
@@ -255,6 +259,19 @@ pub(crate) enum Commands {
     /// Diagnose the configured LLM backend and model setup
     #[command(display_order = 7)]
     LlmDoctor,
+
+    /// Recovery/setup assistant: recipe-card configs, self-check, tiny-model Q&A.
+    /// With no flags, runs the guided wizard that writes a verified config.
+    #[command(display_order = 8)]
+    Boot {
+        /// Freeform setup Q&A with the local boot-assistant model
+        /// (downloads Qwen3-0.6B GGUF on first use, needs llama-server)
+        #[arg(long)]
+        chat: bool,
+        /// Self-test: model file integrity, llama-server, round-trip, config doctor
+        #[arg(long)]
+        check: bool,
+    },
 
     /// Trust this repository's checkout-local selfware.toml. Trusting ACTIVATES
     /// all of its privileged settings, which are otherwise stripped for an

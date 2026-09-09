@@ -424,6 +424,7 @@ fn should_skip_calibration(cli: &Cli, config: &Config) -> bool {
                 | Commands::Bench { .. }
                 | Commands::Doctor
                 | Commands::LlmDoctor
+                | Commands::Boot { .. }
                 | Commands::Test { .. }
                 | Commands::Status
         )
@@ -4123,10 +4124,43 @@ max_recovery_attempts = 3
             println!();
         }
 
-        Commands::Init { template, scaffold } => {
+        Commands::Init {
+            template,
+            scaffold,
+            with_boot_assistant,
+        } => {
             tokio::task::spawn_blocking(move || init_wizard::run_init_wizard(template, scaffold))
                 .await
                 .map_err(|e| anyhow::anyhow!("Task panicked: {}", e))??;
+            if with_boot_assistant {
+                // Fetch the tiny Q&A model now so `selfware boot --chat` works
+                // offline later. A download failure must not fail `init` —
+                // the config the wizard just wrote is the primary artifact.
+                match crate::boot::model::ensure_model(&crate::boot::model::boot_dir()).await {
+                    Ok(path) => println!("  Boot-assistant model ready at {}", path.display()),
+                    Err(e) => eprintln!(
+                        "  Boot-assistant download failed ({:#}). Retry later with `selfware boot --chat`.",
+                        e
+                    ),
+                }
+            }
+        }
+
+        Commands::Boot { chat, check } => {
+            if check {
+                let (checks, ok) = crate::boot::check::run_boot_check(&config).await;
+                println!();
+                for c in &checks {
+                    println!("  {}", c.render());
+                }
+                if !ok {
+                    anyhow::bail!("boot --check: one or more checks FAILED");
+                }
+            } else if chat {
+                crate::boot::chat::run_boot_chat().await?;
+            } else {
+                crate::boot::wizard::run_boot_wizard().await?;
+            }
         }
 
         Commands::Runs { command } => {

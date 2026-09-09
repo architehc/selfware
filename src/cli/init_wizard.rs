@@ -199,7 +199,7 @@ fn ensure_interactive_stdin(is_terminal: bool) -> Result<()> {
 /// Quote `s` as a TOML basic-string literal. Backslashes, double quotes, and
 /// control characters are escaped, so Windows paths (`C:\Users\...`) don't
 /// produce invalid TOML escape sequences (`\U`, `\s`) in the generated config.
-fn toml_quote(s: &str) -> String {
+pub(crate) fn toml_quote(s: &str) -> String {
     use std::fmt::Write as _;
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

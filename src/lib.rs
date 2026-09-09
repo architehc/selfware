@@ -134,6 +134,8 @@ pub mod profiles;
 // ============================================================================
 // Utility modules
 // ============================================================================
+// Recovery/setup assistant (`selfware boot`) — recipe-card configs + tiny-model Q&A
+pub mod boot;
 pub mod interview;
 pub mod llm_doctor;
 pub mod memory;
