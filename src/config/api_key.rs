@@ -66,9 +66,17 @@ pub fn is_insecure_remote_endpoint(endpoint: &str) -> bool {
 /// is present AND the endpoint would leak it — plaintext HTTP to a remote host,
 /// or a URL embedding userinfo (user:pass@host). The single choke point every
 /// authenticated request path should call before sending.
+///
+/// Opt-in escape hatch: `SELFWARE_ALLOW_PLAINTEXT_REMOTE=1` skips the
+/// plaintext-remote refusal for rigs where the LAN endpoint is trusted
+/// (e.g. an sglang box on the home network). The embedded-userinfo refusal is
+/// NOT bypassed — a userinfo URL is a host-spoofing vector regardless.
 pub fn assert_credential_endpoint_safe(endpoint: &str, has_credential: bool) -> Result<()> {
-    if has_credential && (endpoint_has_userinfo(endpoint) || is_insecure_remote_endpoint(endpoint))
-    {
+    let plaintext_ok = std::env::var("SELFWARE_ALLOW_PLAINTEXT_REMOTE")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let insecure_remote = is_insecure_remote_endpoint(endpoint) && !plaintext_ok;
+    if has_credential && (endpoint_has_userinfo(endpoint) || insecure_remote) {
         anyhow::bail!(
             "Refusing to send the API key to endpoint '{}': it would go over plaintext HTTP to a \
              remote host or via an embedded-credential URL. Use https:// or a local endpoint \

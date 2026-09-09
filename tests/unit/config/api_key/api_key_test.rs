@@ -46,6 +46,25 @@ fn assert_credential_endpoint_safe_rules() {
 }
 
 #[test]
+fn plaintext_remote_opt_in_allows_trusted_lan() {
+    // SELFWARE_ALLOW_PLAINTEXT_REMOTE=1 opts in to plaintext HTTP to a remote
+    // (trusted LAN) endpoint; the embedded-userinfo refusal still applies.
+    // Env is process-global; this test mutates it and must not run in parallel
+    // with assert_credential_endpoint_safe_rules — both are in one test binary,
+    // so keep the mutation scoped and restore it before returning.
+    let prev = std::env::var("SELFWARE_ALLOW_PLAINTEXT_REMOTE").ok();
+    std::env::set_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE", "1");
+    let lan = assert_credential_endpoint_safe("http://192.168.137.1:8000/v1", true);
+    let userinfo = assert_credential_endpoint_safe("http://user:pass@192.168.137.1:8000/v1", true);
+    match prev {
+        Some(v) => std::env::set_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE", v),
+        None => std::env::remove_var("SELFWARE_ALLOW_PLAINTEXT_REMOTE"),
+    }
+    assert!(lan.is_ok());
+    assert!(userinfo.is_err());
+}
+
+#[test]
 fn insecure_check_is_case_insensitive_on_scheme() {
     // The scheme is case-insensitive per the URL spec, and reqwest
     // normalizes it — so an uppercase/mixed-case http scheme must NOT bypass

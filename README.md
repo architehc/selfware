@@ -1092,6 +1092,7 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `SELFWARE_TIMEOUT` | Per-step timeout (seconds) | `300` |
 | `SELFWARE_DEBUG` | Enable debug logging | Disabled |
 | `SELFWARE_ASCII` | Force ASCII-only mode | Disabled |
+| `SELFWARE_ALLOW_PLAINTEXT_REMOTE` | Set `1` to allow sending the API key over plaintext HTTP to a *trusted* remote endpoint (e.g. a LAN inference box). Default refuses. | Disabled |
 | `NO_COLOR` | Disable colors (standard) | Disabled |
 
 ### Interactive Commands
