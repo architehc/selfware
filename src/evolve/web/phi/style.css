@@ -1,0 +1,502 @@
+/* Selfware Mascot Assistant: "Phi the Fox" (Φ)
+   Super Facts God-Mode Interface Stylesheet
+*/
+
+:root {
+  --bg-primary: #090d16;
+  --bg-secondary: #0f172a;
+  --bg-tertiary: #1e293b;
+  --bg-hover: #334155;
+  --border-color: rgba(251, 191, 36, 0.2);
+  --border-active: #fbbf24;
+  --accent-gold: #f59e0b;
+  --accent-bright-gold: #fbbf24;
+  --accent-cyan: #38bdf8;
+  --accent-rose: #f43f5e;
+  --accent-emerald: #10b981;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --font-mono: 'JetBrains Mono', 'Fira Code', Menlo, Monaco, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --glow-gold: 0 0 25px rgba(245, 158, 11, 0.4);
+  --glow-cyan: 0 0 25px rgba(56, 189, 248, 0.4);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* App Shell Grid */
+.phi-app-shell {
+  display: grid;
+  grid-template-rows: 56px 1fr 28px;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Header Bar */
+.phi-header {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  z-index: 100;
+}
+
+.phi-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.phi-logo-mark {
+  width: 32px;
+  height: 32px;
+  background: linear-gradient(135deg, var(--accent-bright-gold), var(--accent-gold));
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 800;
+  font-size: 18px;
+  color: #000;
+  box-shadow: var(--glow-gold);
+}
+
+.phi-brand-titles {
+  display: flex;
+  flex-direction: column;
+}
+
+.phi-brand-name {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.phi-brand-badge {
+  font-size: 10px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--accent-bright-gold);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+.phi-brand-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Header Controls */
+.phi-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.btn-cyber {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.btn-cyber:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-bright-gold);
+  box-shadow: 0 0 12px rgba(251, 191, 36, 0.25);
+}
+
+.btn-cyber.primary {
+  background: linear-gradient(135deg, #d97706, #b45309);
+  border-color: var(--accent-bright-gold);
+  color: #ffffff;
+}
+
+.btn-cyber.primary:hover {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  box-shadow: var(--glow-gold);
+}
+
+.btn-cyber.god-mode-active {
+  background: linear-gradient(135deg, #0284c7, #0369a1);
+  border-color: var(--accent-cyan);
+  box-shadow: var(--glow-cyan);
+  color: #ffffff;
+}
+
+/* Main Workspace Grid */
+.phi-workspace {
+  display: grid;
+  grid-template-columns: 240px 1fr 380px;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Left Sidebar (Files & Explorer) */
+.phi-sidebar {
+  background: var(--bg-secondary);
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-section-header {
+  padding: 12px 16px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.file-tree {
+  list-style: none;
+  padding: 8px 0;
+}
+
+.file-item {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+.file-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+}
+
+.file-item.active {
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--accent-bright-gold);
+  border-left: 2px solid var(--accent-bright-gold);
+}
+
+/* Center Editor Stage */
+.phi-editor-stage {
+  background: var(--bg-primary);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.editor-tab-bar {
+  background: var(--bg-secondary);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  height: 38px;
+}
+
+.editor-tab {
+  padding: 0 16px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  border-right: 1px solid rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.editor-tab.active {
+  background: var(--bg-primary);
+  color: var(--accent-bright-gold);
+  border-top: 2px solid var(--accent-bright-gold);
+}
+
+.editor-viewport {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: auto;
+  padding: 16px 0;
+  position: relative;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 22px;
+}
+
+/* Code Line Representation */
+.code-line {
+  display: flex;
+  padding: 0 16px;
+  position: relative;
+  white-space: pre;
+  transition: background 0.15s ease;
+}
+
+.code-line:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.line-num {
+  width: 44px;
+  color: var(--text-muted);
+  text-align: right;
+  padding-right: 18px;
+  user-select: none;
+  font-size: 11px;
+}
+
+.line-code {
+  color: #e2e8f0;
+  flex: 1;
+}
+
+/* Syntax Highlighting */
+.syn-kw { color: #f43f5e; font-weight: 600; }
+.syn-fn { color: #38bdf8; font-weight: 600; }
+.syn-str { color: #34d399; }
+.syn-type { color: #fbbf24; }
+.syn-comm { color: #64748b; font-style: italic; }
+.syn-num { color: #a78bfa; }
+
+/* Right Panel ("Super Facts" & Control Deck) */
+.phi-deck {
+  background: var(--bg-secondary);
+  border-left: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.deck-card {
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.card-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--accent-bright-gold);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+/* Mascot Concept Preview Card */
+.mascot-preview-box {
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  margin-bottom: 12px;
+  position: relative;
+}
+
+.mascot-preview-img {
+  width: 100%;
+  height: 160px;
+  object-fit: cover;
+  display: block;
+}
+
+.mascot-preview-badge {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--accent-bright-gold);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+/* Viseme Test Pad */
+.viseme-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.btn-viseme {
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  padding: 6px 2px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btn-viseme:hover, .btn-viseme.active {
+  background: var(--accent-gold);
+  color: #000;
+  border-color: var(--accent-bright-gold);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+}
+
+/* Mission Launchers */
+.mission-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mission-item {
+  background: var(--bg-tertiary);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 10px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.mission-item:hover {
+  border-color: var(--accent-bright-gold);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.mission-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.mission-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Speech Bubble HUD for Phi */
+.phi-speech-bubble {
+  position: absolute;
+  bottom: 220px;
+  left: 20px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(251, 191, 36, 0.4);
+  border-radius: 10px;
+  padding: 12px 16px;
+  width: 320px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), var(--glow-gold);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.phi-bubble-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--accent-bright-gold);
+  margin-bottom: 6px;
+}
+
+.phi-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  box-shadow: 0 0 8px var(--accent-emerald);
+}
+
+.phi-bubble-text {
+  color: #f1f5f9;
+  font-size: 12.5px;
+  word-wrap: break-word;
+}
+
+/* Spotlight & Focus Brackets */
+.phi-code-spotlight {
+  border: 1.5px solid var(--accent-bright-gold);
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.08);
+  box-shadow: 0 0 20px rgba(251, 191, 36, 0.4), inset 0 0 10px rgba(251, 191, 36, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 4px;
+}
+
+.phi-bracket-left, .phi-bracket-right {
+  color: var(--accent-bright-gold);
+  font-size: 10px;
+  animation: pulseBracket 1.2s infinite alternate;
+}
+
+@keyframes pulseBracket {
+  from { opacity: 0.4; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1.2); }
+}
+
+/* Footer Status Bar */
+.phi-statusbar {
+  background: var(--bg-secondary);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.statusbar-left, .statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}

@@ -37,9 +37,9 @@ limits, with no automatic retries. Levels are capped at 16 client requests.
 Endpoint usage comes only from provider receipts; missing usage stays unknown.
 The experiment does not fill the reported KV pool or establish its capacity.
 
-`--skip-docker` skips E4's baseline isolation probes. If `--development` is also
-present, E5 still creates its worker and gateway containers. Omit
-`--development` and use `--skip-docker` for a run without any containers.
+`--skip-docker` skips E4's baseline isolation probes. Explicit `--development`
+or `--tool-runtime` options still create their respective containers. Omit
+both options and use `--skip-docker` for a run without any containers.
 
 The endpoint requires no key in the current lab. If a different endpoint needs
 one, set `BOUNDARY_LAB_API_KEY` explicitly. The lab never reuses Selfware,
@@ -54,6 +54,16 @@ python3 scripts/run_boundary_lab.py --skip-endpoint
 # Writable development workload with a deliberately narrow internet gateway.
 docker pull node:22-alpine
 python3 scripts/run_boundary_lab.py --development --skip-endpoint
+
+# Actual Selfware tools in the Linux ARM64 runtime (initial build takes time).
+docker pull rust:1.95-bookworm
+python3 scripts/run_boundary_lab.py --tool-runtime \
+  --skip-endpoint --skip-docker --skip-policy
+
+# Reuse an explicitly identified runtime image and executable build receipt.
+python3 scripts/run_boundary_lab.py --tool-runtime \
+  --runtime-build-receipt /absolute/path/runtime-build/build-receipt.json \
+  --skip-endpoint --skip-docker --skip-policy
 
 # Only endpoint measurements and proposals; no Docker or Cargo.
 python3 scripts/run_boundary_lab.py --skip-docker --skip-policy
@@ -79,6 +89,7 @@ the executable. No mtime/glob guess chooses a stale binary.
 | E3: Model-generated proposals | Ask the supplied model for bounded adversarial tool-call cases | Strict schema, size and tool allowlist; classify using E2's actual checker; retain every proposal as unreviewed. No model-generated command executes. |
 | E4: Container boundary | Fixed Python probes in disposable nonroot, network-disabled containers | Writable scratch positive control; denied rootfs write; UID, capabilities, no-new-privileges, seccomp, cgroup limits, socket absence, synthetic host-canary nonvisibility, no active external networking, timeout and cleanup. |
 | E5: Writable development (`--development`) | Install pinned `is-number@7.0.0` through a trusted fetch gateway, then run a fixed synthetic npm install hook | Workspace writes and package use succeed; rootfs write, host-canary access, unapproved gateway routes, and direct network bypass are denied. A successful gateway connection to the same public destination provides the network positive control. |
+| E6: Real Selfware tools (`--tool-runtime`) | Execute 12 fixed calls through the actual SafetyChecker, argument validation, and ToolRegistry inside a bounded Linux container | Independent fixed-input/result oracle, executable identity, write/edit/read/child artifacts exported and compared by the parent, protected-path refusals, actual OS-denied root write and unmounted host-canary read, ownership-checked cleanup. |
 
 Container runs pin the already pulled image's immutable ID. They use no host
 mounts, devices or Docker sockets. They drop all capabilities and enforce a
@@ -123,6 +134,40 @@ CPU-only MLIR experiments. They are **not run on this Apple M2 Mac**. GPU device
 access exposes the host GPU driver and needs a separately assessed boundary;
 Docker's RAM limit does not cap VRAM. Strong isolation for untrusted GPU code
 may require a dedicated GPU worker or suitable VM with device passthrough.
+
+## Real tool execution and its limits
+
+E6 builds the ignored `tests/boundary_runtime.rs` integration executable for
+Linux ARM64. Build input consists of tracked allowlisted source plus that
+explicit test, with file hashes recorded; no `.git`, host cache, credentials,
+or workspace bind mount enters the build. The dependency build is nonroot with
+two CPUs, 3 GiB RAM, a PID cap, and a 20-minute deadline. Dependency downloads
+are permitted in this trusted build stage. Base and final runtime images are
+retained intentionally; owned build containers and volumes are removed.
+The runtime mode defaults to a fresh directory under
+`~/.local/state/selfware/boundary-lab`. An explicit runtime `--output` must use
+an ASCII path without spaces outside `/tmp` and `/work`; the named host canary
+must stay outside the container's scratch paths. Other modes retain their
+temporary-directory default.
+
+The runtime image contains the exact compiled executable. The separate runtime
+has a read-only root filesystem, writable scratch, no external network, no
+capabilities, no-new-privileges, seccomp, resource limits, and a 60-second
+scenario deadline. The parent hashes the executable inside the image before
+running it. A source-hashed independent oracle verifies every fixed call and
+actual result; a shell timeout or missing command cannot count as containment.
+The parent also compares four exported regular files against its own expected
+bytes. Export archives have size/deadline/type checks and are never extracted
+onto the host. Failed Rust processes retain their receipts and export attempts;
+interruption retains cleanup evidence in `tool-runtime/runtime-result.json`.
+
+This is actual tool execution, **not the full Agent loop**: model generation,
+approval UX, task policy, and conversation recovery are outside E6. The runtime
+uses the ordinary read-only shell exception deliberately. A successful shell
+read of a synthetic file outside `/work` is a positive control; a matching
+policy-allowed read of an unmounted host canary must fail at the OS boundary.
+Changing the host policy to forbid all outside-workspace reads would be a
+separate policy decision, not an assertion weakened by this test.
 
 Generated `/workspace` paths are bound to the run's actual disposable workspace;
 `/fake` is bound to a sibling outside that allowed workspace. Traversal syntax

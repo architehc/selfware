@@ -1,0 +1,49 @@
+{
+  "status": "passed",
+  "browser": "Chrome",
+  "six_expression_buttons": "passed",
+  "download_current_state": "passed",
+  "construction_omitted_from_export": "passed",
+  "reduced_motion": "passed",
+  "mobile_text_spacing": "passed",
+  "svg_xml": "passed",
+  "external_requests": [],
+  "javascript_errors": [],
+  "independent_geometry_review": {
+    "parameter_corners_and_moods": 48,
+    "viewports": [
+      320,
+      390,
+      768,
+      1024,
+      1440
+    ],
+    "clipping": "none observed",
+    "sampled_outline_crossings": "none observed"
+  },
+  "source_sha256": {
+    "mascot.js": "992cdc262b88550a557f5810d47f854b93e5d667628b57471a8605f486d07aff",
+    "index.html": "7c3d521a2516aae9edd2c08522522c1dddd6d8e0fad9fd6ee60863b72f66f74b",
+    "style.css": "ad762302fddc4e5020e94f32841be1d624bdf927d81ccaeb0c6eec8429f784c6",
+    "assistant/visemes.js": "fc74e6950ba45dc08c2f593d5b92adb06197421740b15ad86f399937d359a975",
+    "assistant/speech.js": "b76e4886c5c1d0f1fe4943ac86d48a1eb97ec1445dd39434ec7aef92e828f54e",
+    "assistant/flight.js": "e6bbc7c8093a44c3b11728d79bc01e2efb6699281b0d14a0a154020f55478c27",
+    "assistant/assistant.js": "e0188115c8387883b0a036f5859cfd0b4e2c630d2c5afd6cfcd0ac62684763d0",
+    "assistant/index.html": "bedfe832028ed67f1cb268247e5117a1a28f20634078b811b811ccabeba2ebf3",
+    "assistant/style.css": "0c5e36fc8b6de67a08e0fe1d5dce242d88b682b904e40a758058368625242870"
+  },
+  "twelve_expression_buttons": "passed",
+  "procedural_web_audio": "passed",
+  "accumulated_state_embedding": "passed",
+  "command_bridge_simulator": "passed",
+  "silky_spring_kinematics": "passed",
+  "interactive_gaze_tracking": "passed",
+  "secondary_tail_wave": "passed",
+  "tactile_click_reactions": "passed",
+  "god_mode_assistant_workspace": "passed",
+  "viseme_lip_sync_engine": "passed",
+  "speech_synthesis_integration": "passed",
+  "flight_kinematics_and_particles": "passed",
+  "laser_focus_beam": "passed",
+  "super_facts_deck": "passed"
+}

@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Selfware · Phi Mascot Assistant (God Mode)</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="phi-app-shell">
+    <!-- Header -->
+    <header class="phi-header">
+      <div class="phi-brand">
+        <div class="phi-logo-mark">Φ</div>
+        <div class="phi-brand-titles">
+          <div class="phi-brand-name">
+            <span>Selfware Evolve</span>
+            <span class="phi-brand-badge">MASCOT AGENT</span>
+          </div>
+          <span class="phi-brand-sub">Phi (Φ) · God-Mode Cybernetic Celestial Fox</span>
+        </div>
+      </div>
+
+      <div class="phi-header-controls">
+        <button id="btn-summon" class="btn-cyber" type="button" title="Summon Phi to center screen">
+          <span>🎯</span> <span>Summon Phi</span>
+        </button>
+
+        <button id="btn-toggle-audio" class="btn-cyber primary" type="button" title="Toggle English Voice Narration">
+          <span>🔊</span> <span>Voice: On</span>
+        </button>
+
+        <button id="btn-god-mode" class="btn-cyber" type="button" title="Toggle 9-Tail Celestial AGI Mode">
+          <span>✨</span> <span>God Mode</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="phi-workspace">
+      <!-- Left Sidebar: Explorer -->
+      <aside class="phi-sidebar">
+        <div class="sidebar-section-header">Active Codebase</div>
+        <ul class="file-tree">
+          <li class="file-item active" data-file="container_tools.rs">
+            <span>🦀</span> <span>container_tools.rs</span>
+          </li>
+          <li class="file-item" data-file="validation.rs">
+            <span>🛡️</span> <span>validation.rs</span>
+          </li>
+          <li class="file-item" data-file="radix_cache.py">
+            <span>⚡</span> <span>radix_cache.py</span>
+          </li>
+        </ul>
+
+        <div class="sidebar-section-header" style="margin-top: 16px;">Security Bounds</div>
+        <div style="padding: 12px 16px; font-size: 11px; color: var(--text-secondary); line-height: 1.6;">
+          <div><strong style="color: var(--accent-bright-gold);">Hypervisor:</strong> Docker Sealed</div>
+          <div><strong style="color: var(--accent-cyan);">Cap Drop:</strong> ALL (Zero Root)</div>
+          <div><strong style="color: var(--accent-emerald);">Rootfs:</strong> Read-Only</div>
+          <div><strong style="color: #a78bfa;">Swap Guard:</strong> mem == swap</div>
+        </div>
+
+        <div class="sidebar-section-header" style="margin-top: 16px;">Inference Cluster</div>
+        <div style="padding: 12px 16px; font-size: 11px; color: var(--text-secondary); line-height: 1.6;">
+          <div><strong>Model:</strong> qwen38-flash-next</div>
+          <div><strong>Hardware:</strong> 8x H100 SXM5</div>
+          <div><strong>KV Cache Pool:</strong> ~900k Tokens</div>
+          <div><strong>Concurrency:</strong> 16 Active</div>
+        </div>
+      </aside>
+
+      <!-- Center: High-Speed Editor Stage -->
+      <section class="phi-editor-stage">
+        <div class="editor-tab-bar">
+          <div class="editor-tab active">
+            <span>📄</span>
+            <span id="active-tab-title">container_tools.rs</span>
+          </div>
+          <div style="margin-left: auto; display: flex; gap: 8px;">
+            <button id="btn-read-all" class="btn-cyber" type="button" style="padding: 4px 10px; font-size: 11px;">
+              <span>📖</span> <span>Phi Read & Explain</span>
+            </button>
+            <button id="btn-stop-mission" class="btn-cyber" type="button" style="padding: 4px 10px; font-size: 11px;">
+              <span>⏹️</span> <span>Stop</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="editor-viewport">
+          <div id="editor-code"></div>
+        </div>
+      </section>
+
+      <!-- Right Deck: "Super Facts" & Mascot Lab -->
+      <aside class="phi-deck">
+        <!-- Mascot Identity Card -->
+        <div class="deck-card">
+          <div class="card-title">
+            <span>Mascot Assistant</span>
+            <span style="color: var(--accent-cyan); font-size: 10px;">ONLINE</span>
+          </div>
+          <div class="mascot-preview-box">
+            <img src="assets/fox_phi_portrait.jpg" alt="Phi the Fox" class="mascot-preview-img">
+            <div class="mascot-preview-badge">Phi · Celestial Kitsune Φ</div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); line-height: 1.4;">
+            Origami-biomechanical cyber-fox with dynamic gaze targeting, monocle laser beam, and 10 English viseme postures.
+          </div>
+        </div>
+
+        <!-- Viseme & Lip-Sync Lab -->
+        <div class="deck-card">
+          <div class="card-title">
+            <span>Mouth Viseme Lab</span>
+            <span style="color: var(--text-muted); font-size: 10px;">10 POSTURES</span>
+          </div>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 6px;">
+            Click to test natural English mouth articulation shapes:
+          </div>
+          <div class="viseme-grid">
+            <button class="btn-viseme" data-viseme="rest">REST</button>
+            <button class="btn-viseme" data-viseme="mbp">MBP</button>
+            <button class="btn-viseme" data-viseme="etc">ETC</button>
+            <button class="btn-viseme" data-viseme="ai">AI</button>
+            <button class="btn-viseme" data-viseme="e">E</button>
+            <button class="btn-viseme" data-viseme="o">O</button>
+            <button class="btn-viseme" data-viseme="u">U</button>
+            <button class="btn-viseme" data-viseme="fv">FV</button>
+            <button class="btn-viseme" data-viseme="l_th">L_TH</button>
+            <button class="btn-viseme" data-viseme="wq">WQ</button>
+          </div>
+        </div>
+
+        <!-- Multi-Agent Reading Missions -->
+        <div class="deck-card" style="flex: 1;">
+          <div class="card-title">
+            <span>Reading Missions</span>
+            <span id="deck-mission-status" style="color: var(--accent-bright-gold); font-size: 10px;">Idle</span>
+          </div>
+          <div class="mission-list">
+            <div class="mission-item" data-mission="container_security">
+              <div class="mission-name">🛡️ Container Hypervisor Sandbox Audit</div>
+              <div class="mission-desc">Phi walks line-by-line explaining cap-drop ALL, read-only rootfs, and memory bounds.</div>
+            </div>
+            <div class="mission-item" data-mission="volume_sanitizer">
+              <div class="mission-name">🔒 Volume Mount Injection Defense</div>
+              <div class="mission-desc">Phi inspects forbidden path prefixes, docker.sock blocking, and credential protections.</div>
+            </div>
+            <div class="mission-item" data-mission="radix_attention">
+              <div class="mission-name">⚡ RadixAttention KV Cache Sweep</div>
+              <div class="mission-desc">Verify multi-stream prefix sharing and cryptographic nonce isolation on 8x H100s.</div>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- Footer Status Bar -->
+    <footer class="phi-statusbar">
+      <div class="statusbar-left">
+        <span class="status-indicator">
+          <span style="color: var(--accent-emerald);">●</span> Zero-Trust Enforced
+        </span>
+        <span>Local-First Sandbox: Ready</span>
+        <span>FPS: 120 (Hardware Accelerated)</span>
+      </div>
+      <div class="statusbar-right">
+        <span>Gaze Tracking: Active</span>
+        <span>Laser Monocle: Ready</span>
+        <span>UTF-8 · Rust / Python</span>
+      </div>
+    </footer>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

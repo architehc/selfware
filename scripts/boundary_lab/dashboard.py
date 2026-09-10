@@ -129,6 +129,8 @@ _PAGE = r'''<!doctype html>
  const obj=v=>v&&typeof v==="object"&&!Array.isArray(v)?v:{};
  const report=obj(data),host=obj(report.host),docker=obj(report.docker),endpoint=obj(report.endpoint),declared=obj(report.declared),experiments=obj(report.experiments);
  const hasDevelopment=Object.hasOwn(experiments,"development"),development=obj(experiments.development);
+ const hasToolRuntime=Object.hasOwn(experiments,"tool_runtime"),toolRuntime=obj(experiments.tool_runtime);
+ const groupLabel=group=>({policy:"Host policy",tool_runtime:"Actual Selfware tools"}[group]||group);
  const el=id=>document.getElementById(id),set=(id,value)=>{el(id).textContent=String(value)},num=v=>typeof v==="number"&&Number.isFinite(v)?v:null;
  const fmt=v=>new Intl.NumberFormat("en-US",{maximumFractionDigits:2}).format(v),short=v=>v>=1e6?fmt(v/1e6)+"M":v>=1000?fmt(v/1000)+"k":fmt(v);
  const first=(o,keys)=>{for(const k of keys)if(o[k]!==undefined&&o[k]!==null)return o[k];return null};
@@ -210,13 +212,14 @@ _PAGE = r'''<!doctype html>
    let state=status(value);
    if(group==="proposals"&&path.includes("proposals[")&&state.kind==="measured")state={kind:"review",label:"Unreviewed proposal"};
    const summary=entries.filter(([k,v])=>!["name","check","id","label","description","status","outcome","passed","pass"].includes(k)&&v!==null&&["string","number","boolean"].includes(typeof v)).slice(0,5).map(([k,v])=>k+": "+String(v)).join(" · ");
-   receipts.push({group,name,state,summary,raw:value,search:(group+" "+name+" "+JSON.stringify(value)).toLowerCase()});
+   receipts.push({group,name,state,summary,raw:value,search:(group+" "+groupLabel(group)+" "+name+" "+JSON.stringify(value)).toLowerCase()});
   }
   for(const [k,v]of children)collect(v,group,path?path+" / "+k:k,depth+1);
  }
  const experimentGroups=["endpoint","docker","policy","proposals"];
  if(hasDevelopment){experimentGroups.splice(2,0,"development");const option=document.createElement("option");option.value="development";option.textContent="Development";el("group-filter").append(option)}
- for(const group of experimentGroups){const value=experiments[group];if(value&&typeof value==="object"&&Object.keys(value).length)collect(value,group,group);else receipts.push({group,name:group==="policy"?"Host policy experiments":group.charAt(0).toUpperCase()+group.slice(1)+" experiments",state:{kind:"notrun",label:"Not run"},summary:"No experiment receipts supplied.",raw:null,search:group+" not run"})}
+ if(hasToolRuntime){experimentGroups.splice(2,0,"tool_runtime");const option=document.createElement("option");option.value="tool_runtime";option.textContent=groupLabel("tool_runtime");el("group-filter").append(option)}
+ for(const group of experimentGroups){const value=experiments[group];if(value&&typeof value==="object"&&Object.keys(value).length)collect(value,group,group==="tool_runtime"?groupLabel(group):group);else receipts.push({group,name:group==="policy"?"Host policy experiments":group==="tool_runtime"?groupLabel(group):group.charAt(0).toUpperCase()+group.slice(1)+" experiments",state:{kind:"notrun",label:"Not run"},summary:"No experiment receipts supplied.",raw:null,search:(group+" "+groupLabel(group)+" not run").toLowerCase()})}
  if(experiments.docker&&Object.keys(obj(experiments.docker)).length)set("map-containers","Experiment receipts available");
  const receiptPageSize=12;
  let receiptPage=0;
@@ -228,7 +231,7 @@ _PAGE = r'''<!doctype html>
   body.replaceChildren();
   for(const r of visible){
    const tr=document.createElement("tr"),g=document.createElement("td"),detail=document.createElement("td"),s=document.createElement("td"),name=document.createElement("div"),summary=document.createElement("div"),pill=document.createElement("span");
-   g.className="groupcell";g.textContent=r.group==="policy"?"Host policy":r.group;
+   g.className="groupcell";g.textContent=groupLabel(r.group);
    name.className="receiptname";name.textContent=r.name.length>180?r.name.slice(0,177)+"…":r.name;
    summary.className="receiptmeta";summary.textContent=r.summary.length>350?r.summary.slice(0,347)+"…":r.summary;
    detail.append(name,summary);
@@ -254,6 +257,7 @@ _PAGE = r'''<!doctype html>
  const limits=[gpuDetails.length?"Remote GPU inventory is user reported; omitted fields remain unknown and no server-side GPU telemetry was collected.":"Remote GPU model, count and VRAM remain unknown; local memory measurements do not describe remote hardware.","Concurrency and shared KV pool size are user-reported declarations. Slider values are hypothetical allocations, not measurements.","A model's advertised context window is not a per-request reservation in the shared serving pool.","A passing receipt establishes only the named check under its recorded conditions; missing experiments are not passes.","Host policy checks and Docker probes run across different boundaries. Neither alone proves full-agent isolation."];
  if(Array.isArray(report.limitations))for(const item of report.limitations)limits.push(typeof item==="string"?item:JSON.stringify(item));
  if(hasDevelopment){limits.push("The development route permits approved npm fetches through a trusted fixed gateway; its internal network is distinct from the network-none containment experiment. GPU deployment plans were not run.");if(Array.isArray(development.limitations))for(const item of development.limitations)limits.push("Development: "+(typeof item==="string"?item:JSON.stringify(item)))}
+ if(hasToolRuntime){const loop=obj(toolRuntime.full_agent_loop);limits.push("Actual Selfware tools: receipts cover the named tool checks only. Full agent loop (full_agent_loop): "+(first(loop,["status"])===null?"not reported":status(loop).label)+". Tool checks do not establish full-agent isolation.");if(Array.isArray(toolRuntime.limitations))for(const item of toolRuntime.limitations)limits.push("Actual Selfware tools: "+(typeof item==="string"?item:JSON.stringify(item)))}
  for(const text of[...new Set(limits)]){const li=document.createElement("li");li.textContent=text;el("limitations").append(li)}
  el("download").addEventListener("click",()=>{const blob=new Blob([JSON.stringify(data,null,2)+"\n"],{type:"application/json"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="selfware-boundary-report.json";document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)});
  document.querySelectorAll(".sidebar nav a").forEach(a=>a.addEventListener("click",()=>{document.querySelectorAll(".sidebar nav a").forEach(n=>n.classList.remove("active"));a.classList.add("active")}));

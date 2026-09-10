@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Φ — the Selfware fox</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="mascot.js" defer></script>
+</head>
+<body>
+  <header>
+    <a class="wordmark" href="./index.html" aria-label="Selfware mascot home"><span class="brand-symbol">φ</span> selfware<span class="slash">/</span><span class="subbrand">a parametric companion</span></a>
+    <div class="header-actions">
+      <a href="assistant/index.html" class="quiet" style="color:var(--accent); font-weight:600;">Assistant Studio ✦</a>
+      <button id="sound-btn" class="quiet" aria-label="Toggle procedural sound effects">Sound: Off</button>
+      <button id="theme" class="quiet" aria-label="Switch to light background">Paper ↗</button>
+    </div>
+  </header>
+  <main>
+    <section class="art" aria-labelledby="title">
+      <div class="intro"><p class="eyebrow">MASCOT STUDY · 01</p><h1 id="title">Meet <i>Phi.</i></h1><p class="lede">A curious little fox,<br>drawn from a few good functions.</p></div>
+      <div class="stage" id="stage"><div id="portrait"></div><span class="axis-label">x →</span></div>
+      <div class="art-footer"><span><i class="status-dot" id="status-dot"></i><span id="mood-caption">A warm hello.</span></span><span class="edition" id="archetype-badge">ARCHETYPE: INITIALIZING</span></div>
+    </section>
+    <aside aria-label="Mascot controls">
+      <div class="control-title"><span class="eyebrow">THE CHARACTER</span><button id="reset" class="text-button">Reset</button></div>
+      <p class="aside-intro">Warm amber. Attentive ears.<br>A tail that curls back into itself.</p>
+      <fieldset><legend>Expression (12 parametric moods)</legend><div class="moods" id="moods">
+        <button data-mood="greeting" aria-pressed="true">Hello</button><button data-mood="thinking" aria-pressed="false">Thinking</button><button data-mood="working" aria-pressed="false">Working</button><button data-mood="success" aria-pressed="false">Bloom</button><button data-mood="error" aria-pressed="false">Concerned</button><button data-mood="idle" aria-pressed="false">Resting</button>
+        <button data-mood="curious" aria-pressed="false">Inspect</button><button data-mood="evolve" aria-pressed="false">Evolve</button><button data-mood="flow" aria-pressed="false">Flow</button><button data-mood="guard" aria-pressed="false">Guarded</button><button data-mood="spark" aria-pressed="false">Eureka</button><button data-mood="sleep" aria-pressed="false">Dormant</button>
+      </div></fieldset>
+      <div class="sliders">
+        <label for="ears">Ear curiosity <output id="ears-value" for="ears">0.82</output></label><input type="range" id="ears" min="0.62" max="1.04" step="0.01" value="0.82">
+        <label for="curl">Tail curl <output id="curl-value" for="curl">1.00</output></label><input type="range" id="curl" min="0.78" max="1.18" step="0.01" value="1">
+        <label for="softness">Body softness <output id="softness-value" for="softness">2.40</output></label><input type="range" id="softness" min="2" max="3.2" step="0.05" value="2.4">
+        <label for="volume">Acoustic volume <output id="volume-value" for="volume">25%</output></label><input type="range" id="volume" min="0" max="1" step="0.01" value="0.25">
+      </div>
+      <div class="switches">
+        <label><input type="checkbox" id="construction"> Show the construction</label>
+        <label><input type="checkbox" id="motion" checked> Let it breathe</label>
+        <label><input type="checkbox" id="gaze" checked> Interactive look-at & gaze</label>
+        <label><input type="checkbox" id="sound-toggle"> Procedural Web Audio</label>
+        <label><input type="checkbox" id="coupling" checked> Couple state embedding to posture</label>
+      </div>
+      <details id="state-details">
+        <summary>Accumulated State & Embedding <span>+</span></summary>
+        <div class="state-container">
+          <div class="state-meta">
+            <span class="state-label" id="state-archetype-name">The Scribe</span>
+            <code class="state-vector" id="state-vector-str">z = [0.50, 1.00, 0.80, 0.60, 0, 0.85]</code>
+          </div>
+          <div class="state-meters">
+            <div class="meter-row"><span class="meter-name">Focus</span><div class="meter-track"><div class="meter-fill" id="meter-foc" style="width:50%"></div></div><span class="meter-val" id="val-foc">0.50</span></div>
+            <div class="meter-row"><span class="meter-name">Vitality</span><div class="meter-track"><div class="meter-fill" id="meter-vit" style="width:100%"></div></div><span class="meter-val" id="val-vit">1.00</span></div>
+            <div class="meter-row"><span class="meter-name">Clarity</span><div class="meter-track"><div class="meter-fill" id="meter-cla" style="width:80%"></div></div><span class="meter-val" id="val-cla">0.80</span></div>
+            <div class="meter-row"><span class="meter-name">Curiosity</span><div class="meter-track"><div class="meter-fill" id="meter-cur" style="width:60%"></div></div><span class="meter-val" id="val-cur">0.60</span></div>
+            <div class="meter-row"><span class="meter-name">Harmony</span><div class="meter-track"><div class="meter-fill" id="meter-har" style="width:85%"></div></div><span class="meter-val" id="val-har">0.85</span></div>
+            <div class="meter-row"><span class="meter-name">Experience</span><div class="meter-track"><div class="meter-fill" id="meter-exp" style="width:0%"></div></div><span class="meter-val" id="val-exp">0 turns</span></div>
+          </div>
+          <div class="state-actions">
+            <button id="reset-state" class="text-button">Reset embedding memory</button>
+          </div>
+        </div>
+      </details>
+      <details id="command-details" open>
+        <summary>Selfware Command Bridge <span>+</span></summary>
+        <div class="cmd-container">
+          <div class="cmd-input-bar">
+            <span class="cmd-prompt">$</span>
+            <input type="text" id="cmd-input" placeholder="Type e.g. 'selfware evolve'..." aria-label="Simulate selfware command">
+          </div>
+          <div class="cmd-chips" id="cmd-chips">
+            <button class="cmd-chip" data-cmd="selfware init">init</button>
+            <button class="cmd-chip" data-cmd="selfware graph">graph</button>
+            <button class="cmd-chip" data-cmd="selfware run">run</button>
+            <button class="cmd-chip" data-cmd="selfware evolve">evolve</button>
+            <button class="cmd-chip" data-cmd="cargo test">test ok</button>
+            <button class="cmd-chip" data-cmd="cargo clippy">clippy err</button>
+            <button class="cmd-chip" data-cmd="selfware trust">trust gate</button>
+            <button class="cmd-chip" data-cmd="swebench pro">swebench</button>
+            <button class="cmd-chip" data-cmd="daemon sleep">sleep</button>
+          </div>
+          <div class="cmd-feed" id="cmd-feed" aria-live="polite">
+            <div class="feed-entry">Waiting for terminal event...</div>
+          </div>
+        </div>
+      </details>
+      <details id="math"><summary>Five ideas behind the fox <span>+</span></summary><div class="equations">
+        <p><b>01 / The body</b><code>|x/a|ⁿ + |y/b|ⁿ = 1</code><span>A superellipse. Roundness is a parameter.</span></p>
+        <p><b>02 / The ears</b><code>G(z) = exp(−z² / 0.025)</code><span>Two mirrored Gaussian peaks lift the head contour.</span></p>
+        <p><b>03 / The tail</b><code>r(u) = r₀ φ^(−2ωu/π)</code><span>A ribbon along a golden spiral. φ = (1 + √5)/2.</span></p>
+        <p><b>04 / The state embedding</b><code>z_{t+1} = clamp(z_t + W·e, 0, 1)</code><span>A 6D recurrent latent state accumulating agent turns.</span></p>
+        <p><b>05 / The acoustic voice</b><code>f_n = f_0 · φⁿ</code><span>Procedural Web Audio synthesis tuned to golden harmonics.</span></p>
+      </div></details>
+      <button id="download" class="download">Download this fox <span>SVG ↗</span></button>
+      <p class="export-note">Editable vectors. Transparent background. <br>Every curve & tone is generated locally.</p>
+    </aside>
+  </main>
+  <footer><span>THE PERSONAL AI WORKSHOP</span><span>One fox. Twelve expressions. Infinite resolution.</span><a href="README.md">Geometry & source ↗</a></footer>
+</body>
+</html>

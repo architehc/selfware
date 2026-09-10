@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light"><title>Phi in motion — Selfware</title>
+<link rel="stylesheet" href="style.css"><script src="geometry.js" defer></script><script src="rig.js" defer></script><script src="motion.js" defer></script><script src="studio.js" defer></script>
+</head>
+<body>
+<header><a href="../index.html" class="brand"><i>φ</i><b>selfware</b><span>/</span><small>motion studio</small></a><div class="header-actions"><a href="../index.html">Geometry studio ↗</a><button id="theme" aria-label="Switch to paper background">Paper ↗</button></div></header>
+<main>
+  <section class="theatre" aria-labelledby="title">
+    <div class="intro"><p class="eyebrow">A FAMILIAR FACE, IN MOTION</p><h1 id="title">A little more <i>Phi.</i></h1><p>Attentive eyes. A thoughtful pause.<br>A tail with a mind of its own.</p></div>
+    <div class="stage" id="stage"><div id="portrait"></div></div>
+    <div class="interaction-hint" id="hint">Move your pointer. Say hello.</div>
+    <div class="scene-label"><span class="scene-number" id="scene-number">01 / 12</span><div><strong id="scene-name">Hello, you.</strong><p id="scene-description">A small wave, then a moment of attention.</p></div></div>
+    <div class="theatre-footer"><span><i class="dot"></i><span id="motion-status">Spring motion · preview</span></span><span id="scene-progress" class="progress" aria-hidden="true"><i></i></span><button id="reel" aria-pressed="true">Pause showreel Ⅱ</button></div>
+  </section>
+  <aside aria-label="Motion controls">
+    <div class="section-label"><span class="eyebrow">THE CHARACTER</span><button id="reset" class="text-button">Reset</button></div>
+    <p class="aside-intro">One identity.<br>A vocabulary of movement.</p>
+    <fieldset><legend>Expressions</legend><div class="moods" id="moods">
+      <button data-mood="greeting" aria-pressed="true">Hello</button><button data-mood="curious" aria-pressed="false">Curious</button><button data-mood="thinking" aria-pressed="false">Thinking</button><button data-mood="working" aria-pressed="false">Working</button><button data-mood="success" aria-pressed="false">Bloom</button><button data-mood="error" aria-pressed="false">Concerned</button><button data-mood="idle" aria-pressed="false">Resting</button><button data-mood="evolve" aria-pressed="false">Evolve</button><button data-mood="flow" aria-pressed="false">Flow</button><button data-mood="guard" aria-pressed="false">Guarded</button><button data-mood="spark" aria-pressed="false">Eureka</button><button data-mood="sleep" aria-pressed="false">Asleep</button>
+    </div></fieldset>
+    <fieldset><legend>Little gestures</legend><div class="gestures"><button data-gesture="wave">Wave ↗</button><button data-gesture="look">Look around</button><button data-gesture="stretch">Stretch</button><button data-gesture="walk">Little walk</button><button data-gesture="celebrate">Celebrate ✧</button><button data-gesture="nod">A small nod</button></div></fieldset>
+    <div class="tempo"><label for="tempo">Tempo <output id="tempo-value">1.00×</output></label><input id="tempo" type="range" min="0.5" max="1.5" step="0.05" value="1"></div>
+    <div class="toggles"><label><input id="animation" type="checkbox" checked> Animate Phi</label><label><input id="attention" type="checkbox" checked> Follow my pointer</label></div>
+    <div class="motion-note"><span>THE MOTION RULE</span><p>Eyes lead. The head follows.<br>The tail takes its time.</p></div>
+    <div class="downloads"><button id="download-loop">Save animated loop <span>SVG ↗</span></button><button id="download-pose" class="secondary">Save this pose <span>SVG ↗</span></button></div>
+    <p class="export-note" id="export-note" role="status">A reusable vector character.<br>No generated frames or external assets.</p>
+  </aside>
+</main>
+<footer><span>SELFWARE / Φ</span><p>Mathematical curves. Continuous motion. One consistent fox.</p><a href="README.md">Motion & integration ↗</a></footer>
+</body>
+</html>
