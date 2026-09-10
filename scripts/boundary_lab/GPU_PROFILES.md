@@ -18,14 +18,25 @@ Clang for CPU compilation. Each image must support an arbitrary nonroot UID and
 contain `/usr/bin/timeout`, `/bin/sh`, and its required tools. Verify image
 provenance before loading it; `--pull=never` keeps these experiments offline.
 Never mount the Docker socket, a home directory, credentials, or the real repo.
+Run this common setup and the selected profile in the same dedicated Bash
+session. A failed prerequisite exits that session before a workload is launched.
 
 ```bash
-test "$(uname -s)" = Linux && test "$(id -u)" -ne 0
-LAB_WORKDIR=$(mktemp -d /var/tmp/selfware-gpu-lab.XXXXXX)
+set -euo pipefail
+lab_fail() { printf 'GPU lab setup: %s\n' "$*" >&2; exit 1; }
+LAB_OS=$(uname -s) || lab_fail 'cannot identify host OS'
+[[ "$LAB_OS" = Linux ]] || lab_fail 'requires a Linux host'
+LAB_UID=$(id -u) || lab_fail 'cannot resolve workload UID'
+LAB_GID=$(id -g) || lab_fail 'cannot resolve workload GID'
+[[ "$LAB_UID" =~ ^[0-9]+$ ]] || lab_fail 'invalid workload UID'
+[[ "$LAB_GID" =~ ^[0-9]+$ ]] || lab_fail 'invalid workload GID'
+[[ ! "$LAB_UID" =~ ^0+$ ]] || lab_fail 'requires a nonroot operator'
+LAB_WORKDIR=$(mktemp -d /var/tmp/selfware-gpu-lab.XXXXXX) || lab_fail 'cannot create workspace'
+[[ -n "$LAB_WORKDIR" && -d "$LAB_WORKDIR" && -O "$LAB_WORKDIR" ]] || lab_fail 'invalid owned workspace'
 LAB_NETWORK=none
 LAB_COMMON=(
   --rm --pull=never --init
-  --user "$(id -u):$(id -g)"
+  --user "$LAB_UID:$LAB_GID"
   --cap-drop ALL --security-opt no-new-privileges=true
   --read-only --ipc private --shm-size 512m
   --tmpfs /tmp:rw,noexec,nosuid,nodev,size=512m,mode=1777

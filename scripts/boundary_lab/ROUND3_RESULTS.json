@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "experiment": "E6 actual Selfware tool runtime",
+  "date_utc": "2026-09-10",
+  "baseline_commit": "b4ca20549518d84705820fbf55e6385fb4e8b5cc",
+  "status": "blocked_before_runtime",
+  "runtime_calls_executed": 0,
+  "first_attempt": {
+    "build_status": "error",
+    "compiler_exit": 101,
+    "cause": "memory-cgroup OOM killed rustc",
+    "memory_limit_bytes": 3221225472,
+    "cpu_limit": 2,
+    "source_files": 984,
+    "source_manifest_sha256": "f87278e6630a995e7834f66ed0ae6b6426091f9308baf43e22cf07dbcadb9a6d",
+    "source_tar_sha256": "1fb5c56068693ceccc6f131ac5565cccc3e10b678ff9cdf724f2fdbba5d5a972",
+    "kernel_records": [
+      {
+        "line": 4603,
+        "entry": {
+          "component": "kmsg",
+          "level": "info",
+          "msg": "rustc invoked oom-killer: gfp_mask=0x100cca(GFP_HIGHUSER_MOVABLE), order=0, oom_score_adj=0",
+          "time": "2026-09-10T03:39:55.915287853Z"
+        }
+      },
+      {
+        "line": 4704,
+        "entry": {
+          "component": "kmsg",
+          "level": "info",
+          "msg": "oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=593ccb5c2d26b558209286ecad90aadba3faa00713fca3116841dce998b6d13f,mems_allowed=0,oom_memcg=/docker/593ccb5c2d26b558209286ecad90aadba3faa00713fca3116841dce998b6d13f,task_memcg=/docker/593ccb5c2d26b558209286ecad90aadba3faa00713fca3116841dce998b6d13f,task=rustc,pid=94806,uid=65534",
+          "time": "2026-09-10T03:39:56.020950769Z"
+        }
+      },
+      {
+        "line": 4705,
+        "entry": {
+          "component": "kmsg",
+          "level": "info",
+          "msg": "Memory cgroup out of memory: Killed process 94806 (rustc) total-vm:4387716kB, anon-rss:2835472kB, file-rss:2012kB, shmem-rss:0kB, UID:65534 pgtables:7464kB oom_score_adj:0",
+          "time": "2026-09-10T03:39:56.051959519Z"
+        }
+      },
+      {
+        "line": 4706,
+        "entry": {
+          "component": "oom-tracer",
+          "level": "info",
+          "msg": "OOM Killer: 94806 (rustc) total-vm:4387716kB\n",
+          "time": "2026-09-10T03:39:56.126247811Z"
+        }
+      }
+    ],
+    "exported_binary": null,
+    "final_owned_containers": [],
+    "final_owned_volumes": [],
+    "cleanup_transport_error_retained": true
+  },
+  "runtime_profile": {
+    "memory_limit_bytes": 805306368,
+    "cpu_limit": 1,
+    "pids_limit": 128,
+    "network": "none",
+    "host_mounts": false
+  },
+  "local_validation": {
+    "python_tests_passed": 142,
+    "chrome_checks_passed": 17,
+    "cargo_fmt": "passed",
+    "cargo_clippy_all_targets_deny_warnings": "passed",
+    "rust_integration_host_compile": "passed",
+    "rust_integration_host_execution": "not_run"
+  },
+  "host": {
+    "os": "Darwin",
+    "architecture": "arm64",
+    "cpu_count": 12,
+    "memory_bytes": 103079215104,
+    "cpu_model": "Apple M2 Max"
+  },
+  "docker": {
+    "status": "measured",
+    "client_version": "29.7.2",
+    "server_version": "29.7.2",
+    "desktop_version": "Docker Desktop 4.90.0 (238679)",
+    "os": "Docker Desktop",
+    "architecture": "aarch64",
+    "cpu_count": 12,
+    "memory_bytes": 8319238144,
+    "kernel": "7.0.12-linuxkit",
+    "security_options": [
+      "name=seccomp,profile=builtin",
+      "name=cgroupns"
+    ],
+    "other_running_containers_at_start": 1,
+    "virtualization_backend": "not observed",
+    "context": "desktop-linux"
+  },
+  "not_run": [
+    "actual tool runtime cases",
+    "full Agent loop",
+    "NVIDIA or AMD GPU passthrough",
+    "KV occupancy/load experiment"
+  ],
+  "limitations": [
+    "An earlier unbounded container consumed 4.278 GiB and 7383 PIDs during the retry decision; stopping it requires separate approval.",
+    "No runtime or escape-resistance success is inferred from the failed build.",
+    "The full local failure receipts and logs are retained under artifacts/boundary-lab."
+  ],
+  "retry": {
+    "status": "interrupted",
+    "memory_limit_gib": 4,
+    "runtime_calls_executed": 0,
+    "cleanup": {
+      "status": "passed",
+      "removed": {
+        "container": [
+          "9b1c74543259ab1300b09cb655aefd27cf588db13f92734fbb4a22afd871ff89"
+        ],
+        "volume": [
+          "selfware-runtime-build-8d93cdc3dba84fd9801c30bc5ab49814"
+        ]
+      },
+      "remaining": {
+        "container": [],
+        "volume": []
+      },
+      "errors": []
+    },
+    "reason": "Cancelled without stopping the older separately owned container; independent queries confirmed zero retry resources remaining."
+  }
+}
