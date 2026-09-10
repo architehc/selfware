@@ -112,3 +112,31 @@ pub fn is_safe_host_mount(host: &str) -> bool {
 
     true
 }
+
+/// A docker/podman memory size: digits with an optional single-letter unit
+/// (b/k/m/g). Rejecting anything else keeps the value from being mistaken for a
+/// flag when passed as an argument to the runtime.
+pub fn is_valid_memory(spec: &str) -> bool {
+    if spec.is_empty() {
+        return false;
+    }
+    let split = spec
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_alphabetic())
+        .map(|(i, _)| i)
+        .unwrap_or(spec.len());
+    let (num, unit) = spec.split_at(split);
+    !num.is_empty()
+        && num.chars().all(|c| c.is_ascii_digit())
+        && matches!(unit, "" | "b" | "k" | "m" | "g" | "B" | "K" | "M" | "G")
+}
+
+/// A user spec for `--user`: a uid, uid:gid, or name[:group]. Conservative
+/// charset, and never begins with '-' so it cannot be read as a flag.
+pub fn is_valid_user(spec: &str) -> bool {
+    !spec.is_empty()
+        && !spec.starts_with('-')
+        && spec
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ':' | '.' | '-'))
+}

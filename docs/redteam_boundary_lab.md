@@ -188,3 +188,21 @@ determined exfil could still tunnel data to an *on-list* host it controls a path
 (e.g. a gist, a public bucket under an allowed CDN). Tightening means per-path
 rules or an mTLS forward-proxy — out of scope here; the current seal stops the
 opportunistic supply-chain payload, which is the stated threat model.
+
+## Follow-up (shipped): ContainerRun applies a profile by default
+
+The Round-1 finding was that `ContainerRun::execute` emitted a bare `docker run`
+(open profile: 0/7 contained). It now applies a `profile` by default:
+
+- **`hardened`** (default) — `--security-opt no-new-privileges`, `--pids-limit`,
+  `--memory`/`--memory-swap`, and drops `NET_RAW`+`MKNOD`. Keeps root, a writable
+  rootfs and networking so ordinary build/dev images keep working. Verified live:
+  container runs normally, `NoNewPrivs=1`, rootfs still writable.
+- **`sealed`** — hardened plus `--cap-drop ALL`, `--read-only`, `tmpfs /tmp`, and
+  a non-root `--user` (default 65534). For untrusted code; pair with
+  `network: "none"`. Verified live: uid 65534, rootfs read-only, `/tmp` writable.
+- **`unsafe`** — no added isolation, an explicit opt-out for the rare case.
+
+Flag construction is the pure, unit-tested `security_flags()` (mirrors
+`scripts/redteam_defense_matrix.sh`); `memory`/`user` inputs are validated so an
+adversarial value can never be forwarded to the runtime as a flag.
