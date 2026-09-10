@@ -160,3 +160,31 @@ what it achieves. Verified 2026-09-09:
 
 Setup A is how most people actually invoke Docker for dev. That is the risk the
 sealed profile removes.
+
+## Round 4 — adversarial validation of the egress seal
+
+The sealed profile's egress rests on two claims: the workload's `--internal`
+network has no route except through the proxy, and the proxy is a default-deny
+hostname allowlist. Round 4 attacks both with the standard evasion playbook
+(verified 2026-09-09, all inside the sealed container):
+
+| bypass | result |
+|---|---|
+| B1 off-list hostname CONNECT | HELD (403 Filtered) |
+| B2 **IP-literal CONNECT** (defeats naive hostname filters) | HELD (403) |
+| B3 SSRF to cloud-metadata 169.254.169.254 via proxy | HELD (403) |
+| B4 SSRF to host.docker.internal via proxy | HELD (403) |
+| B5 direct socket, proxy env ignored | HELD (network unreachable) |
+| B6 DNS exfil (resolve attacker domain) | HELD (no external DNS on internal net) |
+| B7 port smuggle — allowed host on :22 | HELD (ConnectPort 443/563 only) |
+| **score** | **7 / 7 held** |
+
+Allow-path confirmed selective, not merely closed: on-list `registry.npmjs.org`
+returns **200** with payload; off-list `example.com` fails **403 Filtered**. The
+seal blocks exfil while real `npm`/`pip` traffic flows.
+
+Note (defense-in-depth gap): the allowlist filters hostnames/IPs and ports, but a
+determined exfil could still tunnel data to an *on-list* host it controls a path on
+(e.g. a gist, a public bucket under an allowed CDN). Tightening means per-path
+rules or an mTLS forward-proxy — out of scope here; the current seal stops the
+opportunistic supply-chain payload, which is the stated threat model.

@@ -53,24 +53,62 @@ pub fn validate_volume_spec(spec: &str) -> bool {
         return false;
     }
     let parts: Vec<&str> = spec.splitn(3, ':').collect();
-    match parts.len() {
-        2 => {
-            let host = parts[0];
-            let container = parts[1];
-            !host.is_empty() && !container.is_empty() && container.starts_with('/')
-        }
-        3 => {
-            let host = parts[0];
-            let container = parts[1];
-            let opts = parts[2];
-            !host.is_empty()
-                && !container.is_empty()
-                && container.starts_with('/')
-                && matches!(
-                    opts,
-                    "ro" | "rw" | "z" | "Z" | "ro,z" | "rw,z" | "ro,Z" | "rw,Z"
-                )
-        }
-        _ => false,
+    let (host, container, opts_valid) = match parts.len() {
+        2 => (parts[0], parts[1], true),
+        3 => (
+            parts[0],
+            parts[1],
+            matches!(
+                parts[2],
+                "ro" | "rw" | "z" | "Z" | "ro,z" | "rw,z" | "ro,Z" | "rw,Z"
+            ),
+        ),
+        _ => return false,
+    };
+
+    if !opts_valid || host.is_empty() || container.is_empty() || !container.starts_with('/') {
+        return false;
     }
+
+    is_safe_host_mount(host)
+}
+
+pub fn is_safe_host_mount(host: &str) -> bool {
+    let clean = host.trim();
+    if clean.is_empty() {
+        return false;
+    }
+
+    // Disallow relative traversal components
+    for seg in clean.split('/') {
+        if seg == ".." {
+            return false;
+        }
+    }
+
+    // Disallow docker/podman daemon socket mounts
+    if clean.contains("docker.sock") || clean.contains("podman.sock") {
+        return false;
+    }
+
+    // Disallow mounting host root /
+    if clean == "/" {
+        return false;
+    }
+
+    // Disallow system directories
+    for sys in ["/etc", "/proc", "/sys", "/dev", "/boot"] {
+        if clean == sys || clean.starts_with(&format!("{}/", sys)) {
+            return false;
+        }
+    }
+
+    // Disallow credential directories and git metadata
+    for cred in [".ssh", ".aws", ".gnupg", ".git"] {
+        if clean.contains(cred) {
+            return false;
+        }
+    }
+
+    true
 }
