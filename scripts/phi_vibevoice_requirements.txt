@@ -1,0 +1,4 @@
+onnxruntime==1.29.0
+numpy==2.5.3
+tokenizers==0.23.2
+huggingface-hub==1.31.0

@@ -55,8 +55,8 @@ export class PhiAgentOrchestrator {
           {
             line: 32,
             emotion: 'god_mode',
-            text: "All sandbox boundaries verified. Sealed execution container is mathematically contained in zero-trust isolation!",
-            status: "God Mode · Verified"
+            text: "This demonstration shows the intended sandbox flags. Runtime containment still needs separate verification.",
+            status: "Example walkthrough complete"
           }
         ]
       },
@@ -88,8 +88,8 @@ export class PhiAgentOrchestrator {
           {
             line: 24,
             emotion: 'god_mode',
-            text: "Host containment intact. Zero malicious mount vectors can breach host file integrity!",
-            status: "God Mode · Complete"
+            text: "These example checks illustrate mount restrictions. A full review must examine the real validator and its callers.",
+            status: "Example walkthrough complete"
           }
         ]
       },
@@ -98,7 +98,7 @@ export class PhiAgentOrchestrator {
         id: 'radix_attention',
         title: 'RadixAttention KV Cache Zero-Leak Verification',
         file: 'scripts/radix_cache_stress.py',
-        description: 'Verify prefix caching isolation across 16 concurrent inference streams on 8x H100s.',
+        description: 'Explore a sample prefix-caching check; no hardware is probed by this walkthrough.',
         steps: [
           {
             line: 3,
@@ -115,8 +115,8 @@ export class PhiAgentOrchestrator {
           {
             line: 16,
             emotion: 'god_mode',
-            text: "Zero cross-stream cache contamination detected. Radix tree maintains absolute token isolation!",
-            status: "God Mode · Transcendent"
+            text: "This example checks returned nonces. It does not prove that a cache is isolated.",
+            status: "Example walkthrough complete"
           }
         ]
       }
@@ -149,7 +149,7 @@ export class PhiAgentOrchestrator {
           steps.push({
             line: lineNum,
             emotion: 'analytical',
-            text: `Look at this conditional logic on line ${lineNum}. It enforces branching guarantees before proceeding.`,
+            text: `Look at this conditional logic on line ${lineNum}. The branch changes which path execution takes.`,
             status: `Branch Verification`
           });
         }
@@ -157,7 +157,7 @@ export class PhiAgentOrchestrator {
         steps.push({
           line: lineNum,
           emotion: 'alert',
-          text: `Pay close attention here: safety validation and invariant checks safeguard execution against untrusted states.`,
+          text: `Pay close attention here: the source mentions a check. Its correctness needs a grounded review.`,
           status: `Safety Gate Check`
         });
       }
@@ -175,7 +175,7 @@ export class PhiAgentOrchestrator {
         steps.push({
           line: Math.min(lines.length, 8),
           emotion: 'focused',
-          text: `Moving through the logic body. Code formatting and structures are clean.`,
+          text: `Moving through the logic body. We can read the source together.`,
           status: `Logic Scan`
         });
       }
@@ -185,8 +185,8 @@ export class PhiAgentOrchestrator {
     steps.push({
       line: Math.min(lines.length, steps[steps.length - 1].line + 4),
       emotion: 'god_mode',
-      text: `Deep inspection completed. All code structures, security invariants, and memory lifetimes are fully accounted for.`,
-      status: `God Mode · Verified`
+      text: `This local outline is complete. No model review or code verification has run.`,
+      status: `Example walkthrough complete`
     });
 
     return {
@@ -197,48 +197,32 @@ export class PhiAgentOrchestrator {
     };
   }
 
-  // Run a complete reading mission with coordinated flight, visemes, and laser focus
+  // Every mission owns its cancellation generation, including awaited speech.
   async runMission(mission, onStepCallback = null) {
-    if (this.isRunning) return;
+    this.cancelMission();
+    const generation = this.generation;
     this.isRunning = true;
     this.shouldCancel = false;
-
     try {
-      this.rig.setEmotion('curious');
-
       for (let i = 0; i < mission.steps.length; i++) {
-        if (this.shouldCancel) break;
-
+        if (generation !== this.generation) return { status: 'cancelled' };
         const step = mission.steps[i];
-        if (onStepCallback) onStepCallback(step, i, mission.steps.length);
-
-        await this.focus.focusLine(step.line, {
-          spokenText: step.text,
-          speechStatus: step.status || `Step ${i + 1}/${mission.steps.length}`,
-          emotion: step.emotion || 'focused',
-          laser: true
-        });
-
-        // Small pause between steps for natural breathing rhythm
-        await new Promise(r => setTimeout(r, 450));
+        onStepCallback?.(step, i, mission.steps.length);
+        const options = { spokenText: step.text, speechStatus: step.status || `Step ${i + 1} of ${mission.steps.length}`,
+          emotion: step.emotion || 'focused', laser: true, ...(step.speechOptions || {}), speechOptions: step.speechOptions || {} };
+        const receipt = step.range && this.focus.focusRange
+          ? await this.focus.focusRange(step.range, options)
+          : await this.focus.focusLine(step.line, options);
+        if (generation !== this.generation) return { status: 'cancelled' };
+        if (receipt?.status === 'error' || receipt?.status === 'cancelled') return receipt;
       }
-
-      if (!this.shouldCancel) {
-        this.rig.setEmotion('god_mode');
-        this.rig.setSpeechText("Full code reading mission complete! Standing by for your next instruction.", "Phi · God Mode Ready");
-      }
-    } finally {
-      this.isRunning = false;
-      this.focus.clearFocus();
-    }
+      return { status: 'completed' };
+    } finally { if (generation === this.generation) this.isRunning = false; }
   }
 
   cancelMission() {
-    this.shouldCancel = true;
-    this.isRunning = false;
-    this.viseme.stop();
-    this.focus.clearFocus();
-    this.rig.setEmotion('curious');
-    this.rig.setSpeechText("Mission paused. How can I help you?", "Phi · Ready");
+    this.generation = (this.generation || 0) + 1;
+    this.shouldCancel = true; this.isRunning = false;
+    this.viseme.stop(); this.focus.clearFocus();
   }
 }

@@ -134,6 +134,7 @@ async fn test_server_applies_local_only_browser_security_headers() {
         .unwrap();
     assert!(policy.contains("script-src 'self'"));
     assert!(policy.contains("connect-src 'self'"));
+    assert!(policy.contains("media-src 'self' blob:"));
     assert!(!policy.contains("http:"));
     assert!(!policy.contains("https:"));
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
@@ -191,6 +192,66 @@ async fn test_workspace_bootstraps_session_and_grounded_capabilities() {
     );
     assert_eq!(json["capabilities"]["deletion_preview"], true);
     assert_eq!(json["capabilities"]["deletion_execute"], false);
+    assert_eq!(json["capabilities"]["branch_creation"], true);
+    assert_eq!(json["git"]["available"], true);
+    assert_eq!(
+        json["git"]["head"],
+        repository.head().unwrap().target().unwrap().to_string()
+    );
+    assert!(json["git"].get("error").is_none());
+}
+
+#[tokio::test]
+async fn test_workspace_bootstraps_plain_folder_with_unavailable_git() {
+    assert_workspace_without_git_head(false).await;
+}
+
+#[tokio::test]
+async fn test_workspace_bootstraps_unborn_repository_with_unavailable_git() {
+    assert_workspace_without_git_head(true).await;
+}
+
+async fn assert_workspace_without_git_head(initialize_git: bool) {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+    if initialize_git {
+        git2::Repository::init(root.path()).unwrap();
+    } else {
+        assert!(git2::Repository::discover(root.path()).is_err());
+    }
+    let server = EvolveServer::for_project(Graph::default(), root.path()).unwrap();
+    let (status, json) = get_json(&server, "/api/workspace").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["session_token"], server.session_token());
+    assert!(!json["session_token"].as_str().unwrap().is_empty());
+    assert_eq!(
+        json["root"],
+        std::fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .to_string()
+    );
+    assert_eq!(json["git"]["available"], false);
+    assert_eq!(json["git"]["error"]["code"], "git_status_unavailable");
+    assert!(json["git"]["error"]["detail"]
+        .as_str()
+        .unwrap()
+        .contains(if initialize_git {
+            "repository has no HEAD"
+        } else {
+            "not inside a git repository"
+        }));
+    for unknown in ["head", "branch", "dirty", "files"] {
+        assert_eq!(json["git"].get(unknown), Some(&Value::Null), "{unknown}");
+    }
+    assert_eq!(json["capabilities"]["branch_creation"], false);
+    assert_eq!(json["capabilities"]["checked_writes"], true);
+    assert_eq!(json["capabilities"]["grounded_review"], true);
+
+    let (status, document) = get_json(&server, "/api/ide/document?path=src/main.rs").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(document["content"], "fn main() {}\n");
 }
 
 #[tokio::test]
@@ -496,19 +557,23 @@ async fn test_review_status_requires_session() {
     assert!(json["error"].as_str().unwrap().contains("session token"));
 }
 
-/// A valid review POST must return 202 with a job id and register a Running
+/// A valid review POST must return 202 with a job id and register a Queued
 /// job without waiting for the model. The endpoint points at a TCP listener
 /// that accepts and never responds, so the background review stays in-flight
 /// (the client's response timeout is minutes) and the Running state is
-/// deterministic; the spawned task is aborted when the test runtime ends.
+/// deterministic. A second job stays queued while the first holds the model
+/// permit; both spawned tasks are aborted when the test runtime ends.
 #[tokio::test]
-async fn test_grounded_review_returns_202_with_running_job() {
+async fn test_grounded_review_returns_202_and_distinguishes_queued_from_running() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
+    let request_seen = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify_request = request_seen.clone();
     tokio::spawn(async move {
         let mut held = Vec::new();
         while let Ok((socket, _)) = listener.accept().await {
             held.push(socket);
+            notify_request.notify_one();
         }
     });
     let project = tempfile::tempdir().unwrap();
@@ -549,9 +614,13 @@ async fn test_grounded_review_returns_202_with_running_job() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED, "{body}");
     let accepted: Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(accepted["status"], "running");
+    assert_eq!(accepted["status"], "queued");
     let job_id = accepted["job_id"].as_str().unwrap();
     assert_eq!(job_id.len(), 36);
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), request_seen.notified())
+        .await
+        .expect("first job must start the model request");
 
     let (status, job) = get_json_auth(
         &server,
@@ -560,6 +629,31 @@ async fn test_grounded_review_returns_202_with_running_job() {
     .await;
     assert_eq!(status, StatusCode::OK, "{job}");
     assert_eq!(job["status"], "running");
+
+    let (status, body) = post_json(
+        &server,
+        "/api/assistant/review",
+        json!({
+            "path": "src/reviewed.rs",
+            "question": "A second review of this file",
+            "expected_hash": document["hash"],
+            "mode": "full_extended",
+            "scope": "selected_document"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let second: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(second["status"], "queued");
+    let second_id = second["job_id"].as_str().unwrap();
+    assert_ne!(second_id, job_id);
+    let (status, second_status) = get_json_auth(
+        &server,
+        &format!("/api/assistant/review/status?id={second_id}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second_status["status"], "queued");
 }
 
 #[tokio::test]

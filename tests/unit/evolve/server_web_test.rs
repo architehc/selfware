@@ -62,6 +62,71 @@ async fn app_js_is_served_from_embedded_assets_without_web_dir() {
 }
 
 #[tokio::test]
+async fn phi_assets_are_complete_in_embedded_release_mode() {
+    // Enumerate the shipped Phi tree so a new module, dictionary, or image
+    // cannot work only in a source checkout while silently missing from the
+    // embedded release. Ignore no runtime asset extensions.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/evolve/web/phi");
+    let mut pending = vec![root.clone()];
+    let mut checked = Vec::new();
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(&root).unwrap().to_string_lossy();
+            let uri = format!("/phi/{}", relative.replace('\\', "/"));
+            let response = embedded_router()
+                .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "missing embedded {uri}");
+            let expected_mime = match path.extension().and_then(|value| value.to_str()) {
+                Some("html") => "text/html; charset=utf-8",
+                Some("js") => "text/javascript; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("jpg") => "image/jpeg",
+                Some("json") => "application/json",
+                _ => "text/plain; charset=utf-8",
+            };
+            assert_eq!(response.headers()["content-type"], expected_mime, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let expected = std::fs::read(&path).unwrap();
+            assert!(
+                body.as_ref() == expected.as_slice(),
+                "embedded {uri} differs from source ({} versus {} bytes); rebuild after asset edits",
+                body.len(),
+                expected.len()
+            );
+            checked.push(uri);
+        }
+    }
+    assert!(checked.iter().any(|uri| uri.ends_with("/phi_workspace.js")));
+    assert!(checked.iter().any(|uri| uri.ends_with("/phi_examples.js")));
+    assert!(checked.iter().any(|uri| uri.ends_with("/cmudict.dict")));
+    assert!(checked.iter().any(|uri| uri.ends_with("/CMUDICT-LICENSE")));
+}
+
+#[tokio::test]
+async fn phi_directory_alias_preserves_relative_asset_urls() {
+    let response = embedded_router()
+        .oneshot(Request::builder().uri("/phi").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+    assert_eq!(response.headers()["location"], "/phi/");
+    let (status, content_type, body) = get(embedded_router(), "/phi/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type.as_deref(), Some("text/html; charset=utf-8"));
+    assert_eq!(body, include_str!("../../../src/evolve/web/phi/index.html"));
+}
+
+#[tokio::test]
 async fn style_and_editor_are_served_from_embedded_assets() {
     let (status, content_type, body) = get(embedded_router(), "/style.css").await;
     assert_eq!(status, StatusCode::OK);

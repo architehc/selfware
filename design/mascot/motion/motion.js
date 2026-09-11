@@ -75,6 +75,7 @@
   function pose(mood, clock, age, options = {}) {
     if (!Object.prototype.hasOwnProperty.call(profiles, mood)) throw new RangeError("Unknown Phi state: " + mood);
     const p = { ...R.base, ...profiles[mood].pose }, phase = TAU * clock / (options.loop ? 6 : 7.4);
+    if (options.mouthOpen !== undefined) p.mouthOpen = options.mouthOpen;
     if (options.static) return p;
     const quiet = mood === "sleep" || mood === "guard" || mood === "error";
     p.stretch += (mood === "sleep" ? .006 : .0035) * Math.sin(phase);
@@ -125,6 +126,7 @@
     return p;
   }
   function omegaFor(key) {
+    if (key === "mouthOpen") return 24;
     if (/^eye/.test(key)) return 32;
     if (/^gaze/.test(key)) return 19;
     if (/^tail/.test(key)) return 6.2;
@@ -140,6 +142,7 @@
       this.clock = 0; this.age = 0; this.gestureName = null; this.gestureAge = 0;
       this.tempo = 1; this.enabled = options.animate !== false; this.followPointer = true;
       this.pointer = { x: 0, y: 0 }; this.pointerSeen = false; this.auto = options.showreel !== false;
+      this.mouthOpen = 0;
       this.reelIndex = 0; this.reelAge = 0; this.frame = null; this.lastTime = null; this.destroyed = false;
       this.reduced = matchMedia("(prefers-reduced-motion: reduce)");
       this.springs = Object.fromEntries(Object.entries(pose(this.mood, 0, 0, { static: true })).map(([key, value]) => [key, new Spring(value, omegaFor(key))]));
@@ -153,8 +156,8 @@
         this.pointerSeen = true;
       };
       this.leaveHandler = () => { this.pointerSeen = false; };
-      this.visibilityHandler = () => { this.lastTime = null; this.sync(); };
-      this.reducedHandler = () => this.sync();
+      this.visibilityHandler = () => { this.lastTime = null; this.sync(); this.emit(); };
+      this.reducedHandler = () => { this.sync(); this.emit(); };
       document.addEventListener("pointermove", this.pointerHandler, { passive: true });
       document.addEventListener("pointerleave", this.leaveHandler);
       document.addEventListener("visibilitychange", this.visibilityHandler);
@@ -183,38 +186,45 @@
       if (!Number.isFinite(value) || value < .5 || value > 1.5) throw new RangeError("Tempo must be between 0.5 and 1.5");
       this.tempo = value; return this;
     }
+    setMouth(open) {
+      this.mouthOpen = clamp(open, 0, 1);
+      return this;
+    }
     setAnimation(enabled) { this.enabled = Boolean(enabled); this.sync(); this.emit(); return this; }
     setAttention(enabled) { this.followPointer = Boolean(enabled); return this; }
     setShowreel(enabled) {
       this.auto = Boolean(enabled); this.reelAge = 0; this.reelIndex = Math.max(0, reel.indexOf(this.mood)); this.emit(); return this;
     }
     drawStatic() {
-      const p = pose(this.mood, 0, 0, { static: true });
+      const p = pose(this.mood, 0, 0, { static: true, mouthOpen: this.mouthOpen });
       if (this.gestureName) applyGesture(p, this.gestureName, 1.4);
       for (const [key, value] of Object.entries(p)) this.springs[key].snap(value);
       this.lastPose = this.rig.draw(p);
     }
     sync() {
-      if (!this.active) { if (this.frame !== null) cancelAnimationFrame(this.frame); this.frame = null; this.lastTime = null; if (this.reduced.matches) this.drawStatic(); }
+      if (!this.active) { if (this.frame !== null) cancelAnimationFrame(this.frame); this.frame = null; this.lastTime = null; if (this.reduced.matches && !this.destroyed) this.drawStatic(); }
       else if (this.frame === null) this.frame = requestAnimationFrame(this.tick);
     }
     tick(ms) {
       this.frame = null;
       if (!this.active) return;
-      const dt = this.lastTime === null ? 1 / 60 : clamp((ms - this.lastTime) / 1000, .0001, .05);
+      // Preserve real time at ordinary frame rates; bound long foreground stalls.
+      const dt = this.lastTime === null ? 1 / 60 : clamp((ms - this.lastTime) / 1000, 0, .25);
       this.lastTime = ms; const step = dt * this.tempo; this.clock += step; this.age += step;
       if (this.gestureName) { this.gestureAge += step; if (this.gestureAge > 6) { this.gestureName = null; this.emit(); } }
       if (this.auto) {
         this.reelAge += step;
         if (this.reelAge >= 8) { this.reelAge -= 8; this.reelIndex = (this.reelIndex + 1) % reel.length; this.setState(reel[this.reelIndex], { fromReel: true }); }
       }
-      const target = pose(this.mood, this.clock, this.age, { gesture: this.gestureName, gestureAge: this.gestureAge, pointer: this.followPointer && this.pointerSeen ? this.pointer : null });
+      if (!this.active) { this.sync(); return; }
+      const target = pose(this.mood, this.clock, this.age, { gesture: this.gestureName, gestureAge: this.gestureAge, pointer: this.followPointer && this.pointerSeen ? this.pointer : null, mouthOpen: this.mouthOpen });
       const current = {};
       for (const [key, value] of Object.entries(target)) current[key] = this.springs[key].step(value, dt);
       const started = performance.now(); this.lastPose = this.rig.draw(current); const elapsed = performance.now() - started;
       this.metrics.frames++; this.metrics.drawMs += elapsed; this.metrics.maxDrawMs = Math.max(this.metrics.maxDrawMs, elapsed);
       this.onFrame({ progress: this.auto ? this.reelAge / 8 : 0, clock: this.clock });
-      this.frame = requestAnimationFrame(this.tick);
+      // Callbacks may pause, destroy, or schedule the controller themselves.
+      this.sync();
     }
     snapshot() {
       const root = this.rig.svg.cloneNode(true);

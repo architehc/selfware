@@ -1,0 +1,22 @@
+{
+  "source": "Carnegie Mellon Pronouncing Dictionary (CMUdict)",
+  "repository": "https://github.com/cmusphinx/cmudict",
+  "commit": "74790861f652b15e4ac49015a90074ad62a27690",
+  "files": [
+    {
+      "file": "cmudict.dict",
+      "upstream_url": "https://raw.githubusercontent.com/cmusphinx/cmudict/74790861f652b15e4ac49015a90074ad62a27690/cmudict.dict",
+      "sha256": "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22",
+      "bytes": 3618488
+    },
+    {
+      "file": "CMUDICT-LICENSE",
+      "upstream_url": "https://raw.githubusercontent.com/cmusphinx/cmudict/74790861f652b15e4ac49015a90074ad62a27690/LICENSE",
+      "sha256": "bd4ce8e44170a5f9f481310ca85c51de3c4f851a65e679b40e603b143bd3542a",
+      "bytes": 1754
+    }
+  ],
+  "retrieved_at": "2026-09-10",
+  "format": "Unmodified upstream ARPAbet dictionary; first pronunciation selected for homographs; stress digits ignored only at runtime for visual mapping.",
+  "limitations": "US English pronunciation dictionary, not measured audio timing. Unknown words and code identifiers use labeled heuristic fallback."
+}

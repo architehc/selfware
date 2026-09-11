@@ -24,9 +24,33 @@ export const VISEMES = {
   WQ: 'wq'        // Tight pucker: W, Q
 };
 
+// Shared topology keeps lips, cavity, teeth and tongue continuous even when a
+// phoneme interrupts an unfinished transition. Values are art coordinates, not
+// measurements of speech or audio amplitude.
+// half-width, corner Y, top, bottom, roundness, teeth, tongue, tongue Y, tongue width
+const MOUTH_POSES = {
+  rest: [8, 103, 103, 103, .65, 0, 0, 103, 4],
+  mbp: [9, 103, 103, 103, .85, 0, 0, 103, 4],
+  etc: [9, 103, 102, 106, .70, .9, 0, 105, 4],
+  ai: [10, 103, 100, 113, .60, .8, .9, 110, 6],
+  e: [12, 103, 102, 107, .85, 1, .3, 106, 6],
+  o: [6, 103, 98, 110, .55, .3, .7, 107, 4],
+  u: [4, 103, 100, 107, .55, 0, 0, 105, 3],
+  fv: [9, 103, 102, 105, .85, 1, 0, 104, 4],
+  l_th: [9, 103, 101, 109, .70, .7, 1, 104, 3],
+  wq: [4, 103, 101, 106, .85, 0, 0, 104, 3]
+};
+const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+const finite = (value, fallback = 0) => Number.isFinite(value) ? value : fallback;
+const ease = (rate, dt) => -Math.expm1(-rate * dt);
+let rigSequence = 0;
+
 export class PhiMascotRig {
   constructor(containerElement, options = {}) {
-    this.container = containerElement;
+    this.container = containerElement || document.body;
+    this.destroyed = false;
+    this.listeners = [];
+    this.instanceId = `phi-rig-${++rigSequence}`;
     this.options = Object.assign({
       width: 260,
       height: 260,
@@ -36,9 +60,19 @@ export class PhiMascotRig {
       godMode: false
     }, options);
 
+    this.options.width = Math.max(48, finite(this.options.width, 260));
+    this.options.height = Math.max(48, finite(this.options.height, 260));
+    this.options.flightSpeed = clamp(finite(this.options.flightSpeed, .12), .01, .5);
+    this.motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    this.reducedMotionOverride = typeof options.reducedMotion === 'boolean' ? options.reducedMotion : null;
+    this.reducedMotion = this.reducedMotionOverride ?? this.motionQuery.matches;
+    this.avoidRect = null;
+    this.renderX = this.renderY = 0;
+    this.emberAccumulator = 0;
+
     // Spatial State
-    this.x = this.options.initialX;
-    this.y = this.options.initialY;
+    this.x = finite(this.options.initialX, 16);
+    this.y = finite(this.options.initialY, 160);
     this.targetX = this.x;
     this.targetY = this.y;
     this.vx = 0;
@@ -68,6 +102,9 @@ export class PhiMascotRig {
     this.visemeMorphProgress = 1.0;
     this.mouthOpenness = 0.0;
 
+    this.mouthPose = [...MOUTH_POSES.rest];
+    this.targetMouthPose = [...this.mouthPose];
+
     // Tails Physics Simulation (9 Kitsune tails)
     this.tails = [];
     for (let i = 0; i < 9; i++) {
@@ -92,6 +129,11 @@ export class PhiMascotRig {
 
     this.initDOM();
     this.bindEvents();
+    this.resizeCanvas();
+    this.renderMouth();
+    this.setAudioVolume(0);
+    if (this.godMode) this.setEmotion('god_mode');
+    this.update(0);
   }
 
   initDOM() {
@@ -109,6 +151,10 @@ export class PhiMascotRig {
     // Speech Bubble HUD
     this.bubble = document.createElement('div');
     this.bubble.className = 'phi-speech-bubble';
+    this.bubble.setAttribute('role', 'status');
+    this.bubble.setAttribute('aria-live', 'polite');
+    this.bubble.style.pointerEvents = 'auto';
+    this.bubble.style.transition = 'none';
     this.bubble.innerHTML = `
       <div class="phi-bubble-badge"><span class="phi-dot"></span> <span class="phi-bubble-status">Phi · Ready</span></div>
       <div class="phi-bubble-text">Hi! I'm Phi, your Selfware assistant. Let's inspect some code together!</div>
@@ -125,9 +171,9 @@ export class PhiMascotRig {
     this.laserCanvas.style.height = '100vh';
     this.laserCanvas.style.pointerEvents = 'none';
     this.laserCanvas.style.zIndex = '9998';
-    this.resizeCanvas();
+    this.laserCanvas.setAttribute('aria-hidden', 'true');
     this.laserCtx = this.laserCanvas.getContext('2d');
-    document.body.appendChild(this.laserCanvas);
+    this.container.appendChild(this.laserCanvas);
 
     // Main SVG Puppet Rig
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -136,6 +182,9 @@ export class PhiMascotRig {
     this.svg.style.width = '100%';
     this.svg.style.height = '100%';
     this.svg.style.overflow = 'visible';
+    this.svg.style.transformOrigin = '50% 60%';
+    this.svg.setAttribute('role', 'img');
+    this.svg.setAttribute('aria-label', 'Phi, a golden nine-tailed fox assistant');
     this.svg.style.filter = 'drop-shadow(0 8px 24px rgba(245, 158, 11, 0.35))';
 
     this.svg.innerHTML = `
@@ -304,11 +353,12 @@ export class PhiMascotRig {
     `;
 
     this.wrapper.appendChild(this.svg);
-    document.body.appendChild(this.wrapper);
+    this.container.appendChild(this.wrapper);
 
     // Cache key DOM references
     this.tailsGroup = this.svg.querySelector('#phi-tails-group');
     this.headGroup = this.svg.querySelector('#phi-head');
+    this.headGroup.removeAttribute('transform-origin');
     this.mouthCavity = this.svg.querySelector('#phi-mouth-cavity');
     this.mouthTongue = this.svg.querySelector('#phi-mouth-tongue');
     this.mouthTeeth = this.svg.querySelector('#phi-mouth-teeth');
@@ -321,6 +371,20 @@ export class PhiMascotRig {
     this.godRings = this.svg.querySelector('#phi-god-rings');
 
     this.initTails();
+    // Isolate SVG paint servers: destroying one of two rigs cannot steal the
+    // other rig's gradients or leave duplicate document IDs behind.
+    for (const element of this.svg.querySelectorAll('[id]')) {
+      const original = element.id;
+      element.id = `${this.instanceId}-${original}`;
+      for (const referencing of this.svg.querySelectorAll('[fill], [stroke], [filter]')) {
+        for (const attr of ['fill', 'stroke', 'filter']) {
+          if (referencing.getAttribute(attr) === `url(#${original})`) {
+            referencing.setAttribute(attr, `url(#${element.id})`);
+          }
+        }
+      }
+    }
+    this.equalizerBars = [...this.earEqLeft.querySelectorAll('rect'), ...this.earEqRight.querySelectorAll('rect')];
   }
 
   initTails() {
@@ -339,81 +403,211 @@ export class PhiMascotRig {
   }
 
   resizeCanvas() {
-    this.laserCanvas.width = window.innerWidth;
-    this.laserCanvas.height = window.innerHeight;
+    if (this.destroyed) return;
+    this.viewportWidth = window.innerWidth;
+    this.viewportHeight = window.innerHeight;
+    this.pixelRatio = clamp(finite(window.devicePixelRatio, 1), 1, 3);
+    this.laserCanvas.width = Math.round(this.viewportWidth * this.pixelRatio);
+    this.laserCanvas.height = Math.round(this.viewportHeight * this.pixelRatio);
+    this.laserCtx?.setTransform(this.pixelRatio, 0, 0, this.pixelRatio, 0, 0);
+    const mobileLimit = this.viewportWidth < 600 ? this.viewportWidth * .56 : this.options.width;
+    const scale = Math.min(1, mobileLimit / this.options.width,
+      Math.max(1, this.viewportWidth - 32) / this.options.width,
+      Math.max(1, this.viewportHeight * .48) / this.options.height);
+    this.width = this.options.width * scale;
+    this.height = this.options.height * scale;
+    this.wrapper.style.width = `${this.width}px`;
+    this.wrapper.style.height = `${this.height}px`;
+    this.bubble.style.boxSizing = 'border-box';
+    this.bubble.style.width = `${Math.min(320, Math.max(1, this.viewportWidth - 32))}px`;
+    this.bubble.style.maxHeight = `${Math.max(32, Math.min(128, this.viewportHeight * .22))}px`;
+    this.bubble.style.overflowY = 'auto';
+    this.layoutBubble();
+    this.updateTails(0);
+    this.renderTransform();
+    const bounds = this.getParkingBounds();
+    this.x = clamp(this.x, bounds.minX, bounds.maxX);
+    this.y = clamp(this.y, bounds.minY, bounds.maxY);
+    this.targetX = clamp(this.targetX, bounds.minX, bounds.maxX);
+    this.targetY = clamp(this.targetY, bounds.minY, bounds.maxY);
+    this.vx = this.vy = 0;
+    this.renderTransform();
+    this.renderLaser();
+  }
+
+  listen(target, event, handler, options) {
+    target.addEventListener(event, handler, options);
+    this.listeners.push(() => target.removeEventListener(event, handler, options));
   }
 
   bindEvents() {
-    window.addEventListener('resize', () => this.resizeCanvas());
-
-    // Allow dragging Phi around freely
-    let isDragging = false;
-    let startX = 0, startY = 0;
-    this.wrapper.style.pointerEvents = 'auto';
+    this.listen(window, 'resize', () => this.resizeCanvas());
+    this.listen(this.motionQuery, 'change', () => {
+      if (this.reducedMotionOverride === null) this.applyReducedMotion(this.motionQuery.matches);
+    });
+    this.wrapper.style.pointerEvents = 'none';
+    this.svg.style.pointerEvents = 'none';
     this.svg.style.cursor = 'grab';
-
-    this.svg.addEventListener('mousedown', (e) => {
-      isDragging = true;
-      startX = e.clientX - this.x;
-      startY = e.clientY - this.y;
+    this.svg.style.touchAction = 'none';
+    // Only painted parts receive hits; the transparent HUD/puppet bounding box
+    // must not swallow editor clicks.
+    for (const part of this.svg.querySelectorAll('path, polygon, circle, ellipse, rect')) {
+      part.style.pointerEvents = 'visiblePainted';
+    }
+    this.listen(this.svg, 'pointerdown', event => {
+      if (this.destroyed || event.button !== 0 || this.drag) return;
+      event.preventDefault();
+      this.drag = { id: event.pointerId, x: event.clientX - this.x, y: event.clientY - this.y };
+      this.svg.setPointerCapture?.(event.pointerId);
       this.svg.style.cursor = 'grabbing';
-      this.setEmotion('excited');
     });
-
-    window.addEventListener('mousemove', (e) => {
-      if (isDragging) {
-        this.targetX = e.clientX - startX;
-        this.targetY = e.clientY - startY;
-        this.gazeAt(e.clientX, e.clientY);
-      }
+    this.listen(window, 'pointermove', event => {
+      if (this.drag?.id !== event.pointerId) return;
+      this.flyTo(event.clientX - this.drag.x, event.clientY - this.drag.y);
+      this.gazeAt(event.clientX, event.clientY);
     });
-
-    window.addEventListener('mouseup', () => {
-      if (isDragging) {
-        isDragging = false;
-        this.svg.style.cursor = 'grab';
-        this.setEmotion('curious');
-      }
-    });
+    const release = event => {
+      if (!this.drag || (event.pointerId !== undefined && this.drag.id !== event.pointerId)) return;
+      if (this.svg.hasPointerCapture?.(this.drag.id)) this.svg.releasePointerCapture(this.drag.id);
+      this.drag = null;
+      this.svg.style.cursor = 'grab';
+    };
+    this.listen(window, 'pointerup', release);
+    this.listen(window, 'pointercancel', release);
+    this.listen(this.svg, 'lostpointercapture', release);
+    this.listen(window, 'blur', release);
+    this.releaseDrag = release;
+    this.bubbleObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+      if (!this.destroyed) this.layoutBubble();
+    }) : null;
+    this.bubbleObserver?.observe(this.bubble);
   }
 
-  // Set Target Destination
+  layoutBubble() {
+    if (!this.width) return;
+    const bubbleWidth = this.bubble.offsetWidth;
+    this.bubble.style.left = `${(this.width - bubbleWidth) / 2}px`;
+    this.bubble.style.bottom = 'auto';
+    this.bubble.style.top = `${-this.bubble.offsetHeight - 12}px`;
+  }
+
+  // Union includes the rendered tails, rotated SVG and speech HUD, not merely
+  // the SVG viewport. All public layout/focus coordinates are CSS viewport px.
+  getBounds() {
+    const box = this.svg.getBBox();
+    const matrix = this.svg.getScreenCTM();
+    const points = matrix ? [[box.x, box.y], [box.x + box.width, box.y],
+      [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
+      .map(([x, y]) => new DOMPoint(x, y).matrixTransform(matrix)) : [];
+    const bubble = this.bubble.getBoundingClientRect();
+    const left = Math.min(bubble.left, ...points.map(p => p.x));
+    const right = Math.max(bubble.right, ...points.map(p => p.x));
+    const top = Math.min(bubble.top, ...points.map(p => p.y));
+    const bottom = Math.max(bubble.bottom, ...points.map(p => p.y));
+    return { x: left, y: top, left, top, right, bottom, width: right - left, height: bottom - top };
+  }
+
+  getLayoutSize() {
+    const rect = this.getBounds();
+    return { width: this.width, height: this.height,
+      bubbleWidth: this.bubble.offsetWidth, bubbleHeight: this.bubble.offsetHeight,
+      leftInset: Math.max(0, this.renderX - rect.left),
+      rightInset: Math.max(0, rect.right - this.renderX - this.width),
+      topInset: Math.max(0, this.renderY - rect.top),
+      bottomInset: Math.max(0, rect.bottom - this.renderY - this.height) };
+  }
+
+  getParkingBounds() {
+    const size = this.getLayoutSize();
+    const margin = 12;
+    const minX = margin + size.leftInset;
+    const minY = margin + size.topInset;
+    return { minX, minY,
+      maxX: Math.max(minX, this.viewportWidth - margin - size.width - size.rightInset),
+      maxY: Math.max(minY, this.viewportHeight - margin - size.height - size.bottomInset) };
+  }
+
+  setAvoidRect(rect) {
+    this.avoidRect = rect && [rect.left, rect.top, rect.width, rect.height].every(Number.isFinite)
+      ? { left: rect.left, top: rect.top, width: rect.width, height: rect.height } : null;
+  }
+
   flyTo(x, y, speed = null) {
-    this.targetX = x;
-    this.targetY = y;
-    if (speed) this.options.flightSpeed = speed;
+    if (this.destroyed || !Number.isFinite(x) || !Number.isFinite(y)) return;
+    const bounds = this.getParkingBounds();
+    this.targetX = clamp(x, bounds.minX, bounds.maxX);
+    this.targetY = clamp(y, bounds.minY, bounds.maxY);
+    if (Number.isFinite(speed) && speed > 0) this.options.flightSpeed = clamp(speed, .01, .5);
+    if (this.reducedMotion) {
+      this.x = this.targetX; this.y = this.targetY;
+      this.vx = this.vy = 0;
+      this.update(0);
+    }
   }
 
-  // Smooth gaze raycast
   gazeAt(targetX, targetY) {
+    if (this.destroyed || !Number.isFinite(targetX) || !Number.isFinite(targetY)) return;
     this.gazeX = targetX;
     this.gazeY = targetY;
   }
 
-  // Focus monocle laser on screen coordinates
   fireLaser(targetX, targetY, active = true) {
+    if (this.destroyed || !Number.isFinite(targetX) || !Number.isFinite(targetY)) return;
     this.laserActive = active;
-    this.laserTarget = { x: targetX, y: targetY };
+    this.laserTarget = active ? { x: targetX, y: targetY } : null;
     this.gazeAt(targetX, targetY);
+    this.renderLaser();
   }
 
   stopLaser() {
     this.laserActive = false;
     this.laserTarget = null;
+    if (!this.destroyed) this.renderLaser();
+  }
+
+  setReducedMotion(value = null) {
+    this.reducedMotionOverride = typeof value === 'boolean' ? value : null;
+    this.applyReducedMotion(this.reducedMotionOverride ?? this.motionQuery.matches);
+  }
+
+  applyReducedMotion(reduced) {
+    if (this.destroyed) return;
+    this.reducedMotion = reduced;
+    this.particles = [];
+    this.emberAccumulator = 0;
+    this.vx = this.vy = this.rotation = this.headAngle = this.blinkProgress = 0;
+    this.scaleX = 1;
+    if (reduced) {
+      this.x = this.targetX; this.y = this.targetY;
+      this.mouthPose = [...this.targetMouthPose];
+      this.renderMouth();
+    }
+    this.update(0);
+  }
+
+  // The selected visual mode survives changes in attention and expression.
+  setGodMode(enabled) {
+    if (this.destroyed) return;
+    this.godMode = Boolean(enabled);
+    this.svg.style.filter = this.godMode
+      ? 'drop-shadow(0 0 35px #fbbf24) drop-shadow(0 0 60px #38bdf8)'
+      : 'drop-shadow(0 8px 24px rgba(245, 158, 11, 0.35))';
+    this.updateTails(0);
+    this.flyTo(this.targetX, this.targetY);
   }
 
   // Set Emotion State
   setEmotion(emotion) {
+    if (this.destroyed) return;
     this.emotion = emotion;
     const statusText = this.bubble.querySelector('.phi-bubble-status');
     const badgeDot = this.bubble.querySelector('.phi-dot');
 
     switch (emotion) {
       case 'god_mode':
-        this.godMode = true;
-        statusText.textContent = 'Phi · God Mode AGI';
+        this.setGodMode(true);
+        statusText.textContent = 'God Mode · visual';
         badgeDot.style.background = '#38bdf8';
-        this.svg.style.filter = 'drop-shadow(0 0 35px #fbbf24) drop-shadow(0 0 60px #38bdf8)';
         break;
       case 'analytical':
       case 'focused':
@@ -424,326 +618,276 @@ export class PhiMascotRig {
         statusText.textContent = 'Phi · Security Alert';
         badgeDot.style.background = '#f43f5e';
         break;
+      case 'head_tilt':
+        statusText.textContent = 'Phi · Confabulation Detected';
+        badgeDot.style.background = '#fbbf24';
+        this.gesture('look');
+        break;
+      case 'pacing':
+        statusText.textContent = 'Phi · Loop Detected';
+        badgeDot.style.background = '#f59e0b';
+        this.gesture('walk');
+        break;
+      case 'stretch':
+        statusText.textContent = 'Phi · Cognitive Reset';
+        badgeDot.style.background = '#38bdf8';
+        this.gesture('stretch');
+        break;
+      case 'sleep':
+        statusText.textContent = 'Phi · Resting';
+        badgeDot.style.background = '#64748b';
+        this.gesture('sleep');
+        break;
       default:
-        this.godMode = false;
         statusText.textContent = 'Phi · Assisting';
         badgeDot.style.background = '#10b981';
-        this.svg.style.filter = 'drop-shadow(0 8px 24px rgba(245, 158, 11, 0.35))';
         break;
+    }
+    this.updateTails(0);
+    this.flyTo(this.targetX, this.targetY);
+  }
+
+  gesture(name) {
+    if (this.destroyed) return;
+    this.activeGesture = name;
+    this.gestureTimer = 0;
+    if (name === 'look' || name === 'head_tilt') {
+      this.targetHeadAngle = 12;
+      this.headAngle = 12;
+    } else if (name === 'nod') {
+      this.targetHeadAngle = -6;
+    } else if (name === 'sleep') {
+      this.blinkProgress = 1;
+      this.eyelidLeft.setAttribute('height', 10);
     }
   }
 
   setSpeechText(text, status = null) {
+    if (this.destroyed) return;
     const textEl = this.bubble.querySelector('.phi-bubble-text');
     textEl.textContent = text;
     if (status) {
       this.bubble.querySelector('.phi-bubble-status').textContent = status;
     }
+    this.layoutBubble();
+    this.flyTo(this.targetX, this.targetY);
   }
 
-  // Viseme mouth shapes generator
-  setViseme(viseme, openness = 1.0) {
-    this.currentViseme = viseme;
-    this.mouthOpenness = openness;
-
-    // Apply specific mouth paths based on Preston Blair / Disney 10-shape standard
-    switch (viseme) {
-      case VISEMES.MBP: // Closed compressed lips
-        this.mouthLip.setAttribute('d', 'M 91 103 L 109 103');
-        this.mouthCavity.setAttribute('d', 'M 91 103 Q 100 103 109 103 Z');
-        this.mouthTeeth.style.opacity = '0';
-        this.mouthTongue.style.opacity = '0';
-        break;
-
-      case VISEMES.ETC: // Slight open, teeth aligned
-        this.mouthLip.setAttribute('d', 'M 91 102 Q 100 105 109 102 Q 100 106 91 102');
-        this.mouthCavity.setAttribute('d', 'M 91 102 Q 100 107 109 102 Q 100 104 91 102 Z');
-        this.mouthTeeth.style.opacity = '0.9';
-        this.mouthTeeth.setAttribute('d', 'M 93 103 L 107 103');
-        this.mouthTongue.style.opacity = '0';
-        break;
-
-      case VISEMES.AI: // Wide open jaw, tongue low
-        this.mouthLip.setAttribute('d', 'M 90 101 Q 100 100 110 101 Q 100 114 90 101');
-        this.mouthCavity.setAttribute('d', 'M 90 101 Q 100 100 110 101 Q 100 114 90 101 Z');
-        this.mouthTeeth.style.opacity = '0.8';
-        this.mouthTeeth.setAttribute('d', 'M 93 102 L 107 102');
-        this.mouthTongue.style.opacity = '0.9';
-        this.mouthTongue.setAttribute('d', 'M 94 110 Q 100 107 106 110 Q 100 113 94 110 Z');
-        break;
-
-      case VISEMES.E: // Wide stretch, spread lips, teeth visible
-        this.mouthLip.setAttribute('d', 'M 88 102 Q 100 103 112 102 Q 100 108 88 102');
-        this.mouthCavity.setAttribute('d', 'M 88 102 Q 100 103 112 102 Q 100 108 88 102 Z');
-        this.mouthTeeth.style.opacity = '1';
-        this.mouthTeeth.setAttribute('d', 'M 90 103 L 110 103');
-        this.mouthTongue.style.opacity = '0.3';
-        break;
-
-      case VISEMES.O: // Tall rounded oval
-        this.mouthLip.setAttribute('d', 'M 94 99 Q 100 97 106 99 Q 108 108 100 109 Q 92 108 94 99');
-        this.mouthCavity.setAttribute('d', 'M 94 99 Q 100 97 106 99 Q 108 108 100 109 Q 92 108 94 99 Z');
-        this.mouthTeeth.style.opacity = '0.3';
-        this.mouthTongue.style.opacity = '0.7';
-        this.mouthTongue.setAttribute('d', 'M 96 106 Q 100 104 104 106 Z');
-        break;
-
-      case VISEMES.U: // Tight circular pucker
-        this.mouthLip.setAttribute('d', 'M 96 101 Q 100 99 104 101 Q 105 106 100 107 Q 95 106 96 101');
-        this.mouthCavity.setAttribute('d', 'M 96 101 Q 100 99 104 101 Q 105 106 100 107 Q 95 106 96 101 Z');
-        this.mouthTeeth.style.opacity = '0';
-        this.mouthTongue.style.opacity = '0';
-        break;
-
-      case VISEMES.FV: // Teeth resting on lower lip
-        this.mouthLip.setAttribute('d', 'M 91 101 Q 100 103 109 101 Q 100 106 91 101');
-        this.mouthCavity.setAttribute('d', 'M 92 102 Q 100 104 108 102 Q 100 105 92 102 Z');
-        this.mouthTeeth.style.opacity = '1';
-        this.mouthTeeth.setAttribute('d', 'M 93 102 L 107 102');
-        this.mouthTongue.style.opacity = '0';
-        break;
-
-      case VISEMES.L_TH: // Tongue behind/between teeth
-        this.mouthLip.setAttribute('d', 'M 91 101 Q 100 103 109 101 Q 100 109 91 101');
-        this.mouthCavity.setAttribute('d', 'M 91 101 Q 100 103 109 101 Q 100 109 91 101 Z');
-        this.mouthTeeth.style.opacity = '0.7';
-        this.mouthTeeth.setAttribute('d', 'M 93 102 L 107 102');
-        this.mouthTongue.style.opacity = '1';
-        this.mouthTongue.setAttribute('d', 'M 97 104 Q 100 101 103 104 Q 100 106 97 104 Z');
-        break;
-
-      case VISEMES.WQ: // Tight pursed whistle pucker
-        this.mouthLip.setAttribute('d', 'M 96 101 Q 100 100 104 101 Q 106 105 100 106 Q 94 105 96 101');
-        this.mouthCavity.setAttribute('d', 'M 96 101 Q 100 100 104 101 Q 106 105 100 106 Q 94 105 96 101 Z');
-        this.mouthTeeth.style.opacity = '0';
-        this.mouthTongue.style.opacity = '0';
-        break;
-
-      case VISEMES.REST:
-      default: // Closed relaxed neutral
-        this.mouthLip.setAttribute('d', 'M 92 103 Q 100 104 108 103');
-        this.mouthCavity.setAttribute('d', 'M 92 103 Q 100 103 108 103 Z');
-        this.mouthTeeth.style.opacity = '0';
-        this.mouthTongue.style.opacity = '0';
-        break;
+  // Updating a target never restarts from a canned previous phoneme: interrupted
+  // transitions continue from the currently rendered mouth.
+  setViseme(viseme, openness = 1) {
+    if (this.destroyed) return;
+    const name = Object.hasOwn(MOUTH_POSES, viseme) ? viseme : VISEMES.REST;
+    this.currentViseme = name;
+    this.targetViseme = name;
+    this.mouthOpenness = clamp(finite(openness), 0, 1);
+    const pose = [...MOUTH_POSES[name]];
+    for (const index of [1, 2, 3, 7]) pose[index] = 103 + (pose[index] - 103) * this.mouthOpenness;
+    pose[5] *= this.mouthOpenness;
+    pose[6] *= this.mouthOpenness;
+    this.targetMouthPose = pose;
+    this.visemeMorphProgress = 0;
+    if (this.reducedMotion) {
+      this.mouthPose = [...pose];
+      this.visemeMorphProgress = 1;
+      this.renderMouth();
     }
   }
 
-  // Audio frequency amplitude drives ear equalizers
-  setAudioVolume(volume) {
-    this.audioVolume = Math.min(1.0, Math.max(0.0, volume));
-    const barsLeft = this.earEqLeft.querySelectorAll('rect');
-    const barsRight = this.earEqRight.querySelectorAll('rect');
+  renderMouth() {
+    const [w, cy, top, bottom, round, teeth, tongue, tongueY, tongueWidth] = this.mouthPose;
+    const path = `M ${100-w} ${cy} C ${100-w} ${top} ${100-w*round} ${top} 100 ${top}
+      C ${100+w*round} ${top} ${100+w} ${top} ${100+w} ${cy}
+      C ${100+w} ${bottom} ${100+w*round} ${bottom} 100 ${bottom}
+      C ${100-w*round} ${bottom} ${100-w} ${bottom} ${100-w} ${cy} Z`;
+    this.mouthLip.setAttribute('d', path);
+    this.mouthCavity.setAttribute('d', path);
+    this.mouthTeeth.setAttribute('d', `M ${100-w*.72} ${top+1} L ${100+w*.72} ${top+1}`);
+    this.mouthTeeth.style.opacity = teeth.toFixed(3);
+    this.mouthTongue.setAttribute('d', `M ${100-tongueWidth} ${tongueY}
+      Q 100 ${tongueY-2} ${100+tongueWidth} ${tongueY} Q 100 ${bottom} ${100-tongueWidth} ${tongueY} Z`);
+    this.mouthTongue.style.opacity = tongue.toFixed(3);
+  }
 
-    const activeBars = Math.floor(this.audioVolume * 5);
-    barsLeft.forEach((bar, idx) => {
-      bar.style.opacity = idx <= activeBars ? '1' : '0.25';
-    });
-    barsRight.forEach((bar, idx) => {
-      bar.style.opacity = idx <= activeBars ? '1' : '0.25';
+  setAudioVolume(volume) {
+    if (this.destroyed) return;
+    this.audioVolume = clamp(finite(volume), 0, 1);
+    const activeBars = Math.ceil(this.audioVolume * 4);
+    this.equalizerBars.forEach((bar, index) => {
+      bar.style.opacity = index % 4 < activeBars ? '1' : '0.25';
     });
   }
 
-  // Core Physics & Render Loop (Executed each animation frame)
+  renderTransform() {
+    const hover = !this.reducedMotion && !this.avoidRect && !this.drag;
+    this.renderX = this.x + (hover ? Math.cos(this.time * 1.4) * 2.2 : 0);
+    this.renderY = this.y + (hover ? Math.sin(this.time * 2.2) * 3.5 : 0);
+    this.wrapper.style.transform = `translate3d(${this.renderX}px, ${this.renderY}px, 0)`;
+    // Phi is drawn front-on. A small yaw, banking and pupils convey direction;
+    // flipping the whole wrapper used to collapse the face and reverse HUD text.
+    this.svg.style.transform = `rotate(${this.rotation}deg) scaleX(${this.scaleX})`;
+  }
+
+  screenPoint(x, y, element = this.svg) {
+    const matrix = element.getScreenCTM();
+    return matrix ? new DOMPoint(x, y).matrixTransform(matrix) : null;
+  }
+
+  // Caller owns the animation frame. No nested RAF, timer, or wall-clock catchup.
   update(deltaTime) {
-    this.time += deltaTime;
+    if (this.destroyed) return;
+    const dt = clamp(finite(deltaTime), 0, .1);
+    if (!this.reducedMotion) this.time += dt;
+    if (!this.reducedMotion) {
+      const omega = clamp(9 * Math.sqrt(this.options.flightSpeed / .12), 4, 16);
+      const decay = Math.exp(-omega * dt);
+      for (const [position, velocity, target] of [['x', 'vx', 'targetX'], ['y', 'vy', 'targetY']]) {
+        const offset = this[position] - this[target];
+        const acceleration = this[velocity] + omega * offset;
+        this[position] = this[target] + (offset + acceleration * dt) * decay;
+        this[velocity] = (this[velocity] - omega * acceleration * dt) * decay;
+      }
+      this.targetRotation = clamp(this.vx * .035, -18, 18);
+      this.rotation += (this.targetRotation - this.rotation) * ease(10, dt);
+    }
+    this.renderTransform();
+    const head = { x: this.renderX + this.width / 2, y: this.renderY + this.height * .45 };
+    const dx = this.gazeX - head.x, dy = this.gazeY - head.y;
+    this.targetHeadAngle = clamp(Math.atan2(dy, Math.max(80, Math.abs(dx))) * 180 / Math.PI * .25, -15, 15);
+    if (dx < 0) this.targetHeadAngle *= -1;
+    const blend = this.reducedMotion ? 1 : ease(12, dt);
+    this.headAngle += (this.targetHeadAngle - this.headAngle) * blend;
+    this.scaleX = this.reducedMotion ? 1 : this.scaleX +
+      ((1 - Math.min(1, Math.abs(dx) / 500) * .035) - this.scaleX) * blend;
+    this.headGroup.setAttribute('transform', `rotate(${this.headAngle} 100 105)`);
+    const matrix = this.headGroup.getScreenCTM();
+    // Convert the target back into the rotated head's own coordinate system.
+    const local = matrix ? new DOMPoint(this.gazeX, this.gazeY).matrixTransform(matrix.inverse()) : { x: 100, y: 80 };
+    const localDistance = Math.hypot(local.x - 100, local.y - 80);
+    const px = localDistance ? (local.x - 100) / localDistance * 2.5 : 0;
+    const py = localDistance ? (local.y - 80) / localDistance * 2.5 : 0;
+    this.pupilLeft.setAttribute('cx', 80 + px);
+    this.pupilLeft.setAttribute('cy', 80 + py);
+    this.pupilRight.setAttribute('cx', 120 + px);
+    this.pupilRight.setAttribute('cy', 80 + py);
 
-    // 1. Spring-Damper Flight Physics toward Target
-    const dx = this.targetX - this.x;
-    const dy = this.targetY - this.y;
-    const dist = Math.hypot(dx, dy);
-
-    const speed = dist > 400 ? 0.16 : this.options.flightSpeed;
-    this.vx = (this.vx + dx * speed) * 0.76;
-    this.vy = (this.vy + dy * speed) * 0.76;
-
-    this.x += this.vx;
-    this.y += this.vy;
-
-    // Organic Idle Hovering
-    const hoverY = Math.sin(this.time * 2.2) * 5.5;
-    const hoverX = Math.cos(this.time * 1.4) * 3.2;
-
-    // Kinetic Banking (tilt when moving horizontally)
-    this.targetRotation = Math.max(-24, Math.min(24, this.vx * 0.7));
-    this.rotation += (this.targetRotation - this.rotation) * 0.15;
-
-    // Flip X scale to face movement / gaze direction
-    const faceLeft = (this.gazeX < this.x + 100);
-    const targetScaleX = faceLeft ? -1 : 1;
-    this.scaleX += (targetScaleX - this.scaleX) * 0.2;
-
-    // Apply transform to wrapper
-    this.wrapper.style.transform = `translate3d(${this.x + hoverX}px, ${this.y + hoverY}px, 0) scaleX(${this.scaleX}) rotate(${this.rotation}deg)`;
-
-    // 2. Head Articulation & Gaze Tracking
-    const headWorldX = this.x + 100;
-    const headWorldY = this.y + 100;
-    const gazeAngle = Math.atan2(this.gazeY - headWorldY, Math.abs(this.gazeX - headWorldX));
-    this.targetHeadAngle = Math.max(-28, Math.min(28, gazeAngle * (180 / Math.PI) * 0.5));
-    this.headAngle += (this.targetHeadAngle - this.headAngle) * 0.2;
-    this.headGroup.setAttribute('transform', `rotate(${this.headAngle * (faceLeft ? -1 : 1)})`);
-
-    // Pupil movement toward gaze
-    const maxPupilOffset = 2.5;
-    const pupilDist = Math.hypot(this.gazeX - headWorldX, this.gazeY - headWorldY);
-    const pOffsetX = pupilDist > 0 ? ((this.gazeX - headWorldX) / pupilDist) * maxPupilOffset : 0;
-    const pOffsetY = pupilDist > 0 ? ((this.gazeY - headWorldY) / pupilDist) * maxPupilOffset : 0;
-
-    this.pupilLeft.setAttribute('cx', (80 + pOffsetX).toString());
-    this.pupilLeft.setAttribute('cy', (80 + pOffsetY).toString());
-    this.pupilRight.setAttribute('cx', (120 + pOffsetX).toString());
-    this.pupilRight.setAttribute('cy', (80 + pOffsetY).toString());
-
-    // 3. Eyelid Blinking
-    this.blinkTimer += deltaTime;
-    if (this.blinkTimer > 3.5 + Math.sin(this.time) * 1.5) {
-      this.blinkProgress = Math.sin((this.blinkTimer - 3.5) * 18);
-      if (this.blinkProgress <= 0) {
-        this.blinkTimer = 0;
-        this.blinkProgress = 0;
+    this.blinkTimer = this.reducedMotion ? 0 : (this.blinkTimer + dt) % 4.4;
+    this.blinkProgress = this.blinkTimer > 4.22 ? Math.sin((this.blinkTimer - 4.22) / .18 * Math.PI) : 0;
+    this.eyelidLeft.setAttribute('height', clamp(this.blinkProgress, 0, 1) * 10);
+    let difference = 0;
+    for (let i = 0; i < this.mouthPose.length; i++) {
+      this.mouthPose[i] += (this.targetMouthPose[i] - this.mouthPose[i]) * (this.reducedMotion ? 1 : ease(32, dt));
+      difference = Math.max(difference, Math.abs(this.targetMouthPose[i] - this.mouthPose[i]));
+    }
+    this.visemeMorphProgress = 1 - Math.min(1, difference / 10);
+    this.renderMouth();
+    this.updateTails(dt);
+    this.godRings.style.opacity = this.godMode ? '1' : '0';
+    this.godRings.setAttribute('transform', `rotate(${this.reducedMotion ? 0 : this.time * 25} 100 100)`);
+    this.renderTransform();
+    this.renderLaser();
+    if (this.godMode && !this.reducedMotion) {
+      this.emberAccumulator += dt * 24;
+      const origin = this.screenPoint(100, 120);
+      while (this.emberAccumulator >= 1) {
+        if (origin) this.spawnParticle(origin.x, origin.y, 'god_ember');
+        this.emberAccumulator -= 1;
       }
     }
-    const lidHeight = Math.max(0, Math.min(10, this.blinkProgress * 10));
-    this.eyelidLeft.setAttribute('height', lidHeight.toString());
-
-    // 4. Update 9 Kitsune Tails (Procedural Bezier Splines with inertia)
-    this.updateTails(deltaTime);
-
-    // 5. Render Monocle Laser Beam
-    this.renderLaser();
-
-    // 6. God-Mode Rings & Embers
-    if (this.godMode) {
-      this.godRings.style.opacity = '1';
-      this.godRings.setAttribute('transform', `rotate(${this.time * 25} 100 100)`);
-      this.spawnParticle(this.x + 100, this.y + 120, 'god_ember');
-    } else {
-      this.godRings.style.opacity = '0';
-    }
-
-    // Update Particles
-    this.updateParticles();
+    this.updateParticles(dt);
   }
 
-  updateTails(deltaTime) {
-    const rootX = 100;
-    const rootY = 145;
-
+  updateTails(dt = 0) {
+    const rootX = 100, rootY = 145;
     for (let i = 0; i < this.tails.length; i++) {
       const tail = this.tails[i];
-      const el = this.tailElements[i];
-
-      // Dynamic oscillation + aerodynamic drag
-      const dragFactor = -this.vx * 0.04;
-      const wave = Math.sin(this.time * tail.swaySpeed + tail.phase) * 0.35;
-      const angle = tail.baseAngle + wave + dragFactor;
-
-      const len = tail.length * (this.godMode ? 1.25 : 1.0);
-      const cp1x = rootX + Math.cos(angle - tail.curl) * (len * 0.45);
-      const cp1y = rootY + Math.sin(angle - tail.curl) * (len * 0.45);
-
-      const cp2x = rootX + Math.cos(angle + tail.curl * 0.8) * (len * 0.8);
-      const cp2y = rootY + Math.sin(angle + tail.curl * 0.8) * (len * 0.8);
-
-      const tipX = rootX + Math.cos(angle + wave * 0.5) * len;
-      const tipY = rootY + Math.sin(angle + wave * 0.5) * len;
-
-      el.setAttribute('d', `M ${rootX} ${rootY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tipX} ${tipY}`);
-
-      if (this.godMode && Math.random() < 0.15) {
-        this.spawnParticle(this.x + tipX, this.y + tipY, 'tail_spark');
+      const drag = this.reducedMotion ? 0 : clamp(-this.vx * .0008, -.3, .3);
+      const wave = this.reducedMotion ? 0 : Math.sin(this.time * tail.swaySpeed + tail.phase) * .24;
+      const angle = tail.baseAngle + wave + drag;
+      const length = tail.length * (this.godMode ? 1.25 : 1);
+      const cp1x = rootX + Math.cos(angle - tail.curl) * length * .45;
+      const cp1y = rootY + Math.sin(angle - tail.curl) * length * .45;
+      const cp2x = rootX + Math.cos(angle + tail.curl * .8) * length * .8;
+      const cp2y = rootY + Math.sin(angle + tail.curl * .8) * length * .8;
+      const tipX = rootX + Math.cos(angle + wave * .5) * length;
+      const tipY = rootY + Math.sin(angle + wave * .5) * length;
+      this.tailElements[i].setAttribute('d', `M ${rootX} ${rootY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tipX} ${tipY}`);
+      if (this.godMode && !this.reducedMotion && Math.random() < 1 - Math.exp(-4 * dt)) {
+        const point = this.screenPoint(tipX, tipY);
+        if (point) this.spawnParticle(point.x, point.y, 'tail_spark');
       }
     }
   }
 
   renderLaser() {
-    this.laserCtx.clearRect(0, 0, this.laserCanvas.width, this.laserCanvas.height);
-    if (!this.laserActive || !this.laserTarget) return;
-
-    // Calculate absolute screen coordinate of monocle emitter
-    const monocleLocalX = 120;
-    const monocleLocalY = 80;
-    const startX = this.x + (this.scaleX === -1 ? (200 - monocleLocalX) : monocleLocalX);
-    const startY = this.y + monocleLocalY;
-
-    const endX = this.laserTarget.x;
-    const endY = this.laserTarget.y;
-
     const ctx = this.laserCtx;
-
-    // Laser Core Beam
+    if (!ctx || this.destroyed) return;
+    ctx.clearRect(0, 0, this.viewportWidth, this.viewportHeight);
+    if (!this.laserActive || !this.laserTarget) return;
+    const origin = this.screenPoint(120, 80, this.headGroup);
+    if (!origin) return;
+    const { x: endX, y: endY } = this.laserTarget;
+    const phase = this.reducedMotion ? 0 : this.time;
     ctx.save();
     ctx.lineCap = 'round';
-
-    // Outer Glow
-    ctx.strokeStyle = this.godMode ? 'rgba(56, 189, 248, 0.45)' : 'rgba(251, 191, 36, 0.45)';
-    ctx.lineWidth = 6 + Math.sin(this.time * 20) * 1.5;
+    ctx.strokeStyle = this.godMode ? 'rgba(56, 189, 248, .45)' : 'rgba(251, 191, 36, .45)';
+    ctx.lineWidth = 6 + Math.sin(phase * 7) * 1.2;
     ctx.beginPath();
-    ctx.moveTo(startX, startY);
+    ctx.moveTo(origin.x, origin.y);
     ctx.lineTo(endX, endY);
     ctx.stroke();
-
-    // Inner Core
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(startX, startY);
-    ctx.lineTo(endX, endY);
-    ctx.stroke();
-
-    // Target Crosshair / Reticle Pulse at Focal Point
-    const reticleRadius = 12 + Math.sin(this.time * 15) * 4;
-    ctx.strokeStyle = this.godMode ? '#38bdf8' : '#fbbf24';
     ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(endX, endY, reticleRadius, 0, Math.PI * 2);
     ctx.stroke();
-
-    // Target Sparks
-    for (let s = 0; s < 4; s++) {
-      const sparkAngle = (this.time * 8) + (s * Math.PI * 0.5);
-      const sx = endX + Math.cos(sparkAngle) * (reticleRadius + 4);
-      const sy = endY + Math.sin(sparkAngle) * (reticleRadius + 4);
+    const radius = 11 + Math.sin(phase * 5) * 2;
+    ctx.strokeStyle = this.godMode ? '#38bdf8' : '#fbbf24';
+    ctx.beginPath();
+    ctx.arc(endX, endY, radius, 0, Math.PI * 2);
+    ctx.stroke();
+    for (let i = 0; i < 4; i++) {
+      const angle = phase * 2 + i * Math.PI / 2;
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(sx - 1, sy - 1, 2.5, 2.5);
+      ctx.fillRect(endX + Math.cos(angle) * (radius + 4) - 1, endY + Math.sin(angle) * (radius + 4) - 1, 2, 2);
     }
-
     ctx.restore();
   }
 
   spawnParticle(x, y, type) {
-    if (this.particles.length > this.maxParticles) return;
-    this.particles.push({
-      x, y,
-      vx: (Math.random() - 0.5) * 1.8,
-      vy: (Math.random() - 0.5) * 1.8 - 0.5,
-      life: 1.0,
-      decay: 0.02 + Math.random() * 0.03,
-      size: 2 + Math.random() * 3,
-      color: type === 'god_ember' ? '#38bdf8' : '#fbbf24'
-    });
+    if (this.destroyed || this.reducedMotion || this.particles.length >= this.maxParticles) return;
+    this.particles.push({ x, y, vx: (Math.random() - .5) * 70,
+      vy: (Math.random() - .5) * 70 - 18, life: 1,
+      decay: 1.2 + Math.random() * 1.8, size: 2 + Math.random() * 3,
+      color: type === 'god_ember' ? '#38bdf8' : '#fbbf24' });
   }
 
-  updateParticles() {
+  updateParticles(dt = 0) {
     const ctx = this.laserCtx;
     for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.x += p.vx;
-      p.y += p.vy;
-      p.life -= p.decay;
-
-      if (p.life <= 0) {
-        this.particles.splice(i, 1);
-        continue;
-      }
-
-      ctx.fillStyle = p.color;
-      ctx.globalAlpha = p.life * 0.8;
+      const particle = this.particles[i];
+      particle.x += particle.vx * dt;
+      particle.y += particle.vy * dt;
+      particle.life -= particle.decay * dt;
+      if (particle.life <= 0) { this.particles.splice(i, 1); continue; }
+      if (!ctx) continue;
+      ctx.fillStyle = particle.color;
+      ctx.globalAlpha = particle.life * .8;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.arc(particle.x, particle.y, particle.size * particle.life, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.globalAlpha = 1.0;
+    if (ctx) ctx.globalAlpha = 1;
+  }
+
+  destroy() {
+    if (this.destroyed) return;
+    this.releaseDrag?.({});
+    this.destroyed = true;
+    for (const remove of this.listeners.splice(0)) remove();
+    this.bubbleObserver?.disconnect();
+    this.laserActive = false;
+    this.laserTarget = null;
+    this.particles = [];
+    this.wrapper.remove();
+    this.laserCanvas.remove();
   }
 }

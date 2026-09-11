@@ -125,7 +125,13 @@
 
       if (this.onStart) this.onStart(text);
 
-      // If Web Speech API is enabled and available:
+      // 1. VibeVoice-Realtime-0.5B ONNX mode
+      if (this.mode === "vibevoice" && !options.fallback) {
+        this.speakVibeVoice(text, options);
+        return;
+      }
+
+      // 2. Web Speech API (speechSynthesis)
       if (this.mode === "speechSynthesis" && "speechSynthesis" in window) {
         const utter = new SpeechSynthesisUtterance(text);
         this.currentUtterance = utter;
@@ -153,16 +159,86 @@
         };
 
         utter.onerror = (e) => {
-          // If speech synthesis fails (e.g. permission or unsupported voice), fallback to formant mode
           console.warn("SpeechSynthesis error, falling back to procedural formant:", e);
           this.speakFormantSequence(words, options);
         };
 
         window.speechSynthesis.speak(utter);
       } else {
-        // Fallback procedural formant speech
+        // 3. Fallback procedural formant speech
         this.speakFormantSequence(words, options);
       }
+    }
+
+    async speakVibeVoice(text, options = {}) {
+      const voice = options.voice || this.vibeVoice || "Emma";
+      const speed = options.rate || this.rate || 1.0;
+      const endpoints = [
+        options.endpoint || "/api/tts/synthesize",
+        "http://127.0.0.1:8766/api/tts/synthesize"
+      ];
+
+      for (const ep of endpoints) {
+        try {
+          const ctrl = new AbortController();
+          const timeout = setTimeout(() => ctrl.abort(), 10000);
+          const resp = await fetch(ep, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, voice, speed }),
+            signal: ctrl.signal
+          }).finally(() => clearTimeout(timeout));
+
+          if (!resp.ok) continue;
+          const data = await resp.json();
+          if (!data.audio_base64) continue;
+
+          const binary = atob(data.audio_base64);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          const blob = new Blob([bytes], { type: "audio/wav" });
+          const blobUrl = URL.createObjectURL(blob);
+
+          const audio = new Audio(blobUrl);
+          this.currentAudio = audio;
+          audio.volume = options.volume || this.volume;
+
+          // Dispatch word events
+          const words = Array.isArray(data.words) ? data.words : [];
+          for (const w of words) {
+            setTimeout(() => {
+              if (!this.isPlaying || this.currentAudio !== audio) return;
+              if (this.onWord) {
+                this.onWord({
+                  word: w.word,
+                  charIndex: w.charStart,
+                  estimatedDurationMs: (w.end - w.start) * 1000
+                });
+              }
+            }, Math.max(0, w.start * 1000));
+          }
+
+          audio.onended = () => {
+            URL.revokeObjectURL(blobUrl);
+            if (this.currentAudio === audio) {
+              this.isPlaying = false;
+              this.currentAudio = null;
+              if (this.onEnd) this.onEnd();
+            }
+          };
+
+          audio.onerror = () => {
+            URL.revokeObjectURL(blobUrl);
+            this.speakFormantSequence(text.split(/\s+/).filter(Boolean), options);
+          };
+
+          await audio.play();
+          return;
+        } catch (_) {}
+      }
+
+      // If VibeVoice endpoint was unreachable, fallback
+      this.speak(text, { ...options, fallback: true });
     }
 
     speakFormantSequence(words, options = {}) {

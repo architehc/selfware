@@ -457,9 +457,19 @@
       // Voice mode toggle
       const voiceBtn = document.getElementById("btn-voice-mode");
       if (voiceBtn) {
+        this.speechEngine.mode = "vibevoice";
+        voiceBtn.textContent = "Voice: VibeVoice (Emma)";
         voiceBtn.addEventListener("click", () => {
-          this.speechEngine.mode = this.speechEngine.mode === "speechSynthesis" ? "formant" : "speechSynthesis";
-          voiceBtn.textContent = this.speechEngine.mode === "speechSynthesis" ? "Voice: SpeechSynth" : "Voice: Formant Local";
+          if (this.speechEngine.mode === "vibevoice") {
+            this.speechEngine.mode = "speechSynthesis";
+            voiceBtn.textContent = "Voice: SpeechSynth";
+          } else if (this.speechEngine.mode === "speechSynthesis") {
+            this.speechEngine.mode = "formant";
+            voiceBtn.textContent = "Voice: Formant Local";
+          } else {
+            this.speechEngine.mode = "vibevoice";
+            voiceBtn.textContent = "Voice: VibeVoice (Emma)";
+          }
         });
       }
 

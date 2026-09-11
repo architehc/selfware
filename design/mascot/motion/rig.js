@@ -11,7 +11,7 @@
     eyeL: 1, eyeR: 1, smile: 0, mouth: 1, browL: 0, browR: 0, browY: 0, browOpacity: 0,
     pawLX: -.235, pawLY: .88, pawRX: .235, pawRY: .88,
     footLX: -.245, footLY: 1.06, footRX: .245, footRY: 1.06,
-    sprout: 0, thought: 0, thoughtPhase: 0, groundScale: 1 });
+    sprout: 0, thought: 0, thoughtPhase: 0, groundScale: 1, mouthOpen: 0 });
   function headPath(left, right) {
     const a = [];
     for (let i = 0; i <= 240; i++) {
@@ -39,7 +39,7 @@
     return "M " + [...left, ...right.reverse()].join(" L ") + " Z";
   }
   function eye(open, smile) {
-    const width = .034 + Math.max(0, open - 1) * .012, height = Math.max(.0025, .055 * open), bend = -.04 * smile;
+    const width = .034 + Math.max(0, open - 1) * .012, height = Math.max(.0055, .055 * open), bend = -.04 * smile;
     const points = [];
     for (let i = 0; i <= 40; i++) {
       const t = TAU * i / 40, c = Math.cos(t);
@@ -109,12 +109,20 @@
       set("brow-l", "transform", `translate(-.22 ${f(-.572 + p.browY)}) rotate(${f(p.browL)})`);
       set("brow-r", "transform", `translate(.22 ${f(-.572 + p.browY)}) rotate(${f(p.browR)})`);
       set("brow-l", "opacity", f(p.browOpacity)); set("brow-r", "opacity", f(p.browOpacity));
-      const mid = .031 + Math.min(0, p.mouth) * .035, control = .031 + p.mouth * .044;
-      set("mouth", "d", `M -.066 .031 Q -.033 ${f(control)} 0 ${f(mid)} Q .033 ${f(control)} .066 .031`);
+      const open = clamp(p.mouthOpen || 0, 0, 1);
+      if (open > 0.05) {
+        const w = .060 * (1 - open * .15), topY = .031, botY = .031 + open * .065;
+        set("mouth", "d", `M ${f(-w)} ${topY} Q 0 ${f(topY + open * .015)} ${f(w)} ${topY} Q 0 ${f(botY)} ${f(-w)} ${topY} Z`);
+        set("mouth", "fill", C.ink);
+      } else {
+        const mid = .031 + Math.min(0, p.mouth) * .035, control = .031 + p.mouth * .044;
+        set("mouth", "d", `M -.066 .031 Q -.033 ${f(control)} 0 ${f(mid)} Q .033 ${f(control)} .066 .031`);
+        set("mouth", "fill", "none");
+      }
       for (const [side, sign] of [["l", -1], ["r", 1]]) {
         const cap = side.toUpperCase(), x = p["paw" + cap + "X"], y = p["paw" + cap + "Y"], path = arm(sign, x, y);
         set("arm-" + side, "d", path); set("arm-" + side + "-edge", "d", path);
-        const raised = clamp((.50 - y) / .20, 0, 1), eased = raised * raised * (3 - 2 * raised);
+        const raised = clamp((.82 - y) / .92, 0, 1), eased = raised * raised * (3 - 2 * raised);
         set("paw-" + side, "transform", `translate(${f(x)} ${f(y)}) rotate(${f(sign * (8 + 15 * eased))})`);
         const fx = p["foot" + cap + "X"], fy = p["foot" + cap + "Y"];
         set("leg-" + side, "d", `M ${f(sign * .245)} .86 Q ${f(fx)} .97 ${f(fx)} ${f(fy)}`);

@@ -1,0 +1,50 @@
+{
+  "created_at": "2026-09-10T04:36:15.734843+00:00",
+  "scope": "Final standalone export and browser checks",
+  "checks": [
+    {
+      "name": "selfware-phi-animated.svg",
+      "status": "passed",
+      "xml_valid": true,
+      "embedded_scripts": false,
+      "bytes": 889341
+    },
+    {
+      "name": "selfware-phi-avatar-animated.svg",
+      "status": "passed",
+      "xml_valid": true,
+      "embedded_scripts": false,
+      "bytes": 847670
+    },
+    {
+      "name": "both_download_buttons",
+      "status": "passed"
+    },
+    {
+      "name": "selfware-phi-animated.svg standalone playback",
+      "status": "passed",
+      "animated_transform_changes": true,
+      "reduced_motion_still_visible": true
+    },
+    {
+      "name": "selfware-phi-avatar-animated.svg standalone playback",
+      "status": "passed",
+      "animated_transform_changes": true,
+      "reduced_motion_still_visible": true
+    }
+  ],
+  "errors": [],
+  "browser": "152.0.7977.83",
+  "source_sha256": {
+    "index.html": "46c7e1643e312ee7a63949fbe73214224f6237c8a0a51b4b3d70cd4eadf3dcc8",
+    "style.css": "8d073e5712eebd5bd0387997e400ac3605e6030c7702f5aae5770a53c4de3060",
+    "geometry.js": "495d9994736cbdc99c1830d979f9bb06bf05b3fd240764693dbf588311456afe",
+    "rig.js": "e8dc79f05506fdafc2e8670f558e6aaee79978ede806897836dfbf278b0610ee",
+    "motion.js": "0e4a1ec56a3f78f797211416939863585ac7ebc17e872d0baad2742cb738f403",
+    "studio.js": "7275fcf1ff288b35ca391cfe7f19de52842ffd9d05e0fcaf75760d77ce999716",
+    "selfware-phi-animated.svg": "946952db5782a084ed42ec7c50697b76e532b65e7f374deeb44c926d7d17513d",
+    "selfware-phi-avatar-animated.svg": "b3314f9e6531fa6c883ac6d5f6b38a92cc8db840e08dfac43306ec1f969a94d6"
+  },
+  "status": "passed",
+  "final_pass": "Regenerated after full-range paw rotation polish; both standalone SVGs parsed and retested for changing transforms and reduced-motion fallback."
+}

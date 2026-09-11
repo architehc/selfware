@@ -140,7 +140,10 @@ fn read_rs_files(path: &Path) -> Result<Vec<String>> {
             contents.push(std::fs::read_to_string(path)?);
         }
     } else if path.is_dir() {
-        for entry in walkdir::WalkDir::new(path) {
+        for entry in walkdir::WalkDir::new(path)
+            .into_iter()
+            .filter_entry(super::graph::retain_outside_python_environments)
+        {
             let entry = entry?;
             if entry.path().extension().is_some_and(|e| e == "rs") {
                 contents.push(std::fs::read_to_string(entry.path())?);

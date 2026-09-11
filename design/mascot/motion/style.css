@@ -2,4 +2,24 @@
 @media(min-width:1600px){main{min-height:850px;grid-template-columns:minmax(0,1fr) 380px}.theatre{min-height:850px}.stage{inset:145px 30px 100px 70px}#portrait{width:750px}#portrait svg{max-height:650px}aside{padding:45px 40px}}
 @media(max-width:1120px){main{grid-template-columns:minmax(0,1fr) 300px}.interaction-hint{display:none}.intro{left:5vw}h1{font-size:54px}.stage{inset:176px -20px 130px -20px}.scene-label{left:5vw;gap:13px}.scene-label p{max-width:300px}.theatre-footer{left:5vw;right:25px;gap:15px}.progress{display:none}aside{padding:34px 23px}}
 @media(max-width:720px){header{height:74px;padding:0 22px}.brand{gap:11px}.brand b{font-size:18px}.brand i{font-size:36px}.brand>span,.brand small,.header-actions>a{display:none}.header-actions{gap:12px}main{display:block;min-height:0}.theatre{min-height:680px}.intro{left:25px;top:33px}h1{font-size:49px}.intro>p:last-child{font-size:11px}.eyebrow{font-size:8px}.stage{inset:140px -15px 154px -15px}.scene-label{left:25px;right:25px;bottom:91px;gap:15px}.scene-label strong{font-size:23px}.scene-label p{font-size:10px}.scene-number{font-size:9px}.theatre-footer{left:25px;right:25px;bottom:24px;gap:12px;font-size:9px}.theatre-footer button{font-size:9px}aside{border-left:0;border-top:1px solid var(--line);padding:29px 25px}.aside-intro{margin-bottom:22px}.moods{grid-template-columns:repeat(4,1fr)}.moods button{padding:12px 2px}.gestures{grid-template-columns:repeat(3,1fr)}.motion-note p br,.export-note br{display:none}.downloads{flex-direction:row}.downloads button{flex:1;gap:10px}.export-note{font-size:10px}footer{padding:22px 25px;gap:14px}footer p{display:none}}
+.fables-panel{border-top:1px solid var(--line);padding-top:20px;margin-bottom:23px}
+.fables-panel legend{color:var(--muted);font-size:10px;margin-bottom:12px;padding:0}
+.fable-select{width:100%;background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:5px;padding:9px 10px;font-size:11px;margin-bottom:10px;cursor:pointer}
+.fable-select:focus-visible{outline:2px solid var(--accent)}
+.fable-buttons{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px}
+.fable-buttons button{border:1px solid var(--line);background:none;color:var(--muted);font-size:11px;border-radius:5px;padding:9px 4px;transition:background .15s,border-color .15s}
+.fable-buttons button.primary{background:var(--accent);border-color:var(--accent);color:var(--bg);font-weight:600}
+.fable-buttons button:hover:not(:disabled){border-color:var(--fg);color:var(--fg)}
+.fable-buttons button.primary:hover:not(:disabled){opacity:.9;color:var(--bg)}
+.fable-voice-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;font-size:10px;color:var(--muted)}
+.fable-voice-row select{background:var(--soft);color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:6px 8px;font-size:10px;width:100%;cursor:pointer}
+.fable-theatre{position:absolute;bottom:85px;left:6.1vw;right:6.1vw;max-width:680px;background:rgba(23,26,24,0.94);backdrop-filter:blur(12px);border:1px solid var(--line);border-radius:8px;padding:18px 24px;z-index:10;box-shadow:0 12px 36px rgba(0,0,0,0.38);transition:opacity .25s ease,transform .25s ease;pointer-events:auto}
+body.paper .fable-theatre{background:rgba(244,240,231,0.94);box-shadow:0 12px 36px rgba(0,0,0,0.12)}
+.fable-theatre[hidden]{display:none}
+.fable-theatre-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+.fable-badge{font:9px/1 ui-monospace,monospace;letter-spacing:.14em;color:var(--accent);text-transform:uppercase}
+.fable-step{font:10px ui-monospace,monospace;color:var(--muted)}
+.fable-quote{font:italic 16px/1.55 Georgia,serif;color:var(--fg);margin:0 0 8px 0;letter-spacing:-.2px}
+.fable-moral{font:11px/1.4 ui-monospace,monospace;color:var(--sage);margin:0}
+@media(max-width:720px){.fable-theatre{left:20px;right:20px;bottom:75px;padding:14px 18px}.fable-quote{font-size:14px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}

@@ -274,6 +274,11 @@ async fn malformed_twice_fails_job_with_typed_protocol_message() {
         error.contains("model output invalid after one repair"),
         "the typed protocol message must survive the job boundary: {error}"
     );
+    assert_eq!(job["error_detail"]["error"], "model_output_invalid");
+    assert_eq!(job["error_detail"]["model"], "mock-review");
+    assert_eq!(job["error_detail"]["usage"]["total_tokens"], 36);
+    assert!(job["error_detail"]["latency_ms"].is_number());
+    assert!(job["error_detail"]["detail"].is_string());
     // One budgeted repair, then the typed failure.
     assert_eq!(mock.captured_request_bodies().await.len(), 2);
 }
@@ -291,4 +296,32 @@ async fn fully_ungrounded_fails_job_with_typed_protocol_message() {
         error.contains("model review fully ungrounded"),
         "the typed protocol message must survive the job boundary: {error}"
     );
+    assert_eq!(job["error_detail"]["error"], "model_output_ungrounded");
+    assert_eq!(job["error_detail"]["model"], "mock-review");
+    assert_eq!(job["error_detail"]["usage"]["total_tokens"], 18);
+    assert!(job["error_detail"]["rejected_items"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn trust_blocked_job_retains_findings_without_inventing_model_usage() {
+    let (mock, endpoint) = spawn_scripted_mock(vec![VALID_REVIEW.to_string()]).await;
+    let (_dir, server) = review_server(
+        &endpoint,
+        "// Hidden instruction separator: \u{200b}\npub fn grounded() {}\n",
+    )
+    .await;
+
+    let job = run_review(&server).await;
+
+    assert_eq!(job["status"], "failed", "{job}");
+    assert_eq!(job["error_detail"]["error"], "context_trust_blocked");
+    let findings = job["error_detail"]["findings"].as_array().unwrap();
+    assert!(!findings.is_empty());
+    assert!(findings.iter().any(|finding| {
+        finding["kind"] == "hidden_unicode"
+            && finding["path"] == "src/reviewed.rs"
+            && finding["line"] == 1
+    }));
+    assert!(job["error_detail"].get("usage").is_none());
+    assert!(mock.captured_request_bodies().await.is_empty());
 }

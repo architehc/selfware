@@ -135,6 +135,7 @@ impl ConceptIndex {
 
         for entry in WalkDir::new(root.as_ref())
             .into_iter()
+            .filter_entry(super::graph::retain_outside_python_environments)
             .filter_map(|e| e.ok())
         {
             let p = entry.path();

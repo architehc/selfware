@@ -36,9 +36,12 @@ use super::{
 };
 use crate::config::Config;
 
+mod friction;
+mod speech;
+
 const WEB_DIR: &str = "src/evolve/web";
 const SESSION_HEADER: &str = "x-selfware-session";
-const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult<T> = std::result::Result<T, ApiError>;
@@ -74,6 +77,8 @@ pub struct EvolveServer {
     assistant_lock: Arc<AsyncMutex<()>>,
     git_lock: Arc<AsyncMutex<()>>,
     review_jobs: Arc<AsyncMutex<HashMap<String, ReviewJob>>>,
+    speech: speech::SpeechBridge,
+    friction: friction::FrictionFeed,
 }
 
 impl EvolveServer {
@@ -177,6 +182,8 @@ impl EvolveServer {
             assistant_lock: Arc::new(AsyncMutex::new(())),
             git_lock: Arc::new(AsyncMutex::new(())),
             review_jobs: Arc::new(AsyncMutex::new(HashMap::new())),
+            speech: speech::SpeechBridge::from_env()?,
+            friction: friction::FrictionFeed::default(),
         };
         server.rebuild_envelope()?;
         Ok(server)
@@ -207,6 +214,8 @@ impl EvolveServer {
 
     pub fn router(&self) -> Router {
         let router = Router::new()
+            .merge(speech::routes())
+            .merge(friction::routes())
             .route("/api/workspace", get(workspace_handler))
             .route("/api/graph", get(graph_handler))
             .route("/api/context", get(context_handler))
@@ -512,7 +521,35 @@ fn reject_over_budget(
 async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult<Json<Value>> {
     let graph = server.graph_snapshot().map_err(internal_error)?;
     let context = server.context_summary().map_err(internal_error)?;
-    let git = server.git.status().map_err(internal_error)?;
+    // Editing and grounded review also work before a project has a Git HEAD.
+    // Git metadata is optional here; guarded Git routes still enforce their
+    // own repository and exact-HEAD requirements.
+    let (git, git_available) = match server.git.status() {
+        Ok(status) => (
+            json!({
+                "available": true,
+                "branch": status.branch,
+                "head": status.head,
+                "dirty": status.dirty,
+                "files": status.files
+            }),
+            true,
+        ),
+        Err(error) => (
+            json!({
+                "available": false,
+                "branch": null,
+                "head": null,
+                "dirty": null,
+                "files": null,
+                "error": {
+                    "code": "git_status_unavailable",
+                    "detail": format!("{error:#}")
+                }
+            }),
+            false,
+        ),
+    };
     let revision = graph_revision(&graph).map_err(internal_error)?;
     let workspace_name = server
         .project_root
@@ -549,7 +586,7 @@ async fn workspace_handler(State(server): State<Arc<EvolveServer>>) -> ApiResult
             "grounded_review_snapshot_binding": true,
             "evidence_preview": true,
             "full_context_inline_test_filter": true,
-            "branch_creation": true,
+            "branch_creation": git_available,
             "deletion_preview": true,
             "deletion_execute": false
         }
@@ -793,6 +830,7 @@ async fn apply_action_handler(
     let id = super::apply::spawn(prompt.clone(), root, server.apply_runs.clone())
         .await
         .map_err(internal_error)?;
+    server.friction.track_apply(&id, &body.kind, &body.target);
     Ok(Json(
         json!({ "id": id, "status": "running", "prompt": prompt }),
     ))
@@ -834,11 +872,15 @@ async fn apply_commit_handler(
     Json(body): Json<ApplyCommitRequest>,
 ) -> ApiResult<Json<Value>> {
     require_session(&headers, &server)?;
+    server.friction.observe_apply(&server.apply_runs).await;
     let root = server.project_root.as_ref().clone();
     let outcome =
         super::apply::commit_staged(&server.apply_runs, &body.run_id, &body.diff_digest, &root)
             .await
             .map_err(commit_error)?;
+    server
+        .friction
+        .applied(&body.run_id, &body.diff_digest, outcome.files_changed);
     Ok(Json(json!({
         "merged": true,
         "new_head": outcome.new_head,
@@ -1739,13 +1781,27 @@ async fn analysis_run_handler(
     require_session(&headers, &server)?;
     let _workspace_guard = server.write_lock.lock().await;
     let _analysis_guard = server.analysis_lock.lock().await;
-    let report = tokio::time::timeout(
+    let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(300),
         server.diagnostics.run(body.kind),
     )
-    .await
-    .map_err(|_| internal_error("analysis timed out (300s); the build may still be running"))?
-    .map_err(internal_error)?;
+    .await;
+    let report = match outcome {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            server.friction.diagnostics_unavailable("analysis_failed");
+            return Err(internal_error(error));
+        }
+        Err(_) => {
+            server
+                .friction
+                .diagnostics_unavailable("analysis_timed_out");
+            return Err(internal_error(
+                "analysis timed out (300s); the build may still be running",
+            ));
+        }
+    };
+    server.friction.diagnostics(&report);
     Ok(Json(serde_json::to_value(report).map_err(internal_error)?))
 }
 
@@ -1767,6 +1823,9 @@ async fn readiness_handler(
         internal_error("readiness evaluation timed out (300s) — analyses may still be running")
     })?
     .map_err(internal_error)?;
+    for analysis in &report.analyses {
+        server.friction.diagnostics(analysis);
+    }
     Ok(Json(serde_json::to_value(report).map_err(internal_error)?))
 }
 
@@ -1788,6 +1847,9 @@ async fn recommendations_handler(
         internal_error("readiness evaluation timed out (300s) — analyses may still be running")
     })?
     .map_err(internal_error)?;
+    for analysis in &report.analyses {
+        server.friction.diagnostics(analysis);
+    }
     Ok(Json(
         serde_json::to_value(report.recommendations).map_err(internal_error)?,
     ))
@@ -1935,9 +1997,25 @@ async fn assistant_evidence_preview_handler(
 #[derive(Clone, serde::Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 enum ReviewJobStatus {
+    Queued,
     Running,
     Done { result: Value },
-    Failed { error: String },
+    Failed { error: String, error_detail: Value },
+}
+
+impl ReviewJobStatus {
+    fn failed(error: anyhow::Error) -> Self {
+        match error.downcast_ref::<ReviewProtocolError>() {
+            Some(protocol) => Self::Failed {
+                error: protocol.to_string(),
+                error_detail: protocol.body(),
+            },
+            None => Self::Failed {
+                error: format!("{error:#}"),
+                error_detail: json!({"error": "review_failed", "detail": format!("{error:#}")}),
+            },
+        }
+    }
 }
 
 struct ReviewJob {
@@ -1986,11 +2064,16 @@ async fn assistant_review_handler(
     let started = std::time::Instant::now();
     {
         let mut jobs = server.review_jobs.lock().await;
-        jobs.retain(|_, job| job.started.elapsed() < REVIEW_JOB_TTL);
+        jobs.retain(|_, job| {
+            matches!(
+                job.status,
+                ReviewJobStatus::Queued | ReviewJobStatus::Running
+            ) || job.started.elapsed() < REVIEW_JOB_TTL
+        });
         jobs.insert(
             job_id.clone(),
             ReviewJob {
-                status: ReviewJobStatus::Running,
+                status: ReviewJobStatus::Queued,
                 started,
             },
         );
@@ -1998,6 +2081,13 @@ async fn assistant_review_handler(
     let worker = server.as_ref().clone();
     let worker_job = job_id.clone();
     tokio::spawn(async move {
+        // A job waiting behind another local-model request is queued, not
+        // running. Hold this permit through completion and publish the actual
+        // transition before sending the request.
+        let _assistant_guard = worker.assistant_lock.lock().await;
+        if let Some(job) = worker.review_jobs.lock().await.get_mut(&worker_job) {
+            job.status = ReviewJobStatus::Running;
+        }
         let status = run_review_job(&worker, body, context, selection).await;
         worker
             .review_jobs
@@ -2007,36 +2097,27 @@ async fn assistant_review_handler(
     });
     Ok((
         StatusCode::ACCEPTED,
-        Json(json!({ "job_id": job_id, "status": "running" })),
+        Json(json!({ "job_id": job_id, "status": "queued" })),
     ))
 }
 
 /// The background half of `assistant_review_handler`: serializes on the
-/// assistant lock (acquired here so the POST never blocks on it), runs the
-/// review, and resolves to the job's terminal status. Failures keep the
-/// review's honesty contract: typed protocol errors carry their message text,
-/// anything else the full anyhow chain.
+/// assistant lock held by the spawned worker, runs the review, and resolves
+/// to the job's terminal status. Failures retain the readable legacy message
+/// plus the complete structured protocol outcome, including model telemetry.
 async fn run_review_job(
     server: &EvolveServer,
     body: AssistantReviewRequest,
     context: super::ContextSummary,
     selection: EvidenceSelection,
 ) -> ReviewJobStatus {
-    let _assistant_guard = server.assistant_lock.lock().await;
     let review = match server
         .assistant
         .review(&body.question, selection.evidence, selection.complete)
         .await
     {
         Ok(review) => review,
-        Err(error) => {
-            return ReviewJobStatus::Failed {
-                error: match error.downcast_ref::<ReviewProtocolError>() {
-                    Some(protocol) => protocol.to_string(),
-                    None => format!("{error:#}"),
-                },
-            };
-        }
+        Err(error) => return ReviewJobStatus::failed(error),
     };
     // Only claim the envelope hash when the envelope actually backed the
     // evidence (revision gate passed); otherwise report null.
@@ -2044,11 +2125,7 @@ async fn run_review_job(
         match server.cached_envelope() {
             Ok(Some(envelope)) => json!(envelope.content_hash),
             Ok(None) => Value::Null,
-            Err(error) => {
-                return ReviewJobStatus::Failed {
-                    error: format!("{error:#}"),
-                };
-            }
+            Err(error) => return ReviewJobStatus::failed(error),
         }
     } else {
         Value::Null
@@ -3157,6 +3234,10 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_str!("web/app.js").as_bytes(),
             "text/javascript; charset=utf-8",
         ),
+        "/phi_friction_client.js" => (
+            include_str!("web/phi_friction_client.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
         "/style.css" => (
             include_str!("web/style.css").as_bytes(),
             "text/css; charset=utf-8",
@@ -3164,6 +3245,78 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
         "/editor.html" => (
             include_str!("web/editor.html").as_bytes(),
             "text/html; charset=utf-8",
+        ),
+        "/phi/" | "/phi/index.html" => (
+            include_str!("web/phi/index.html").as_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        "/phi/app.js" => (
+            include_str!("web/phi/app.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_rig.js" => (
+            include_str!("web/phi/phi_rig.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_agent.js" => (
+            include_str!("web/phi/phi_agent.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_viseme.js" => (
+            include_str!("web/phi/phi_viseme.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_speech_client.js" => (
+            include_str!("web/phi/phi_speech_client.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_focus.js" => (
+            include_str!("web/phi/phi_focus.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_workspace.js" => (
+            include_str!("web/phi/phi_workspace.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_examples.js" => (
+            include_str!("web/phi/phi_examples.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_friction.js" => (
+            include_str!("web/phi/phi_friction.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_friction_monitor.js" => (
+            include_str!("web/phi/phi_friction_monitor.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_friction_ui.js" => (
+            include_str!("web/phi/phi_friction_ui.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/style.css" => (
+            include_str!("web/phi/style.css").as_bytes(),
+            "text/css; charset=utf-8",
+        ),
+        "/phi/assets/fox_phi_portrait.jpg" => (
+            include_bytes!("web/phi/assets/fox_phi_portrait.jpg").as_slice(),
+            "image/jpeg",
+        ),
+        "/phi/assets/fox_phi_banner.jpg" => (
+            include_bytes!("web/phi/assets/fox_phi_banner.jpg").as_slice(),
+            "image/jpeg",
+        ),
+        "/phi/assets/cmudict.dict" => (
+            include_bytes!("web/phi/assets/cmudict.dict").as_slice(),
+            "text/plain; charset=utf-8",
+        ),
+        "/phi/assets/CMUDICT-LICENSE" => (
+            include_bytes!("web/phi/assets/CMUDICT-LICENSE").as_slice(),
+            "text/plain; charset=utf-8",
+        ),
+        "/phi/assets/cmudict-provenance.json" => (
+            include_str!("web/phi/assets/cmudict-provenance.json").as_bytes(),
+            "application/json",
         ),
         "/vendor/d3/d3.min.js" => (
             include_bytes!("web/vendor/d3/d3.min.js").as_slice(),
@@ -3179,6 +3332,9 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
 
 /// Fallback handler serving the embedded UI assets (release-binary mode).
 async fn embedded_web(uri: axum::http::Uri) -> Response {
+    if uri.path() == "/phi" {
+        return axum::response::Redirect::permanent("/phi/").into_response();
+    }
     match embedded_asset(uri.path()) {
         Some((body, mime)) => ([(axum::http::header::CONTENT_TYPE, mime)], body).into_response(),
         None => (

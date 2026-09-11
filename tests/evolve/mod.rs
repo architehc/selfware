@@ -203,8 +203,10 @@ async fn poll_review_job(server: &EvolveServer, job_id: &str) -> Value {
         let (status, job) =
             get_json_auth(server, &format!("/api/assistant/review/status?id={job_id}")).await;
         assert_eq!(status, StatusCode::OK, "review job lost: {job}");
-        if job["status"] != "running" {
-            return job;
+        match job["status"].as_str() {
+            Some("queued" | "running") => {}
+            Some("done" | "failed") => return job,
+            _ => panic!("review job {job_id} returned an unknown state: {job}"),
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }

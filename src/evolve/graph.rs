@@ -399,9 +399,10 @@ pub(crate) fn repository_source_inventory(
         .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
-            entry.depth() == 0
-                || !entry.file_type().is_dir()
-                || !is_excluded_repository_directory(entry.file_name())
+            retain_outside_python_environments(entry)
+                && (entry.depth() == 0
+                    || !entry.file_type().is_dir()
+                    || !is_excluded_repository_directory(entry.file_name()))
         });
     for entry in walker {
         let entry = entry?;
@@ -465,6 +466,14 @@ pub(crate) fn repository_relative_path_supported(path: &Path) -> bool {
         return false;
     }
     is_graph_source(path)
+}
+
+/// Prune nested Python environments by their interpreter marker, regardless
+/// of their directory name. The explicit scan root remains user-selected
+/// input even if it contains this marker. This is discovery pruning, not a
+/// restriction on explicitly requested document reads.
+pub(crate) fn retain_outside_python_environments(entry: &walkdir::DirEntry) -> bool {
+    entry.depth() == 0 || !entry.file_type().is_dir() || !entry.path().join("pyvenv.cfg").is_file()
 }
 
 fn is_excluded_repository_directory(name: &std::ffi::OsStr) -> bool {

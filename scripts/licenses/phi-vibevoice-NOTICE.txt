@@ -1,0 +1,22 @@
+Phi VibeVoice runtime source acknowledgments
+
+Microsoft VibeVoice, revision 1541f590c7099820f10ea012f48d2399282df69f
+Copyright (c) 2025 Microsoft. MIT License (VibeVoice-MIT.txt).
+https://github.com/microsoft/VibeVoice
+
+ElBruno.VibeVoiceTTS, revision bf9d1fe78ca71ab2c1b1483d855b9f034c654408
+Copyright (c) 2026 El Bruno. MIT License (ElBruno-VibeVoiceTTS-MIT.txt).
+https://github.com/elbruno/ElBruno.VibeVoiceTTS
+
+DPM-Solver scheduler, as distributed in Microsoft VibeVoice
+Copyright 2024 TSAIL Team and The HuggingFace Team. All rights reserved.
+Licensed under Apache License 2.0 (DPM-Solver-Apache-2.0.txt).
+The upstream file acknowledges influence from https://github.com/LuChengTHU/dpm-solver.
+
+Modifications for Selfware: a NumPy-only order-two midpoint solver restricted
+to the VibeVoice cosine/v-prediction configuration, zero terminal sigma;
+ONNX execution with upstream windowed text and negative-cache handling;
+bounded inference, cancellation, and explicit completion/error metadata.
+This is an adapted runtime, not an upstream package or a claim of numerical
+or audio-quality equivalence. No weights or voice presets are distributed
+inside this source tree. The separate downloaded model retains its license.

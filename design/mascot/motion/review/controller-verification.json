@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "status": "passed",
+  "verified_at": "2026-09-10T04:34:35.431Z",
+  "runtime": {
+    "name": "Node.js",
+    "version": "v24.13.0"
+  },
+  "source_sha256": {
+    "design/mascot/motion/motion.js": "0e4a1ec56a3f78f797211416939863585ac7ebc17e872d0baad2742cb738f403",
+    "design/mascot/motion/rig.js": "230ffc30df7091bd0b4a72f8c42f08c93dd8b57f9f0fb64f1b424923c9a3ec86"
+  },
+  "method": "Actual rig.js base pose and motion.js evaluated in Node vm; deterministic RAF, event targets, reduced-motion media and finite-pose draw stubs. No browser DOM rendering performed.",
+  "checks": [
+    {
+      "id": "critical_spring_exact_subdivision",
+      "status": "passed",
+      "expected": "Constant-target updates agree within 1e-10 and remain finite",
+      "observed": {
+        "cases": 64,
+        "max_absolute_error": 5.684341886080802e-14,
+        "all_finite": true
+      }
+    },
+    {
+      "id": "active_transition_continuity",
+      "status": "passed",
+      "expected": "All 12 moods and 6 gestures retain current spring positions and velocities",
+      "observed": {
+        "preserved": true
+      }
+    },
+    {
+      "id": "reentrant_animation_enable_single_loop",
+      "status": "passed",
+      "expected": "Exactly one queued frame after each callback; none after destroy",
+      "observed": {
+        "pending_frames": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "frames_drawn": 8,
+        "pending_after_destroy": 0,
+        "listeners_after_destroy": 0
+      }
+    },
+    {
+      "id": "on_frame_pause_cleanup",
+      "status": "passed",
+      "expected": "Callback prevents another RAF or draw",
+      "observed": {
+        "active": false,
+        "pending": 0,
+        "additional_draws": 0
+      }
+    },
+    {
+      "id": "on_frame_destroy_cleanup",
+      "status": "passed",
+      "expected": "Callback prevents another RAF or draw",
+      "observed": {
+        "active": false,
+        "pending": 0,
+        "additional_draws": 0
+      }
+    },
+    {
+      "id": "on_change_reel_destroy",
+      "status": "passed",
+      "expected": "Destroy from an in-tick state callback prevents rendering and scheduling",
+      "observed": {
+        "callback_reached": true,
+        "draws_after_callback": 0,
+        "pending": 0,
+        "listeners": 0
+      }
+    },
+    {
+      "id": "on_change_gesture_destroy",
+      "status": "passed",
+      "expected": "Destroy from an in-tick state callback prevents rendering and scheduling",
+      "observed": {
+        "callback_reached": true,
+        "draws_after_callback": 0,
+        "pending": 0,
+        "listeners": 0
+      }
+    },
+    {
+      "id": "reduced_motion_notifications",
+      "status": "passed",
+      "expected": "Reduce cancels motion; both changes emit accurate state; resume schedules one RAF",
+      "observed": {
+        "notices": [
+          {
+            "animated": false,
+            "reduced": true
+          },
+          {
+            "animated": true,
+            "reduced": false
+          },
+          {
+            "animated": false,
+            "reduced": true
+          }
+        ],
+        "reduced_queue": 0,
+        "reduced_active": false,
+        "resume_queue": 1
+      }
+    },
+    {
+      "id": "destroy_while_reduced",
+      "status": "passed",
+      "expected": "Destroy removes all listeners/frames without redrawing the still pose",
+      "observed": {
+        "additional_draws": 0,
+        "pending": 0,
+        "listeners": 0
+      }
+    },
+    {
+      "id": "visibility_pause_resume",
+      "status": "passed",
+      "expected": "Hidden pages stop; resume uses a fresh frame delta and emits both states",
+      "observed": {
+        "notices": [
+          false,
+          true
+        ],
+        "hidden_pending": 0,
+        "hidden_clock_unchanged": true,
+        "resume_increment": 0.016666666666666666
+      }
+    },
+    {
+      "id": "manual_pause_resume",
+      "status": "passed",
+      "expected": "Pause freezes the clock; resume does not catch up hidden elapsed time",
+      "observed": {
+        "frozen": true,
+        "resume_increment": 0.016666666666666666,
+        "pending": 1
+      }
+    },
+    {
+      "id": "ordinary_frame_rate_timing",
+      "status": "passed",
+      "expected": "4–120 FPS advances ten animation seconds over ten elapsed seconds",
+      "observed": {
+        "samples": [
+          {
+            "hz": 4,
+            "wall_seconds": 10,
+            "animation_seconds": 9.999999999999998
+          },
+          {
+            "hz": 10,
+            "wall_seconds": 10,
+            "animation_seconds": 9.99999999999998
+          },
+          {
+            "hz": 20,
+            "wall_seconds": 10,
+            "animation_seconds": 10.000000000000009
+          },
+          {
+            "hz": 30,
+            "wall_seconds": 10,
+            "animation_seconds": 9.999999999999988
+          },
+          {
+            "hz": 60,
+            "wall_seconds": 10,
+            "animation_seconds": 9.999999999999895
+          },
+          {
+            "hz": 120,
+            "wall_seconds": 10,
+            "animation_seconds": 10.000000000000039
+          }
+        ]
+      }
+    },
+    {
+      "id": "foreground_stall_policy",
+      "status": "passed",
+      "expected": "A one-second foreground gap intentionally advances at most 250 ms",
+      "observed": {
+        "elapsed_seconds": 1,
+        "animation_seconds": 0.25
+      }
+    },
+    {
+      "id": "tempo_timing",
+      "status": "passed",
+      "expected": "Tempo scales choreography elapsed time",
+      "observed": {
+        "samples": [
+          {
+            "tempo": 0.5,
+            "wall_seconds": 2,
+            "animation_seconds": 1.000000000000002
+          },
+          {
+            "tempo": 1,
+            "wall_seconds": 2,
+            "animation_seconds": 2.000000000000004
+          },
+          {
+            "tempo": 1.5,
+            "wall_seconds": 2,
+            "animation_seconds": 2.9999999999999956
+          }
+        ]
+      }
+    },
+    {
+      "id": "instance_owned_cleanup",
+      "status": "passed",
+      "expected": "Destroying one controller leaves the other controller alive and removes only its own listeners",
+      "observed": {
+        "pending_after_first_destroy": 1,
+        "listeners_after_first_destroy": 4,
+        "second_frames": 1,
+        "final_pending": 0,
+        "final_listeners": 0
+      }
+    }
+  ],
+  "limitations": [
+    "Numerical constant-target checks do not establish exact integration for time-varying choreography targets.",
+    "Foreground stalls longer than 250 ms intentionally slow the animation timeline, matching the documented policy.",
+    "SVG geometry, browser rendering, visual smoothness, accessibility and standalone export behavior are outside this report.",
+    "This report tests the recorded source hashes only."
+  ],
+  "remaining_important_problems": []
+}

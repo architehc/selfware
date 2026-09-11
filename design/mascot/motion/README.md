@@ -43,7 +43,9 @@ v_next = (v − ωc·dt)·decay
 Gaze responds faster than the head; the tail responds more slowly. Gestures
 have eased entrances and exits. Blinks are short and sparsely scheduled.
 The animation uses `requestAnimationFrame` without rebuilding the SVG each
-frame. Hidden documents stop requesting frames. Reduced motion displays an
+frame. The timeline follows elapsed time, with foreground stalls capped at
+250 ms to avoid large jumps. Hidden documents stop requesting frames and resume
+without catching up the hidden interval. Reduced motion displays an
 expressive still pose; gestures can be previewed as still poses too.
 
 ## Reuse as Selfware's face
@@ -81,6 +83,7 @@ fox.setState("curious");
 fox.gesture("wave");
 fox.setTempo(0.85);              // Supported range: 0.5–1.5
 fox.setAttention(true);
+fox.setMouth(0.85);              // Supported range: 0.0–1.0 (viseme aperture)
 fox.setAnimation(false);         // Freeze the current pose
 fox.setShowreel(false);
 const still = fox.snapshot();    // SVG of the actual current pose
@@ -92,16 +95,34 @@ Supported states: `greeting`, `curious`, `thinking`, `working`, `success`,
 `error`, `idle`, `evolve`, `flow`, `guard`, `spark`, `sleep`.
 Supported gestures: `wave`, `look`, `stretch`, `walk`, `celebrate`, `nod`.
 The controller dispatches a `phi:state` event on its mounting element when a
-state, gesture, or control changes. Pointer input affects pose only.
+state, gesture, animation control, visibility, or reduced-motion setting changes.
+Pointer input affects pose only.
+
+## Fables of Phi (Storyteller & Viseme Motion)
+
+`fables.js` provides an allegorical storytelling engine (`PhiFables.FableNarrator`)
+narrating Selfware's core architectural tenets while driving Phi's continuous-time
+kinematics, synchronized mouth opening visemes (`setMouth`), and expressive gestures:
+
+- *The Fox & The Compiler* — Humility before the gatekeeper; a patient mirror, not an obstacle.
+- *The Fox Who Measured The Forest* — Rule 4: Measured, not estimated.
+- *The Tale of the Nine Tails* — Rule 2: Mastery through deletion over accumulation.
+- *The Red Line on the Horizon* — Rule 1: Red CI is a stop signal, never background noise.
+- *The Fox & The Living River* — Rule 5: Sweep the bug class, not the single file.
+
+Speech synthesis is powered by the local ONNX engine (`VibeVoice-Realtime-0.5B-ONNX`)
+with monotonic word timelines for natural lip movement, gracefully falling back to native
+Web Speech synthesis or silent kinematics when offline.
 
 ## Artifacts
 
 - `selfware-phi-animated.svg`: a standalone greeting/wave loop.
 - `selfware-phi-avatar-animated.svg`: a compact thinking face for headers.
 - `geometry.js`: the original mascot paths and their source SVG fingerprint.
-- `rig.js`: attached body parts, deformable ears, eyes, limbs, and rendering.
+- `rig.js`: attached body parts, deformable ears, eyes, limbs, mouth aperture, and rendering.
 - `motion.js`: choreography, spring controller, lifecycle, and export.
-- `studio.js`, `style.css`, `index.html`: the interactive motion preview.
+- `fables.js`: storyteller narrator engine, fables collection, and viseme timing.
+- `studio.js`, `style.css`, `index.html`: the interactive motion preview & story theatre.
 
 Standalone animated SVGs contain a deterministic six-second loop at normal
 tempo, sampled into 121 vector keyframes with interpolation between them.
@@ -113,3 +134,11 @@ the live interactive controller additionally uses spring dynamics.
 The original `../index.html` studio is being developed separately and is left
 intact. This module is an additive motion prototype, not a change to the Rust
 terminal mascot or a connection to a live agent process.
+
+## Verification
+
+Chrome checks cover all twelve states and six gestures, pointer attention,
+pause, reduced motion, downloads, and layouts at 390, 768, and 1440 pixels.
+`verification.json` records standalone export checks and final source hashes;
+`review/` contains the live-frame review and controller lifecycle checks.
+These checks do not establish performance on every device or browser.

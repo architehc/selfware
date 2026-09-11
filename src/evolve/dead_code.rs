@@ -122,7 +122,11 @@ impl DeadCodeAnalyzer {
         for dir in ref_roots {
             let dir_path = self.root.join(dir);
             let is_src = dir == "src";
-            for entry in WalkDir::new(&dir_path).into_iter().filter_map(|e| e.ok()) {
+            for entry in WalkDir::new(&dir_path)
+                .into_iter()
+                .filter_entry(super::graph::retain_outside_python_environments)
+                .filter_map(|e| e.ok())
+            {
                 let p = entry.path();
                 if p.extension().is_some_and(|e| e == "rs") {
                     let Ok(text) = std::fs::read_to_string(p) else {
