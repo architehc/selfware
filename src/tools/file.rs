@@ -71,8 +71,9 @@ fn get_snapshots() -> &'static Mutex<HashMap<String, FileSnapshot>> {
 }
 
 /// Record a snapshot of a file after reading it.
-pub(crate) fn record_file_snapshot(path: &str, content: &str) {
-    let last_modified = std::fs::metadata(path)
+pub(crate) async fn record_file_snapshot(path: &str, content: &str) {
+    let last_modified = tokio::fs::metadata(path)
+        .await
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -103,11 +104,13 @@ pub(crate) fn clear_file_snapshot(path: &str) {
 
 /// Check whether a file on disk has changed since the last recorded snapshot.
 /// Returns `Some(true)` if stale, `Some(false)` if unchanged, `None` if no snapshot exists.
-pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
-    let guard = get_snapshots().lock().ok()?;
-    let snapshot = guard.get(path)?;
+pub(crate) async fn is_file_stale(path: &str) -> Option<bool> {
+    let snapshot = {
+        let guard = get_snapshots().lock().ok()?;
+        guard.get(path)?.clone()
+    };
 
-    let metadata = std::fs::metadata(path).ok()?;
+    let metadata = tokio::fs::metadata(path).await.ok()?;
     let current_mtime = metadata
         .modified()
         .ok()
@@ -119,7 +122,7 @@ pub(crate) fn is_file_stale(path: &str) -> Option<bool> {
     }
 
     // Secondary hash check for same-mtime modifications
-    let current_bytes = std::fs::read(path).ok()?;
+    let current_bytes = tokio::fs::read(path).await.ok()?;
     let current_text = String::from_utf8_lossy(&current_bytes);
     let mut hasher = DefaultHasher::new();
     current_text.hash(&mut hasher);
@@ -376,7 +379,7 @@ impl Tool for FileRead {
         let valid_utf8 = std::str::from_utf8(&bytes).is_ok();
 
         // Record snapshot for stale-guard detection
-        record_file_snapshot(&args.path, &content);
+        record_file_snapshot(&args.path, &content).await;
 
         let total_lines = content.lines().count();
 
@@ -441,7 +444,7 @@ impl Tool for FileWrite {
 
         // Stale-guard: reject if file changed since last read
         if path.exists() {
-            if let Some(true) = is_file_stale(&args.path) {
+            if let Some(true) = is_file_stale(&args.path).await {
                 return Err(ToolError::FileStale {
                     path: args.path.clone(),
                 }
@@ -529,7 +532,7 @@ impl Tool for FileEdit {
         validate_tool_path(&args.path, &safety)?;
 
         // Stale-guard: reject if file changed since last read
-        if let Some(true) = is_file_stale(&args.path) {
+        if let Some(true) = is_file_stale(&args.path).await {
             return Err(ToolError::FileStale {
                 path: args.path.clone(),
             }
@@ -640,7 +643,7 @@ impl Tool for FileDelete {
         }
 
         // Stale-guard: reject if file changed since last read
-        if let Some(true) = is_file_stale(&args.path) {
+        if let Some(true) = is_file_stale(&args.path).await {
             return Err(ToolError::FileStale {
                 path: args.path.clone(),
             }
@@ -723,7 +726,7 @@ impl Tool for FileMultiEdit {
         // Validate paths and stale-guard first
         for edit in &args.edits {
             validate_tool_path(&edit.path, &safety)?;
-            if let Some(true) = is_file_stale(&edit.path) {
+            if let Some(true) = is_file_stale(&edit.path).await {
                 return Err(ToolError::FileStale {
                     path: edit.path.clone(),
                 }
