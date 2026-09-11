@@ -183,7 +183,7 @@ async fn apply_sed_substitution(file: &str, sub: &SedSubstitution) -> anyhow::Re
         .map_err(|e| anyhow::anyhow!("sed interception path validation failed: {}", e))?;
 
     // Stale-guard
-    if let Some(true) = is_file_stale(file) {
+    if let Some(true) = is_file_stale(file).await {
         anyhow::bail!(
             "File {} changed on disk since you last read it. Re-read the file and try again.",
             file

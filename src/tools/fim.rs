@@ -186,7 +186,7 @@ impl Tool for FileFimEdit {
         validate_tool_path(path, &safety)?;
 
         // Stale-guard: reject if file changed since last read
-        if let Some(true) = is_file_stale(path) {
+        if let Some(true) = is_file_stale(path).await {
             return Err(anyhow!(
                 "File {} changed on disk since you last read it. Re-read the file and try again.",
                 path
