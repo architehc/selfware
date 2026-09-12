@@ -35,6 +35,7 @@ impl Agent {
         success: bool,
         snapshot: RunSnapshot,
         call_id: Option<&str>,
+        result: &str,
     ) {
         let parsed: serde_json::Value =
             serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
@@ -44,7 +45,7 @@ impl Agent {
             arguments: &parsed,
             turn_index,
             succeeded: success,
-            output: None,
+            output: Some(result),
         };
         let events = classify(&record);
         if events.is_empty() {

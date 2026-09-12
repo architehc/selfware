@@ -1819,6 +1819,7 @@ impl Agent {
                 success,
                 ledger_snapshot,
                 Some(vt.call_id.as_str()),
+                &result_str,
             );
 
             // Audit log
@@ -2176,6 +2177,7 @@ impl Agent {
             success,
             ledger_snapshot,
             observed_call_id.as_deref(),
+            &result,
         );
 
         // Audit: log tool execution

@@ -144,3 +144,6 @@ research/
 # autonomous self-improve loop workspace
 scratchpad/
 .worktrees/
+
+# Phi ledger scenario fixtures (regenerable; see docs/quant_bench)
+target/phi-session-eval/

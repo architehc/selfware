@@ -232,6 +232,32 @@ fn diff_line_counts(diff: &str) -> Vec<(PathBuf, usize)> {
 /// A failed tool changes nothing, so it produces no events — but note the
 /// asymmetry: a *partially* applied multi-edit that reports failure would be
 /// missed here. That is why the ledger also accepts external-change records.
+/// A shell tool reports ITS OWN success — whether the process was spawned and
+/// reaped — not the command's exit status. A failing test run is a successful
+/// `shell_exec`, so trusting the dispatcher flag recorded red suites as green
+/// and discharged obligations on them. Found by a deterministic scenario, not
+/// by a unit test: the unit tests passed `succeeded` in directly and could not
+/// see the difference.
+fn command_outcome(call: &ToolCallRecord<'_>) -> Outcome {
+    if !call.succeeded {
+        return Outcome::Failed;
+    }
+    let Some(output) = call.output else {
+        // No output to inspect. The tool ran, but whether the command passed is
+        // unknown, and unknown must not read as passed.
+        return Outcome::Failed;
+    };
+    match serde_json::from_str::<serde_json::Value>(output) {
+        Ok(value) => match value.get("exit_code").and_then(|v| v.as_i64()) {
+            Some(0) => Outcome::Passed,
+            Some(_) => Outcome::Failed,
+            // A shell result without an exit code is not evidence of success.
+            None => Outcome::Failed,
+        },
+        Err(_) => Outcome::Failed,
+    }
+}
+
 pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
     let outcome = if call.succeeded {
         Outcome::Passed
@@ -251,6 +277,8 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
         use crate::agent::tool_dispatch::helpers::{
             shell_command_verification_kind, VerificationKind,
         };
+        // The command's exit status, not the tool's.
+        let outcome = command_outcome(call);
         // A compound command may both mutate and verify: `python fix.py && pytest`
         // changed files this observer cannot name.
         let may_have_mutated = command.contains("&&")

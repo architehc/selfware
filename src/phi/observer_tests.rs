@@ -21,6 +21,21 @@ fn call<'a>(
     }
 }
 
+/// A tool record carrying a shell-style result payload.
+fn shell_call<'a>(
+    tool: &'a str,
+    arguments: &'a serde_json::Value,
+    output: &'a str,
+) -> ToolCallRecord<'a> {
+    ToolCallRecord {
+        tool,
+        arguments,
+        turn_index: 1,
+        succeeded: true,
+        output: Some(output),
+    }
+}
+
 #[test]
 fn every_registry_tool_is_explicitly_classified_or_explicitly_inert() {
     // The previous version read CRITICAL_TOOLS and then filtered it through a
@@ -543,4 +558,67 @@ fn an_opaque_run_is_recorded_not_discarded() {
             ..
         }]
     ));
+}
+
+#[test]
+fn a_failing_command_is_not_recorded_as_a_passing_test_run() {
+    // Found by a deterministic scenario, not by a unit test: shell_exec reports
+    // ITS OWN success, so a red suite arrived as succeeded=true and was
+    // recorded Passed. The exit code is the only honest signal.
+    let args = json!({"command": "python3 -m unittest discover"});
+    let red = r#"{"exit_code":1,"stdout":"","stderr":"FAILED (errors=1)"}"#;
+    match classify(&shell_call("shell_exec", &args, red)).as_slice() {
+        [ObservedEvent::RunFinished { outcome, .. }] => assert_eq!(*outcome, Outcome::Failed),
+        other => panic!("expected a failed run, got {other:?}"),
+    }
+
+    let green = r#"{"exit_code":0,"stdout":"OK","stderr":""}"#;
+    match classify(&shell_call("shell_exec", &args, green)).as_slice() {
+        [ObservedEvent::RunFinished { outcome, .. }] => assert_eq!(*outcome, Outcome::Passed),
+        other => panic!("expected a passing run, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_unreadable_shell_result_is_not_treated_as_success() {
+    // Absence of a parsable exit code is not evidence the command passed.
+    let args = json!({"command": "pytest"});
+    for output in ["not json at all", r#"{"stdout":"ok"}"#] {
+        match classify(&shell_call("shell_exec", &args, output)).as_slice() {
+            [ObservedEvent::RunFinished { outcome, .. }] => {
+                assert_eq!(*outcome, Outcome::Failed, "output was: {output}")
+            }
+            other => panic!("expected RunFinished, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_failing_test_run_discharges_nothing() {
+    let mut ledger = Ledger::new();
+    let snap = ledger.snapshot();
+    apply(
+        &mut ledger,
+        &classify(&call(
+            "file_write",
+            &json!({"path": "src/a.rs", "content": "a"}),
+            1,
+        )),
+        snap,
+        T,
+    );
+    let run = ledger.snapshot();
+    let args = json!({"command": "pytest"});
+    let red = r#"{"exit_code":1}"#;
+    apply(
+        &mut ledger,
+        &classify(&shell_call("shell_exec", &args, red)),
+        run,
+        T,
+    );
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UntestedLogic),
+        1,
+        "a red suite establishes work remains"
+    );
 }
