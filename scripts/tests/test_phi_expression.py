@@ -591,17 +591,52 @@ s.record('human_verified');s.record('reverted');
 assert.ok(s.snapshot().reversals<2,'a human disagreeing again must relieve it');
 """)
 
-    def test_debt_outlives_the_mood_it_was_earned_in(self):
-        """Unread code does not improve by being ignored."""
+    def test_debt_does_not_decay_with_time_at_all(self):
+        """Waiting is not a verification strategy.
+
+        The previous version of this test used a 120s window and asserted
+        debt > peak*0.6, where the true value was 0.619 — tuned to pass rather
+        than to prove the property. The constant it guarded gave debt a 173s
+        half-life, so ten idle minutes cleared 91% of it.
+        """
         self.node("""
 let t=0;const s=new PhiState({now:()=>t});
 for(let i=0;i<6;i++){t+=200;s.record('diff_accepted_unread');}
 const peak=s.snapshot().vector.debt;
-t+=120000;s.tick();
-const after=s.snapshot();
-assert.ok(after.vector.debt>peak*0.6,
-  `debt decayed like a mood (${peak} -> ${after.vector.debt})`);
-assert.ok(Math.abs(after.vector.focus-0.35)<0.15,'mood axes should have relaxed by now');
+assert.ok(peak>0.5,`expected real debt, got ${peak}`);
+// Eight hours away must not repay a single point of it.
+for (const minutes of [10, 60, 480]) {
+  const q=new PhiState({now:()=>t});
+  q.vector.debt=peak; q.updatedAt=t;
+  q.decayTo(t+minutes*60000);
+  assert.equal(q.vector.debt,peak,
+    `${minutes} idle minutes changed debt ${peak} -> ${q.vector.debt}`);
+}
+// Mood, by contrast, must still relax.
+t+=600000;s.tick();
+assert.ok(Math.abs(s.snapshot().vector.focus-0.35)<0.15,'mood axes should still decay');
+assert.equal(s.snapshot().vector.debt,peak,'debt must be untouched by the same tick');
+""")
+
+    def test_exposure_is_not_comprehension(self):
+        """Opening a file, and writing a test that has not run, are not checks."""
+        self.node("""
+let t=0;
+const load=()=>{const s=new PhiState({now:()=>t});
+  for(let i=0;i<5;i++){t+=200;s.record('diff_accepted_unread');} return s;};
+const opened=load(); const before=opened.snapshot().vector.debt;
+for(let i=0;i<6;i++){t+=200;opened.record('file_read');}
+assert.equal(opened.snapshot().vector.debt,before,
+  'reading files must not repay debt - exposure is not comprehension');
+
+const written=load(); const w0=written.snapshot().vector.debt;
+t+=200;written.record('test_written');
+const afterWritten=w0-written.snapshot().vector.debt;
+const ran=load(); const r0=ran.snapshot().vector.debt;
+t+=200;ran.record('tests_passed');
+const afterRan=r0-ran.snapshot().vector.debt;
+assert.ok(afterRan>afterWritten,
+  `a green run must repay more than an unrun test (${afterRan} vs ${afterWritten})`);
 """)
 
     def test_only_verification_pays_debt_down(self):
@@ -609,10 +644,11 @@ assert.ok(Math.abs(after.vector.focus-0.35)<0.15,'mood axes should have relaxed 
 let t=0;
 const load=()=>{const s=new PhiState({now:()=>t});
   for(let i=0;i<6;i++){t+=200;s.record('diff_accepted_unread');} return s;};
-const waiting=load(); t+=60000; waiting.tick();
-const working=load(); for(const e of ['diff_reviewed','test_written','human_verified','reverted']){t+=200;working.record(e);}
-assert.ok(working.snapshot().vector.debt < waiting.snapshot().vector.debt,
-  'checking the work must beat waiting it out');
+const waiting=load(); const owed=waiting.snapshot().vector.debt;
+t+=3600000; waiting.tick();
+assert.equal(waiting.snapshot().vector.debt,owed,'an hour of waiting repays nothing');
+const working=load(); for(const e of ['diff_reviewed','tests_passed','human_verified','reverted']){t+=200;working.record(e);}
+assert.ok(working.snapshot().vector.debt < owed,'verification must actually repay');
 """)
 
     def test_the_new_faces_are_reachable_from_the_state_alone(self):
@@ -779,17 +815,48 @@ for (const item of p) {
 }
 """)
 
-    def test_explore_only_appears_once_the_books_are_clear(self):
+    def test_explore_needs_positive_evidence_of_health(self):
+        """Absence of observed failures is not evidence that checks passed.
+
+        This test previously supplied no gate data at all and asserted that
+        Phi proposed new work — encoding the bug where an unreachable endpoint
+        and a green workspace were indistinguishable.
+        """
         self.steward("""
 const s=new PhiSteward();
-const clean=s.propose({state:{vector:{debt:.1},phase:'building'},
-  friction:{unreviewed:{count:0,lines:0}},workspace:{recentFiles:['src/a.rs']}});
-assert.equal(clean[0].kind,PROPOSAL_KINDS.EXPLORE);
-const dirty=s.propose({state:{vector:{debt:.1},phase:'building'},
+const base={state:{vector:{debt:.1},phase:'building'},friction:{unreviewed:{count:0,lines:0}}};
+
+const verified=s.propose({...base,workspace:{gateStatus:'passing',recentFiles:['src/a.rs']}});
+assert.equal(verified[0].kind,PROPOSAL_KINDS.EXPLORE,'checks passed: new work is cheap');
+s.reset();
+
+const unknown=s.propose({...base,workspace:{gateStatus:'unavailable',recentFiles:['src/a.rs']}});
+assert.ok(!unknown.some(x=>x.kind===PROPOSAL_KINDS.EXPLORE),
+  'checks that did not run must not read as a clean board');
+assert.equal(unknown[0].kind,PROPOSAL_KINDS.ORIENT);
+s.reset();
+
+const silent=s.propose({...base,workspace:{recentFiles:['src/a.rs']}});
+assert.ok(!silent.some(x=>x.kind===PROPOSAL_KINDS.EXPLORE),
+  'no gate signal at all is unknown, not green');
+s.reset();
+
+const red=s.propose({...base,workspace:{gateStatus:'passing',recentFiles:['src/a.rs'],
+  failingTests:[{name:'t',file:'f.rs'}]}});
+assert.ok(!red.some(x=>x.kind===PROPOSAL_KINDS.EXPLORE),'nothing is free while a test is red');
+""")
+
+    def test_unavailable_checks_are_reported_not_omitted(self):
+        self.steward("""
+const s=new PhiSteward();
+const signals={state:{vector:{debt:.1},phase:'building'},
   friction:{unreviewed:{count:0,lines:0}},
-  workspace:{recentFiles:['src/a.rs'],failingTests:[{name:'t',file:'f.rs'}]}});
-assert.ok(!dirty.some(x=>x.kind===PROPOSAL_KINDS.EXPLORE),
-  'nothing is free while a test is red');
+  workspace:{gateStatus:'unavailable',gateReason:'request failed',recentFiles:['src/a.rs']}};
+const p=s.propose(signals);
+const line=s.summarise(p,signals);
+assert.match(line,/not the same as nothing being wrong|unknown/i,
+  `Phi must say it could not check, got: ${line}`);
+assert.ok(p[0].evidence.some(e=>/unavailable/i.test(e)),'the reason must be cited');
 """)
 
     def test_a_dismissed_proposal_does_not_come_back(self):

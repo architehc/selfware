@@ -27,6 +27,13 @@ export const PROPOSAL_KINDS = Object.freeze({
   EXPLORE: 'explore'    // genuinely free to look around
 });
 
+/* Whether the checks could run at all. Absence of failures is not evidence of
+ * success: an unreachable endpoint and a green workspace look identical from
+ * here unless the difference is carried explicitly. */
+export const CHECK_STATUS = Object.freeze({
+  PASSING: 'passing', FAILING: 'failing', UNAVAILABLE: 'unavailable'
+});
+
 /* Rank, not score. The order is a position: nothing that produces new code
  * outranks something that checks the code already written. */
 const RANK = Object.freeze({ repair: 0, verify: 1, repay: 2, orient: 3, explore: 4 });
@@ -147,6 +154,21 @@ export class PhiSteward {
       }));
     }
 
+    // --- orient: nothing could be checked ---
+    // This outranks exploring on purpose. A workspace whose gates did not run
+    // is not a clean workspace; it is an unknown one.
+    if (workspace.gateStatus === CHECK_STATUS.UNAVAILABLE) {
+      out.push(proposal({
+        id: 'orient:gates-unavailable', kind: PROPOSAL_KINDS.ORIENT,
+        title: 'Architecture checks did not run',
+        rationale: `The gate endpoint did not answer${workspace.gateReason ? ` (${workspace.gateReason})` : ''}. `
+          + 'Nothing here has been verified — that is different from nothing being wrong, and I cannot tell you which this is.',
+        evidence: ['/api/gates unavailable'].concat(workspace.gateReason ? [workspace.gateReason] : []),
+        task: { question: 'Why is the architecture gate endpoint not responding, and what is the last known result?', kind: 'debug', target: '' },
+        effort: 'quick'
+      }));
+    }
+
     // --- orient: the thread is lost ---
     if (state.phase === 'entrenched') {
       out.push(proposal({
@@ -160,7 +182,12 @@ export class PhiSteward {
     }
 
     // --- explore: only once the books are clear ---
-    const clean = !out.length && (vector.debt ?? 0) < .3 && !failing.length && !failingGates.length;
+    // Exploring requires POSITIVE evidence of health, not merely an absence of
+    // observed failures. If the checks could not run, the books are unknown,
+    // not clear.
+    const checksRan = workspace.gateStatus === CHECK_STATUS.PASSING;
+    const clean = !out.length && checksRan && (vector.debt ?? 0) < .3
+      && !failing.length && !failingGates.length;
     if (clean && (workspace.recentFiles || []).length) {
       out.push(proposal({
         id: 'explore:next', kind: PROPOSAL_KINDS.EXPLORE,
@@ -183,11 +210,14 @@ export class PhiSteward {
     if (proposals.length) {
       const top = proposals[0];
       const leading = { repair: 'Something is red.', verify: 'Something is unchecked.',
-                        repay: 'Something was left behind.', orient: 'The thread is loose.',
+                        repay: 'Something was left behind.', orient: 'Something is unknown.',
                         explore: 'The books are clear.' }[top.kind] || '';
       return `${leading} ${top.title}.`;
     }
     const debt = signals.state?.vector?.debt ?? 0;
+    if (signals.workspace?.gateStatus === CHECK_STATUS.UNAVAILABLE) {
+      return 'I could not run the checks, so I have nothing to report — which is not the same as nothing being wrong.';
+    }
     if (debt > .5) return 'Nothing concrete to point at, but plenty here is unverified. I would not call this a clean stop.';
     return 'Nothing worth interrupting you for. I am not going to invent something.';
   }

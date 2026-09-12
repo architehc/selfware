@@ -222,23 +222,89 @@ export class PhiApp {
     quick.replaceChildren(...Array.from(full.children, child => child.cloneNode(true)));
     quick.value = full.value;
   }
-  /* Gather what the workspace can tell us. Anything that fails is simply not
-   * proposed about — a steward that guesses when an endpoint is down is worse
-   * than one that stays quiet. */
+  /* Gather what the workspace can tell us.
+   *
+   * Three outcomes, never two. "No failing checks observed" does not establish
+   * that checks passed — an unreachable endpoint, a 404, a payload whose shape
+   * we do not recognise, and a genuinely green run all used to collapse into
+   * the same empty list, which rendered as silence. Silence reads as fine, and
+   * that is the exact failure this module exists to catch.
+   *
+   * `gateStatus` is one of: 'passing' | 'failing' | 'unavailable'. Unknown is
+   * never reported as passing. */
   async refreshWorkspaceSignals() {
+    const gates = await this.readGates();
     const pull = async (path, shape) => {
-      try { return shape(await this.workspace.request(path)) || []; } catch (_) { return []; }
+      try {
+        const data = await this.workspace.request(path);
+        return { available: true, items: shape(data) || [] };
+      } catch (_) {
+        // Unreachable is not empty.
+        return { available: false, items: [] };
+      }
     };
-    const [gates, dead, duplicates] = await Promise.all([
-      pull('/api/gates', data => (data.gates || data.items || []).map(g =>
-        ({ id: g.id || g.name, name: g.name || g.id, passing: g.passing ?? g.ok ?? true, file: g.file }))),
+    const [dead, duplicates] = await Promise.all([
       pull('/api/analysis/dead-code', data => (data.items || data.symbols || []).map(d =>
         ({ file: d.file || d.path, symbol: d.symbol || d.name }))),
       pull('/api/analysis/duplicate-functions', data => (data.items || data.pairs || []).map(d =>
         ({ a: d.a || d.left, b: d.b || d.right })))
     ]);
-    this.workspaceSignals = { ...this.workspaceSignals, gates, deadCode: dead, duplicates };
+    this.workspaceSignals = {
+      ...this.workspaceSignals,
+      gates: gates.gates,
+      gateStatus: gates.status,
+      gateReason: gates.reason,
+      deadCode: dead.items,
+      deadCodeAvailable: dead.available,
+      duplicates: duplicates.items,
+      duplicatesAvailable: duplicates.available
+    };
     return this.workspaceSignals;
+  }
+
+  /* Parse the actual /api/gates payload.
+   *
+   * The server returns { passed: bool, architecture: ValidationReport } — not
+   * `gates` and not `items`. Reading those keys produced an empty list on every
+   * response, including `passed: false`, so a red workspace looked clean.
+   * Individual findings come out of `architecture`. */
+  async readGates() {
+    let data;
+    try {
+      data = await this.workspace.request('/api/gates');
+    } catch (error) {
+      return { status: 'unavailable', gates: [], reason: error?.message || 'request failed' };
+    }
+    if (!data || typeof data.passed !== 'boolean') {
+      // A shape we do not recognise is unknown, not green.
+      return { status: 'unavailable', gates: [], reason: 'unrecognised /api/gates payload' };
+    }
+    const report = data.architecture || {};
+    const findings = [
+      ['duplicate ids', report.duplicate_ids],
+      ['hierarchy cycles', report.cycles],
+      ['dangling edges', report.dangling_edges],
+      ['isolated nodes', report.isolated_nodes]
+    ];
+    const gates = findings
+      .filter(([, rows]) => Array.isArray(rows) && rows.length)
+      .map(([name, rows]) => ({
+        id: `architecture:${name.replace(/\s+/g, '_')}`,
+        name: `${name} (${rows.length})`,
+        passing: false,
+        detail: rows.slice(0, 3).map(row =>
+          typeof row === 'string' ? row : JSON.stringify(row)).join(', ')
+      }));
+    if (data.passed) return { status: 'passing', gates: [], reason: null };
+    if (gates.length) return { status: 'failing', gates, reason: null };
+    // passed:false with nothing enumerable is still a failure, and saying so
+    // beats inventing a specific one.
+    return {
+      status: 'failing',
+      gates: [{ id: 'architecture:unspecified', name: 'architecture validation', passing: false,
+                detail: 'reported as not passing, with no itemised findings' }],
+      reason: null
+    };
   }
 
   /* Called on a slow tick. Speaks at most once per idle period. */

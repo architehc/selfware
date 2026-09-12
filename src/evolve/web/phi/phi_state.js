@@ -44,7 +44,8 @@ export const EVENT_EFFECTS = Object.freeze({
   planning:         { focus:  .12, curiosity: .10, harmony:  .05, expression: 'thinking' },
   tool_call:        { focus:  .10, vitality: -.06, harmony: -.02, turn: 1 },
   exploring:        { curiosity:.24, focus:   -.04, expression: 'curious' },
-  file_read:        { curiosity:.06, focus:    .03, debt: -.02 },
+  // Opening a file records exposure, not comprehension — it pays nothing down.
+  file_read:        { curiosity:.06, focus:    .03 },
   high_throughput:  { focus:  .18, vitality:-.12 },
   awaiting_input:   { focus: -.10, vitality: .06 },
   rest:             { vitality:.24, focus:  -.14, harmony: .08 },
@@ -62,8 +63,12 @@ export const EVENT_EFFECTS = Object.freeze({
   // --- verification: the only thing that pays debt down ---
   diff_reviewed:    { debt: -.16, clarity: .08, harmony: .06 },
   diff_rejected:    { debt: -.12, clarity: .06, curiosity: .05 },
-  test_written:     { debt: -.18, clarity: .12, harmony: .08 },
-  tests_passed:     { debt: -.06, clarity: .28, harmony: .18, vitality: .04, turn: 1, expression: 'success' },
+  // Written, not yet run: it is a promise of verification, not verification.
+  // The larger repayment arrives with tests_passed.
+  test_written:     { debt: -.06, clarity: .12, harmony: .08 },
+  // A green run pays down real debt, but it cannot say WHICH changes it covered;
+  // that needs revision-keyed evidence, which this scalar model does not carry.
+  tests_passed:     { debt: -.18, clarity: .28, harmony: .18, vitality: .04, turn: 1, expression: 'success' },
   reverted:         { debt: -.22, clarity: .04, harmony: -.08 },
 
   // --- the loop failing as a check on you ---
@@ -109,9 +114,22 @@ export const ARCHETYPES = Object.freeze([
 ]);
 
 const REST = Object.freeze({ focus: .35, vitality: .8, clarity: .6, curiosity: .45, harmony: .6, debt: 0 });
-// Unreviewed code does not improve by being ignored, so debt relaxes an order of
-// magnitude slower than mood. Waiting is not a verification strategy.
-const DEBT_DECAY_PER_SECOND = .004;
+/* Debt does not decay with time. At all.
+ *
+ * This was .004/s — a 173-second half-life. Ten idle minutes cleared 91% of it,
+ * so a coffee break "verified" an afternoon of unread code, which is the exact
+ * opposite of what this axis is for. The comment claimed unreviewed code does
+ * not improve by being ignored while the constant arranged for it to.
+ *
+ * Worse, the test guarding it (`debt outlives the mood it was earned in`) used
+ * a 120s window and asserted debt > peak*0.6, where the true value was 0.619 —
+ * tuned to pass rather than to prove the property.
+ *
+ * Mood may decay; obligations may not. Debt is now repaid only by events that
+ * actually check something: diff_reviewed, test_written, tests_passed,
+ * reverted, human_verified.
+ */
+const DEBT_DECAY_PER_SECOND = 0;
 const DECAY_PER_SECOND = .06;      // how fast an axis returns to rest when nothing happens
 const STORAGE_KEY = 'phi.state.v1';
 
@@ -153,10 +171,12 @@ export class PhiState {
     const elapsed = Math.max(0, finite(timestamp) - this.updatedAt) / 1000;
     if (elapsed > 0) {
       const blend = -Math.expm1(-DECAY_PER_SECOND * elapsed);
-      const debtBlend = -Math.expm1(-DEBT_DECAY_PER_SECOND * elapsed);
+      const debtBlend = DEBT_DECAY_PER_SECOND > 0
+        ? -Math.expm1(-DEBT_DECAY_PER_SECOND * elapsed)
+        : 0;
       for (const axis of AXES) {
         const rate = axis === 'debt' ? debtBlend : blend;
-        this.vector[axis] += (REST[axis] - this.vector[axis]) * rate;
+        if (rate) this.vector[axis] += (REST[axis] - this.vector[axis]) * rate;
       }
       this.updatedAt = timestamp;
     }
