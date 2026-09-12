@@ -17,8 +17,38 @@ export const INTERVENTION_KINDS = {
   PHANTOM_API: 'phantom_api',
   CIRCULAR_SPIN: 'circular_spin',
   BOILERPLATE_VOMIT: 'boilerplate_vomit',
-  LATE_NIGHT_FATIGUE: 'late_night_fatigue'
+  LATE_NIGHT_FATIGUE: 'late_night_fatigue',
+  SYCOPHANTIC_REVERSAL: 'sycophantic_reversal',
+  UNREVIEWED_DRIFT: 'unreviewed_drift'
 };
+
+/* Phrases an assistant reaches for when it is capitulating rather than
+ * reasoning. On their own they are harmless — people and models are polite.
+ * What matters is one of these arriving ON A REVERSAL that cites no new
+ * evidence, which is the "You're absolutely right!" pattern: the loop stopped
+ * disagreeing with you, and agreement is not verification. */
+export const CAPITULATION_MARKERS = Object.freeze([
+  /\byou(?:'| a)?re\s+(?:absolutely|completely|totally|quite)\s+right\b/i,
+  /\byou(?:'| a)?re\s+right\b/i,
+  /\bgood\s+catch\b/i,
+  /\bmy\s+(?:apologies|mistake|bad)\b/i,
+  /\bi\s+apolog(?:ise|ize)\b/i,
+  /\byou(?:'| a)?re\s+correct\b/i,
+  /\b(?:that'?s|thats)\s+(?:a\s+)?(?:great|excellent|very good)\s+point\b/i,
+  /\bsorry\s+about\s+that\b/i
+]);
+
+/* Evidence is something that can be checked by someone other than the model:
+ * a file, a line, a command, a test, a measurement. "I think" and "it should"
+ * are not evidence. */
+export const EVIDENCE_MARKERS = Object.freeze([
+  /\b[\w./-]+\.(?:rs|js|ts|py|go|toml|json|md):\d+/,
+  /\b(?:cargo|npm|pytest|git|node|go)\s+\w+/i,
+  /\b(?:test|tests)\s+(?:pass|passed|fail|failed)\b/i,
+  /\bexit\s+(?:code|status)\b/i,
+  /\bmeasured\b|\bbenchmark\b|\bprofil(?:e|ed|ing)\b/i,
+  /```/
+]);
 
 export class CognitiveFrictionClassifier {
   constructor(options = {}) {
@@ -30,6 +60,10 @@ export class CognitiveFrictionClassifier {
       undoVelocityThreshold: 4,      // Undos within window
       undoVelocityWindowMs: 15000,   // 15 seconds
       sessionFatigueHours: 3.5,      // Continuous coding duration
+      reversalThreshold: 2,          // Capitulations before Phi says something
+      reversalWindowMs: 900000,      // 15 minutes
+      unreviewedThreshold: 5,        // Consecutive accepts with no review
+      unreviewedLinesThreshold: 200, // ...or this much unread code
       cooldownMs: 60000              // Minimum delay between interventions of same kind
     }, options);
 
@@ -37,6 +71,9 @@ export class CognitiveFrictionClassifier {
       errors: [],                    // { timestamp, signature, symbol, file }
       diffs: [],                     // { timestamp, generatedLines, expectedLines, prompt, rejected }
       undos: [],                     // [ timestamp ]
+      claims: [],                    // { timestamp, text, stance }
+      reversals: [],                 // { timestamp, marker, citedEvidence, topic }
+      unreviewed: { count: 0, lines: 0 },
       interventions: new Map(),      // kind -> timestamp
       sessionStart: Date.now(),
       lastActivity: Date.now()
@@ -101,6 +138,55 @@ export class CognitiveFrictionClassifier {
     return this.evaluate();
   }
 
+  /* Record an assistant turn that takes a position. `stance` is whatever the
+   * caller uses to identify the claim being made (a symbol, a file, a design
+   * decision) — Phi only needs to know when it flips. */
+  recordAssistantClaim({ stance, text = '', timestamp = Date.now() } = {}) {
+    if (!stance) return this;
+    this.history.claims.push({ timestamp, stance: String(stance), text: String(text) });
+    if (this.history.claims.length > 40) this.history.claims.shift();
+    return this;
+  }
+
+  /* Record an assistant turn that reverses a previous position. Returns the
+   * classified reversal so callers can act on it directly.
+   *
+   * A reversal is only counted as capitulation when it carries an agreement
+   * marker AND cites no checkable evidence. Changing your mind because a test
+   * failed is reasoning; changing it because you were pushed is not. */
+  recordAssistantReversal({ stance, text = '', afterPushback = true, timestamp = Date.now() } = {}) {
+    const body = String(text || '');
+    const marker = CAPITULATION_MARKERS.find(pattern => pattern.test(body));
+    const citedEvidence = EVIDENCE_MARKERS.some(pattern => pattern.test(body));
+    const capitulated = Boolean(marker) && !citedEvidence && afterPushback;
+    const reversal = { timestamp, stance: stance ? String(stance) : null,
+                       marker: marker ? marker.source : null, citedEvidence, capitulated };
+    if (capitulated) {
+      this.history.reversals.push(reversal);
+      if (this.history.reversals.length > 40) this.history.reversals.shift();
+    }
+    return reversal;
+  }
+
+  /* Generated code entering the tree, and whether anyone looked at it. */
+  recordAcceptance({ lines = 0, reviewed = false } = {}) {
+    if (reviewed) this.history.unreviewed = { count: 0, lines: 0 };
+    else {
+      this.history.unreviewed.count += 1;
+      this.history.unreviewed.lines += Math.max(0, Number(lines) || 0);
+    }
+    return this;
+  }
+
+  /* The human checked the work themselves, or reverted it. Both clear the
+   * unreviewed backlog and count against the capitulation streak: someone is
+   * disagreeing with the model again. */
+  recordHumanVerification() {
+    this.history.unreviewed = { count: 0, lines: 0 };
+    this.history.reversals = [];
+    return this;
+  }
+
   isCoolingDown(kind) {
     const last = this.history.interventions.get(kind) || 0;
     return (Date.now() - last) < this.options.cooldownMs;
@@ -134,6 +220,52 @@ export class CognitiveFrictionClassifier {
             { id: 'pin_ast', label: 'Pin AST to Context', action: 'pin_ast' },
             { id: 'prune_symbol', label: 'Prune Hallucination', action: 'prune' },
             { id: 'dismiss', label: 'I’ve got this (Esc)', action: 'dismiss' }
+          ]
+        };
+      }
+    }
+
+    // 1b. The loop has stopped being a check on you. This one goes early
+    // because nothing else in the classifier catches it: no error fires, no
+    // test breaks, and the session feels agreeable right up until it is wrong.
+    if (!this.isCoolingDown(INTERVENTION_KINDS.SYCOPHANTIC_REVERSAL)) {
+      const cutoff = now - this.options.reversalWindowMs;
+      const recent = this.history.reversals.filter(r => r.timestamp >= cutoff);
+      if (recent.length >= this.options.reversalThreshold) {
+        return {
+          kind: INTERVENTION_KINDS.SYCOPHANTIC_REVERSAL,
+          title: 'It Agreed With You Again',
+          context: { capitulations: recent.length, window_minutes: Math.round(this.options.reversalWindowMs / 60000),
+                     last_stance: recent[recent.length - 1].stance || 'unnamed claim' },
+          motionState: 'sycophancy',
+          gesture: 'look',
+          speechText: `That's ${recent.length} reversals with no new evidence behind any of them. It isn't converging on the answer, it's converging on you. Ask it what would prove the previous version wrong — if it can't say, neither version was reasoning.`,
+          actions: [
+            { id: 'demand_evidence', label: 'Ask what would disprove it', action: 'demand_evidence' },
+            { id: 'revert_claim', label: 'Revert to the first answer', action: 'revert_claim' },
+            { id: 'dismiss', label: 'I\u2019ve got this (Esc)', action: 'dismiss' }
+          ]
+        };
+      }
+    }
+
+    // 1c. Producing faster than anything is checking. Nothing has failed yet,
+    // which is the point: from the inside this is indistinguishable from a
+    // good day.
+    if (!this.isCoolingDown(INTERVENTION_KINDS.UNREVIEWED_DRIFT)) {
+      const { count, lines } = this.history.unreviewed;
+      if (count >= this.options.unreviewedThreshold || lines >= this.options.unreviewedLinesThreshold) {
+        return {
+          kind: INTERVENTION_KINDS.UNREVIEWED_DRIFT,
+          title: 'Nothing Has Read This',
+          context: { accepted_without_review: count, unread_lines: lines },
+          motionState: 'drifting',
+          gesture: 'look',
+          speechText: `${count} diffs in, ${lines} lines, and nothing has read any of it. The tests passing here only means the bug is somewhere the tests don't look. Pick one file and actually read it before the next prompt.`,
+          actions: [
+            { id: 'review_diff', label: 'Open the unread diff', action: 'review_diff' },
+            { id: 'write_test', label: 'Write a test for it', action: 'write_test' },
+            { id: 'dismiss', label: 'I\u2019ve got this (Esc)', action: 'dismiss' }
           ]
         };
       }

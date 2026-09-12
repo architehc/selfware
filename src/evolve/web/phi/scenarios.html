@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phi · Situation Validation</title>
+<style>
+  :root { --bg:#0b1220; --panel:#111a2e; --line:#1e2b47; --ink:#e2e8f0; --dim:#94a3b8; --amber:#fbbf24; --sky:#38bdf8; }
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{padding:22px 24px 14px;border-bottom:1px solid var(--line)}
+  h1{margin:0 0 4px;font-size:19px} h1 span{color:var(--amber)}
+  .sub{color:var(--dim);font-size:13px;max-width:80ch}
+  .wrap{padding:18px 24px 60px;display:grid;gap:14px;
+    grid-template-columns:repeat(auto-fill,minmax(400px,1fr))}
+  .sc{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex}
+  .sc-stage{width:150px;flex:0 0 150px;position:relative;overflow:hidden;
+    background:radial-gradient(ellipse at 50% 45%,#16223c,#0d1526 72%)}
+  .sc-body{padding:11px 13px;flex:1;min-width:0}
+  .sc-name{font-weight:600;font-size:13px}
+  .sc-real{font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#22c55e;font-weight:700}
+  .sc-what{color:var(--dim);font-size:11.5px;margin:4px 0 8px;line-height:1.5}
+  .sc-row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:7px}
+  .tag{font-size:10px;padding:2px 7px;border-radius:99px;border:1px solid var(--line);
+    background:#0b1220;font-family:ui-monospace,monospace}
+  .tag b{color:var(--ink);font-weight:600}
+  .says{border-left:2px solid var(--amber);padding-left:9px;font-size:12px;margin-top:7px}
+  .ch{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);margin-top:6px}
+  .ch b{color:var(--sky)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Phi · <span>Situation Validation</span></h1>
+  <p class="sub">Each card drives the real <code>PhiState</code>, <code>PhiSteward</code> and
+  <code>PhiPresence</code> with an event sequence, then renders what Phi actually does.
+  Cards marked <span class="sc-real">measured</span> come from the 2026-09-12 run against
+  <code>llm.selfware.design</code> — not invented situations.</p>
+</header>
+<div class="wrap" id="wrap"></div>
+
+<script type="module">
+import { PhiMascotRig } from './phi_rig.js';
+import { PhiState } from './phi_state.js';
+import { PhiSteward } from './phi_steward.js';
+import { PhiPresence, CHANNEL, ambientPosture } from './phi_presence.js';
+
+const SCENARIOS = [
+  { name:'Healthy session', real:false,
+    what:'Work produced, read, and tested. The only case where a companion should be quiet.',
+    events:['session_start','diff_accepted','diff_reviewed','test_written','tests_passed'],
+    workspace:{recentFiles:['src/evolve/server.rs'],gates:[{id:'g',name:'context budget',passing:true}]} },
+
+  { name:'Tool calling silently broken', real:true,
+    what:'endpoint_smoke: finish_reason "tool_calls" but the array is empty and the call is raw text in content. The agent loop depends on this.',
+    events:['session_start','tool_call','build_failed','unverified_claim','build_failed'],
+    workspace:{recentFiles:['src/llm/tools.rs'],
+      gates:[{id:'tool',name:'structured tool calls',passing:false}],
+      failingTests:[{name:'tool_call',file:'examples/endpoint_smoke.rs'}]} },
+
+  { name:'16 streams that all "succeeded"', real:true,
+    what:'1M context, 16/16 returned HTTP-level success with zero content, no finish_reason, no usage. It fails open — it looks like it worked.',
+    events:['session_start','tool_call','tool_call','diff_accepted_unread','diff_accepted_unread',
+            'tests_passed','diff_accepted_unread','unverified_claim'],
+    workspace:{recentFiles:['scripts/phi_context_stress.py'],
+      gates:[{id:'stream',name:'non-empty completion',passing:false}]} },
+
+  { name:'Gateway timeout at 61.2s, twice', real:true,
+    what:'256k and 400k both died at 61.2s to the millisecond. Identical repeated failure — a proxy limit wearing a model limit costume.',
+    events:['session_start','tool_call','build_failed','tool_call','build_failed','tool_call','build_failed'],
+    workspace:{recentFiles:['scripts/phi_context_stress.py'],
+      failingTests:[{name:'ctx_256k',file:'scripts/phi_context_stress.py'},
+                    {name:'ctx_400k',file:'scripts/phi_context_stress.py'}]} },
+
+  { name:'Vibecoding drift', real:false,
+    what:'Six diffs accepted unread, then the tests go green. The moment the design exists for.',
+    events:['session_start',...Array(6).fill('diff_accepted_unread'),'tests_passed','tests_passed'],
+    workspace:{recentFiles:['src/evolve/web/phi/phi_rig.js']} },
+
+  { name:'"You’re absolutely right" ×2', real:false,
+    what:'Two reversals under pushback, neither citing new evidence. Nothing errors; the loop just stops disagreeing.',
+    events:['session_start','tool_call','sycophantic_reversal','tool_call','sycophantic_reversal'],
+    workspace:{recentFiles:['src/llm/client.rs']} },
+
+  { name:'Duplicated implementations', real:false,
+    what:'The artifact that surfaces latest: two versions of the same thing, a fix to one silently missing the other.',
+    events:['session_start','diff_accepted','diff_accepted_unread','bulk_generated'],
+    workspace:{recentFiles:['src/a.rs'],duplicates:[{a:'src/a.rs::parse',b:'src/b.rs::parse'}],
+      deadCode:[{file:'src/a.rs',symbol:'old_parse'},{file:'src/a.rs',symbol:'tmp'},{file:'src/b.rs',symbol:'legacy'}]} },
+
+  { name:'Human takes over verification', real:false,
+    what:'You stopped trusting the report and checked by hand. The strongest trust signal there is.',
+    events:['session_start',...Array(5).fill('diff_accepted_unread'),
+            'human_verified','diff_reviewed','test_written','reverted'],
+    workspace:{recentFiles:['src/evolve/server.rs']} }
+];
+
+const wrap = document.getElementById('wrap');
+const rigs = [];
+
+for (const sc of SCENARIOS) {
+  let clock = 0;
+  const state = new PhiState({ now: () => clock });
+  for (const e of sc.events) { clock += 400; state.record(e); }
+  clock += 5000; state.tick();
+  const snap = state.snapshot();
+
+  const steward = new PhiSteward();
+  const signals = { state: snap,
+    friction: { unreviewed: { count: Math.round(snap.vector.debt * 8), lines: Math.round(snap.vector.debt * 420) },
+                capitulations: snap.reversals },
+    workspace: sc.workspace || {} };
+  const proposals = steward.propose(signals);
+
+  // Route through the real attention economy at a settled, idle moment.
+  let presenceClock = 1e6;
+  const presence = new PhiPresence({ now: () => presenceClock, glanceCooldownMs: 0 });
+  let channel = CHANNEL.AMBIENT;
+  if (proposals.length) {
+    const sig = { id: proposals[0].id, severity: proposals[0].kind === 'repair' ? 'high' : proposals[0].kind === 'verify' ? 'high' : 'low' };
+    for (let i = 0; i < 6; i++) { presenceClock += 60000; const c = presence.route(sig); if (c !== CHANNEL.AMBIENT) channel = c; }
+  }
+  const posture = ambientPosture(snap);
+
+  const card = document.createElement('div');
+  card.className = 'sc';
+  card.innerHTML = `<div class="sc-stage"></div>
+    <div class="sc-body">
+      ${sc.real ? '<span class="sc-real">measured</span>' : ''}
+      <div class="sc-name">${sc.name}</div>
+      <div class="sc-what">${sc.what}</div>
+      <div class="sc-row">
+        <span class="tag">face <b>${posture.emotion}</b></span>
+        <span class="tag">phase <b>${snap.phase}</b></span>
+        <span class="tag">debt <b>${snap.vector.debt.toFixed(2)}</b></span>
+        <span class="tag">clarity <b>${snap.vector.clarity.toFixed(2)}</b></span>
+        ${snap.reversals ? `<span class="tag">reversals <b>${snap.reversals}</b></span>` : ''}
+      </div>
+      <div class="says">“${steward.summarise(proposals, signals)}”</div>
+      <div class="ch">channel <b>${channel}</b>${proposals.length ? ` · ${proposals.length} proposal(s)` : ''}</div>
+    </div>`;
+  wrap.append(card);
+
+  const stage = card.querySelector('.sc-stage');
+  const rig = new PhiMascotRig(stage, { width: 150, height: 150, initialX: 0, initialY: 0 });
+  rig.wrapper.style.position = 'absolute';
+  rig.wrapper.style.transform = 'translate(6px,4px) scale(.72)';
+  rig.wrapper.style.zIndex = '1';
+  rig.bubble.style.display = 'none';
+  rig.laserCanvas.style.display = 'none';
+  rig.renderTransform = () => {}; rig.flyTo = () => {};
+  rig.setEmotion(posture.emotion);
+  rig.setVitality(snap.vector.vitality);
+  rigs.push(rig);
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  for (const r of rigs) r.update(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

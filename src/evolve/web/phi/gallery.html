@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phi · Expression & State Lab</title>
+<style>
+  :root {
+    --bg:#0b1220; --panel:#111a2e; --line:#1e2b47; --ink:#e2e8f0; --dim:#94a3b8;
+    --amber:#fbbf24; --sky:#38bdf8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:0; background:var(--bg); color:var(--ink);
+    font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding:22px 24px 12px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 4px; font-size:19px; letter-spacing:.2px; }
+  h1 span { color:var(--amber); }
+  .sub { color:var(--dim); font-size:13px; max-width:76ch; }
+  .wrap { padding:20px 24px 60px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.12em; color:var(--dim);
+    margin:28px 0 12px; font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:16px; }
+  .cell { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+    padding:10px; display:flex; flex-direction:column; align-items:center; transition:border-color .2s, box-shadow .2s; }
+  .cell { cursor:pointer; }
+  .cell:hover { border-color:#3a4a6d; }
+  .cell.ringing { border-color:var(--sky); box-shadow:0 0 0 1px var(--sky), 0 8px 30px rgba(56,189,248,.2); }
+  .sound-toggle { display:inline-block; margin:0 8px 8px 0; vertical-align:middle; }
+  .sound-toggle[aria-pressed="true"] { border-color:var(--amber); color:var(--amber); }
+  .sig { color:var(--dim); font-size:10.5px; text-align:center; margin-top:3px; font-style:italic; }
+  .cell.live { border-color:var(--amber); box-shadow:0 0 0 1px var(--amber), 0 8px 30px rgba(251,191,36,.15); }
+  .stage { width:190px; height:176px; position:relative; overflow:hidden; border-radius:9px;
+    background:radial-gradient(ellipse at 55% 45%, #16223c 0%, #0d1526 70%); }
+  .name { margin-top:6px; font-weight:600; font-size:13px; }
+  .name b { color:var(--amber); font-weight:600; }
+  .meta { color:var(--dim); font-size:11px; text-align:center; margin-top:2px; }
+  .swatch { width:100%; height:3px; border-radius:2px; margin-top:8px; }
+  .lab { display:grid; grid-template-columns:minmax(280px,1fr) minmax(280px,1.1fr); gap:18px;
+    background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .axis { display:grid; grid-template-columns:74px 1fr 44px; align-items:center; gap:10px; margin-bottom:7px; }
+  .axis span { color:var(--dim); font-size:12px; }
+  .bar { height:7px; background:#0b1220; border-radius:4px; overflow:hidden; }
+  .bar i { display:block; height:100%; background:linear-gradient(90deg,var(--sky),var(--amber)); transition:width .3s; }
+  .bar i[data-axis="debt"] { background:linear-gradient(90deg,#eab308,#f43f5e); }
+  .num { font-variant-numeric:tabular-nums; font-size:12px; color:var(--ink); text-align:right; }
+  .events { display:flex; flex-wrap:wrap; gap:6px; }
+  button { background:#0b1220; color:var(--ink); border:1px solid var(--line); border-radius:7px;
+    padding:5px 9px; font:inherit; font-size:12px; cursor:pointer; }
+  button:hover { border-color:var(--amber); color:var(--amber); }
+  button.ghost { border-style:dashed; }
+  .readout { margin-top:12px; padding-top:12px; border-top:1px solid var(--line);
+    display:flex; gap:20px; flex-wrap:wrap; }
+  .readout div { font-size:12px; color:var(--dim); }
+  .readout b { display:block; color:var(--ink); font-size:15px; font-weight:600; margin-top:2px; }
+  .note { color:var(--dim); font-size:12px; margin-top:10px; max-width:78ch; }
+  .steward-line { font-size:14px; color:var(--ink); margin-bottom:12px; padding-left:10px;
+    border-left:2px solid var(--amber); }
+  .prop { background:#0b1220; border:1px solid var(--line); border-left-width:3px; border-radius:8px;
+    padding:9px 11px; margin-bottom:7px; }
+  .prop-head { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+  .prop-kind { font-size:10px; text-transform:uppercase; letter-spacing:.1em; font-weight:700; }
+  .prop-title { font-weight:600; font-size:13px; }
+  .prop-why { color:var(--dim); font-size:12px; margin-top:3px; }
+  .prop-ev { color:var(--dim); font-size:11px; margin-top:4px; font-family:ui-monospace,monospace; opacity:.8; }
+  .prop[data-kind="repair"]  { border-left-color:#f43f5e; } .prop[data-kind="repair"]  .prop-kind { color:#f43f5e; }
+  .prop[data-kind="verify"]  { border-left-color:#eab308; } .prop[data-kind="verify"]  .prop-kind { color:#eab308; }
+  .prop[data-kind="repay"]   { border-left-color:#a78bfa; } .prop[data-kind="repay"]   .prop-kind { color:#a78bfa; }
+  .prop[data-kind="orient"]  { border-left-color:#94a3b8; } .prop[data-kind="orient"]  .prop-kind { color:#94a3b8; }
+  .prop[data-kind="explore"] { border-left-color:#22c55e; } .prop[data-kind="explore"] .prop-kind { color:#22c55e; }
+  @media (max-width:720px){ .lab { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Phi · <span>Expression &amp; State Lab</span></h1>
+  <p class="sub"><button id="btn-sound" class="sound-toggle" aria-pressed="false">🔇 Sound off</button>
+  Click any fox to hear its acoustic signature. Every cell is a real <code>PhiMascotRig</code> driven by the shipped
+  <code>phi_expression.js</code> table — not a picture. The lab below runs the live
+  <code>phi_state.js</code> vector: fire events, watch the axes move, and see which face the
+  state resolves to.</p>
+</header>
+<div class="wrap">
+  <h2>The 12 canonical expressions</h2>
+  <div class="grid" id="grid"></div>
+
+  <h2>Steward — what Phi says when Selfware goes idle</h2>
+  <div class="lab" style="grid-template-columns:1fr">
+    <div>
+      <div class="steward-line" id="steward-line">—</div>
+      <div id="steward-list"></div>
+      <p class="note">Phi speaks once per idle period, never while something is running. Proposals are
+      ranked by what is <em>unpaid</em>: repair before verify, verify before new production. Every one cites
+      the evidence it came from — and when there is no evidence, Phi says nothing rather than inventing a task.
+      Fire events in the lab below and watch this change.</p>
+    </div>
+  </div>
+
+  <h2>State lab</h2>
+  <div class="lab">
+    <div>
+      <div id="axes"></div>
+      <div class="readout">
+        <div>Expression<b id="r-expression">—</b></div>
+        <div>Archetype<b id="r-archetype">—</b></div>
+        <div>Experience<b id="r-experience">0</b></div>
+        <div>Last event<b id="r-event">—</b></div>
+        <div>Phase<b id="r-phase">—</b></div>
+        <div>Capitulations<b id="r-reversals">0</b></div>
+      </div>
+    </div>
+    <div>
+      <div class="events" id="events"></div>
+      <p class="note" id="phase-note">Events nudge the vector; it relaxes toward rest between them.</p>
+      <p class="note"><b>debt</b> is the one axis that isn't a mood: generated code minus anything
+      that checked it. It decays ~15× slower than the rest, because unread code doesn't improve by
+      being ignored. Try <code>diff_accepted_unread</code> five times, then <code>tests_passed</code> —
+      Phi stays unconvinced, because green tests on unread code only narrow where the bug is hiding.</p>
+      <div class="events" style="margin-top:10px">
+        <button class="ghost" id="btn-tick">Advance 10s (decay)</button>
+        <button class="ghost" id="btn-reset">Reset state</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { PhiMascotRig } from './phi_rig.js';
+import { EXPRESSIONS, EXPRESSION_IDS } from './phi_expression.js';
+import { PhiState, AXES, EVENT_EFFECTS } from './phi_state.js';
+import { PhiExpressionVoice, SIGNATURES } from './phi_sound.js';
+import { PhiSteward } from './phi_steward.js';
+
+const steward = new PhiSteward();
+// Stand-in workspace signals; the app feeds these from /api/analysis/* and /api/gates.
+const workspaceSignals = { recentFiles: ['src/agent/execution.rs'], gates: [], failingTests: [], deadCode: [], duplicates: [] };
+
+function renderSteward(snapshot) {
+  const signals = {
+    state: snapshot,
+    friction: { unreviewed: { count: Math.round(snapshot.vector.debt * 8), lines: Math.round(snapshot.vector.debt * 420) },
+                capitulations: snapshot.reversals },
+    workspace: workspaceSignals
+  };
+  const proposals = steward.propose(signals);
+  document.getElementById('steward-line').textContent = '“' + steward.summarise(proposals, signals) + '”';
+  const list = document.getElementById('steward-list');
+  list.replaceChildren(...proposals.map(p => {
+    const card = document.createElement('div');
+    card.className = 'prop'; card.dataset.kind = p.kind;
+    card.innerHTML = `<div class="prop-head"><span class="prop-kind">${p.kind}</span>
+      <span class="prop-title">${p.title}</span></div>
+      <div class="prop-why">${p.rationale}</div>
+      <div class="prop-ev">${p.evidence.join('  ·  ')}</div>`;
+    return card;
+  }));
+}
+
+// One voice shared by every cell; enabling it is a user gesture, as browsers require.
+const voice = new PhiExpressionVoice({ volume: .5, enabled: false });
+const soundButton = document.getElementById('btn-sound');
+soundButton.onclick = () => {
+  const on = voice.setEnabled(!voice.enabled);
+  soundButton.textContent = on ? '🔊 Sound on' : '🔇 Sound off';
+  soundButton.setAttribute('aria-pressed', String(on));
+  if (on) voice.play('greeting', { force: true });
+};
+
+const rigs = new Map();
+const grid = document.getElementById('grid');
+
+for (const id of EXPRESSION_IDS) {
+  const e = EXPRESSIONS[id];
+  const cell = document.createElement('div');
+  cell.className = 'cell'; cell.dataset.id = id;
+  cell.innerHTML = `<div class="stage"></div>
+    <div class="name"><b>${id}</b> · ${e.label}</div>
+    <div class="meta">${e.status}</div>
+    <div class="meta">on <code>${e.event}</code></div>
+    <div class="sig">${SIGNATURES[id]?.description || ''}</div>
+    <div class="swatch" style="background:${e.accent}"></div>`;
+  cell.onclick = () => {
+    if (!voice.enabled) { soundButton.click(); return; }
+    voice.play(id, { force: true });
+    cell.classList.add('ringing');
+    setTimeout(() => cell.classList.remove('ringing'), 700);
+  };
+  grid.append(cell);
+
+  const stage = cell.querySelector('.stage');
+  const rig = new PhiMascotRig(stage, { width: 190, height: 190, initialX: 0, initialY: 0 });
+  // The rig is built to fly over a page; in a gallery cell it sits still.
+  rig.wrapper.style.position = 'absolute';
+  rig.wrapper.style.zIndex = '1';
+  // Fit the whole rig — ear tips, tails and accessory — inside the cell.
+  rig.wrapper.style.transform = 'translate(9px, 2px) scale(.87)';
+  rig.bubble.style.display = 'none';
+  rig.laserCanvas.style.display = 'none';
+  rig.renderTransform = () => {};
+  rig.flyTo = () => {};
+  rig.setEmotion(id);
+  rigs.set(id, rig);
+}
+
+// One animation frame drives every rig, the way the app drives its single one.
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  for (const rig of rigs.values()) rig.update(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ── state lab ────────────────────────────────────────────────────────────────
+const axesBox = document.getElementById('axes');
+for (const axis of AXES) {
+  const row = document.createElement('div');
+  row.className = 'axis';
+  row.innerHTML = `<span>${axis}</span><div class="bar"><i data-axis="${axis}"></i></div>
+    <div class="num" data-num="${axis}">—</div>`;
+  axesBox.append(row);
+}
+
+let clock = Date.now();
+const state = new PhiState({ now: () => clock, onChange: render });
+
+const eventsBox = document.getElementById('events');
+for (const name of Object.keys(EVENT_EFFECTS)) {
+  const button = document.createElement('button');
+  button.textContent = name;
+  button.onclick = () => { clock += 250; state.record(name); };
+  eventsBox.append(button);
+}
+document.getElementById('btn-tick').onclick = () => { clock += 10000; state.tick(); };
+document.getElementById('btn-reset').onclick = () => { clock += 250; state.reset(); render(state.snapshot()); };
+
+function render(snapshot) {
+  for (const axis of AXES) {
+    const value = snapshot.vector[axis];
+    axesBox.querySelector(`[data-axis="${axis}"]`).style.width = `${(value * 100).toFixed(1)}%`;
+    axesBox.querySelector(`[data-num="${axis}"]`).textContent = value.toFixed(2);
+  }
+  document.getElementById('r-expression').textContent = snapshot.expression;
+  document.getElementById('r-archetype').textContent =
+    `${snapshot.archetype.label} (${snapshot.archetype.score.toFixed(3)})`;
+  document.getElementById('r-experience').textContent = snapshot.experience;
+  document.getElementById('r-event').textContent = snapshot.lastEvent || '—';
+  document.getElementById('r-phase').textContent = snapshot.phase;
+  document.getElementById('r-reversals').textContent = snapshot.reversals;
+  document.getElementById('phase-note').textContent = snapshot.phaseNote;
+  renderSteward(snapshot);
+  for (const cell of grid.children) cell.classList.toggle('live', cell.dataset.id === snapshot.expression);
+  voice.play(snapshot.expression);
+}
+render(state.snapshot());
+</script>
+</body>
+</html>

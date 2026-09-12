@@ -669,3 +669,31 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 .balloon-action-btn.primary:hover {
   background: #D4A37344;
 }
+
+
+/* Phi's next-step proposals, shown when Selfware finishes and waits. Ranked by
+   what is unpaid: repair, then verify, then repay. The evidence line is not
+   decoration - a suggestion you cannot argue with is just an instruction. */
+.phi-proposals { position: fixed; right: 18px; bottom: 74px; z-index: 9997;
+  width: min(360px, calc(100vw - 36px)); display: flex; flex-direction: column; gap: 8px; }
+.phi-proposal { background: rgba(15, 23, 42, .94); border: 1px solid #1e2b47;
+  border-left: 3px solid #64748b; border-radius: 10px; padding: 10px 12px;
+  backdrop-filter: blur(6px); box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+.phi-proposal-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+  font-weight: 700; color: #94a3b8; }
+.phi-proposal-title { font-weight: 600; font-size: 13px; margin-top: 2px; color: #e2e8f0; }
+.phi-proposal-why { font-size: 12px; color: #94a3b8; margin-top: 4px; line-height: 1.45; }
+.phi-proposal-ev { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px;
+  color: #64748b; margin-top: 5px; word-break: break-word; }
+.phi-proposal-actions { display: flex; gap: 6px; margin-top: 9px; }
+.phi-proposal-actions button { font-size: 11px; padding: 4px 9px; }
+.phi-proposal[data-kind="repair"] { border-left-color: #f43f5e; }
+.phi-proposal[data-kind="repair"] .phi-proposal-kind { color: #f43f5e; }
+.phi-proposal[data-kind="verify"] { border-left-color: #eab308; }
+.phi-proposal[data-kind="verify"] .phi-proposal-kind { color: #eab308; }
+.phi-proposal[data-kind="repay"] { border-left-color: #a78bfa; }
+.phi-proposal[data-kind="repay"] .phi-proposal-kind { color: #a78bfa; }
+.phi-proposal[data-kind="explore"] { border-left-color: #22c55e; }
+.phi-proposal[data-kind="explore"] .phi-proposal-kind { color: #22c55e; }
+@media (max-width: 720px) { .phi-proposals { right: 10px; left: 10px; width: auto; bottom: 64px; } }
+@media (prefers-reduced-motion: reduce) { .phi-proposal { backdrop-filter: none; } }

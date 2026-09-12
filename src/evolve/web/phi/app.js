@@ -6,6 +6,10 @@ import { PhiWorkspace, focusForClaim, resolveEvidence } from './phi_workspace.js
 import { SAMPLE_FILES } from './phi_examples.js';
 import { PhiSpeechClient } from './phi_speech_client.js';
 import { PhiFrictionUI } from './phi_friction_ui.js';
+import { PhiState } from './phi_state.js';
+import { PhiExpressionVoice } from './phi_sound.js';
+import { PhiSteward, IdleWatcher } from './phi_steward.js';
+import { PhiPresence, CHANNEL, ambientPosture } from './phi_presence.js';
 
 const $ = id => document.getElementById(id);
 const make = (tag, text, className) => { const el = document.createElement(tag); if (text != null) el.textContent = text; if (className) el.className = className; return el; };
@@ -27,6 +31,37 @@ export class PhiApp {
     this.editing = false; this.dirty = false; this.paused = false; this.speechEnabled = true; this.facts = []; this.reading = null;
     this.openVersion = 0; this.playVersion = 0; this.polling = false; this.destroyed = false;
     this.rig = new PhiMascotRig(document.body, { initialX: Math.max(10, innerWidth - 310), initialY: 210, width: 220, height: 220 });
+    // Accumulated mood: events nudge a vector, the face is read off it. Storage
+    // is best-effort — a blocked localStorage leaves Phi working, just forgetful.
+    let store = null;
+    try { store = window.localStorage; } catch (_) { store = null; }
+    // Phi's acoustic signatures. Silent until the user turns sound on: browsers
+    // refuse to start an AudioContext without a gesture, and an assistant that
+    // makes noise unasked is a bug.
+    this.expressionVoice = new PhiExpressionVoice({ volume: .45, enabled: false });
+    this.rig.setSound(this.expressionVoice);
+    // Phi as steward: when Selfware finishes and waits, it says what the last
+    // stretch left unpaid — once per idle period, and only ever with evidence.
+    this.steward = new PhiSteward();
+    this.idle = new IdleWatcher({ quietMs: 12000 });
+    // Almost everything Phi knows is expressed as posture. Speaking is rationed.
+    this.presence = new PhiPresence({ interruptBudget: 3 });
+    this.workspaceSignals = { gates: [], failingTests: [], deadCode: [], duplicates: [], recentFiles: [] };
+    this.state = new PhiState({ storage: store, onChange: snapshot => {
+      const posture = ambientPosture(snapshot);
+      this.rig.setEmotion(posture.emotion);
+      this.rig.setVitality(snapshot.vector.vitality);
+    } });
+    this.state.record('session_start');
+    // A slow tick: idle detection must never be part of the animation frame.
+    // Pull is always free. Clicking Phi asks it what it sees, unrationed.
+    this.rig.wrapper.style.pointerEvents = 'auto';
+    this.rig.wrapper.style.cursor = 'pointer';
+    this.rig.wrapper.addEventListener('click', () => this.askPhi());
+    this.idleTimer = setInterval(() => { this.considerNextSteps().catch(() => { /* a quiet steward is fine */ }); }, 4000);
+    for (const event of ['pointerdown', 'keydown']) {
+      document.addEventListener(event, () => { this.idle.noteActivity(); this.presence.noteActivity(); }, { passive: true });
+    }
     this.speechClient = new PhiSpeechClient({ getToken: () => this.workspace.token });
     this.viseme = new PhiVisemeEngine(this.rig, { speechClient: this.speechClient });
     this.speechCapabilities = null; this.voiceExplicit = false;
@@ -187,6 +222,114 @@ export class PhiApp {
     quick.replaceChildren(...Array.from(full.children, child => child.cloneNode(true)));
     quick.value = full.value;
   }
+  /* Gather what the workspace can tell us. Anything that fails is simply not
+   * proposed about — a steward that guesses when an endpoint is down is worse
+   * than one that stays quiet. */
+  async refreshWorkspaceSignals() {
+    const pull = async (path, shape) => {
+      try { return shape(await this.workspace.request(path)) || []; } catch (_) { return []; }
+    };
+    const [gates, dead, duplicates] = await Promise.all([
+      pull('/api/gates', data => (data.gates || data.items || []).map(g =>
+        ({ id: g.id || g.name, name: g.name || g.id, passing: g.passing ?? g.ok ?? true, file: g.file }))),
+      pull('/api/analysis/dead-code', data => (data.items || data.symbols || []).map(d =>
+        ({ file: d.file || d.path, symbol: d.symbol || d.name }))),
+      pull('/api/analysis/duplicate-functions', data => (data.items || data.pairs || []).map(d =>
+        ({ a: d.a || d.left, b: d.b || d.right })))
+    ]);
+    this.workspaceSignals = { ...this.workspaceSignals, gates, deadCode: dead, duplicates };
+    return this.workspaceSignals;
+  }
+
+  /* Called on a slow tick. Speaks at most once per idle period. */
+  async considerNextSteps() {
+    if (!this.idle.shouldSpeak()) return null;
+    await this.refreshWorkspaceSignals();
+    const snapshot = this.state.snapshot();
+    const signals = {
+      state: snapshot,
+      friction: { unreviewed: this.companion?.classifier?.history?.unreviewed || { count: 0, lines: 0 },
+                  capitulations: snapshot.reversals },
+      workspace: this.workspaceSignals
+    };
+    const proposals = this.steward.propose(signals);
+    // With nothing to point at, Phi stays quiet rather than manufacturing a task.
+    if (!proposals.length) return null;
+
+    // Posture carries it by default; speaking has to be earned.
+    const routed = this.presence.routeAll(proposals.map(p => ({
+      id: p.id, severity: p.kind === 'repair' ? 'high' : p.kind === 'verify' ? 'high' : 'low', proposal: p
+    })));
+    const loudest = routed[0];
+    if (loudest.channel === CHANNEL.INTERRUPT) {
+      this.rig.setSpeechText(this.steward.summarise([loudest.signal.proposal], signals), 'Phi · Next steps');
+      this.renderProposals([loudest.signal.proposal]);
+    } else if (loudest.channel === CHANNEL.GLANCE) {
+      this.rig.setSpeechText(loudest.signal.proposal.title, 'Phi');
+      this.renderProposals([]);
+    } else {
+      this.renderProposals([]);
+    }
+    return proposals;
+  }
+
+  /* The human asked. Never rationed, never counted, always the full picture —
+   * pull being free is what makes rationed push tolerable. */
+  async askPhi() {
+    this.presence.invited();
+    await this.refreshWorkspaceSignals();
+    const snapshot = this.state.snapshot();
+    const signals = {
+      state: snapshot,
+      friction: { unreviewed: this.companion?.classifier?.history?.unreviewed || { count: 0, lines: 0 },
+                  capitulations: snapshot.reversals },
+      workspace: this.workspaceSignals
+    };
+    const proposals = this.steward.propose(signals);
+    this.rig.setSpeechText(this.steward.summarise(proposals, signals), 'Phi · Asked');
+    this.renderProposals(proposals);
+    return proposals;
+  }
+
+  /* Render the proposals beside Phi. Each card names the evidence it came from,
+   * so the suggestion can be argued with rather than just obeyed. */
+  renderProposals(proposals) {
+    const host = $('phi-proposals');
+    if (!host) return;
+    host.hidden = proposals.length === 0;
+    host.replaceChildren(...proposals.map(proposal => {
+      const card = make('div');
+      card.className = 'phi-proposal';
+      card.dataset.kind = proposal.kind;
+      const title = make('div', proposal.title); title.className = 'phi-proposal-title';
+      const kind = make('span', proposal.kind); kind.className = 'phi-proposal-kind';
+      const why = make('div', proposal.rationale); why.className = 'phi-proposal-why';
+      const evidence = make('div', proposal.evidence.join('  ·  ')); evidence.className = 'phi-proposal-ev';
+      const accept = make('button', 'Do this next'); accept.className = 'btn-cyber';
+      accept.onclick = () => this.acceptProposal(proposal);
+      const skip = make('button', 'Not now'); skip.className = 'btn-cyber';
+      skip.onclick = () => {
+        this.presence.dismiss(proposal.id); this.steward.dismiss(proposal.id);
+        card.remove(); host.hidden = !host.children.length;
+      };
+      const actions = make('div'); actions.className = 'phi-proposal-actions';
+      actions.append(accept, skip);
+      card.append(kind, title, why, evidence, actions);
+      return card;
+    }));
+  }
+
+  /* Accepting a proposal submits it to Selfware as the next task. */
+  async acceptProposal(proposal) {
+    this.presence.acknowledge(proposal.id);   // worth taking: refund the interrupt
+    this.steward.dismiss(proposal.id);
+    this.state.record('planning');
+    $('reading-question').value = proposal.task.question;
+    this.idle.setBusy(true);
+    try { await this.prepareReading(); }
+    finally { this.idle.setBusy(false); }
+  }
+
   showTranscript(text) { this.currentText = text; $('transcript').textContent = text; }
   spokenWord(word, offset) {
     if (!this.currentText || !Number.isInteger(offset)) return;
@@ -200,6 +343,9 @@ export class PhiApp {
       const voice = engineVal.split(':')[1] || 'Emma';
       return { engine: 'vibevoice', voice, fallback: false, speechRate: rate, onWord: (word, offset) => this.spokenWord(word, offset) };
     }
+    if (engineVal === 'formant') {
+      return { engine: 'formant', useSpeechSynthesis: false, speechRate: rate, onWord: (word, offset) => this.spokenWord(word, offset) };
+    }
     if (engineVal === 'silent') {
       return { engine: 'silent', useSpeechSynthesis: false, speechRate: rate, onWord: (word, offset) => this.spokenWord(word, offset) };
     }
@@ -207,11 +353,13 @@ export class PhiApp {
   }
   stopReading() {
     ++this.playVersion; this.paused = false; this.orchestrator.cancelMission(); this.focus.clearFocus();
+    this.idle?.setBusy(false);
     $('btn-pause').textContent = 'Pause reading'; $('btn-pause').setAttribute('aria-pressed', 'false');
     for (const card of document.querySelectorAll('.super-fact.active')) card.classList.remove('active');
   }
   async play(steps, { paused = false } = {}) {
     this.stopReading(); this.paused = paused; const version = this.playVersion;
+    this.idle?.setBusy(true);
     this.rig.wrapper.hidden = false; this.rig.laserCanvas.hidden = false;
     $('btn-pause').setAttribute('aria-pressed', String(paused)); $('btn-pause').textContent = paused ? 'Resume reading' : 'Pause reading';
     if (this.editing) { this.editing = false; this.renderEditor(); this.updateControls(); }
@@ -258,7 +406,7 @@ export class PhiApp {
   async prepareReading() {
     if (!this.document || this.dirty || this.examples || this.polling) return;
     this.polling = true; this.updateControls(); $('agent-state').textContent = 'PREPARING';
-    this.rig.setEmotion('analytical'); $('generation-status').textContent = 'Sending the saved source to your reading agent…';
+    this.state.record('tool_call'); this.rig.setEmotion('analytical'); $('generation-status').textContent = 'Sending the saved source to your reading agent…';
     try {
       const question = $('reading-question').value.trim() || 'Explain the important flow and suggest useful improvements.';
       const job = await this.workspace.startReading(this.document, question);
@@ -388,7 +536,7 @@ export class PhiApp {
       this.speechEnabled = !this.speechEnabled; this.viseme.setAudioEnabled?.(this.speechEnabled);
       $('btn-toggle-audio').textContent = this.speechEnabled ? 'Voice on' : 'Voice off'; $('btn-toggle-audio').setAttribute('aria-pressed', String(this.speechEnabled));
     });
-    $('btn-summon').addEventListener('click', () => { this.stopReading(); this.rig.setEmotion('curious'); this.rig.setSpeechText('Here with you. Choose something to explore.', 'Phi · Ready'); $('phi-perch').scrollIntoView({ block: 'center', behavior: 'instant' }); this.dock(); });
+    $('btn-summon').addEventListener('click', () => { this.stopReading(); this.state.record('exploring'); this.rig.setSpeechText('Here with you. Choose something to explore.', 'Phi · Ready'); $('phi-perch').scrollIntoView({ block: 'center', behavior: 'instant' }); this.dock(); });
     $('btn-god-mode').addEventListener('click', () => {
       const enabled = !this.rig.godMode; this.rig.setGodMode(enabled); $('btn-god-mode').setAttribute('aria-pressed', String(enabled));
       this.rig.setSpeechText(enabled ? 'A little more light for a complicated idea.' : 'Back to a quieter glow.', enabled ? 'God Mode · visual' : 'Phi · Ready');
@@ -435,6 +583,14 @@ export class PhiApp {
       }
       choice.append(sysGroup);
 
+      // Procedural formant voice: audible with no model and no installed voice pack
+      const formantGroup = make('optgroup');
+      formantGroup.label = 'Offline (no model, no voice pack)';
+      const formantOpt = make('option', 'Procedural formant voice (vowel colour only)');
+      formantOpt.value = 'formant';
+      formantGroup.append(formantOpt);
+      choice.append(formantGroup);
+
       // Silent mode
       const silentGroup = make('optgroup');
       silentGroup.label = 'Silent Mode';
@@ -455,6 +611,8 @@ export class PhiApp {
       if (val.startsWith('vibevoice:')) {
         const voice = val.split(':')[1] || 'Emma';
         this.viseme.setEngine('vibevoice', voice);
+      } else if (val === 'formant') {
+        this.viseme.setEngine('formant');
       } else if (val === 'silent') {
         this.viseme.setEngine('silent');
       } else {

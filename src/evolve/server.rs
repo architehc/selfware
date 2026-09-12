@@ -3266,6 +3266,46 @@ fn embedded_asset(path: &str) -> Option<(&'static [u8], &'static str)> {
             include_str!("web/phi/phi_viseme.js").as_bytes(),
             "text/javascript; charset=utf-8",
         ),
+        "/phi/scenarios.html" => (
+            include_str!("web/phi/scenarios.html").as_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        "/phi/gallery.html" => (
+            include_str!("web/phi/gallery.html").as_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        "/phi/phi_presence.js" => (
+            include_str!("web/phi/phi_presence.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_mediator.js" => (
+            include_str!("web/phi/phi_mediator.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_steward.js" => (
+            include_str!("web/phi/phi_steward.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_sound.js" => (
+            include_str!("web/phi/phi_sound.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_fox.js" => (
+            include_str!("web/phi/phi_fox.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_expression.js" => (
+            include_str!("web/phi/phi_expression.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_state.js" => (
+            include_str!("web/phi/phi_state.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
+        "/phi/phi_formant.js" => (
+            include_str!("web/phi/phi_formant.js").as_bytes(),
+            "text/javascript; charset=utf-8",
+        ),
         "/phi/phi_speech_client.js" => (
             include_str!("web/phi/phi_speech_client.js").as_bytes(),
             "text/javascript; charset=utf-8",
