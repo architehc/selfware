@@ -4,12 +4,16 @@
  *
  * Implements a high-performance, hardware-accelerated SVG/Canvas puppet rig:
  * - 10-viseme mouth articulation for real-time speech lip-sync
- * - 9 procedural celestial Kitsune tails with hydrodynamic/aerodynamic trailing physics
+ * - One golden-spiral tail (phi_fox.js), swayed as a whole about its root
  * - Dynamic gaze tracking & head rotation targeting
  * - Holographic monocle laser targeting system with particle beam
  * - God-Mode celestial AGI aura with rotating data rings & particle emissions
  * - Smooth spring-damper flight dynamics & non-occluding parking planner
  */
+
+import { resolveExpression, ACCESSORIES } from './phi_expression.js';
+import { buildFox, headPath, innerEarPath, tailRibbon, bodyPath, RANGE, PALETTE,
+         EYE_LEFT, EYE_RIGHT, NECK, TAIL_PIVOT } from './phi_fox.js';
 
 export const VISEMES = {
   REST: 'rest',   // Neutral closed mouth
@@ -43,6 +47,27 @@ const MOUTH_POSES = {
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 const finite = (value, fallback = 0) => Number.isFinite(value) ? value : fallback;
 const ease = (rate, dt) => -Math.expm1(-rate * dt);
+// How far an eyelid drops when fully shut. The eye spans y 72..88, so the
+// original 10px lid only ever reached the pupil and never closed the eye.
+const LID_TRAVEL = 13;
+
+/* Impulse spring for discrete secondary motion — an ear flick, a landing hop.
+ * Integrated semi-implicitly and clamped, so a long frame (a background tab
+ * waking up) settles instead of exploding the way explicit Euler would. */
+class Spring {
+  constructor(stiffness, damping) { this.k = stiffness; this.d = damping; this.value = 0; this.velocity = 0; this.target = 0; }
+  update(dt) {
+    const step = Math.min(dt, 1 / 60);
+    for (let remaining = Math.min(dt, .1); remaining > 0; remaining -= step) {
+      const slice = Math.min(step, remaining);
+      this.velocity += (-this.k * (this.value - this.target) - this.d * this.velocity) * slice;
+      this.value += this.velocity * slice;
+    }
+    if (!Number.isFinite(this.value) || !Number.isFinite(this.velocity)) { this.value = this.target; this.velocity = 0; }
+    return this.value;
+  }
+  impulse(velocity) { this.velocity += velocity; }
+}
 let rigSequence = 0;
 
 export class PhiMascotRig {
@@ -105,26 +130,46 @@ export class PhiMascotRig {
     this.mouthPose = [...MOUTH_POSES.rest];
     this.targetMouthPose = [...this.mouthPose];
 
-    // Tails Physics Simulation (9 Kitsune tails)
-    this.tails = [];
-    for (let i = 0; i < 9; i++) {
-      this.tails.push({
-        baseAngle: ((i - 4) * 0.15) - Math.PI * 0.85,
-        length: 85 + (4 - Math.abs(i - 4)) * 14,
-        curl: (i - 4) * 0.25,
-        phase: i * 0.65,
-        swaySpeed: 1.8 + (i % 3) * 0.4,
-        points: []
-      });
-    }
+    // The character's own geometry parameters. Each is animated, and each is
+    // regenerated only when it moves materially — resampling a 260-point head
+    // outline every frame would be pure waste.
+    this.foxEars = RANGE.ears.rest;
+    this.foxCurl = RANGE.curl.rest;
+    this.foxSoftness = RANGE.softness.rest;
+    this.foxEarsTarget = this.foxEars;
+    this.foxCurlTarget = this.foxCurl;
+    this.foxSoftnessTarget = this.foxSoftness;
+    this.drawnEars = null;
+    this.drawnCurl = null;
+    this.drawnSoftness = null;
 
-    // Particles System
+    this.godMode = Boolean(this.options.godMode);
+
+    // Particle pool for god-mode embers and tail sparks.
     this.particles = [];
     this.maxParticles = 80;
 
-    // Emotion & Mode
-    this.emotion = 'curious'; // curious, focused, analytical, proud, alert, god_mode
-    this.godMode = this.options.godMode;
+    this.emotion = 'curious'; // any name phi_expression.js resolves; see EXPRESSION_ALIASES
+    this.sound = null;   // optional PhiExpressionVoice; see setSound()
+    // Expression channels are interpolated, never snapped: a mood change is a
+    // movement. `pose` is what is rendered, `poseTarget` where it is heading.
+    this.expression = resolveExpression('curious');
+    this.pose = { brow: 0, browLift: 0, browAsym: 0, eyeOpen: 1, eyeArc: 0, pupil: 1, ear: 0, smile: 0 };
+    this.poseTarget = { ...this.pose };
+    this.tailEnergy = 1;
+    this.tailEnergyTarget = 1;
+    this.tailPhase = 0;
+    this.accessoryKey = null;
+
+    // Secondary motion. Breath and blink are modulated by the state engine's
+    // vitality axis: a tired Phi breathes slower and deeper and blinks longer.
+    this.vitality = 1;
+    this.breathPhase = 0;
+    this.gazeIdleFor = 0;
+    this.twitchSpring = new Spring(220, 18);
+    this.hopSpring = new Spring(180, 14);
+    this.nextTwitchIn = 4 + Math.random() * 5;
+
     this.time = 0;
 
     this.initDOM();
@@ -184,186 +229,36 @@ export class PhiMascotRig {
     this.svg.style.overflow = 'visible';
     this.svg.style.transformOrigin = '50% 60%';
     this.svg.setAttribute('role', 'img');
-    this.svg.setAttribute('aria-label', 'Phi, a golden nine-tailed fox assistant');
-    this.svg.style.filter = 'drop-shadow(0 8px 24px rgba(245, 158, 11, 0.35))';
+    this.svg.setAttribute('aria-label', 'Phi, a seated amber fox with a curled golden-spiral tail');
+    this.svg.style.filter = 'drop-shadow(0 8px 22px rgba(184, 115, 51, 0.35))';
 
-    this.svg.innerHTML = `
-      <defs>
-        <!-- Gradients -->
-        <linearGradient id="phi-gold-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#fef08a" />
-          <stop offset="40%" stop-color="#fbbf24" />
-          <stop offset="80%" stop-color="#d97706" />
-          <stop offset="100%" stop-color="#b45309" />
-        </linearGradient>
-
-        <linearGradient id="phi-fur-white" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#ffffff" />
-          <stop offset="60%" stop-color="#f1f5f9" />
-          <stop offset="100%" stop-color="#cbd5e1" />
-        </linearGradient>
-
-        <linearGradient id="phi-cyber-blue" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="#38bdf8" />
-          <stop offset="100%" stop-color="#0284c7" />
-        </linearGradient>
-
-        <linearGradient id="phi-tail-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-          <stop offset="0%" stop-color="rgba(251, 191, 36, 0.85)" />
-          <stop offset="50%" stop-color="rgba(245, 158, 11, 0.65)" />
-          <stop offset="100%" stop-color="rgba(56, 189, 248, 0)" />
-        </linearGradient>
-
-        <radialGradient id="phi-eye-amber" cx="40%" cy="40%" r="60%">
-          <stop offset="0%" stop-color="#fef08a" />
-          <stop offset="60%" stop-color="#f59e0b" />
-          <stop offset="100%" stop-color="#78350f" />
-        </radialGradient>
-
-        <filter id="phi-glow" x="-50%" y="-50%" width="200%" height="200%">
-          <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
-          <feMerge>
-            <feMergeNode in="blur" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
-
-        <filter id="phi-god-glow" x="-60%" y="-60%" width="220%" height="220%">
-          <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur1" />
-          <feGaussianBlur in="SourceGraphic" stdDeviation="14" result="blur2" />
-          <feMerge>
-            <feMergeNode in="blur2" />
-            <feMergeNode in="blur1" />
-            <feMergeNode in="SourceGraphic" />
-          </feMerge>
-        </filter>
-      </defs>
-
-      <!-- God-Mode Celestial Rings (Behind) -->
-      <g id="phi-god-rings" opacity="0" class="phi-god-layer">
-        <circle cx="100" cy="100" r="85" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6,4,18,4" />
-        <circle cx="100" cy="100" r="95" fill="none" stroke="#38bdf8" stroke-width="1" stroke-dasharray="20,8,4,8" opacity="0.8" />
-        <polygon points="100,10 180,100 100,190 20,100" fill="none" stroke="rgba(251,191,36,0.3)" stroke-width="1" />
-      </g>
-
-      <!-- 9 Kitsune Tail Splines (Behind Body) -->
-      <g id="phi-tails-group"></g>
-
-      <!-- Main Body Group -->
-      <g id="phi-body-group">
-        <!-- Torso & Forequarters -->
-        <path d="M 85 105 Q 65 125 72 155 Q 100 170 128 152 Q 135 120 115 105 Z" fill="url(#phi-gold-grad)" stroke="#78350f" stroke-width="1" />
-        <!-- White Chest Fur Plate -->
-        <path d="M 88 112 Q 100 145 100 158 Q 112 145 112 112 Q 100 106 88 112 Z" fill="url(#phi-fur-white)" />
-        <!-- Cybernetic Chassis Lines -->
-        <path d="M 76 132 L 88 142 M 124 132 L 112 142 M 100 125 L 100 152" stroke="#38bdf8" stroke-width="1.5" stroke-linecap="round" opacity="0.9" />
-
-        <!-- Front Left Paw / Pointer Stylus -->
-        <g id="phi-paw-left" transform="translate(80, 155)">
-          <path d="M -6 0 C -8 12 -4 20 2 20 C 8 20 10 12 8 0 Z" fill="url(#phi-fur-white)" stroke="#78350f" stroke-width="0.75" />
-          <circle cx="1" cy="16" r="2.5" fill="#38bdf8" />
-        </g>
-
-        <!-- Front Right Paw -->
-        <g id="phi-paw-right" transform="translate(120, 155)">
-          <path d="M -6 0 C -8 12 -4 20 2 20 C 8 20 10 12 8 0 Z" fill="url(#phi-fur-white)" stroke="#78350f" stroke-width="0.75" />
-          <circle cx="1" cy="16" r="2.5" fill="#38bdf8" />
-        </g>
-      </g>
-
-      <!-- Articulated Head Group (Can tilt, yaw, pitch) -->
-      <g id="phi-head" transform-origin="100 105">
-        <!-- Left Cyber Ear -->
-        <g id="phi-ear-left" transform-origin="75 65">
-          <polygon points="50,68 76,15 90,62" fill="url(#phi-gold-grad)" stroke="#78350f" stroke-width="1" />
-          <polygon points="56,64 76,26 84,60" fill="url(#phi-fur-white)" />
-          <!-- Equalizer Bar on Ear -->
-          <g id="phi-ear-eq-left">
-            <rect x="73" y="38" width="5" height="3" rx="1" fill="#38bdf8" />
-            <rect x="73" y="44" width="5" height="3" rx="1" fill="#38bdf8" />
-            <rect x="73" y="50" width="5" height="3" rx="1" fill="#38bdf8" />
-            <rect x="73" y="56" width="5" height="3" rx="1" fill="#fbbf24" />
-          </g>
-        </g>
-
-        <!-- Right Cyber Ear -->
-        <g id="phi-ear-right" transform-origin="125 65">
-          <polygon points="150,68 124,15 110,62" fill="url(#phi-gold-grad)" stroke="#78350f" stroke-width="1" />
-          <polygon points="144,64 124,26 116,60" fill="url(#phi-fur-white)" />
-          <!-- Equalizer Bar on Ear -->
-          <g id="phi-ear-eq-right">
-            <rect x="122" y="38" width="5" height="3" rx="1" fill="#38bdf8" />
-            <rect x="122" y="44" width="5" height="3" rx="1" fill="#38bdf8" />
-            <rect x="122" y="50" width="5" height="3" rx="1" fill="#38bdf8" />
-            <rect x="122" y="56" width="5" height="3" rx="1" fill="#fbbf24" />
-          </g>
-        </g>
-
-        <!-- Main Head Base & Cheeks -->
-        <polygon points="100,42 62,66 52,94 82,108 100,116 118,108 148,94 138,66" fill="url(#phi-gold-grad)" stroke="#78350f" stroke-width="1" />
-        <!-- White Muzzle & Cheek Fur -->
-        <polygon points="65,88 52,94 76,104 100,116 124,104 148,94 135,88 100,98" fill="url(#phi-fur-white)" />
-
-        <!-- Forehead Cyber Crown Plate -->
-        <path d="M 88 52 L 100 44 L 112 52 L 108 64 L 100 68 L 92 64 Z" fill="#0f172a" stroke="#38bdf8" stroke-width="1.2" />
-        <circle cx="100" cy="56" r="3" fill="#38bdf8" filter="url(#phi-glow)" />
-
-        <!-- Left Eye (Organic Cyber Amber) -->
-        <g id="phi-eye-left-group">
-          <!-- Eye Socket / White -->
-          <ellipse id="phi-eye-left-bg" cx="80" cy="80" rx="9" ry="8" fill="#ffffff" stroke="#78350f" stroke-width="1" />
-          <!-- Amber Iris -->
-          <circle id="phi-iris-left" cx="80" cy="80" r="5.5" fill="url(#phi-eye-amber)" />
-          <!-- Pupil Aperture -->
-          <circle id="phi-pupil-left" cx="80" cy="80" r="2.8" fill="#0f172a" />
-          <circle cx="82" cy="78" r="1.2" fill="#ffffff" />
-          <!-- Eyelid for Blinking -->
-          <rect id="phi-eyelid-left" x="70" y="71" width="20" height="0" fill="#d97706" />
-        </g>
-
-        <!-- Right Eye (Holographic Monocle / Targeting Lens) -->
-        <g id="phi-monocle-group" transform-origin="120 80">
-          <ellipse cx="120" cy="80" rx="10" ry="9" fill="#0f172a" stroke="#0284c7" stroke-width="1.5" />
-          <circle id="phi-monocle-iris" cx="120" cy="80" r="6" fill="#0369a1" />
-          <!-- Monocle Reticle Dial -->
-          <circle cx="120" cy="80" r="8" fill="none" stroke="#38bdf8" stroke-width="1" stroke-dasharray="6,4" />
-          <circle id="phi-pupil-right" cx="120" cy="80" r="3.2" fill="#38bdf8" filter="url(#phi-glow)" />
-          <line x1="112" y1="80" x2="128" y2="80" stroke="#38bdf8" stroke-width="0.8" opacity="0.7" />
-          <line x1="120" y1="72" x2="120" y2="88" stroke="#38bdf8" stroke-width="0.8" opacity="0.7" />
-          <!-- Monocle Frame Clip / Ear Wire -->
-          <path d="M 129 78 Q 140 76 144 82" fill="none" stroke="#fbbf24" stroke-width="1.5" />
-          <!-- Laser Emitter Center Point: (120, 80) in Head space -->
-        </g>
-
-        <!-- Nose -->
-        <polygon points="97,94 103,94 100,98" fill="#0f172a" />
-
-        <!-- Dynamic Mouth & Lip-Sync Group -->
-        <g id="phi-mouth-group">
-          <!-- Oral Cavity (Visible when open) -->
-          <path id="phi-mouth-cavity" d="M 92 103 Q 100 103 108 103 Q 100 103 92 103 Z" fill="#450a0a" />
-          <!-- Tongue (Rises for L, TH, AI) -->
-          <path id="phi-mouth-tongue" d="M 96 103 Q 100 101 104 103 Q 100 104 96 103 Z" fill="#f43f5e" opacity="0" />
-          <!-- Upper Teeth Bar -->
-          <path id="phi-mouth-teeth" d="M 94 102 L 106 102" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" opacity="0" />
-          <!-- Outer Lip Contour Path (Morphs through 10 visemes) -->
-          <path id="phi-mouth-lip" d="M 92 103 Q 100 104 108 103" fill="none" stroke="#78350f" stroke-width="1.8" stroke-linecap="round" />
-        </g>
-      </g>
-    `;
+    this.svg.innerHTML = buildFox({ ears: this.foxEars, curl: this.foxCurl, softness: this.foxSoftness });
 
     this.wrapper.appendChild(this.svg);
     this.container.appendChild(this.wrapper);
 
     // Cache key DOM references
     this.tailsGroup = this.svg.querySelector('#phi-tails-group');
+    this.bodyGroup = this.svg.querySelector('#phi-body-group');
     this.headGroup = this.svg.querySelector('#phi-head');
+    this.earLeft = this.svg.querySelector('#phi-ear-left');
+    this.earRight = this.svg.querySelector('#phi-ear-right');
     this.headGroup.removeAttribute('transform-origin');
+    // Same trap as the head: a transform-origin left on the group compounds with
+    // the rotate() below and displaces the ear instead of pivoting it.
+    for (const ear of [this.earLeft, this.earRight]) ear?.removeAttribute('transform-origin');
     this.mouthCavity = this.svg.querySelector('#phi-mouth-cavity');
     this.mouthTongue = this.svg.querySelector('#phi-mouth-tongue');
     this.mouthTeeth = this.svg.querySelector('#phi-mouth-teeth');
     this.mouthLip = this.svg.querySelector('#phi-mouth-lip');
     this.eyelidLeft = this.svg.querySelector('#phi-eyelid-left');
+    this.eyelidRight = this.svg.querySelector('#phi-eyelid-right');
+    this.browLeft = this.svg.querySelector('#phi-brow-left');
+    this.browRight = this.svg.querySelector('#phi-brow-right');
+    this.eyeArcs = this.svg.querySelector('#phi-eye-arcs');
+    this.accessoryLayer = this.svg.querySelector('#phi-accessory');
+    this.pupilsLeft = this.svg.querySelector('#phi-pupils-left');
+    this.pupilsRight = this.svg.querySelector('#phi-pupils-right');
     this.pupilLeft = this.svg.querySelector('#phi-pupil-left');
     this.pupilRight = this.svg.querySelector('#phi-pupil-right');
     this.earEqLeft = this.svg.querySelector('#phi-ear-eq-left');
@@ -388,17 +283,36 @@ export class PhiMascotRig {
   }
 
   initTails() {
-    this.tailsGroup.innerHTML = '';
-    this.tailElements = [];
-    for (let i = 0; i < this.tails.length; i++) {
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('fill', 'none');
-      path.setAttribute('stroke', 'url(#phi-tail-grad)');
-      path.setAttribute('stroke-width', (7 - Math.abs(i - 4) * 0.7).toString());
-      path.setAttribute('stroke-linecap', 'round');
-      path.setAttribute('filter', 'url(#phi-glow)');
-      this.tailsGroup.appendChild(path);
-      this.tailElements.push(path);
+    // One golden-spiral tail, drawn by phi_fox.js. Sway is a rotation of the
+    // whole ribbon about its root, which is what the studio does and is far
+    // cheaper than resampling the spiral every frame.
+    this.tailRibbon = this.svg.querySelector('#phi-tail-ribbon');
+    this.tailTip = this.svg.querySelector('#phi-tail-tip');
+    this.tailElements = [this.tailRibbon, this.tailTip].filter(Boolean);
+    this.headShape = this.svg.querySelector('#phi-head-shape');
+    this.bodyShape = this.svg.querySelector('#phi-body-shape');
+    this.innerEarLeft = this.svg.querySelector('#phi-inner-ear-left');
+    this.innerEarRight = this.svg.querySelector('#phi-inner-ear-right');
+  }
+
+  /* Redraw only the curves whose parameter actually moved. */
+  rebuildFox() {
+    if (this.destroyed) return;
+    if (this.drawnEars === null || Math.abs(this.foxEars - this.drawnEars) > .004) {
+      this.drawnEars = this.foxEars;
+      this.headShape?.setAttribute('d', headPath(this.foxEars));
+      const inner = innerEarPath(this.foxEars);
+      this.innerEarLeft?.setAttribute('d', inner);
+      this.innerEarRight?.setAttribute('d', inner);
+    }
+    if (this.drawnCurl === null || Math.abs(this.foxCurl - this.drawnCurl) > .004) {
+      this.drawnCurl = this.foxCurl;
+      this.tailRibbon?.setAttribute('d', tailRibbon(this.foxCurl));
+      this.tailTip?.setAttribute('d', tailRibbon(this.foxCurl, .70));
+    }
+    if (this.drawnSoftness === null || Math.abs(this.foxSoftness - this.drawnSoftness) > .004) {
+      this.drawnSoftness = this.foxSoftness;
+      this.bodyShape?.setAttribute('d', bodyPath(this.foxSoftness));
     }
   }
 
@@ -547,9 +461,37 @@ export class PhiMascotRig {
 
   gazeAt(targetX, targetY) {
     if (this.destroyed || !Number.isFinite(targetX) || !Number.isFinite(targetY)) return;
+    // Only a real move renews attention; re-aiming at the same spot must not
+    // keep the stare alive forever.
+    if (Math.hypot(targetX - this.gazeX, targetY - this.gazeY) > 2) this.gazeIdleFor = 0;
     this.gazeX = targetX;
     this.gazeY = targetY;
   }
+
+  /* Attach the procedural expression voice (phi_sound.js). Optional: with no
+   * voice attached Phi is silent, which is the default. */
+  setSound(voice) {
+    this.sound = voice || null;
+    return this;
+  }
+
+  /* Stamina, 0..1, from phi_state.js. Drives breath rate and blink duration:
+   * a drained Phi breathes slower and deeper and holds its blinks longer. */
+  setVitality(vitality) {
+    if (this.destroyed) return;
+    this.vitality = clamp(finite(vitality, 1), 0, 1);
+  }
+
+  /* A small landing bounce the tails pick up a beat later. */
+  hop(strength = 1) {
+    if (this.destroyed || this.reducedMotion) return;
+    this.hopSpring.impulse(clamp(finite(strength, 1), -3, 3) * 2.4);
+  }
+
+  /* Where the beam leaves the face, in the head's own coordinates. Published so
+   * callers and tests never hardcode an art coordinate that moves when Phi is
+   * redrawn. */
+  get laserOrigin() { return { x: EYE_RIGHT[0], y: EYE_RIGHT[1] }; }
 
   fireLaser(targetX, targetY, active = true) {
     if (this.destroyed || !Number.isFinite(targetX) || !Number.isFinite(targetY)) return;
@@ -596,55 +538,80 @@ export class PhiMascotRig {
     this.flyTo(this.targetX, this.targetY);
   }
 
-  // Set Emotion State
+  /* Set the face. Accepts any canonical mood or operational alias — see
+   * phi_expression.js. Only the targets move here; update() interpolates. */
   setEmotion(emotion) {
     if (this.destroyed) return;
+    const previousExpressionId = this.expression?.id ?? null;
     this.emotion = emotion;
+    const expression = resolveExpression(emotion);
+    this.expression = expression;
+    this.poseTarget = {
+      brow: expression.browAngle, browLift: expression.browLift, browAsym: expression.browAsymmetry,
+      eyeOpen: expression.eyeOpen, eyeArc: expression.eyeArc, pupil: expression.pupil,
+      ear: expression.ear, smile: expression.smile
+    };
+    this.tailEnergyTarget = expression.tail;
+    this.setAccessory(expression.accessory);
+
     const statusText = this.bubble.querySelector('.phi-bubble-status');
     const badgeDot = this.bubble.querySelector('.phi-dot');
+    if (statusText) statusText.textContent = expression.status;
+    if (badgeDot) badgeDot.style.background = expression.accent;
 
-    switch (emotion) {
-      case 'god_mode':
-        this.setGodMode(true);
-        statusText.textContent = 'God Mode · visual';
-        badgeDot.style.background = '#38bdf8';
-        break;
-      case 'analytical':
-      case 'focused':
-        statusText.textContent = 'Phi · Analyzing Syntax';
-        badgeDot.style.background = '#fbbf24';
-        break;
-      case 'alert':
-        statusText.textContent = 'Phi · Security Alert';
-        badgeDot.style.background = '#f43f5e';
-        break;
-      case 'head_tilt':
-        statusText.textContent = 'Phi · Confabulation Detected';
-        badgeDot.style.background = '#fbbf24';
-        this.gesture('look');
-        break;
-      case 'pacing':
-        statusText.textContent = 'Phi · Loop Detected';
-        badgeDot.style.background = '#f59e0b';
-        this.gesture('walk');
-        break;
-      case 'stretch':
-        statusText.textContent = 'Phi · Cognitive Reset';
-        badgeDot.style.background = '#38bdf8';
-        this.gesture('stretch');
-        break;
-      case 'sleep':
-        statusText.textContent = 'Phi · Resting';
-        badgeDot.style.background = '#64748b';
-        this.gesture('sleep');
-        break;
-      default:
-        statusText.textContent = 'Phi · Assisting';
-        badgeDot.style.background = '#10b981';
-        break;
+    // The acoustic signature belongs to the mood, so it fires on a real mood
+    // change — not on every alias or repeated call that resolves to the same face.
+    if (expression.id !== previousExpressionId) this.sound?.play(expression.id);
+
+    // God mode is sticky by design: an expression may switch it on, and only
+    // setGodMode(false) switches it off.
+    if (expression.godMode) this.setGodMode(true);
+    if (expression.gesture) this.gesture(expression.gesture);
+    if (this.reducedMotion) {
+      this.pose = { ...this.poseTarget }; this.tailEnergy = this.tailEnergyTarget;
+      this.renderExpression();
+      this.foxEars = this.foxEarsTarget; this.rebuildFox();
     }
     this.updateTails(0);
     this.flyTo(this.targetX, this.targetY);
+  }
+
+  /* Swap the accessory layer. Markup is replaced only when the key actually
+   * changes, so a per-frame expression update does not rebuild SVG. */
+  setAccessory(key) {
+    if (this.destroyed || key === this.accessoryKey) return;
+    this.accessoryKey = key;
+    this.accessoryLayer.innerHTML = key && ACCESSORIES[key] ? ACCESSORIES[key] : '';
+  }
+
+  /* Paint the current pose. Eyelids combine the expression's openness with the
+   * blink, so a blink still reads on an already half-closed eye. */
+  renderExpression() {
+    if (this.destroyed) return;
+    const pose = this.pose;
+    this.browLeft.setAttribute('transform', `translate(0 ${-pose.browLift}) rotate(${-pose.brow} ${EYE_LEFT[0]} ${EYE_LEFT[1] - 8})`);
+    this.browRight.setAttribute('transform', `translate(0 ${-pose.browLift - pose.browAsym}) rotate(${pose.brow} ${EYE_RIGHT[0]} ${EYE_RIGHT[1] - 8})`);
+
+    // A happy arc is a fully shut eye with a smile drawn on it, so the arc
+    // closes the lid rather than leaving a band of iris showing under it.
+    const lid = Math.max(1 - clamp(pose.eyeOpen, 0, 1), clamp(this.blinkProgress, 0, 1), clamp(pose.eyeArc, 0, 1));
+    this.eyelidLeft.setAttribute('height', (lid * LID_TRAVEL).toFixed(2));
+    this.eyelidRight.setAttribute('height', (lid * LID_TRAVEL).toFixed(2));
+    this.eyeArcs.style.opacity = pose.eyeArc.toFixed(3);
+
+    // A wide-eyed mood rounds the almond out rather than simply enlarging it,
+    // which is how the studio distinguishes `curious` from `working`.
+    const pupil = clamp(pose.pupil, .4, 1.8);
+    for (const eye of [this.pupilLeft, this.pupilRight]) {
+      eye?.setAttribute('rx', (2.6 * pupil).toFixed(2));
+      eye?.setAttribute('ry', (4.2 * (1 + (pupil - 1) * .25)).toFixed(2));
+    }
+
+    // This fox's ears are Gaussian peaks in the head outline, so alertness is a
+    // parameter of the curve — not a rotation of a separate triangle. Rotating
+    // them would tear them off the silhouette they are part of.
+    this.foxEarsTarget = RANGE.ears.min + (clamp(pose.ear, -20, 14) + 20) / 34 * (RANGE.ears.max - RANGE.ears.min);
+    this.accessoryLayer.style.opacity = this.accessoryKey ? '1' : '0';
   }
 
   gesture(name) {
@@ -658,7 +625,7 @@ export class PhiMascotRig {
       this.targetHeadAngle = -6;
     } else if (name === 'sleep') {
       this.blinkProgress = 1;
-      this.eyelidLeft.setAttribute('height', 10);
+      this.eyelidLeft.setAttribute('height', LID_TRAVEL);
     }
   }
 
@@ -700,7 +667,14 @@ export class PhiMascotRig {
       C ${100+w*round} ${top} ${100+w} ${top} ${100+w} ${cy}
       C ${100+w} ${bottom} ${100+w*round} ${bottom} 100 ${bottom}
       C ${100-w*round} ${bottom} ${100-w} ${bottom} ${100-w} ${cy} Z`;
-    this.mouthLip.setAttribute('d', path);
+    // A closed mouth carries the expression; a speaking one must not be bent
+    // out of its viseme, so the smile only applies at rest.
+    if (this.currentViseme === VISEMES.REST && Math.abs(this.pose.smile) > .02) {
+      const curve = this.pose.smile * 7, half = 8.5;
+      this.mouthLip.setAttribute('d', `M ${100 - half} ${cy - curve * .3} Q 100 ${cy + curve} ${100 + half} ${cy - curve * .3}`);
+    } else {
+      this.mouthLip.setAttribute('d', path);
+    }
     this.mouthCavity.setAttribute('d', path);
     this.mouthTeeth.setAttribute('d', `M ${100-w*.72} ${top+1} L ${100+w*.72} ${top+1}`);
     this.mouthTeeth.style.opacity = teeth.toFixed(3);
@@ -712,9 +686,10 @@ export class PhiMascotRig {
   setAudioVolume(volume) {
     if (this.destroyed) return;
     this.audioVolume = clamp(finite(volume), 0, 1);
-    const activeBars = Math.ceil(this.audioVolume * 4);
+    const perEar = this.earEqLeft ? this.earEqLeft.children.length : 0;
+    const activeBars = Math.ceil(this.audioVolume * perEar);
     this.equalizerBars.forEach((bar, index) => {
-      bar.style.opacity = index % 4 < activeBars ? '1' : '0.25';
+      bar.style.opacity = perEar && index % perEar < activeBars ? '1' : '0.25';
     });
   }
 
@@ -751,29 +726,80 @@ export class PhiMascotRig {
       this.rotation += (this.targetRotation - this.rotation) * ease(10, dt);
     }
     this.renderTransform();
+    // A gaze held forever looks like a stare. With nothing moving, Phi releases
+    // the target and settles front-on. Reduced motion freezes the clock, since
+    // relaxing over 3.5s is itself motion.
+    if (!this.reducedMotion) this.gazeIdleFor += dt;
+    const gazeRelaxed = this.gazeIdleFor > 3.5 || this.expression.id === 'sleep';
     const head = { x: this.renderX + this.width / 2, y: this.renderY + this.height * .45 };
-    const dx = this.gazeX - head.x, dy = this.gazeY - head.y;
+    const dx = (gazeRelaxed ? head.x : this.gazeX) - head.x, dy = (gazeRelaxed ? head.y : this.gazeY) - head.y;
     this.targetHeadAngle = clamp(Math.atan2(dy, Math.max(80, Math.abs(dx))) * 180 / Math.PI * .25, -15, 15);
     if (dx < 0) this.targetHeadAngle *= -1;
     const blend = this.reducedMotion ? 1 : ease(12, dt);
     this.headAngle += (this.targetHeadAngle - this.headAngle) * blend;
     this.scaleX = this.reducedMotion ? 1 : this.scaleX +
       ((1 - Math.min(1, Math.abs(dx) / 500) * .035) - this.scaleX) * blend;
-    this.headGroup.setAttribute('transform', `rotate(${this.headAngle} 100 105)`);
-    const matrix = this.headGroup.getScreenCTM();
-    // Convert the target back into the rotated head's own coordinate system.
-    const local = matrix ? new DOMPoint(this.gazeX, this.gazeY).matrixTransform(matrix.inverse()) : { x: 100, y: 80 };
-    const localDistance = Math.hypot(local.x - 100, local.y - 80);
-    const px = localDistance ? (local.x - 100) / localDistance * 2.5 : 0;
-    const py = localDistance ? (local.y - 80) / localDistance * 2.5 : 0;
-    this.pupilLeft.setAttribute('cx', 80 + px);
-    this.pupilLeft.setAttribute('cy', 80 + py);
-    this.pupilRight.setAttribute('cx', 120 + px);
-    this.pupilRight.setAttribute('cy', 80 + py);
+    // Thoracic breathing: the chest widens as it shortens, never a uniform
+    // pulse — a fox that scales evenly reads as a zooming sprite, not breathing.
+    // Low vitality lengthens and deepens the cycle.
+    const breathRate = 1.55 / (1 + .4 * (1 - this.vitality));
+    if (!this.reducedMotion) this.breathPhase += dt * breathRate;
+    const breathY = this.reducedMotion ? 0 : 1.6 * Math.sin(this.breathPhase);
+    const breathX = this.reducedMotion ? 0 : .010 * Math.cos(this.breathPhase);
+    const breathSquash = this.reducedMotion ? 0 : .007 * Math.cos(this.breathPhase);
+    this.bodyGroup.setAttribute('transform',
+      `translate(0 ${breathY.toFixed(3)}) translate(100 152) scale(${(1 + breathX).toFixed(4)} ${(1 - breathSquash).toFixed(4)}) translate(-100 -152)`);
 
-    this.blinkTimer = this.reducedMotion ? 0 : (this.blinkTimer + dt) % 4.4;
-    this.blinkProgress = this.blinkTimer > 4.22 ? Math.sin((this.blinkTimer - 4.22) / .18 * Math.PI) : 0;
-    this.eyelidLeft.setAttribute('height', clamp(this.blinkProgress, 0, 1) * 10);
+    // Ear micro-twitch: a periodic organic flick, never while asleep.
+    if (!this.reducedMotion && this.expression.id !== 'sleep') {
+      this.nextTwitchIn -= dt;
+      if (this.nextTwitchIn <= 0) {
+        this.twitchSpring.impulse((Math.random() > .5 ? 1 : -1) * (8 + Math.random() * 8));
+        this.nextTwitchIn = 4 + Math.random() * 5;
+      }
+    }
+    if (this.reducedMotion) { this.twitchSpring.value = this.twitchSpring.velocity = 0; this.hopSpring.value = this.hopSpring.velocity = 0; }
+    else { this.twitchSpring.update(dt); this.hopSpring.update(dt); }
+
+    // The head counters the breath a beat late. That lag is most of what makes
+    // the body read as connected rather than as two sprites moving together.
+    const counterBob = this.reducedMotion ? 0 : -.9 * Math.sin(this.breathPhase - .4);
+    this.headGroup.setAttribute('transform',
+      `translate(0 ${counterBob.toFixed(3)}) rotate(${(this.headAngle + this.twitchSpring.value * .35).toFixed(3)} ${NECK[0]} ${NECK[1]})`);
+    const matrix = this.headGroup.getScreenCTM();
+    const centre = this.screenPoint(100, EYE_LEFT[1]);
+    const lookX = gazeRelaxed && centre ? centre.x : this.gazeX;
+    const lookY = gazeRelaxed && centre ? centre.y : this.gazeY;
+    // Convert the target back into the rotated head's own coordinate system.
+    const local = matrix ? new DOMPoint(lookX, lookY).matrixTransform(matrix.inverse()) : { x: EYE_RIGHT[0], y: EYE_RIGHT[1] };
+    const localDistance = Math.hypot(local.x - 100, local.y - EYE_LEFT[1]);
+    const px = localDistance ? (local.x - 100) / localDistance * 1.9 : 0;
+    const py = localDistance ? (local.y - EYE_LEFT[1]) / localDistance * 1.9 : 0;
+    const shift = `translate(${px.toFixed(2)} ${py.toFixed(2)})`;
+    this.pupilsLeft?.setAttribute('transform', shift);
+    this.pupilsRight?.setAttribute('transform', shift);
+
+    // A Gaussian blink closes and opens on a curve rather than a linear window,
+    // and a tired Phi holds the lid down longer.
+    this.blinkTimer = this.reducedMotion ? 0 : (this.blinkTimer + dt) % 6.4;
+    const blinkWidth = .009 + .015 * (1 - this.vitality);
+    this.blinkProgress = this.reducedMotion ? 0
+      : .96 * Math.exp(-((this.blinkTimer - 5.9) ** 2) / blinkWidth);
+    const poseBlend = this.reducedMotion ? 1 : ease(7, dt);
+    for (const channel of Object.keys(this.poseTarget)) {
+      this.pose[channel] += (this.poseTarget[channel] - this.pose[channel]) * poseBlend;
+    }
+    this.tailEnergy += (this.tailEnergyTarget - this.tailEnergy) * poseBlend;
+    this.renderExpression();
+    // Posture follows the geometry parameters: ears from the expression, tail
+    // curl and body softness from stamina. A tired fox sits heavier and its
+    // tail uncurls; this is the studio's "couple state to posture", shipped.
+    this.foxCurlTarget = clamp(RANGE.curl.rest - (1 - this.vitality) * .18 + (this.tailEnergy - 1) * .1, RANGE.curl.min, RANGE.curl.max);
+    this.foxSoftnessTarget = clamp(RANGE.softness.rest + (1 - this.vitality) * .55, RANGE.softness.min, RANGE.softness.max);
+    for (const [current, target] of [['foxEars', 'foxEarsTarget'], ['foxCurl', 'foxCurlTarget'], ['foxSoftness', 'foxSoftnessTarget']]) {
+      this[current] += (this[target] - this[current]) * poseBlend;
+    }
+    this.rebuildFox();
     let difference = 0;
     for (let i = 0; i < this.mouthPose.length; i++) {
       this.mouthPose[i] += (this.targetMouthPose[i] - this.mouthPose[i]) * (this.reducedMotion ? 1 : ease(32, dt));
@@ -788,7 +814,7 @@ export class PhiMascotRig {
     this.renderLaser();
     if (this.godMode && !this.reducedMotion) {
       this.emberAccumulator += dt * 24;
-      const origin = this.screenPoint(100, 120);
+      const origin = this.screenPoint(100, 132);
       while (this.emberAccumulator >= 1) {
         if (origin) this.spawnParticle(origin.x, origin.y, 'god_ember');
         this.emberAccumulator -= 1;
@@ -798,24 +824,15 @@ export class PhiMascotRig {
   }
 
   updateTails(dt = 0) {
-    const rootX = 100, rootY = 145;
-    for (let i = 0; i < this.tails.length; i++) {
-      const tail = this.tails[i];
-      const drag = this.reducedMotion ? 0 : clamp(-this.vx * .0008, -.3, .3);
-      const wave = this.reducedMotion ? 0 : Math.sin(this.time * tail.swaySpeed + tail.phase) * .24;
-      const angle = tail.baseAngle + wave + drag;
-      const length = tail.length * (this.godMode ? 1.25 : 1);
-      const cp1x = rootX + Math.cos(angle - tail.curl) * length * .45;
-      const cp1y = rootY + Math.sin(angle - tail.curl) * length * .45;
-      const cp2x = rootX + Math.cos(angle + tail.curl * .8) * length * .8;
-      const cp2y = rootY + Math.sin(angle + tail.curl * .8) * length * .8;
-      const tipX = rootX + Math.cos(angle + wave * .5) * length;
-      const tipY = rootY + Math.sin(angle + wave * .5) * length;
-      this.tailElements[i].setAttribute('d', `M ${rootX} ${rootY} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${tipX} ${tipY}`);
-      if (this.godMode && !this.reducedMotion && Math.random() < 1 - Math.exp(-4 * dt)) {
-        const point = this.screenPoint(tipX, tipY);
-        if (point) this.spawnParticle(point.x, point.y, 'tail_spark');
-      }
+    if (this.destroyed || !this.tailsGroup) return;
+    if (!this.reducedMotion) this.tailPhase += dt * this.tailEnergy;
+    const drag = this.reducedMotion ? 0 : clamp(-this.vx * .05, -14, 14);
+    const sway = this.reducedMotion ? 0 : 4.2 * Math.sin(this.tailPhase * 1.6 - .4) * this.tailEnergy;
+    const angle = sway + drag + this.hopSpring.value * 22;
+    this.tailsGroup.setAttribute('transform', `rotate(${angle.toFixed(3)} ${TAIL_PIVOT[0].toFixed(2)} ${TAIL_PIVOT[1].toFixed(2)})`);
+    if (this.godMode && !this.reducedMotion && Math.random() < 1 - Math.exp(-4 * dt)) {
+      const point = this.screenPoint(38, 152);
+      if (point) this.spawnParticle(point.x, point.y, 'tail_spark');
     }
   }
 
@@ -824,7 +841,7 @@ export class PhiMascotRig {
     if (!ctx || this.destroyed) return;
     ctx.clearRect(0, 0, this.viewportWidth, this.viewportHeight);
     if (!this.laserActive || !this.laserTarget) return;
-    const origin = this.screenPoint(120, 80, this.headGroup);
+    const origin = this.screenPoint(EYE_RIGHT[0], EYE_RIGHT[1], this.headGroup);
     if (!origin) return;
     const { x: endX, y: endY } = this.laserTarget;
     const phase = this.reducedMotion ? 0 : this.time;
@@ -880,6 +897,7 @@ export class PhiMascotRig {
 
   destroy() {
     if (this.destroyed) return;
+    this.sound?.stop();
     this.releaseDrag?.({});
     this.destroyed = true;
     for (const remove of this.listeners.splice(0)) remove();

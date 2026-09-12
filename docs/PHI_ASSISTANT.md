@@ -52,7 +52,7 @@ by the browser page.
   checks the source snapshot and excerpt, not semantic truth. The page never
   equates citation validation with passing code tests.
 - **Voice**, speed, pause, and stop control narration. **Summon Phi** returns the
-  mascot to its reserved perch. **God Mode** changes the artwork and nine-tail
+  mascot to its reserved perch. **God Mode** changes the artwork and tail
   animation and remains selected through reading and summoning. It is a visual
   mode, not a claim of AGI or successful verification.
 
@@ -145,14 +145,112 @@ so their origin follows the moving head. Reduced motion keeps a readable static
 pose and suppresses particles. These are animation parameters, not measurements
 of physical anatomy or audio amplitude.
 
+## The character changed on 2026-09-12
+
+Phi was drawn twice: a cyber nine-tailed kitsune in the rig, and a seated
+parametric fox in `design/mascot/`. The studio fox is now the shipped character,
+and this is a **design decision, not a side effect of deduplication**:
+
+- One drawing everywhere, so the brand and the assistant stop diverging.
+- Its geometry is derived and parameterised (superellipse body, mirrored
+  Gaussian ears, golden-spiral tail), so expression is a change of *parameter*
+  rather than a swap of artwork — ears flatten by varying the Gaussian term,
+  not by rotating a separate triangle off the silhouette.
+- The warm amber palette reads as a companion. The kitsune read as a product.
+
+Consequences to be aware of: `rig.tailElements` is now 2 paths (spiral ribbon +
+cream tip) rather than 9 spline strokes, and `test_phi_rig.py` was updated to
+match. Anything depending on nine tails is depending on the old character.
+
+## Expressions and state
+
+Phi has one expression vocabulary. `src/evolve/web/phi/phi_expression.js` holds the
+12 canonical moods — greeting, thinking, working, success, error, idle, curious,
+evolve, flow, guard, spark, sleep — as facial *parameters* (brow angle and lift,
+eyelid coverage, pupil scale, ear rotation, resting mouth curve, tail energy, an
+accent colour and an optional accessory). The rig interpolates toward them, so a
+mood change is a movement rather than a swap.
+
+`design/mascot/` draws the same 12 for the static brand vectors.
+`scripts/tests/test_phi_expression.py` fails if either side gains or loses a mood,
+which is what keeps the two from drifting apart again.
+
+Operational names the friction companion already emits — `analytical`, `alert`,
+`head_tilt`, `pacing`, `stretch`, `god_mode` — are aliases onto canonical moods.
+An alias keeps its own status wording and accent, so "Loop Detected" never
+silently becomes "In flow"; only the face is shared. An unrecognised name
+resolves to `greeting` rather than throwing, because an emotion arriving from
+telemetry must not be able to strand the face mid-render.
+
+`phi_state.js` chooses the face. Rather than every caller picking an expression,
+events nudge a six-axis vector — focus, vitality, clarity, curiosity, harmony and
+a monotonic experience odometer — which relaxes toward rest between events. The
+expression is read *off* that vector, so a long green streak and a single passing
+test no longer look identical. An unambiguous event pins its face for ~2.6s, then
+the vector takes over. A cosine classifier labels the working style (Architect,
+Scout, Sprinter, Scribe, Sage); it is a label for the UI and gates nothing.
+
+These axes are behavioural bookkeeping over events Selfware already emits. They
+are not measurements of a model's internals and not claims about affect — they
+drive an animation, and nothing reads them back as ground truth. Unknown events
+are ignored rather than guessed at. Persistence via `localStorage` is
+best-effort; a blocked or corrupt store leaves Phi working, just forgetful, and a
+stale snapshot is relaxed by the time away instead of resuming mid-sprint.
+
+### Idle motion
+
+Phi's idle motion is ported from the `design/mascot/` studio loop, which had the
+better model for looking alive:
+
+- **Thoracic breathing.** The chest widens as it shortens rather than pulsing
+  uniformly — an evenly scaled fox reads as a zooming sprite, not a breathing
+  animal.
+- **Cervical counter-bob.** The head counters the breath a beat late. That phase
+  lag is most of what makes head and body read as one creature.
+- **Ear micro-twitch.** A damped impulse spring flicks an ear every 4–9s, and
+  never while asleep.
+- **Gaze relaxation.** A target held for 3.5s is released and Phi settles
+  front-on; a gaze held forever reads as a stare. Re-aiming at the same point
+  does not renew attention.
+- **Gaussian blink.** The lid closes on a curve instead of a linear window.
+
+Breath rate and blink duration are driven by the state engine's `vitality` axis,
+so a drained Phi visibly breathes slower and deeper and holds its blinks longer.
+The springs integrate semi-implicitly with a clamped step, so the long frame a
+background tab delivers on wake settles instead of diverging.
+
+Everything above is suppressed under `prefers-reduced-motion`, including the gaze
+idle clock — relaxing a stare over 3.5s is itself motion.
+
+Open `/phi/gallery.html` against a running workspace to see all 12 rendered by the
+real rig, and to drive the state vector by hand.
+
 ## Speech and synchronization
 
 The default voice path selects an installed English voice with
 `SpeechSynthesisVoice.localService === true`. Browsers without a local voice can
-still provide a labelled silent reading. Audio-off cancels active audible speech.
+still provide a labelled silent reading, or the procedural formant voice below.
+Audio-off cancels active audible speech.
 Native word-boundary events correct the spoken-word clock; browsers that omit
 these events use an explicitly approximate clock. Phonemes within a native
 spoken word are approximate because the browser does not report their alignment.
+
+### Procedural formant voice
+
+`phi_formant.js` is the offline tier: a sawtooth glottal source through two
+bandpass resonators tuned to the F1/F2 targets of each mouth shape. It needs no
+model, no voice pack, no files and no network, so it is audible on a machine
+where every other engine is unavailable.
+
+It reproduces the **vowel colour and rhythm** of the narration. It does not
+synthesize intelligible speech and is labelled as such in the voice menu — it is
+an audible cue track, not a substitute for a real voice.
+
+It is driven by the same CMU-derived viseme schedule that drives the mouth, so
+sound and lips come from one timeline and cannot drift apart. The tier is opt-in:
+select "Procedural formant voice" in the voice menu, or construct the engine with
+`formantFallback: true` to make it replace the mute `local_voice_unavailable`
+path. Left alone, a machine with no installed voice still gets silence.
 
 Before native synthesis, `<`, `>` and `&` are narrated as "less than", "greater
 than" and "ampersand". This keeps code delimiters literal in an API that also
@@ -217,8 +315,12 @@ difference and does not establish human-rated voice quality.
 The worker supplies **no measured word or phoneme alignment**. Phi follows
 `audio.currentTime` and maps an explicitly approximate mouth/caption timeline
 across the measured audio duration. Voice speed changes playback speed; it does
-not provide alignment. Native browser voices and labelled silent reading remain
-available in the voice menu. An explicitly selected VibeVoice failure is shown
+not provide alignment. `scripts/phi_align.py` closes this gap when whisperX is
+installed, and its `visemes_from_audio()` derives mouth shapes from the audio's
+own RMS envelope and zero-crossing rate — an animation heuristic, not measured
+phonemes, but one that tracks the real waveform when alignment has fallen back.
+Native browser voices, the procedural formant voice, and labelled silent reading
+remain available in the voice menu. An explicitly selected VibeVoice failure is shown
 as a failure; the UI does not silently change voices. With the launcher default
 `--speech native`, no ONNX worker is started.
 
@@ -273,7 +375,9 @@ python3 scripts/tests/test_phi_vibevoice_runtime.py -v
 python3 scripts/tests/test_phi_speech_worker.py -v
 python3 scripts/tests/test_phi_speech_client.py -v
 python3 scripts/tests/test_phi_local_speech.py -v
-python3 scripts/tests/test_phi_voice.py -v
+python3 scripts/tests/test_phi_expression.py -v
+python3 scripts/tests/test_phi_align.py -v
+python3 scripts/tests/test_phi_formant.py -v
 ```
 
 Worker/runtime tests use the installed speech Python environment. The setup and

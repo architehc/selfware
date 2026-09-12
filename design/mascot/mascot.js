@@ -44,6 +44,8 @@
     flow: "Deep in the loop. Zero hesitation.",
     guard: "Verifying boundaries and trust gates.",
     spark: "A clean hypothesis verified.",
+    skeptical: "Nothing has verified this yet.",
+    unimpressed: "It agreed with you. That is not the same as being right.",
     sleep: "Dormant daemon. Resting until summoned."
   };
 

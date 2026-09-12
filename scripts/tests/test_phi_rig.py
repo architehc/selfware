@@ -133,7 +133,7 @@ class PhiRigTests(unittest.TestCase):
         self.assertEqual(result["beforeInterrupt"], result["open"])
         self.assertNotEqual(result["interrupted"]["d"], result["open"]["d"])
         self.assertEqual(len({pose["d"] for pose in result["poses"]}), 10)
-        self.assertEqual(result["tails"], 9)
+        self.assertEqual(result["tails"], 2)  # spiral ribbon + cream tip
         # Numeric convergence permits subpixel float differences, but neither a
         # previous tongue shape nor an old teeth bar may remain visible.
         for key in ("tongue", "teeth"):
@@ -148,7 +148,7 @@ class PhiRigTests(unittest.TestCase):
         self.assertAlmostEqual(result["closedPose"][3], 103, places=7)
         self.assertAlmostEqual(result["closedPose"][5], 0, places=7)
 
-    def test_laser_tracks_actual_monocle_ctm_during_banked_flight(self):
+    def test_laser_tracks_actual_eye_ctm_during_banked_flight(self):
         result = self.page.evaluate("""() => {
           const rig=new PhiMascotRig(document.body,{width:300,height:300,initialX:200,initialY:280});
           const moves=[],lines=[];
@@ -159,7 +159,7 @@ class PhiRigTests(unittest.TestCase):
           const errors=[];
           for(let i=0;i<50;i++){
             rig.update(1/60);
-            const actual=new DOMPoint(120,80).matrixTransform(rig.headGroup.getScreenCTM());
+            const actual=new DOMPoint(rig.laserOrigin.x,rig.laserOrigin.y).matrixTransform(rig.headGroup.getScreenCTM());
             const drawn=moves.at(-1);errors.push(Math.hypot(actual.x-drawn.x,actual.y-drawn.y));
           }
           const result={errors,last:lines.at(-1),canvasWidth:rig.laserCanvas.width,
@@ -232,7 +232,7 @@ class PhiRigTests(unittest.TestCase):
         self.assertLessEqual(bounds["bottom"], 844)
         self.assertGreater(result["layout"]["topInset"], 100)
         self.assertEqual(result["underlying"], "underlying")
-        self.assertEqual(result["tails"], 9)
+        self.assertEqual(result["tails"], 2)  # spiral ribbon + cream tip
 
     def test_destroy_releases_owned_dom_listeners_and_never_owns_raf(self):
         result = self.page.evaluate("""() => {

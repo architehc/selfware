@@ -12,6 +12,7 @@
  */
 
 import { VISEMES } from './phi_rig.js';
+import { PhiFormantVoice } from './phi_formant.js';
 
 // Phoneme-to-Viseme Lookup Map
 export const PHONEME_TO_VISEME = {
@@ -142,6 +143,12 @@ export class PhiVisemeEngine {
     this.session = null;
     this.onStateChange = null;
     this.lastStatus = { status: 'idle', mode: 'idle', audible: false, approximate: false };
+    // Procedural formant voice: opt-in, either per call (engine: 'formant') or
+    // as an upgrade of the mute `local_voice_unavailable` path. Off by default —
+    // callers that expect silence when no voice is installed still get silence.
+    this.formantFallback = options.formantFallback === true;
+    this.formantFactory = options.formantFactory || (opts => new PhiFormantVoice(opts));
+    this.formant = null;
     this.voiceHandler = () => this.initSpeech();
     this.synth?.addEventListener?.('voiceschanged', this.voiceHandler);
     this.initSpeech();
@@ -305,6 +312,7 @@ export class PhiVisemeEngine {
     const local = this.audioEnabled && options.useSpeechSynthesis !== false && engine === 'vibevoice';
     if (local) { s.provider = 'vibevoice_onnx'; s.voice = options.voice || this.selectedVibeVoice || 'Emma'; s.phase = 'queued'; }
     if (engine === 'silent') s.options.useSpeechSynthesis = false;
+    s.engine = engine;
     Promise.resolve(this.ready).then(() => { if (this.session === s) { if (local) this.startLocalSpeech(s); else this.startSpeech(s); } });
     return s.promise;
   }
@@ -313,8 +321,11 @@ export class PhiVisemeEngine {
     if (!s.text.trim()) { this.finish(s, 'completed'); return; }
     this.initSpeech();
     s.schedule = this.sentenceToVisemes(s.text, 155 * s.options.speechRate);
+    if (this.audioEnabled && s.engine === 'formant' && this.startFormant(s, 'formant_requested')) return;
     if (!this.audioEnabled || !s.options.useSpeechSynthesis || !this.synth || !this.preferredVoice) {
-      this.startSilent(s, !this.audioEnabled ? 'audio_disabled' : !s.options.useSpeechSynthesis ? 'silent_requested' : 'local_voice_unavailable');
+      const reason = !this.audioEnabled ? 'audio_disabled' : !s.options.useSpeechSynthesis ? 'silent_requested' : 'local_voice_unavailable';
+      if (reason === 'local_voice_unavailable' && this.formantFallback && this.startFormant(s, reason)) return;
+      this.startSilent(s, reason);
       return;
     }
     s.mode = 'speech_boundary_approximate'; s.audible = true; s.phase = 'waiting';
@@ -369,6 +380,25 @@ export class PhiVisemeEngine {
     if (this.session !== s) return;
     try { this.synth.speak(utterance); } catch (error) { this.detachNative(s); this.startSilent(s, error.message || 'speech_error'); }
   }
+  /* Audible counterpart of startSilent: the same CMU-derived viseme schedule
+   * drives both the mouth and a two-formant vocal tract, so sound and lips come
+   * from one timeline. Returns false when no AudioContext is available, which
+   * leaves the caller to fall through to the mute path. */
+  startFormant(s, reason) {
+    if (this.session !== s) return false;
+    s.schedule ||= this.sentenceToVisemes(s.text, 155 * s.options.speechRate);
+    if (!s.schedule.length) return false;
+    this.formant ||= this.formantFactory({ volume: s.options.volume });
+    this.formant.setVolume(s.options.volume);
+    if (!this.formant.speak(s.schedule, { rate: 1 })) return false;
+    s.mode = 'formant_approximate'; s.audible = true; s.approximate = true;
+    s.provider = 'formant'; s.voice = 'procedural';
+    s.phase = 'playing'; s.reason = reason; s.startedAt = this.now(); s.lastWord = -1;
+    this.queue = s.schedule;
+    if (s.paused) this.formant.stop();
+    this.emit(s, s.paused ? 'paused' : 'playing', { reason });
+    return true;
+  }
   startSilent(s, reason) {
     if (this.session !== s) return;
     s.mode = 'silent_approximate'; s.audible = false; s.approximate = true;
@@ -419,6 +449,7 @@ export class PhiVisemeEngine {
     if (!s || s.paused) return this;
     s.paused = true; s.pausedAt = this.now(); this.isPlaying = false;
     if (s.native) this.synth?.pause();
+    if (s.mode === 'formant_approximate') this.formant?.stop();
     s.audio?.pause();
     this.rig.setViseme(VISEMES.REST, 0); this.rig.setAudioVolume(0);
     this.emit(s, 'paused'); return this;
@@ -432,6 +463,7 @@ export class PhiVisemeEngine {
     if (s.deferredStart) { const start = s.deferredStart; s.deferredStart = null; start(); }
     else {
       if (s.native) this.synth?.resume();
+      if (s.mode === 'formant_approximate') this.formant?.speak(s.schedule, { offsetMs: this.now() - s.startedAt, rate: 1 });
       if (s.audio) this.playAudio(s);
       if (this.session === s) this.emit(s, s.phase);
     }
@@ -448,6 +480,7 @@ export class PhiVisemeEngine {
     this.session = null; this.isPlaying = false; clearInterval(s.poll);
     s.abort.abort();
     this.detachNative(s);
+    this.formant?.stop();
     for (const [event, handler] of s.handlers) s.audio?.removeEventListener(event, handler);
     s.audio?.pause();
     s.audioDispose?.(); s.audioDispose = null;
@@ -464,7 +497,11 @@ export class PhiVisemeEngine {
   runVirtualClock(_schedule, resolve, onWord, words) {
     return this.speak(words.join(' '), { useSpeechSynthesis: false, onWord }).then(resolve);
   }
-  destroy() { this.stop('destroyed'); this.synth?.removeEventListener?.('voiceschanged', this.voiceHandler); }
+  destroy() {
+    this.stop('destroyed');
+    this.formant?.destroy(); this.formant = null;
+    this.synth?.removeEventListener?.('voiceschanged', this.voiceHandler);
+  }
 
   // Seconds, source-text UTF-16 offsets, and explicit visemes from an audio producer.
   // Word-only timestamps still use approximate phonemes within each measured word.

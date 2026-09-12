@@ -154,47 +154,37 @@ Selfware commands (`selfware init`, `selfware run`, `selfware graph`, `selfware 
 events to the corresponding expression, triggers the acoustic voice, mutates the state embedding,
 and records the event in the telemetry feed.
 
-## God-Mode Assistant Workspace (`assistant/`)
+## The shipped assistant lives elsewhere
 
-In addition to the static geometry studio, the repository provides a full-featured
-**God-Mode Assistant Workspace** (`design/mascot/assistant/index.html`). Here, Phi functions as an
-autonomous, flying AI companion that reads code, tracks English speech with real-time viseme lip-sync,
-aims a precision laser focus beam onto code lines, and guides developers through Super Facts:
+This directory is the **authoring studio** for Phi's geometry and motion: it
+generates the static brand vectors and is where new poses and animations are
+worked out. It is not what ships.
 
-1. **Autonomous Flight Kinematics (`flight.js`)**:
-   - 2D critically damped spring kinematics with velocity banking ($\theta_{\text{roll}} \in [-24^\circ, +24^\circ]$) and pitch damping.
-   - Dual states: Free roaming, hovering with harmonic buoyancy ($y = y_0 + 5.5\sin(2.4t)$), and perching directly on code line gutters or card headers.
-   - Golden particle canvas: Trails stardust sparks and shimmering $\phi$ glyphs in Phi's flight wake.
-   - Dynamic SVG Focus Beam: Projects an amber laser guide with pulsing circular reticle from Phi directly to target code tokens.
+The running assistant is `src/evolve/web/phi/` — which now draws **this** fox, with
+CMU-dictionary lip sync, a laser focus beam, friction telemetry, and a local
+VibeVoice speech stack. An earlier `assistant/` prototype lived here; every part
+of it is now superseded by that directory, and its one unique contribution — a
+procedural F1/F2 formant voice for machines with no installed voice pack — was
+carried over as `src/evolve/web/phi/phi_formant.js`.
 
-2. **English Text-to-Viseme Lip-Sync (`visemes.js`)**:
-   - Maps English text, syllables, and words into 8 parametric vector mouth shapes (`rest`, `open_a`, `open_e`, `round_o`, `pucker_u`, `closed_m`, `dental_f`, `alveolar_t`).
-   - Co-articulation timing: Smooth transitions with word-boundary synchronization.
+The studio's animation loop is the origin of the shipped rig's idle motion:
+thoracic breathing, cervical counter-bob, the ear micro-twitch spring, gaze
+relaxation and the Gaussian blink were all ported from here into
+`src/evolve/web/phi/phi_rig.js`, and are now driven by that side's state vector.
+The 12 moods below are the shared vocabulary — `scripts/tests/test_phi_expression.py`
+fails if this list and `phi_expression.js` disagree.
 
-3. **Dual Speech Synthesis & Formant Voice (`speech.js`)**:
-   - Web Speech API integration with millisecond `onboundary` tracking for exact word-by-word lip sync and transcript glow.
-   - Procedural Web Audio formant synthesizer fallback ($F_1, F_2$ bandpass resonance), speaking audible vowel syllables 100% offline with zero dependencies.
-
-4. **Super Facts & Code Walkthrough Stream (`assistant.js`)**:
-   - Code Editor with syntax highlighting, line numbers, and interactive line inspection.
-   - Super Facts Deck highlighting Invariant Gates, Context Budget, Rule 5 (Sweep Bug Class), and Golden Spiral Math.
-   - Interactive Prompt Input: Ask Phi questions about code or invariants; Phi autonomously plans flight paths, perches, and narrates the answer.
-
-Launch the Assistant Experience:
-```sh
-open /Users/ivo/selfware/design/mascot/assistant/index.html
-```
+**Resolved 2026-09-12:** the two no longer draw different foxes. This studio's
+seated fox with its golden-spiral tail is the shipped character; the geometry
+lives in `src/evolve/web/phi/phi_fox.js` and the mood vocabulary is shared and
+enforced by `scripts/tests/test_phi_expression.py`. See `docs/PHI_ASSISTANT.md`
+for the rationale.
 
 ## Files and reuse
 
 - `mascot.js`: geometry, procedural audio, 6D state engine, and command simulator.
 - `index.html`, `style.css`: the local interactive geometry studio.
-- `assistant/`: the God-Mode Assistant coding workspace:
-  - `assistant/index.html`, `assistant/style.css`: IDE workspace interface.
-  - `assistant/visemes.js`: English phonetic-to-viseme lip-sync engine.
-  - `assistant/speech.js`: Speech synthesis and procedural formant audio fallback.
-  - `assistant/flight.js`: 60fps spring flight kinematics, particle trails, and focus beam.
-  - `assistant/assistant.js`: Workspace orchestrator and walkthrough controller.
+- `motion/`: the Motion Studio — continuous-time kinematics, gestures, and the Fables of Phi narration.
 - `selfware-phi.svg`: the complete mascot, transparent background.
 - `selfware-phi-icon.svg`: face-only vector for small placements.
 - `selfware-phi.png`, `selfware-phi-icon.png`: transparent PNG exports.
