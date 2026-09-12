@@ -63,9 +63,10 @@ export const EVENT_EFFECTS = Object.freeze({
   // --- verification: the only thing that pays debt down ---
   diff_reviewed:    { debt: -.16, clarity: .08, harmony: .06 },
   diff_rejected:    { debt: -.12, clarity: .06, curiosity: .05 },
-  // Written, not yet run: it is a promise of verification, not verification.
-  // The larger repayment arrives with tests_passed.
-  test_written:     { debt: -.06, clarity: .12, harmony: .08 },
+  // Written, not yet run: it verifies NOTHING, so it repays nothing. Seventeen
+  // of these took debt from 1.0 to zero without a single test executing. The
+  // repayment arrives with tests_passed, which is the event that ran it.
+  test_written:     { clarity: .12, harmony: .08 },
   // A green run pays down real debt, but it cannot say WHICH changes it covered;
   // that needs revision-keyed evidence, which this scalar model does not carry.
   tests_passed:     { debt: -.18, clarity: .28, harmony: .18, vitality: .04, turn: 1, expression: 'success' },

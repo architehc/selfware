@@ -19,6 +19,8 @@
  *   - It only ever cites what it observed. No augmentation without a signal.
  */
 
+import { CITATION_MARKERS } from './phi_friction.js';
+
 export const MEDIATION = Object.freeze({
   DEMAND_DISPROOF: 'demand_disproof',
   REQUIRE_EVIDENCE: 'require_evidence',
@@ -41,14 +43,14 @@ const UNSOURCED = Object.freeze([
   /\b(?:this|that)\s+is\s+(?:correct|right|fine|safe)\b/i,
   /\bnow\s+(?:works|fixed|resolved)\b/i
 ]);
-const SOURCED = Object.freeze([
-  /\b[\w./-]+\.(?:rs|js|ts|py|go|toml|json|md):\d+/,
-  /\b(?:cargo|npm|pytest|git|node|go)\s+\w+/i,
-  /\b(?:test|tests)\s+(?:pass|passed|fail|failed)\b/i,
-  /```/
-]);
 
-const isSourced = text => SOURCED.some(pattern => pattern.test(text));
+/* One definition, shared with phi_friction.
+ *
+ * The mediator kept its own SOURCED list, which still accepted a bare "tests
+ * passed" as sourcing after phi_friction had been narrowed. Two heuristics for
+ * one judgement is how they disagree: an install test found the mediator
+ * clearing answers the friction classifier flagged. */
+const isSourced = text => CITATION_MARKERS.some(pattern => pattern.test(text));
 
 export class PhiMediator {
   constructor({ debtGateThreshold = .72, scopeLineLimit = 400 } = {}) {

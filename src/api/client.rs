@@ -311,6 +311,34 @@ impl ServerSpeedTracker {
     }
 }
 
+/// Whether an `extra_body` already pins reasoning behavior, in EITHER placement.
+///
+/// Top-level `reasoning_effort` / `reasoning` is the OpenAI-style spelling.
+/// Qwen/SGLang chat templates take the same settings nested under
+/// `chat_template_kwargs`, and a check that looked only at the top level left a
+/// nested pin invisible — the bounded-reasoning retry would then add a
+/// conflicting top-level key beside the user's own.
+///
+/// This lives as one free function on purpose. The client path and the profile
+/// path each had their own copy, so fixing one of them fixed exactly one of
+/// them; a cross-distribution install test caught the other still wrong.
+pub fn extra_body_pins_reasoning(
+    extra_body: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> bool {
+    fn pins(map: &serde_json::Map<String, serde_json::Value>) -> bool {
+        map.contains_key("reasoning_effort")
+            || map.contains_key("reasoning")
+            || map.contains_key("enable_thinking")
+    }
+    extra_body.is_some_and(|map| {
+        pins(map)
+            || map
+                .get("chat_template_kwargs")
+                .and_then(|value| value.as_object())
+                .is_some_and(pins)
+    })
+}
+
 impl ApiClient {
     pub fn new(config: &crate::config::Config) -> Result<Self> {
         // Total-timeout client, used only by the short FIM `complete` path.
@@ -563,24 +591,8 @@ impl ApiClient {
 
     /// True when the user's `extra_body` already pins reasoning behavior — the
     /// bounded-reasoning retry must not override an explicit choice.
-    ///
-    /// Checks both placements. Top-level `reasoning_effort` / `reasoning` is
-    /// the OpenAI-style spelling; Qwen/SGLang templates take the same setting
-    /// nested under `chat_template_kwargs`, and looking only at the top level
-    /// left a nested pin invisible — the retry would then add a conflicting
-    /// top-level key alongside the user's own.
     fn user_pinned_reasoning(&self) -> bool {
-        fn pins(map: &serde_json::Map<String, serde_json::Value>) -> bool {
-            map.contains_key("reasoning_effort")
-                || map.contains_key("reasoning")
-                || map.contains_key("enable_thinking")
-        }
-        self.config.extra_body.as_ref().is_some_and(|m| {
-            pins(m)
-                || m.get("chat_template_kwargs")
-                    .and_then(|v| v.as_object())
-                    .is_some_and(pins)
-        })
+        extra_body_pins_reasoning(self.config.extra_body.as_ref())
     }
 
     pub async fn completion(
@@ -1911,9 +1923,7 @@ impl ApiClient {
             )
             .await?;
         if let Some(reasoning_chars) = reasoning_budget_exhausted(&response) {
-            let pinned = profile.extra_body.as_ref().is_some_and(|extra| {
-                extra.contains_key("reasoning") || extra.contains_key("reasoning_effort")
-            });
+            let pinned = extra_body_pins_reasoning(profile.extra_body.as_ref());
             if pinned {
                 return Err(ApiError::ReasoningBudgetExhausted { reasoning_chars }.into());
             }

@@ -730,6 +730,44 @@ for (const text of [
 }
 """)
 
+    def test_the_mediator_and_the_classifier_never_disagree(self):
+        """Two heuristics for one judgement is how they drift apart.
+
+        The mediator kept its own SOURCED list and still accepted a bare
+        "tests passed" after the classifier had been narrowed, so an answer the
+        classifier flagged was cleared by the mediator.
+        """
+        self.node("""
+const {PhiMediator} = await import('""" + (PHI / 'phi_mediator.js').as_uri() + """');
+const {CognitiveFrictionClassifier} = await import('""" + (PHI / 'phi_friction.js').as_uri() + """');
+const m=new PhiMediator();
+for (const text of [
+  "You're absolutely right, the tests pass now.",
+  "Good catch - I ran cargo build and it works.",
+  "You're right - src/net.rs:42 drops the guard early.",
+  "You're right: ```error[E0382]: borrow of moved value```",
+  "My mistake. This should be fine now."]) {
+  const c=new CognitiveFrictionClassifier();
+  const mediator=m.inbound(text,{afterPushback:true}).some(a=>a.kind==='capitulation');
+  const classifier=c.recordAssistantReversal({stance:'x',text}).capitulated;
+  assert.equal(mediator,classifier,
+    `mediator and classifier disagree on: ${text}`);
+}
+""")
+
+    def test_an_unrun_test_repays_no_debt_at_all(self):
+        """Seventeen test_written events took debt from 1.0 to zero."""
+        self.node("""
+let t=0;const s=new PhiState({now:()=>t});
+for(let i=0;i<6;i++){t+=200;s.record('diff_accepted_unread');}
+const owed=s.snapshot().vector.debt;
+for(let i=0;i<20;i++){t+=200;s.record('test_written');}
+assert.equal(s.snapshot().vector.debt,owed,
+  `writing 20 tests without running them repaid ${owed - s.snapshot().vector.debt}`);
+t+=200;s.record('tests_passed');
+assert.ok(s.snapshot().vector.debt<owed,'running them must repay');
+""")
+
     def test_the_caller_owns_reversal_detection_and_it_says_so(self):
         """Phi never compared stances across turns; the record must not imply it did."""
         self.detector("""

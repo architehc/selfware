@@ -54,3 +54,42 @@ fn empty_stream_is_distinct_from_reasoning_starvation() {
         "an empty stream must not suggest a budget fix that cannot help: {empty}"
     );
 }
+
+/// Both reasoning-pin call sites must agree, in both placements.
+///
+/// The client path and the profile path each carried their own copy of this
+/// check. Fixing one fixed exactly one; a cross-distribution install test found
+/// the profile path still blind to a nested pin. They now share a definition,
+/// and this pins the behaviour that definition must have.
+#[test]
+fn a_nested_reasoning_pin_is_visible_to_every_caller() {
+    use selfware::api::client::extra_body_pins_reasoning;
+    use serde_json::{json, Map, Value};
+
+    let obj = |v: Value| -> Map<String, Value> { v.as_object().unwrap().clone() };
+
+    // Top-level, OpenAI spelling.
+    assert!(extra_body_pins_reasoning(Some(&obj(
+        json!({"reasoning_effort": "low"})
+    ))));
+    assert!(extra_body_pins_reasoning(Some(&obj(
+        json!({"reasoning": {}})
+    ))));
+
+    // Nested, Qwen/SGLang chat-template spelling — the case that regressed.
+    assert!(extra_body_pins_reasoning(Some(&obj(json!({
+        "chat_template_kwargs": {"reasoning_effort": "low"}
+    })))));
+    assert!(extra_body_pins_reasoning(Some(&obj(json!({
+        "chat_template_kwargs": {"enable_thinking": false}
+    })))));
+
+    // Unrelated settings are not a pin, and absence is not a pin.
+    assert!(!extra_body_pins_reasoning(Some(&obj(json!({
+        "chat_template_kwargs": {"add_vision_id": true}
+    })))));
+    assert!(!extra_body_pins_reasoning(Some(&obj(
+        json!({"temperature": 0})
+    ))));
+    assert!(!extra_body_pins_reasoning(None));
+}
