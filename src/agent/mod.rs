@@ -140,7 +140,7 @@ pub(crate) const MAX_PENDING_MESSAGES: usize = 100;
 
 /// Detected project type for adapting verification instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectType {
+pub(super) enum ProjectType {
     Python,
     JavaScript,
     TypeScript,
@@ -159,10 +159,16 @@ fn find_project_root_with_markers(
     markers: &[&str],
 ) -> Option<std::path::PathBuf> {
     start.ancestors().find_map(|ancestor| {
-        markers
-            .iter()
-            .any(|marker| ancestor.join(marker).exists())
-            .then(|| ancestor.to_path_buf())
+        let has_marker = markers.iter().any(|marker| {
+            if *marker == "Cargo.toml"
+                && ancestor != start
+                && !self::verification_scope::cargo_applies_to_task(start)
+            {
+                return false;
+            }
+            ancestor.join(marker).exists()
+        });
+        has_marker.then(|| ancestor.to_path_buf())
     })
 }
 
@@ -233,6 +239,61 @@ async fn read_bounded_file(
 
 /// Detect the project type from marker files in the working directory or its ancestors.
 async fn detect_project_type() -> ProjectType {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    detect_project_type_at(&cwd).await
+}
+
+async fn detect_project_type_at(cwd: &std::path::Path) -> ProjectType {
+    // 1. Inspect cwd itself first. Nested subprojects (e.g. py_sub inside a parent repo)
+    // must be identified by their own contents rather than falling through to an enclosing parent's manifest.
+    if try_exists(&cwd.join("pyproject.toml")).await
+        || try_exists(&cwd.join("setup.py")).await
+        || try_exists(&cwd.join("requirements.txt")).await
+        || has_file_with_extension(cwd, "py").await
+    {
+        return ProjectType::Python;
+    }
+    if try_exists(&cwd.join("tsconfig.json")).await || has_file_with_extension(cwd, "ts").await {
+        return ProjectType::TypeScript;
+    }
+    if try_exists(&cwd.join("package.json")).await || has_file_with_extension(cwd, "js").await {
+        return ProjectType::JavaScript;
+    }
+    if try_exists(&cwd.join("Cargo.toml")).await || has_file_with_extension(cwd, "rs").await {
+        return ProjectType::Rust;
+    }
+    if try_exists(&cwd.join("go.mod")).await || has_file_with_extension(cwd, "go").await {
+        return ProjectType::Go;
+    }
+    if try_exists(&cwd.join("pom.xml")).await
+        || try_exists(&cwd.join("build.gradle")).await
+        || try_exists(&cwd.join("build.gradle.kts")).await
+        || has_file_with_extension(cwd, "java").await
+    {
+        return ProjectType::Java;
+    }
+    if has_file_with_extension(cwd, "csproj").await
+        || has_file_with_extension(cwd, "sln").await
+        || has_file_with_extension(cwd, "cs").await
+    {
+        return ProjectType::CSharp;
+    }
+    if has_file_with_extension(cwd, "cpp").await
+        || has_file_with_extension(cwd, "cc").await
+        || has_file_with_extension(cwd, "cxx").await
+        || has_file_with_extension(cwd, "c").await
+        || try_exists(&cwd.join("CMakeLists.txt")).await
+    {
+        return ProjectType::Cpp;
+    }
+    if has_file_with_extension(cwd, "sql").await {
+        return ProjectType::Sql;
+    }
+    if try_exists(&cwd.join("Package.swift")).await || has_file_with_extension(cwd, "swift").await {
+        return ProjectType::Swift;
+    }
+
+    // 2. If cwd doesn't have any markers or code, check project root from ancestors
     let root = current_project_root();
     if try_exists(&root.join("pyproject.toml")).await
         || try_exists(&root.join("setup.py")).await
@@ -267,7 +328,9 @@ async fn detect_project_type() -> ProjectType {
         || has_file_with_extension(&root, "swift").await
     {
         ProjectType::Swift
-    } else if try_exists(&root.join("Cargo.toml")).await {
+    } else if try_exists(&root.join("Cargo.toml")).await
+        && self::verification_scope::cargo_applies_to_task(cwd)
+    {
         ProjectType::Rust
     } else {
         ProjectType::Generic

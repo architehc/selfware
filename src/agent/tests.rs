@@ -1270,3 +1270,41 @@ async fn clear_conversation_keeps_only_system_prompt() {
     assert!(agent.last_assistant_response.is_empty());
     server.stop().await;
 }
+
+// =========================================================================
+// Test: Project type detection correctly scopes nested subprojects
+// =========================================================================
+
+#[tokio::test]
+async fn test_detect_project_type_nested_scoping() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent_rust");
+    let py_child = parent.join("py_sub");
+    std::fs::create_dir_all(&py_child).unwrap();
+    std::fs::write(
+        parent.join("Cargo.toml"),
+        "[package]\nname=\"p\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        py_child.join("calculator.py"),
+        "def add(a, b): return a + b\n",
+    )
+    .unwrap();
+
+    // The nested Python child must be detected as Python, not parent's Rust
+    let detected_child = detect_project_type_at(&py_child).await;
+    assert_eq!(
+        detected_child,
+        ProjectType::Python,
+        "nested Python dir must be detected as Python"
+    );
+
+    // The parent itself is Rust
+    let detected_parent = detect_project_type_at(&parent).await;
+    assert_eq!(
+        detected_parent,
+        ProjectType::Rust,
+        "parent with Cargo.toml must be detected as Rust"
+    );
+}

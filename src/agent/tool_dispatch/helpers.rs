@@ -632,9 +632,24 @@ pub(crate) fn has_file_redirect(command: &str) -> bool {
                 while chars.get(j) == Some(&' ') {
                     j += 1;
                 }
-                if chars.get(j) != Some(&'&') {
-                    return true;
+                if chars.get(j) == Some(&'&') {
+                    i = j;
+                    continue;
                 }
+                // Check if redirecting to /dev/null (e.g. 2>/dev/null, >/dev/null)
+                let rem: String = chars[j..].iter().collect();
+                if let Some(after) = rem.strip_prefix("/dev/null") {
+                    if after.is_empty()
+                        || after.starts_with(' ')
+                        || after.starts_with(';')
+                        || after.starts_with('&')
+                        || after.starts_with('|')
+                    {
+                        i = j + "/dev/null".len();
+                        continue;
+                    }
+                }
+                return true;
             }
             _ => {}
         }
@@ -753,10 +768,33 @@ pub(crate) fn shell_command_is_observational(command: &str) -> bool {
         "whoami",
         "pytest",
         "python -m pytest",
+        "python3 -m pytest",
+        "python -m unittest",
+        "python3 -m unittest",
+        "python -m test",
+        "python3 -m test",
+        "python -m py_compile",
+        "python3 -m py_compile",
+        "node --test",
         "npm test",
         "pnpm test",
         "yarn test",
+        "bun test",
+        "deno test",
+        "npx jest",
+        "npx mocha",
+        "npx vitest",
+        "npx ava",
         "go test",
+        "mvn test",
+        "mvn verify",
+        "gradle test",
+        "./gradlew test",
+        "dotnet test",
+        "ctest",
+        "make test",
+        "swift test",
+        "lake test",
         "which",
         "echo",
         "env",
@@ -1000,9 +1038,18 @@ pub(crate) fn shell_command_is_verification(command: &str) -> bool {
         "python3 -m unittest",
         "python -m py_compile",
         "python3 -m py_compile",
+        "python -m test",
+        "python3 -m test",
+        "node --test",
         "npm test",
         "pnpm test",
         "yarn test",
+        "bun test",
+        "deno test",
+        "npx jest",
+        "npx mocha",
+        "npx vitest",
+        "npx ava",
         "npx tsc",
         "tsc ",
         "go test",
@@ -1306,7 +1353,8 @@ pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {
             );
 
         if is_interpreter {
-            for arg in &tokens[index + 1..] {
+            let mut iter = tokens[index + 1..].iter().peekable();
+            while let Some(arg) = iter.next() {
                 if matches!(*arg, "-c" | "-e" | "--eval") {
                     if command
                         .find(*arg)
@@ -1316,6 +1364,20 @@ pub(crate) fn shell_command_runs_test_script(command: &str) -> bool {
                         return true;
                     }
                     break;
+                }
+                if *arg == "-m" {
+                    if let Some(mod_name) = iter.next() {
+                        if mod_name.starts_with("unittest")
+                            || mod_name.starts_with("pytest")
+                            || *mod_name == "test"
+                        {
+                            return true;
+                        }
+                    }
+                    continue;
+                }
+                if matches!(*arg, "--test" | "test") {
+                    return true;
                 }
                 if arg.starts_with('-') {
                     continue;

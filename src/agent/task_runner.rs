@@ -371,13 +371,28 @@ impl Agent {
                      4. FIX: If verification fails, fix errors before proceeding\n\
                      {test_step}\n"
                 );
+                let primary_tools: Vec<&str> = if project_type == super::ProjectType::Rust {
+                    task_type.primary_tools().to_vec()
+                } else {
+                    let mut pt = Vec::new();
+                    for &tool in task_type.primary_tools() {
+                        if tool.starts_with("cargo_") {
+                            if !pt.contains(&"shell_exec") {
+                                pt.push("shell_exec");
+                            }
+                        } else {
+                            pt.push(tool);
+                        }
+                    }
+                    pt
+                };
                 format!(
                     "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
                     workflow,
                     preamble,
                     file_hint,
                     explicit_tool_guidance,
-                    task_type.primary_tools().join(", ")
+                    primary_tools.join(", ")
                 )
             };
             if !focus_block.is_empty() {

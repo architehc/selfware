@@ -112,7 +112,7 @@ Do NOT call git_status, context_status, or process_list — go directly to the f
                 "\
 TASK TYPE: Code modification.
 START by using file_read to understand the current code, then use file_edit to make changes.
-After editing, use cargo_check to verify the code compiles.
+After editing, verify the code compiles and tests pass.
 Do NOT explore the repository first — go directly to the target file."
             }
 
@@ -120,7 +120,7 @@ Do NOT explore the repository first — go directly to the target file."
                 "\
 TASK TYPE: Testing.
 START by reading the relevant source and test files with file_read.
-Use cargo_test to run tests. Use file_edit to fix or add tests.
+Run tests to verify behavior. Use file_edit to fix or add tests.
 Do NOT explore the repository first — go directly to the test file."
             }
 
@@ -128,7 +128,7 @@ Do NOT explore the repository first — go directly to the test file."
                 "\
 TASK TYPE: Refactoring.
 START by using file_read and grep_search to understand the current structure.
-Use file_edit to make changes. Run cargo_check and cargo_clippy after each change.
+Use file_edit to make changes. Verify changes and run tests after each change.
 Do NOT call git_status or process_list — focus on the code."
             }
 
@@ -136,7 +136,7 @@ Do NOT call git_status or process_list — focus on the code."
                 "\
 TASK TYPE: Ship/deploy.
 START by using git_status and git_diff to see what's changed.
-Run cargo_test to verify, then git_commit and git_push."
+Run tests to verify, then git_commit and git_push."
             }
 
             TaskType::Visual => {

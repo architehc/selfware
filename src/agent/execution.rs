@@ -530,7 +530,8 @@ impl Agent {
                 "lake build".to_string(),
             ));
         }
-        let is_rust = root.join("Cargo.toml").exists();
+        let is_rust = root.join("Cargo.toml").exists()
+            && super::verification_scope::cargo_applies_to_task(&self.verification_task_root());
         if is_rust && self.tools.get("cargo_check").is_some() {
             return Some((
                 "cargo_check".to_string(),
@@ -1850,7 +1851,10 @@ fn is_observational_shell_batch(tool_calls: &[CollectedToolCall]) -> bool {
 /// turns while the model re-issues the identical command.
 fn tool_call_is_file_write_intent(name: &str, args_str: &str) -> bool {
     if name != "shell_exec" {
-        return super::tool_dispatch::tool_call_counts_as_state_change(name, args_str);
+        return matches!(
+            name,
+            "file_edit" | "file_write" | "file_fim_edit" | "file_multi_edit" | "patch_apply"
+        );
     }
     let command = serde_json::from_str::<serde_json::Value>(args_str)
         .ok()
