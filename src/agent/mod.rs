@@ -519,6 +519,9 @@ pub struct Agent {
     /// life of the task. Without these persisted, a debt figure cannot be told
     /// apart from a complete one — the count is what makes it a floor.
     pub(crate) ledger_unattributed: Vec<crate::phi::observer::UnattributedRecord>,
+    /// Everything observed that the ledger cannot itself represent: commands
+    /// run, their outcomes, and uncertainty about what they touched.
+    pub(crate) ledger_journal: Vec<crate::phi::observer::ObservationRecord>,
     client: ApiClient,
     tools: ToolRegistry,
     memory: AgentMemory,
@@ -1329,6 +1332,7 @@ To call a tool, use this EXACT XML structure:
         let agent = Self {
             evidence_ledger: crate::phi::ledger::Ledger::new(),
             ledger_unattributed: Vec::new(),
+            ledger_journal: Vec::new(),
             client,
             tools,
             memory,

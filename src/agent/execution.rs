@@ -1376,13 +1376,13 @@ impl Agent {
             return Ok(false);
         }
 
-        self.execute_tool_batch(tool_calls).await?;
-
         // The diagnostic artifact above is written BEFORE these tools run, so
-        // its evidence necessarily omits this turn's changes. Append a second,
-        // clearly-labelled record afterwards; without it the telemetry is
-        // permanently one turn behind and the first turn always reads empty.
+        // its evidence necessarily omits this turn's changes. Record a second,
+        // clearly-labelled snapshot afterwards -- and on the error path too,
+        // since a batch that failed part-way still moved the tree.
+        let batch_result = self.execute_tool_batch(tool_calls).await;
         self.write_post_execution_evidence().await;
+        batch_result?;
 
         // After tool batch execution, check if all tool calls were suppressed.
         // When the model keeps emitting identical tool calls that are all

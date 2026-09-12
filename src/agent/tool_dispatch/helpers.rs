@@ -899,6 +899,87 @@ pub(crate) fn tool_call_is_mutating(name: &str, args: &serde_json::Value) -> boo
     false
 }
 
+/// What kind of verification a command performs.
+///
+/// `shell_command_is_verification` is deliberately broad — it answers "is this
+/// a checking command", which includes compilers and linters. Consumers that
+/// care whether TESTS RAN must not reuse that boolean: `cargo check`,
+/// `npx tsc`, `go build` and `sqlfluff lint` all return true and execute no
+/// tests. The evidence ledger discharged test obligations on them until this
+/// split existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationKind {
+    /// Executes tests.
+    TestExecution,
+    /// Compiles, type-checks or lints. Proves the code builds, not that it works.
+    CompileOrLint,
+}
+
+/// Commands that check without executing tests. Subset of the prefixes below,
+/// kept as one list so the two cannot drift.
+const COMPILE_OR_LINT_PREFIXES: &[&str] = &[
+    "cargo check",
+    "cargo clippy",
+    "python -m py_compile",
+    "python3 -m py_compile",
+    "npx tsc",
+    "tsc ",
+    "go build",
+    "javac",
+    "dotnet build",
+    "cmake --build",
+    "swift build",
+    "sqlfluff lint",
+    "lake build",
+];
+
+/// Classify a verification command by kind. `None` when it is not verification
+/// at all.
+pub(crate) fn shell_command_verification_kind(command: &str) -> Option<VerificationKind> {
+    if !shell_command_is_verification(command) {
+        return None;
+    }
+    let normalized = command.trim().to_lowercase();
+    // A compound command is judged by its LAST verification segment: in
+    // `cargo check && cargo test` the tests did run.
+    let mut kind = VerificationKind::CompileOrLint;
+    let mut saw_any = false;
+    let segments: Vec<&str> = normalized
+        .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split(';'))
+        .flat_map(|s| s.split('|'))
+        .collect();
+    for segment in segments {
+        let segment = segment.trim();
+        if segment.is_empty() || !shell_command_is_verification(segment) {
+            continue;
+        }
+        saw_any = true;
+        kind = if COMPILE_OR_LINT_PREFIXES
+            .iter()
+            .any(|prefix| segment.starts_with(prefix))
+        {
+            VerificationKind::CompileOrLint
+        } else {
+            VerificationKind::TestExecution
+        };
+        if kind == VerificationKind::TestExecution {
+            return Some(kind);
+        }
+    }
+    if saw_any {
+        Some(kind)
+    } else if COMPILE_OR_LINT_PREFIXES
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
+        Some(VerificationKind::CompileOrLint)
+    } else {
+        Some(VerificationKind::TestExecution)
+    }
+}
+
 pub(crate) fn shell_command_is_verification(command: &str) -> bool {
     let normalized = command.trim().to_lowercase();
     if normalized.is_empty() {

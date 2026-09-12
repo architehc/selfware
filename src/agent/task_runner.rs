@@ -143,6 +143,11 @@ impl Agent {
         // A new task starts with no outstanding obligations. Debt is per-task:
         // carrying it across would attribute one task's unread code to another.
         self.evidence_ledger = crate::phi::ledger::Ledger::new();
+        // Reset with it: journal entries from a previous task would otherwise
+        // be attributed to this one, and the ledger reset would look like a
+        // clean start while the telemetry disagreed.
+        self.ledger_unattributed.clear();
+        self.ledger_journal.clear();
         self.clear_failed_tool_attempts();
         self.edit_loop_recovery_used = false;
         self.clear_task_state_memory();

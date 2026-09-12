@@ -87,6 +87,26 @@ pub enum ObservedEvent {
     Unattributed { tool: String, reason: String },
 }
 
+/// A durable record of something observed that the ledger itself cannot hold:
+/// commands that ran, their outcomes, and whether they may have moved the tree.
+///
+/// Classifying an OpaqueRun and then discarding it left a shell mutation with no
+/// trace at all — the session log said nothing happened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObservationRecord {
+    pub turn: usize,
+    pub tool: String,
+    pub command: Option<String>,
+    /// "run_finished" | "opaque_run" | "unattributed"
+    pub kind: String,
+    pub outcome: Option<String>,
+    /// True when the observer cannot rule out a filesystem change it did not
+    /// record. Any non-zero count makes the ledger a floor, not a total.
+    pub may_have_mutated: bool,
+    pub reason: Option<String>,
+    pub call_id: Option<String>,
+}
+
 /// A mutation the observer could not attribute, kept in durable telemetry.
 ///
 /// Debug-logging the count was not enough to answer the question it exists for:
@@ -162,43 +182,31 @@ fn line_count(arguments: &serde_json::Value, output: Option<&str>) -> Option<usi
     None
 }
 
-/// Paths a unified diff touches, from its `+++ b/<path>` headers. A patch may
-/// cover several files; attributing it to one would leave the rest unrecorded.
-fn diff_paths(diff: &str) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("+++ ") {
-            let cleaned = rest
-                .split('\t')
-                .next()
-                .unwrap_or(rest)
-                .trim()
-                .trim_start_matches("b/");
-            if !cleaned.is_empty()
-                && cleaned != "/dev/null"
-                && !paths.iter().any(|p| p == &PathBuf::from(cleaned))
-            {
-                paths.push(PathBuf::from(cleaned));
-            }
-        }
-    }
-    paths
-}
-
 /// Lines each path gains or loses in a multi-file diff.
+///
+/// Reads BOTH headers. A deletion is `+++ /dev/null`, so keying only on the
+/// destination silently dropped every removed file from a mixed patch — the
+/// obligation simply never existed, with no unattributed event to show for it.
 fn diff_line_counts(diff: &str) -> Vec<(PathBuf, usize)> {
     let mut out: Vec<(PathBuf, usize)> = Vec::new();
+    let mut source: Option<PathBuf> = None;
     let mut current: Option<PathBuf> = None;
+
+    let clean = |raw: &str| -> Option<PathBuf> {
+        let text = raw.split('\t').next().unwrap_or(raw).trim();
+        let text = text.trim_start_matches("a/").trim_start_matches("b/");
+        (!text.is_empty() && text != "/dev/null").then(|| PathBuf::from(text))
+    };
+
     for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("--- ") {
+            source = clean(rest);
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("+++ ") {
-            let cleaned = rest
-                .split('\t')
-                .next()
-                .unwrap_or(rest)
-                .trim()
-                .trim_start_matches("b/");
-            current =
-                (!cleaned.is_empty() && cleaned != "/dev/null").then(|| PathBuf::from(cleaned));
+            // On a deletion the destination is /dev/null; the file that changed
+            // is the source.
+            current = clean(rest).or_else(|| source.clone());
             if let Some(path) = &current {
                 if !out.iter().any(|(p, _)| p == path) {
                     out.push((path.clone(), 0));
@@ -240,21 +248,52 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
             .get("command")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        if crate::agent::tool_dispatch::helpers::shell_command_is_verification(command) {
-            return vec![ObservedEvent::RunFinished {
-                command: command.to_string(),
-                scope: Scope::WorkspaceCoverageUnknown,
-                outcome,
-                artifact: None,
-            }];
+        use crate::agent::tool_dispatch::helpers::{
+            shell_command_verification_kind, VerificationKind,
+        };
+        // A compound command may both mutate and verify: `python fix.py && pytest`
+        // changed files this observer cannot name.
+        let may_have_mutated = command.contains("&&")
+            || command.contains(';')
+            || command.contains("||")
+            || !crate::agent::tool_dispatch::helpers::shell_command_is_verification(command);
+        match shell_command_verification_kind(command) {
+            // Only executed tests discharge a test obligation. `cargo check`,
+            // `npx tsc`, `go build` and `sqlfluff lint` all pass
+            // shell_command_is_verification and run no tests; reusing that
+            // boolean recreated, through shell dispatch, the exact bug that
+            // removing cargo_check from TEST_EXECUTION_TOOLS had just fixed.
+            Some(VerificationKind::TestExecution) => {
+                let mut events = vec![ObservedEvent::RunFinished {
+                    command: command.to_string(),
+                    scope: Scope::WorkspaceCoverageUnknown,
+                    outcome,
+                    artifact: None,
+                }];
+                if may_have_mutated {
+                    events.push(ObservedEvent::OpaqueRun {
+                        command: command.to_string(),
+                        outcome,
+                        may_have_mutated: true,
+                    });
+                }
+                return events;
+            }
+            Some(VerificationKind::CompileOrLint) => {
+                return vec![ObservedEvent::OpaqueRun {
+                    command: command.to_string(),
+                    outcome,
+                    may_have_mutated,
+                }];
+            }
+            None => {
+                return vec![ObservedEvent::OpaqueRun {
+                    command: command.to_string(),
+                    outcome,
+                    may_have_mutated: true,
+                }];
+            }
         }
-        // Not verification. It may still have written files the observer cannot
-        // name, so the session log records that the tree may have moved.
-        return vec![ObservedEvent::OpaqueRun {
-            command: command.to_string(),
-            outcome,
-            may_have_mutated: true,
-        }];
     }
 
     if TEST_EXECUTION_TOOLS.contains(&call.tool) {
@@ -308,12 +347,10 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
                 })
                 .collect();
         }
-        if diff_paths(diff).is_empty() {
-            return vec![ObservedEvent::Unattributed {
-                tool: call.tool.to_string(),
-                reason: "diff named no target files".to_string(),
-            }];
-        }
+        return vec![ObservedEvent::Unattributed {
+            tool: call.tool.to_string(),
+            reason: "diff named no target files".to_string(),
+        }];
     }
 
     if let Some(edits) = call.arguments.get("edits").and_then(|v| v.as_array()) {

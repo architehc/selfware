@@ -86,6 +86,13 @@ pub struct EvidenceSnapshot {
     /// the classifier's schema assumptions match real traffic.
     #[serde(default)]
     pub unattributed: Vec<crate::phi::observer::UnattributedRecord>,
+    /// Commands observed this task, with outcomes and uncertainty.
+    #[serde(default)]
+    pub observations: Vec<crate::phi::observer::ObservationRecord>,
+    /// Observations that may have changed files the ledger did not record. Any
+    /// non-zero value means the totals above are a floor, not a total.
+    #[serde(default)]
+    pub possible_unrecorded_mutations: usize,
     /// One line per outstanding obligation, naming file and turn.
     pub citations: Vec<String>,
 }

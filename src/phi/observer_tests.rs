@@ -22,33 +22,46 @@ fn call<'a>(
 }
 
 #[test]
-fn every_mutating_tool_in_the_registry_is_classified() {
-    // Rule 5 sweep, read from the authoritative list rather than a handwritten
-    // copy of it. An earlier version of this test asserted against four names
-    // typed in by hand, which would have passed while a real new write tool
-    // went unclassified.
-    let known: Vec<&str> = crate::tools::CRITICAL_TOOLS
-        .iter()
-        .copied()
-        .filter(|t| {
-            // Anything that writes, by the registry's own naming.
-            matches!(
-                *t,
-                "file_write" | "file_edit" | "file_multi_edit" | "file_fim_edit" | "file_delete"
-            ) || *t == "patch_apply"
-        })
-        .collect();
-    assert!(
-        known.len() >= 4,
-        "sanity: the registry should list several write tools, found {known:?}"
-    );
-    for tool in known {
-        assert!(
-            MUTATING_TOOLS.contains(&tool),
-            "{tool} is a registry write tool the observer does not classify; \
-             mutations through it would create no obligation at all"
-        );
+fn every_registry_tool_is_explicitly_classified_or_explicitly_inert() {
+    // The previous version read CRITICAL_TOOLS and then filtered it through a
+    // handwritten list of six names -- so a new mutation tool with any other
+    // name vanished before the assertion. Every registry tool must now be
+    // accounted for by name, with no filter in between.
+    //
+    // `cargo_fmt` is the live example: it rewrites files and is not in
+    // MUTATING_TOOLS. It is listed below as a KNOWN uncovered mutation so the
+    // gap is recorded rather than implied by omission.
+    const KNOWN_INERT: &[&str] = &[
+        "file_read",
+        "directory_tree",
+        "grep_search",
+        "glob_find",
+        "symbol_search",
+        "git_status",
+        "git_diff",
+        "tool_search",
+    ];
+    // Mutating, and knowingly not yet observed. Emptying this list is the goal;
+    // it exists so the gap cannot be forgotten.
+    const KNOWN_UNCOVERED_MUTATIONS: &[&str] = &["cargo_fmt"];
+
+    let mut unaccounted = Vec::new();
+    for tool in crate::tools::CRITICAL_TOOLS {
+        let known = MUTATING_TOOLS.contains(tool)
+            || TEST_EXECUTION_TOOLS.contains(tool)
+            || COMPILE_ONLY_TOOLS.contains(tool)
+            || SHELL_TOOLS.contains(tool)
+            || KNOWN_INERT.contains(tool)
+            || KNOWN_UNCOVERED_MUTATIONS.contains(tool);
+        if !known {
+            unaccounted.push(*tool);
+        }
     }
+    assert!(
+        unaccounted.is_empty(),
+        "registry tools the observer neither classifies nor declares inert: {unaccounted:?}. \
+         Add each to a list above -- silence means mutations through it create no obligation."
+    );
 }
 
 #[test]
@@ -424,4 +437,110 @@ fn an_edit_with_no_recognisable_size_reports_unknown_not_zero() {
         1,
         "the line total is a floor, and the ledger must say so"
     );
+}
+
+#[test]
+fn shell_compilation_is_not_recorded_as_test_execution() {
+    // shell_command_is_verification returns true for cargo check, npx tsc,
+    // go build and sqlfluff lint. Reusing that boolean recreated, through shell
+    // dispatch, the exact bug that removing cargo_check from
+    // TEST_EXECUTION_TOOLS had just fixed.
+    for command in [
+        "cargo check",
+        "npx tsc --noEmit",
+        "go build ./...",
+        "cargo clippy",
+    ] {
+        let args = json!({"command": command});
+        let events = classify(&call("shell_exec", &args, 1));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+            "{command} executes no tests but was recorded as a test run: {events:?}"
+        );
+    }
+
+    // And it must not discharge anything.
+    let mut ledger = Ledger::new();
+    let snap = ledger.snapshot();
+    apply(
+        &mut ledger,
+        &classify(&call(
+            "file_write",
+            &json!({"path": "src/a.rs", "content": "a"}),
+            1,
+        )),
+        snap,
+        T,
+    );
+    let run = ledger.snapshot();
+    let args = json!({"command": "cargo check"});
+    apply(
+        &mut ledger,
+        &classify(&call("shell_exec", &args, 2)),
+        run,
+        T,
+    );
+    assert_eq!(ledger.outstanding_lines(ObligationKind::UntestedLogic), 1);
+}
+
+#[test]
+fn a_compound_command_that_ends_in_tests_counts_and_flags_the_mutation() {
+    // `python fix.py && pytest` both changed files this observer cannot name
+    // AND ran tests. Recording only one of those loses information either way.
+    let args = json!({"command": "python fix.py && pytest -q"});
+    let events = classify(&call("shell_exec", &args, 1));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ObservedEvent::RunFinished { .. })),
+        "the tests did run: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ObservedEvent::OpaqueRun {
+                may_have_mutated: true,
+                ..
+            }
+        )),
+        "and the tree may have moved: {events:?}"
+    );
+}
+
+#[test]
+fn a_mixed_patch_records_deleted_files_too() {
+    // A deletion is `+++ /dev/null`. Keying only on the destination header
+    // dropped removed files entirely, with no unattributed event to show it.
+    let diff = "--- a/src/keep.rs\n+++ b/src/keep.rs\n@@\n+added\n--- a/src/gone.rs\n+++ /dev/null\n@@\n-one\n-two\n";
+    let args = json!({"diff": diff});
+    let events = classify(&call("patch_apply", &args, 1));
+    let paths: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            ObservedEvent::Changed { path, .. } => Some(path.display().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(paths.iter().any(|p| p.ends_with("keep.rs")), "{paths:?}");
+    assert!(
+        paths.iter().any(|p| p.ends_with("gone.rs")),
+        "the deleted file must still be recorded: {paths:?}"
+    );
+}
+
+#[test]
+fn an_opaque_run_is_recorded_not_discarded() {
+    // Classifying OpaqueRun and then dropping it in apply() left a shell
+    // mutation with no trace at all.
+    let args = json!({"command": "sed -i s/a/b/ src/a.rs"});
+    let events = classify(&call("shell_exec", &args, 1));
+    assert!(matches!(
+        events.as_slice(),
+        [ObservedEvent::OpaqueRun {
+            may_have_mutated: true,
+            ..
+        }]
+    ));
 }

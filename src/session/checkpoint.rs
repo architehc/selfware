@@ -295,6 +295,15 @@ pub struct CheckpointDelta {
     pub current_step: Option<usize>,
     pub current_iteration: Option<usize>,
 
+    /// Full ledger state at the delta's target version.
+    ///
+    /// Not a diff: the ledger is append-only but its satisfaction marks mutate
+    /// in place, so a "new obligations" list would lose discharges. Carrying
+    /// the whole value is small and correct. Without it, an incremental save
+    /// resumed with stale evidence while the full-save path looked fine.
+    #[serde(default)]
+    pub evidence_ledger: Option<crate::phi::ledger::Ledger>,
+
     // Context additions (we only append messages in the context window)
     pub new_messages: Vec<Message>,
     pub new_memory_entries: Vec<MemoryEntry>,
@@ -478,6 +487,7 @@ impl TaskCheckpoint {
         }
 
         Some(CheckpointDelta {
+            evidence_ledger: Some(self.evidence_ledger.clone()),
             task_id: self.task_id.clone(),
             base_version: base.version,
             target_version: self.version,
@@ -514,6 +524,9 @@ impl TaskCheckpoint {
         }
 
         self.version = delta.target_version;
+        if let Some(ledger) = &delta.evidence_ledger {
+            self.evidence_ledger = ledger.clone();
+        }
         self.updated_at = delta.updated_at;
 
         if let Some(ref status) = delta.status {

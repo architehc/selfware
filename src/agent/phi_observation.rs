@@ -57,6 +57,57 @@ impl Agent {
             .unwrap_or(0);
         apply(&mut self.evidence_ledger, &events, snapshot, now_ms);
 
+        // Journal EVERYTHING observable, including the events the ledger cannot
+        // hold. An OpaqueRun that is classified and then dropped leaves a shell
+        // mutation with no trace, and the session log then claims nothing
+        // happened.
+        for event in &events {
+            let record = match event {
+                crate::phi::observer::ObservedEvent::RunFinished {
+                    command, outcome, ..
+                } => Some(crate::phi::observer::ObservationRecord {
+                    turn: turn_index,
+                    tool: name.to_string(),
+                    command: Some(command.clone()),
+                    kind: "run_finished".to_string(),
+                    outcome: Some(format!("{outcome:?}")),
+                    may_have_mutated: false,
+                    reason: None,
+                    call_id: call_id.map(str::to_string),
+                }),
+                crate::phi::observer::ObservedEvent::OpaqueRun {
+                    command,
+                    outcome,
+                    may_have_mutated,
+                } => Some(crate::phi::observer::ObservationRecord {
+                    turn: turn_index,
+                    tool: name.to_string(),
+                    command: Some(command.clone()),
+                    kind: "opaque_run".to_string(),
+                    outcome: Some(format!("{outcome:?}")),
+                    may_have_mutated: *may_have_mutated,
+                    reason: None,
+                    call_id: call_id.map(str::to_string),
+                }),
+                crate::phi::observer::ObservedEvent::Unattributed { tool, reason } => {
+                    Some(crate::phi::observer::ObservationRecord {
+                        turn: turn_index,
+                        tool: tool.clone(),
+                        command: None,
+                        kind: "unattributed".to_string(),
+                        outcome: None,
+                        may_have_mutated: true,
+                        reason: Some(reason.clone()),
+                        call_id: call_id.map(str::to_string),
+                    })
+                }
+                _ => None,
+            };
+            if let Some(record) = record {
+                self.ledger_journal.push(record);
+            }
+        }
+
         if unattributed > 0 {
             // Persisted, not just logged. A debug line cannot be compared
             // against a saved session, and the whole reason this count exists
@@ -92,20 +143,40 @@ impl Agent {
     /// evidence cannot include them. This is written afterwards and named
     /// separately so the two are never confused.
     pub(super) async fn write_post_execution_evidence(&self) {
+        // Honour the same capture switch as the main artifact; ignoring it
+        // wrote files a user had explicitly turned off.
+        if self.config.agent.disable_turn_artifacts {
+            return;
+        }
         let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let dir = super::turn_artifacts::artifact_dir(&workdir);
         if tokio::fs::create_dir_all(&dir).await.is_err() {
             return;
         }
-        let step = self.loop_control.current_iteration();
         let payload = serde_json::json!({
-            "step": step,
+            "turn": self.loop_control.current_iteration(),
             "phase": "post_execution",
+            "recorded_at_ms": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             "evidence": self.evidence_snapshot(),
         });
-        let path = dir.join(format!("turn_{step:04}_evidence.json"));
-        if let Ok(text) = serde_json::to_string_pretty(&payload) {
-            let _ = tokio::fs::write(path, text).await;
+        // Appended as JSONL rather than written to a per-turn filename: the
+        // iteration counter is not the artifact sequence, so a filename keyed
+        // on it silently overwrote a previous record whenever the two diverged.
+        let path = dir.join("evidence.jsonl");
+        let Ok(line) = serde_json::to_string(&payload) else {
+            return;
+        };
+        use tokio::io::AsyncWriteExt;
+        if let Ok(mut file) = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+        {
+            let _ = file.write_all(format!("{line}\n").as_bytes()).await;
         }
     }
 
@@ -124,6 +195,12 @@ impl Agent {
                 .evidence_ledger
                 .outstanding_unknown_size(ObligationKind::UnreviewedChange),
             unattributed: self.ledger_unattributed.clone(),
+            observations: self.ledger_journal.clone(),
+            possible_unrecorded_mutations: self
+                .ledger_journal
+                .iter()
+                .filter(|r| r.may_have_mutated)
+                .count(),
             citations: self.evidence_ledger.citations(),
         }
     }
