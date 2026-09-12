@@ -1193,10 +1193,12 @@ To call a tool, use this EXACT XML structure:
                 .await
                 .unwrap_or(None);
 
-        // Initialize verification gate with project root
+        // Initialize verification gate with project root and active working dir
         let project_root = current_project_root();
+        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let mut verification_gate =
-            VerificationGate::new(&project_root, VerificationConfig::fast());
+            VerificationGate::new(&project_root, VerificationConfig::fast())
+                .with_working_dir(workdir);
         if let Some(ref cmd) = config.agent.post_edit_test_command {
             verification_gate.set_post_edit_test_command(Some(cmd.clone()));
         }

@@ -402,6 +402,8 @@ pub struct VerificationGate {
     repo_language_hint: Option<String>,
     /// Cached inferred language to avoid re-scanning the repo.
     inferred_language_cache: Option<RepoLanguage>,
+    /// Working directory for tool executions (defaults to process cwd).
+    working_dir: Option<PathBuf>,
 }
 
 impl VerificationGate {
@@ -414,7 +416,19 @@ impl VerificationGate {
             last_verification_time: None,
             repo_language_hint: None,
             inferred_language_cache: None,
+            working_dir: None,
         }
+    }
+
+    /// Set an explicit working directory for tool operations and path resolution.
+    pub fn with_working_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.working_dir = Some(dir.into());
+        self
+    }
+
+    /// Set an explicit working directory for tool operations and path resolution.
+    pub fn set_working_dir(&mut self, dir: impl Into<PathBuf>) {
+        self.working_dir = Some(dir.into());
     }
 
     /// Set a language hint (e.g. from SWE-bench Pro dataset).
@@ -429,13 +443,41 @@ impl VerificationGate {
         self.config.post_edit_test_command = command;
     }
 
+    /// Resolve a file path, checking `working_dir` (or `cwd`) first for relative paths
+    /// so that edits made in a subproject or nested directory are resolved correctly
+    /// even if `project_root` points to an enclosing workspace.
+    pub fn resolve_file_path(&self, file: &str) -> PathBuf {
+        let p = Path::new(file);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            let cwd = self
+                .working_dir
+                .clone()
+                .or_else(|| std::env::current_dir().ok());
+            if let Some(ref dir) = cwd {
+                let cwd_path = dir.join(p);
+                if cwd_path.exists() {
+                    return cwd_path;
+                }
+            }
+            if self.project_root.join(p).exists() {
+                self.project_root.join(p)
+            } else if let Some(dir) = cwd {
+                dir.join(p)
+            } else {
+                self.project_root.join(p)
+            }
+        }
+    }
+
     /// Compute hash for a file's content
     fn compute_file_hash(&self, path: &str) -> Option<u64> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::Hasher;
         use std::io::Read;
 
-        let full_path = self.project_root.join(path);
+        let full_path = self.resolve_file_path(path);
         let mut file = std::fs::File::open(full_path).ok()?;
         let mut contents = Vec::new();
         file.read_to_end(&mut contents).ok()?;
@@ -1060,7 +1102,7 @@ impl VerificationGate {
 
         for file in files {
             // Check if it's a new file
-            let path = self.project_root.join(file);
+            let path = self.resolve_file_path(file);
             if path.exists() {
                 effects.push(SideEffect {
                     effect_type: SideEffectType::FileModified,
@@ -1178,9 +1220,9 @@ impl VerificationGate {
             ("requirements.txt", RepoLanguage::Python),
         ];
         for (file, lang) in &manifests {
-            if self.project_root.join(file).exists() {
+            if self.resolve_file_path(file).exists() {
                 if *lang == RepoLanguage::JavaScript
-                    && self.project_root.join("tsconfig.json").exists()
+                    && self.resolve_file_path("tsconfig.json").exists()
                 {
                     self.inferred_language_cache = Some(RepoLanguage::TypeScript);
                     return RepoLanguage::TypeScript;
@@ -1217,7 +1259,7 @@ impl VerificationGate {
         files: &[String],
     ) -> Result<CheckResult> {
         let start = Instant::now();
-        let full_paths: Vec<_> = files.iter().map(|f| self.project_root.join(f)).collect();
+        let full_paths: Vec<_> = files.iter().map(|f| self.resolve_file_path(f)).collect();
 
         let (program, args): (&str, Vec<String>) = match lang {
             RepoLanguage::Python => {
@@ -1421,9 +1463,17 @@ impl VerificationGate {
             });
         }
 
+        let check_dir = full_paths
+            .first()
+            .and_then(|p| p.parent())
+            .filter(|p| p.is_dir())
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| self.project_root.clone());
+
         let output = Command::new(program)
             .args(&args)
-            .current_dir(&self.project_root)
+            .current_dir(&check_dir)
             .output()
             .await
             .context(format!("Failed to run {} syntax check", lang))?;
@@ -1444,16 +1494,22 @@ impl VerificationGate {
             output: if output.status.success() {
                 format!("{} syntax check passed", lang)
             } else {
-                combined
+                combined.clone()
             },
             errors: if output.status.success() {
                 vec![]
             } else {
+                let first_error = combined
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("syntax check failed");
+                let first_error: String = first_error.chars().take(150).collect();
                 vec![VerificationError {
                     file: files.first().cloned().unwrap_or_default(),
                     line: None,
                     column: None,
-                    message: format!("{} syntax error", lang),
+                    message: format!("{} syntax check failed: {}", lang, first_error),
                     code: None,
                     severity: ErrorSeverity::Error,
                     suggestion: Some(format!("Check {} syntax and fix errors", lang)),

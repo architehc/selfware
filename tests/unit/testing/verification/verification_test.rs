@@ -2219,3 +2219,60 @@ async fn test_post_edit_test_command_fails() {
         .iter()
         .any(|s| s.contains("post-edit test command failed")));
 }
+
+#[test]
+fn test_resolve_file_path_prioritizes_cwd_when_file_exists() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let child_dir = parent_dir.path().join("child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+
+    let child_file = child_dir.join("calc.py");
+    std::fs::write(&child_file, "def add(a, b): return a + b\n").unwrap();
+
+    let gate = VerificationGate::new(parent_dir.path(), VerificationConfig::fast())
+        .with_working_dir(&child_dir);
+    let resolved = gate.resolve_file_path("calc.py");
+
+    assert_eq!(resolved, child_file);
+}
+
+#[test]
+fn test_resolve_file_path_falls_back_to_project_root() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let parent_file = parent_dir.path().join("root.py");
+    std::fs::write(&parent_file, "print('root')\n").unwrap();
+
+    let child_dir = parent_dir.path().join("child");
+    std::fs::create_dir_all(&child_dir).unwrap();
+
+    let gate = VerificationGate::new(parent_dir.path(), VerificationConfig::fast())
+        .with_working_dir(&child_dir);
+    let resolved = gate.resolve_file_path("root.py");
+
+    assert_eq!(resolved, parent_file);
+}
+
+#[tokio::test]
+async fn test_nested_project_syntax_check_runs_in_child_dir() {
+    let parent_dir = tempfile::tempdir().unwrap();
+    let child_dir = parent_dir.path().join("child_sub");
+    std::fs::create_dir_all(&child_dir).unwrap();
+
+    let child_file = child_dir.join("math_lib.py");
+    std::fs::write(&child_file, "def mul(a, b): return a * b\n").unwrap();
+
+    let mut gate = VerificationGate::new(parent_dir.path(), VerificationConfig::fast())
+        .with_working_dir(&child_dir);
+    let report = gate
+        .verify_change(&["math_lib.py".to_string()], "test")
+        .await
+        .unwrap();
+
+    assert!(report.overall_passed);
+    let type_check = report
+        .checks
+        .iter()
+        .find(|c| c.check_type == CheckType::TypeCheck);
+    assert!(type_check.is_some());
+    assert!(type_check.unwrap().passed);
+}

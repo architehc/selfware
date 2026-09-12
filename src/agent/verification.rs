@@ -2097,6 +2097,7 @@ impl Agent {
                 } else if report.overall_passed {
                     self.last_successful_verification_mutation_sequence = self.mutation_sequence;
                     self.last_failed_verification_summary = None;
+                    self.last_failed_verification_record = None;
                     spinner.stop_success("Verification passed");
                     self.cognitive_state.episodic_memory.what_worked(
                         tool_name,
@@ -2116,8 +2117,21 @@ impl Agent {
                             format!("{} failed: {}", check.check_type.as_str(), output)
                         })
                         .unwrap_or_else(|| "verification failed".to_string());
-                    self.last_failed_verification_summary = Some(summary);
+                    self.last_failed_verification_summary = Some(summary.clone());
                     self.last_failed_verification_mutation_sequence = self.mutation_sequence;
+                    let cwd =
+                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    self.last_failed_verification_record =
+                        Some(super::verification_scope::VerificationRecord {
+                            command: format!("{}:{}", tool_name, path),
+                            summary,
+                            passed: false,
+                            mutation_sequence: self.mutation_sequence,
+                            scope: super::verification_scope::VerificationScope {
+                                working_dir: cwd.clone(),
+                                project_root: Some(cwd),
+                            },
+                        });
                     spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
                         tool_name,
