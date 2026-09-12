@@ -36,18 +36,54 @@ impl Agent {
         success: bool,
         result_str: &str,
     ) {
-        if success && tool_call_is_verification(name, args_str) {
+        if !tool_call_is_verification(name, args_str) {
+            return;
+        }
+        // Relative to the TASK, not to wherever the process currently is.
+        let working_dir = self.verification_task_root();
+        let command = serde_json::from_str::<serde_json::Value>(args_str)
+            .ok()
+            .and_then(|v| {
+                v.get("command")
+                    .and_then(|c| c.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
+        let scope = super::verification_scope::scope_for_command(name, &command, &working_dir);
+        let record = super::verification_scope::VerificationRecord {
+            command: name.to_string(),
+            scope,
+            passed: success,
+            mutation_sequence: self.mutation_sequence,
+            summary: format!(
+                "{} failed: {}",
+                name,
+                result_str.chars().take(300).collect::<String>()
+            ),
+        };
+
+        if success {
             // Loop 12: a passing verification breaks any repeated-probe
             // streak — probes interleaved with green checks are iteration,
             // not a stall.
             self.probe_command_counts.clear();
             if self.mutation_sequence > 0 {
                 self.last_successful_verification_mutation_sequence = self.mutation_sequence;
-                self.last_failed_verification_summary = None;
+                // Clear only what this result actually covers. Clearing
+                // unconditionally let an unrelated green check erase a relevant
+                // failure -- the mirror of the foreign-failure blocking bug.
+                let clears = self
+                    .last_failed_verification_record
+                    .as_ref()
+                    .is_some_and(|failed| record.clears(failed));
+                if clears || self.last_failed_verification_record.is_none() {
+                    self.last_failed_verification_summary = None;
+                    self.last_failed_verification_record = None;
+                }
             }
-        } else if !success && tool_call_is_verification(name, args_str) {
-            let preview: String = result_str.chars().take(300).collect();
-            self.last_failed_verification_summary = Some(format!("{} failed: {}", name, preview));
+        } else {
+            self.last_failed_verification_summary = Some(record.summary.clone());
+            self.last_failed_verification_record = Some(record);
             self.last_failed_verification_mutation_sequence = self.mutation_sequence;
         }
     }

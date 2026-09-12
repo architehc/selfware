@@ -142,6 +142,7 @@ impl Agent {
         self.loop_control.reset_for_task();
         // A new task starts with no outstanding obligations. Debt is per-task:
         // carrying it across would attribute one task's unread code to another.
+        self.task_verification_root = std::env::current_dir().ok();
         self.evidence_ledger = crate::phi::ledger::Ledger::new();
         // Reset with it: journal entries from a previous task would otherwise
         // be attributed to this one, and the ledger reset would look like a

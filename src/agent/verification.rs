@@ -627,6 +627,17 @@ fn artifact_readback_guidance(paths: &[String]) -> String {
 }
 
 impl Agent {
+    /// The root this task's verification relevance is measured against.
+    ///
+    /// Defaults to the working directory the agent was started in, which is the
+    /// project the user pointed it at — not whatever ancestor a language
+    /// toolchain happens to discover.
+    pub(super) fn verification_task_root(&self) -> std::path::PathBuf {
+        self.task_verification_root.clone().unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        })
+    }
+
     /// Tool categories that inherently bypass the Rust/cargo verification gate.
     /// These tools indicate non-Rust tasks (browser automation, vision analysis,
     /// desktop control, web fetching, etc.) where `cargo check` is meaningless.
@@ -678,14 +689,15 @@ impl Agent {
     ///    queried information without making any changes. No code was modified,
     ///    so there is nothing to verify.
     pub(super) async fn should_skip_cargo_verification(&self) -> bool {
-        // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
-        let cargo_toml_path = super::current_project_root().join("Cargo.toml");
-        let has_cargo_toml = tokio::fs::try_exists(&cargo_toml_path)
-            .await
-            .unwrap_or(false);
-        if !has_cargo_toml {
+        // Condition 1: cargo must apply to THIS task, not merely to some
+        // ancestor. Accepting any Cargo.toml found by walking up told a Python
+        // task nested in a Rust repository to run cargo_check, which then
+        // failed in the parent crate and blocked a correct, tested repair.
+        let task_root = self.verification_task_root();
+        if !super::verification_scope::cargo_applies_to_task(&task_root) {
             debug!(
-                "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
+                task_root = %task_root.display(),
+                "Completion gate: nearest Cargo.toml is outside the task root;                  skipping cargo verification guidance"
             );
             return true;
         }
@@ -1141,7 +1153,21 @@ impl Agent {
             && self.last_failed_verification_mutation_sequence
                 >= self.last_successful_verification_mutation_sequence
         {
-            if let Some(summary) = &self.last_failed_verification_summary {
+            if let Some(record) = &self.last_failed_verification_record {
+                // Only a failure this task's work could have caused blocks it.
+                // A broken crate that merely ENCLOSES the task is reported, not
+                // enforced: a Python repair with passing Python tests must be
+                // allowed to finish even inside a Rust workspace that does not
+                // build. Unknown scope still blocks -- unknown is not permission.
+                let task_root = self.verification_task_root();
+                if record.blocks_completion(&task_root, self.mutation_sequence) {
+                    let summary = &record.summary;
+                    return Some(format!(
+                        "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
+                         Fix the issue and run verification again before completing."
+                    ));
+                }
+            } else if let Some(summary) = &self.last_failed_verification_summary {
                 return Some(format!(
                     "FailingTestsAccepted: the latest verification after your edit failed: {summary}. \
                      Fix the issue and run verification again before completing."

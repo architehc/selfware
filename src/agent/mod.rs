@@ -123,6 +123,7 @@ pub(crate) mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
+pub(crate) mod verification_scope;
 
 pub use task_runner::RunSummary;
 mod verification;
@@ -799,6 +800,15 @@ pub struct Agent {
     last_successful_verification_mutation_sequence: usize,
     /// Most recent failed verification summary, used by the completion gate.
     last_failed_verification_summary: Option<String>,
+    /// The most recent failing verification, WITH the project it concerned.
+    ///
+    /// The bare summary above cannot distinguish a failing test in this task's
+    /// project from a compile error in an unrelated crate that encloses it, so
+    /// both blocked completion. See `verification_scope`.
+    last_failed_verification_record: Option<verification_scope::VerificationRecord>,
+    /// Root the current task is working in; verification relevance is measured
+    /// against it.
+    task_verification_root: Option<std::path::PathBuf>,
     /// Mutation sequence at which the most recent verification failure was
     /// recorded. The gate compares this against the credited success: a
     /// failure at the SAME revision as (or after) the last pass is an
@@ -1437,6 +1447,10 @@ To call a tool, use this EXACT XML structure:
             mutation_sequence: 0,
             last_successful_verification_mutation_sequence: 0,
             last_failed_verification_summary: None,
+            last_failed_verification_record: None,
+            // Pinned at construction: reading the process cwd live made verification
+            // relevance depend on whatever else the process had chdir'd to.
+            task_verification_root: std::env::current_dir().ok(),
             last_failed_verification_mutation_sequence: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
             mutating_tool_call_count: 0,
