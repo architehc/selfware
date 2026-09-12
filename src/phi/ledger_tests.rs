@@ -23,7 +23,7 @@ fn a_change_owes_both_a_read_and_a_test() {
     l.record_change("src/a.rs", Some(40), 1, T);
     assert_eq!(l.outstanding().len(), 2);
     assert_eq!(l.outstanding_lines(ObligationKind::UnreviewedChange), 40);
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 40);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 40);
 }
 
 #[test]
@@ -40,7 +40,7 @@ fn passing_tests_never_discharge_the_review_obligation() {
         T,
     );
 
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 0);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 0);
     assert_eq!(
         l.outstanding_lines(ObligationKind::UnreviewedChange),
         40,
@@ -57,7 +57,7 @@ fn a_human_review_never_discharges_the_test_obligation() {
 
     assert_eq!(l.outstanding_lines(ObligationKind::UnreviewedChange), 0);
     assert_eq!(
-        l.outstanding_lines(ObligationKind::UntestedLogic),
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         40,
         "reading the diff does not execute it"
     );
@@ -97,7 +97,7 @@ fn a_run_that_started_before_the_change_proves_nothing_about_it() {
     );
 
     assert_eq!(
-        l.outstanding_lines(ObligationKind::UntestedLogic),
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         20,
         "a result that predates the change must not discharge it"
     );
@@ -119,7 +119,7 @@ fn a_run_that_raced_an_edit_is_stale_for_that_path() {
         T,
     );
 
-    let untested = l.outstanding_lines(ObligationKind::UntestedLogic);
+    let untested = l.outstanding_lines(ObligationKind::UnconfirmedCoverage);
     assert_eq!(
         untested, 25,
         "both revisions of the raced path stay untested"
@@ -146,7 +146,7 @@ fn a_run_that_raced_an_edit_still_covers_untouched_paths() {
     let still_owed: Vec<_> = l
         .outstanding()
         .iter()
-        .filter(|o| o.kind == ObligationKind::UntestedLogic)
+        .filter(|o| o.kind == ObligationKind::UnconfirmedCoverage)
         .map(|o| o.path.clone())
         .collect();
     assert!(still_owed.contains(&PathBuf::from("src/a.rs")));
@@ -222,7 +222,7 @@ fn deleting_a_file_retires_its_debt_but_the_deletion_is_itself_a_change() {
         "nothing left to test, but somebody should read the removal"
     );
     assert_eq!(out[0].kind, ObligationKind::UnreviewedChange);
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 0);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 0);
 }
 
 #[test]
@@ -306,7 +306,7 @@ fn the_reason_for_non_discharge_is_inspectable() {
     let test = l
         .obligations()
         .iter()
-        .find(|o| o.kind == ObligationKind::UntestedLogic)
+        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
         .unwrap();
 
     assert_eq!(l.assess(&evidence, review), Err(Unsatisfied::WrongKind));
@@ -322,7 +322,7 @@ fn citations_name_the_file_and_the_turn() {
         .iter()
         .any(|c| c.contains("src/agent/streaming.rs") && c.contains("turn 3")));
     assert!(lines.iter().any(|c| c.starts_with("unreviewed")));
-    assert!(lines.iter().any(|c| c.starts_with("untested")));
+    assert!(lines.iter().any(|c| c.starts_with("coverage unconfirmed")));
 }
 
 #[test]
@@ -359,7 +359,7 @@ fn a_green_suite_with_no_coverage_data_discharges_nothing() {
     );
 
     assert_eq!(
-        l.outstanding_lines(ObligationKind::UntestedLogic),
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         60,
         "a suite that did not say what it exercised discharges nothing"
     );
@@ -368,7 +368,7 @@ fn a_green_suite_with_no_coverage_data_discharges_nothing() {
     let test = l
         .obligations()
         .iter()
-        .find(|o| o.kind == ObligationKind::UntestedLogic)
+        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
         .unwrap();
     assert_eq!(
         l.assess(&evidence, test),
@@ -403,7 +403,7 @@ fn unknown_coverage_is_distinct_from_definitely_not_covered() {
     let test = l
         .obligations()
         .iter()
-        .find(|o| o.kind == ObligationKind::UntestedLogic)
+        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
         .unwrap();
     assert_eq!(
         l.assess(&l.evidence()[0], test),
@@ -431,7 +431,7 @@ fn a_reported_coverage_list_does_discharge_what_it_names() {
     );
 
     assert_eq!(
-        l.outstanding_lines(ObligationKind::UntestedLogic),
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         20,
         "only the covered path is discharged"
     );
@@ -458,7 +458,7 @@ fn an_external_edit_makes_the_revision_unknown() {
     let agent_change = l
         .obligations()
         .iter()
-        .find(|o| o.kind == ObligationKind::UntestedLogic && o.line_count == Some(30))
+        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage && o.line_count == Some(30))
         .unwrap();
     assert_eq!(
         l.assess(&l.evidence()[0], agent_change),
@@ -523,12 +523,12 @@ fn a_change_to_a_dependency_does_not_invalidate_evidence_about_its_dependents() 
         None,
         T,
     );
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 0);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 0);
 
     l.record_change("src/a.rs", Some(5), 2, T); // b's dependency moves underneath it
 
     assert_eq!(
-        l.outstanding_lines(ObligationKind::UntestedLogic),
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         5,
         "only a.rs owes; b.rs keeps a verdict that may no longer hold"
     );
@@ -544,7 +544,7 @@ fn deleting_a_file_does_not_discharge_other_paths() {
 
     let owed: Vec<_> = l.outstanding().iter().map(|o| o.path.clone()).collect();
     assert!(owed.contains(&PathBuf::from("src/b.rs")));
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 20);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 20);
 }
 
 #[test]
@@ -567,7 +567,7 @@ fn duplicate_change_delivery_records_the_work_twice_on_purpose() {
     );
 
     assert_eq!(
-        l.outstanding_lines(ObligationKind::UntestedLogic),
+        l.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         20,
         "a run racing the redelivery covers neither copy"
     );
@@ -588,11 +588,11 @@ fn evidence_recorded_without_taking_a_snapshot_first_cannot_backdate_itself() {
         None,
         T,
     );
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 0);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 0);
 
     // A later change is not retroactively covered by that earlier run.
     l.record_change("src/a.rs", Some(7), 2, T);
-    assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 7);
+    assert_eq!(l.outstanding_lines(ObligationKind::UnconfirmedCoverage), 7);
 }
 
 #[test]

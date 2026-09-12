@@ -133,7 +133,7 @@ impl Agent {
                 .outstanding_lines(crate::phi::ledger::ObligationKind::UnreviewedChange),
             untested_lines = self
                 .evidence_ledger
-                .outstanding_lines(crate::phi::ledger::ObligationKind::UntestedLogic),
+                .outstanding_lines(crate::phi::ledger::ObligationKind::UnconfirmedCoverage),
             "phi ledger: recorded"
         );
     }
@@ -191,7 +191,7 @@ impl Agent {
                 .outstanding_lines(ObligationKind::UnreviewedChange),
             untested_lines: self
                 .evidence_ledger
-                .outstanding_lines(ObligationKind::UntestedLogic),
+                .outstanding_lines(ObligationKind::UnconfirmedCoverage),
             unknown_size_obligations: self
                 .evidence_ledger
                 .outstanding_unknown_size(ObligationKind::UnreviewedChange),

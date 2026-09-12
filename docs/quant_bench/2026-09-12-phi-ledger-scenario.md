@@ -94,8 +94,37 @@ an invented path. The registry sweep's uncovered list is empty.
 
 Same fixture shape, real model, XML tool mode, `enable_thinking=false`.
 The model fixed the bug (`return a - b` -> `return a + b`) and the suite went
-green; the task reported failure only on max iterations, because it kept going
-after succeeding.
+green.
+
+**Correction.** An earlier revision of this document said the task "reported
+failure only on max iterations, because it kept going after succeeding". That
+was wrong, and it buried a product failure under a benign explanation.
+
+`turn_0010.json` shows the model declaring completion, reporting
+`Ran 2 tests ... OK`, and correctly identifying the one Rust error as
+pre-existing and out of scope. Selfware **refused** it:
+
+    refused: FailingTestsAccepted: the latest verification after your edit
+    failed: cargo_check failed: E0599 in experiments/context_select/main.rs
+
+`experiments/context_select/main.rs` belongs to the **enclosing Selfware
+workspace**, not the fixture. The fixture lived under `target/`, so `cargo`
+walked up, found the parent workspace, and failed there. The completion gate
+then bound that unrelated failure to this task and would not let it finish.
+
+The model did not keep going after succeeding. It was not allowed to stop.
+
+Two separable problems:
+
+- **Verification is not project-aware.** The prompt instructed `cargo_check` /
+  `cargo_test` for a Python task, and cargo's upward project discovery reached
+  outside the task's workspace.
+- **The completion gate binds failures from outside the task scope.** A green
+  Python suite plus a red compile in an unrelated parent crate reads as
+  "verification failed".
+
+A Python project nested inside a Rust repository is an ordinary arrangement, so
+this is not an artefact of the fixture's location. The fixture made it visible.
 
 | | |
 | --- | --- |
@@ -106,11 +135,34 @@ after succeeding.
 | possible_unrecorded_mutations | 2 |
 | outstanding / untested | 2 / 2 |
 
-**Zero unattributed against real model traffic.** The schema keys hold outside
-the scripted fixture: an actual Qwen tool call in XML mode was attributed to the
-right file and turn, with a size.
+**Zero unattributed for the cases exercised.** An actual Qwen tool call in XML
+mode was attributed to the right file and turn, with a size.
 
-**Six passing test runs did not move the debt.**
+The denominator matters: this run exercised **one** live edit, plus the scripted
+write / edit / multi-edit / delete / shell cases. Zero unattributed across those
+is evidence the schema keys are right for those shapes. It is not a general
+statement about the classifier, and an observer that skipped an event entirely
+would also report zero. Measuring observed events against an independently
+enumerated list of mutations, with an explicit denominator, is still to do.
+
+**Correction to the framing: "untested" was the wrong word.**
+
+An earlier revision reported `untested_lines: 2` and described six green runs as
+leaving the change "untested". That asserts more than the evidence supports. The
+tests ran, after the edit, and passed. What was never established is whether they
+*covered* the changed lines.
+
+Execution, outcome, coverage and review are four separate facts. The ledger now
+keeps them apart: `ObligationKind::UnconfirmedCoverage` is named for what is
+missing, and each passing run that reported no coverage is counted on the
+obligation rather than discarded. The citation reads:
+
+    coverage unconfirmed calculator.py (2 lines, turn 2) — 6 passing runs reported no coverage
+
+which is the whole finding in one line, and does not claim the change was never
+tested.
+
+**Six passing test runs did not discharge the obligation.**
 
     rec2 .. rec18   untested=2  unreviewed=2  outstanding=2
 
@@ -126,27 +178,38 @@ still shadow mode.
 `cargo_check` was recorded `opaque_run / Failed` — correctly not a test run, and
 correctly failed, since this is not a Rust project.
 
-### A known imprecision, found here
+### A known imprecision, found here — since corrected
 
 `possible_unrecorded_mutations: 2` came from two read-only commands:
 
     ls -la; echo '---'; find . -maxdepth 2 -name '*.rs'
 
-They are flagged because the compound-command check keys on `;`, `&&` and `||`
-without asking what the segments do. The error is in the conservative direction
-— overstating uncertainty rather than understating it — but it does inflate the
-figure, and a consumer treating it as a count of real unrecorded mutations would
-be misled. Narrowing it needs per-segment classification, not a different
-separator list.
+They were flagged because the check keyed on `;`, `&&` and `||` without asking
+what the segments do — and worse, it flagged *every* non-verification shell
+command, so a bare `ls` counted too.
+
+Now each segment is classified. A command is treated as read-only only when every
+segment is established as such, and a read-only *verb* is not enough:
+`grep x f > out`, `find . -delete`, `sed -i`, and anything with `$(...)` or
+backticks all preserve uncertainty. Anything the classifier cannot establish as
+read-only stays flagged, because the cost of a false "nothing changed" is a
+silently unreviewed edit.
 
 ## Not yet done
 
-- **`file_delete` end to end.** It is dropped before dispatch with no
-  `tool_call_started` and no logged refusal, in both the scripted and
-  read-before-delete variants. `mutating_tools_so_far` does not advance. The
-  ledger correctly records nothing for a tool that never ran, so this is a
-  product finding outside the ledger's scope — but it means the deletion path is
-  covered only by unit tests.
+- ~~`file_delete` end to end~~ **Resolved.** It is `destructive: true`, and in
+  headless mode the yolo gate returns `RequireConfirmation` with no operator to
+  ask, so dispatch fails closed before `tool_call_started`. The setting is
+  `[yolo].allow_destructive_shell`, not `[safety]` — Selfware prints
+  `Unknown config key [safety].allow_destructive_shell — this key is ignored`,
+  which is why two earlier attempts changed nothing. With it in the right
+  section the deletion dispatches and the ledger records:
+
+      unreviewed scratch.txt (0 lines, turn 4)
+
+  The coverage obligation is retired — nothing left to test — while the removal
+  itself still wants reading. Size is 0 because `file_delete` reports none, not
+  because nothing happened.
 - Incremental checkpoint/resume through a real Agent, rather than a constructed
   checkpoint.
 - Threshold evaluation. Nothing here justifies a number yet, and "more debt" is

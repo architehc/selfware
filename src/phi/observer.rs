@@ -234,6 +234,80 @@ fn diff_line_counts(diff: &str) -> Vec<(PathBuf, usize)> {
     out
 }
 
+/// Commands established as read-only. Deliberately short: anything not on this
+/// list is treated as possibly mutating, because the cost of a false "nothing
+/// changed" is a silently unreviewed edit.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "ls", "dir", "pwd", "echo", "cat", "head", "tail", "wc", "grep", "rg", "find", "file", "stat",
+    "which", "whoami", "date", "env", "printenv", "diff", "du", "df", "tree", "less", "more",
+    "basename", "dirname", "realpath", "sort", "uniq", "cut", "awk", "sed",
+];
+
+/// Git subcommands that only read.
+const READ_ONLY_GIT: &[&str] = &[
+    "status",
+    "diff",
+    "log",
+    "show",
+    "branch",
+    "ls-files",
+    "rev-parse",
+];
+
+/// Whether one command segment is established as read-only.
+///
+/// Returns false for anything it cannot establish, including redirects and
+/// substitutions — `grep x f > out` and `find . -delete` both begin with a
+/// read-only word and neither is.
+fn segment_is_read_only(segment: &str) -> bool {
+    let segment = segment.trim();
+    if segment.is_empty() {
+        return true;
+    }
+    // A redirect or substitution can write regardless of the verb.
+    if segment.contains('>') || segment.contains('`') || segment.contains("$(") {
+        return false;
+    }
+    let mut words = segment.split_whitespace();
+    let Some(verb) = words.next() else {
+        return true;
+    };
+    let verb = verb.rsplit('/').next().unwrap_or(verb);
+    if verb == "git" {
+        return words.next().is_some_and(|sub| READ_ONLY_GIT.contains(&sub));
+    }
+    if !READ_ONLY_COMMANDS.contains(&verb) {
+        return false;
+    }
+    // `find -delete` / `-exec` mutate despite a read-only verb.
+    if verb == "find" && segment.contains("-delete") || segment.contains("-exec") {
+        return false;
+    }
+    // In-place editing.
+    if verb == "sed" && (segment.contains("-i") || segment.contains("--in-place")) {
+        return false;
+    }
+    true
+}
+
+/// Whether a command may have changed files the observer cannot name.
+///
+/// An earlier version flagged EVERY non-verification shell command, so a bare
+/// `ls` inflated possible_unrecorded_mutations. It now inspects each segment
+/// and preserves uncertainty only where it genuinely exists.
+pub fn command_may_mutate(command: &str) -> bool {
+    let segments: Vec<&str> = command
+        .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split(';'))
+        .flat_map(|s| s.split('|'))
+        .collect();
+    !segments.iter().all(|segment| {
+        segment_is_read_only(segment)
+            || crate::agent::tool_dispatch::helpers::shell_command_is_verification(segment.trim())
+    })
+}
+
 /// Classify one tool call.
 ///
 /// A failed tool changes nothing, so it produces no events — but note the
@@ -286,12 +360,7 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
         };
         // The command's exit status, not the tool's.
         let outcome = command_outcome(call);
-        // A compound command may both mutate and verify: `python fix.py && pytest`
-        // changed files this observer cannot name.
-        let may_have_mutated = command.contains("&&")
-            || command.contains(';')
-            || command.contains("||")
-            || !crate::agent::tool_dispatch::helpers::shell_command_is_verification(command);
+        let may_have_mutated = command_may_mutate(command);
         match shell_command_verification_kind(command) {
             // Only executed tests discharge a test obligation. `cargo check`,
             // `npx tsc`, `go build` and `sqlfluff lint` all pass
@@ -325,7 +394,7 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
                 return vec![ObservedEvent::OpaqueRun {
                     command: command.to_string(),
                     outcome,
-                    may_have_mutated: true,
+                    may_have_mutated,
                 }];
             }
         }

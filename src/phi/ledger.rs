@@ -12,7 +12,7 @@
 //!    exposure, not comprehension. Writing a test is a promise, not a result.
 //! 2. **Review and testing are distinct.** One edit creates one
 //!    [`ObligationKind::UnreviewedChange`] and one
-//!    [`ObligationKind::UntestedLogic`]. Passing tests never discharge the
+//!    [`ObligationKind::UnconfirmedCoverage`]. Passing tests never discharge the
 //!    review obligation; a human reading the diff never discharges the test
 //!    obligation.
 //! 3. **Evidence is scoped.** It discharges obligations on the paths it covers
@@ -68,8 +68,13 @@ pub struct EvidenceId(pub u64);
 pub enum ObligationKind {
     /// Nobody has read this change.
     UnreviewedChange,
-    /// No executed test has covered this change.
-    UntestedLogic,
+    /// No test run has been shown to cover this change.
+    ///
+    /// Named for what is missing: coverage, not execution. Tests may have run
+    /// and passed over this file many times — if none reported what it
+    /// exercised, the obligation stands, and calling that "untested" asserts
+    /// something the evidence does not establish.
+    UnconfirmedCoverage,
 }
 
 /// The two kinds of evidence, kept apart on purpose. A green suite is not a
@@ -88,7 +93,7 @@ impl EvidenceKind {
     /// clearing unread code again.
     pub fn discharges(self) -> ObligationKind {
         match self {
-            EvidenceKind::TestsExecuted => ObligationKind::UntestedLogic,
+            EvidenceKind::TestsExecuted => ObligationKind::UnconfirmedCoverage,
             EvidenceKind::HumanReviewed => ObligationKind::UnreviewedChange,
         }
     }
@@ -175,6 +180,12 @@ pub struct Obligation {
     pub satisfied_by: Option<EvidenceId>,
     /// Set when the file was removed: there is no longer anything to check.
     pub retired: bool,
+    /// Test runs that executed after this change and passed, but reported no
+    /// coverage. Held separately on purpose: execution, outcome, coverage and
+    /// review are four different facts, and a run that passed without saying
+    /// what it touched is evidence of the first two and neither of the last.
+    #[serde(default)]
+    pub passing_runs_without_coverage: usize,
 }
 
 impl Obligation {
@@ -282,7 +293,7 @@ impl Ledger {
         let mut ids = [ObligationId(0); 2];
         for (slot, kind) in [
             ObligationKind::UnreviewedChange,
-            ObligationKind::UntestedLogic,
+            ObligationKind::UnconfirmedCoverage,
         ]
         .into_iter()
         .enumerate()
@@ -302,6 +313,7 @@ impl Ledger {
                 checkpoint: None,
                 satisfied_by: None,
                 retired: false,
+                passing_runs_without_coverage: 0,
             });
         }
         ids
@@ -358,6 +370,7 @@ impl Ledger {
             checkpoint: None,
             satisfied_by: None,
             retired: false,
+            passing_runs_without_coverage: 0,
         });
         id
     }
@@ -465,6 +478,7 @@ impl Ledger {
             checkpoint: None,
             satisfied_by: None,
             retired: false,
+            passing_runs_without_coverage: 0,
         });
         id
     }
@@ -525,9 +539,27 @@ impl Ledger {
             .filter(|o| o.outstanding() && self.assess(evidence, o).is_ok())
             .map(|o| o.id)
             .collect();
+        // A passing run that could not say what it exercised is still a fact
+        // about this change: the suite ran, after the edit, and was green. It
+        // does not discharge, and it is not nothing.
+        let executed_over: Vec<ObligationId> = self
+            .obligations
+            .iter()
+            .filter(|o| {
+                o.outstanding()
+                    && o.kind == ObligationKind::UnconfirmedCoverage
+                    && evidence.kind == EvidenceKind::TestsExecuted
+                    && evidence.outcome == Outcome::Passed
+                    && matches!(self.assess(evidence, o), Err(Unsatisfied::CoverageUnknown))
+            })
+            .map(|o| o.id)
+            .collect();
         for obligation in self.obligations.iter_mut() {
             if discharged.contains(&obligation.id) {
                 obligation.satisfied_by = Some(evidence.id);
+            }
+            if executed_over.contains(&obligation.id) {
+                obligation.passing_runs_without_coverage += 1;
             }
         }
     }
@@ -579,18 +611,24 @@ impl Ledger {
             .map(|o| {
                 let kind = match o.kind {
                     ObligationKind::UnreviewedChange => "unreviewed",
-                    ObligationKind::UntestedLogic => "untested",
+                    ObligationKind::UnconfirmedCoverage => "coverage unconfirmed",
+                };
+                let runs = match o.passing_runs_without_coverage {
+                    0 => String::new(),
+                    1 => " — 1 passing run reported no coverage".to_string(),
+                    n => format!(" — {n} passing runs reported no coverage"),
                 };
                 let size = match o.line_count {
                     Some(n) => format!("{n} lines"),
                     None => "size unknown".to_string(),
                 };
                 format!(
-                    "{} {} ({}, turn {})",
+                    "{} {} ({}, turn {}){}",
                     kind,
                     o.path.display(),
                     size,
-                    o.turn_index
+                    o.turn_index,
+                    runs
                 )
             })
             .collect()

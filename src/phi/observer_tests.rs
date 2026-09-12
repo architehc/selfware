@@ -143,7 +143,7 @@ fn cargo_check_is_not_a_test_run() {
     let run_snap = ledger.snapshot();
     apply(&mut ledger, &events, run_snap, T);
     assert_eq!(
-        ledger.outstanding_lines(ObligationKind::UntestedLogic),
+        ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         1,
         "a successful compile discharges nothing"
     );
@@ -294,7 +294,10 @@ fn a_delete_retires_rather_than_accrues() {
         snap,
         T,
     );
-    assert_eq!(ledger.outstanding_lines(ObligationKind::UntestedLogic), 0);
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
+        0
+    );
     assert_eq!(
         ledger.outstanding().len(),
         1,
@@ -322,7 +325,7 @@ fn a_green_cargo_test_does_not_discharge_untested_logic() {
     apply(&mut ledger, &events, run_snap, T);
 
     assert_eq!(
-        ledger.outstanding_lines(ObligationKind::UntestedLogic),
+        ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         2,
         "a suite that did not report coverage discharges nothing"
     );
@@ -330,7 +333,7 @@ fn a_green_cargo_test_does_not_discharge_untested_logic() {
     let obligation = ledger
         .obligations()
         .iter()
-        .find(|o| o.kind == ObligationKind::UntestedLogic)
+        .find(|o| o.kind == ObligationKind::UnconfirmedCoverage)
         .unwrap();
     assert_eq!(
         ledger.assess(&evidence, obligation),
@@ -499,7 +502,10 @@ fn shell_compilation_is_not_recorded_as_test_execution() {
         run,
         T,
     );
-    assert_eq!(ledger.outstanding_lines(ObligationKind::UntestedLogic), 1);
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
+        1
+    );
 }
 
 #[test]
@@ -619,7 +625,7 @@ fn a_failing_test_run_discharges_nothing() {
         T,
     );
     assert_eq!(
-        ledger.outstanding_lines(ObligationKind::UntestedLogic),
+        ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
         1,
         "a red suite establishes work remains"
     );
@@ -636,4 +642,114 @@ fn a_formatter_that_rewrites_files_is_recorded_as_an_opaque_mutation() {
         }] => assert!(*may_have_mutated),
         other => panic!("expected an opaque mutation, got {other:?}"),
     }
+}
+
+#[test]
+fn read_only_commands_are_not_flagged_as_possible_mutations() {
+    // Live data showed `ls -la; echo '---'; find .` counted as a possible
+    // unrecorded mutation. The old check flagged every non-verification shell
+    // command, so even a bare `ls` inflated the figure.
+    for command in [
+        "ls -la",
+        "ls -la; echo '---'; find . -maxdepth 2 -name '*.rs'",
+        "git status",
+        "git diff --stat | head -20",
+        "cat calculator.py",
+        "pwd && ls",
+    ] {
+        assert!(
+            !command_may_mutate(command),
+            "{command} is read-only but was flagged as possibly mutating"
+        );
+    }
+}
+
+#[test]
+fn uncertainty_is_preserved_for_anything_not_established_read_only() {
+    // The asymmetry that makes the above safe: a read-only VERB is not a
+    // read-only command. Each of these begins innocently and writes.
+    for command in [
+        "grep needle src/a.rs > found.txt",
+        "find . -name '*.tmp' -delete",
+        "sed -i s/a/b/ src/a.rs",
+        "echo hi > note.txt",
+        "cat $(mktemp)",
+        "ls; python3 fix.py",
+        "make install",
+        "curl -o out.bin https://example.com",
+    ] {
+        assert!(
+            command_may_mutate(command),
+            "{command} may write but was treated as read-only"
+        );
+    }
+}
+
+#[test]
+fn a_mixed_command_both_runs_tests_and_flags_the_mutation() {
+    let args = json!({"command": "python3 fix.py && pytest -q"});
+    let out = r#"{"exit_code":0}"#;
+    let events = classify(&shell_call("shell_exec", &args, out));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, ObservedEvent::RunFinished { .. })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ObservedEvent::OpaqueRun {
+            may_have_mutated: true,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn a_passing_run_without_coverage_is_recorded_as_execution_not_as_coverage() {
+    // "untested" asserted more than the evidence supported: the suite ran and
+    // passed, and what was unknown was whether it covered the change. Those are
+    // four separate facts -- execution, outcome, coverage, review -- and only
+    // the first two are established here.
+    let mut ledger = Ledger::new();
+    let snap = ledger.snapshot();
+    apply(
+        &mut ledger,
+        &classify(&call(
+            "file_write",
+            &json!({"path": "calc.py", "content": "a\nb"}),
+            1,
+        )),
+        snap,
+        T,
+    );
+    let args = json!({"command": "python3 -m unittest test_calc.py"});
+    let green = r#"{"exit_code":0}"#;
+    for _ in 0..6 {
+        let run = ledger.snapshot();
+        apply(
+            &mut ledger,
+            &classify(&shell_call("shell_exec", &args, green)),
+            run,
+            T,
+        );
+    }
+
+    // Still outstanding, because coverage was never reported...
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UnconfirmedCoverage),
+        2
+    );
+    // ...but the six executions are on the record, and the citation says so
+    // rather than claiming the change was never tested.
+    let citation = ledger
+        .citations()
+        .into_iter()
+        .find(|c| c.starts_with("coverage unconfirmed"))
+        .expect("the coverage obligation must be cited");
+    assert!(
+        citation.contains("6 passing runs reported no coverage"),
+        "citation must carry the execution history: {citation}"
+    );
+    assert!(
+        !citation.contains("untested"),
+        "must not assert the change was never tested: {citation}"
+    );
 }

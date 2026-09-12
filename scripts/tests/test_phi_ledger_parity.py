@@ -52,7 +52,7 @@ class LedgerParityTests(unittest.TestCase):
         pairs = re.findall(r"EvidenceKind::(\w+)\s*=>\s*ObligationKind::(\w+)", block)
         self.assertEqual(len(pairs), 2, f"expected two evidence kinds, got {pairs}")
         self.assertEqual(dict(pairs), {
-            "TestsExecuted": "UntestedLogic",
+            "TestsExecuted": "UnconfirmedCoverage",
             "HumanReviewed": "UnreviewedChange",
         })
         # One-to-one: no obligation kind is dischargeable by two evidence kinds.
