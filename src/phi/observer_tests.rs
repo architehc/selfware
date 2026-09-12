@@ -58,7 +58,8 @@ fn every_registry_tool_is_explicitly_classified_or_explicitly_inert() {
     ];
     // Mutating, and knowingly not yet observed. Emptying this list is the goal;
     // it exists so the gap cannot be forgotten.
-    const KNOWN_UNCOVERED_MUTATIONS: &[&str] = &["cargo_fmt"];
+    // Emptied: cargo_fmt is now observed as an opaque mutation.
+    const KNOWN_UNCOVERED_MUTATIONS: &[&str] = &[];
 
     let mut unaccounted = Vec::new();
     for tool in crate::tools::CRITICAL_TOOLS {
@@ -66,6 +67,7 @@ fn every_registry_tool_is_explicitly_classified_or_explicitly_inert() {
             || TEST_EXECUTION_TOOLS.contains(tool)
             || COMPILE_ONLY_TOOLS.contains(tool)
             || SHELL_TOOLS.contains(tool)
+            || OPAQUE_MUTATION_TOOLS.contains(tool)
             || KNOWN_INERT.contains(tool)
             || KNOWN_UNCOVERED_MUTATIONS.contains(tool);
         if !known {
@@ -621,4 +623,17 @@ fn a_failing_test_run_discharges_nothing() {
         1,
         "a red suite establishes work remains"
     );
+}
+
+#[test]
+fn a_formatter_that_rewrites_files_is_recorded_as_an_opaque_mutation() {
+    // cargo_fmt mutates and names nothing. Leaving it unclassified reported the
+    // tree as unchanged; claiming a path would be inventing one.
+    let args = json!({});
+    match classify(&call("cargo_fmt", &args, 1)).as_slice() {
+        [ObservedEvent::OpaqueRun {
+            may_have_mutated, ..
+        }] => assert!(*may_have_mutated),
+        other => panic!("expected an opaque mutation, got {other:?}"),
+    }
 }

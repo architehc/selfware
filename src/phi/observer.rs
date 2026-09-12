@@ -45,6 +45,13 @@ pub const TEST_EXECUTION_TOOLS: &[&str] = &["cargo_test"];
 /// Tools that compile without executing. Recorded, but they discharge nothing.
 pub const COMPILE_ONLY_TOOLS: &[&str] = &["cargo_check"];
 
+/// Tools that rewrite files without naming which ones.
+///
+/// `cargo_fmt` reformats the workspace. It genuinely mutates, and the observer
+/// genuinely cannot say what it touched — so it is recorded as an opaque
+/// mutation rather than left out. Silence would report the tree as unchanged.
+pub const OPAQUE_MUTATION_TOOLS: &[&str] = &["cargo_fmt"];
+
 /// Tools that run arbitrary commands, which may or may not be verification and
 /// may or may not mutate. Their command text decides, via the authoritative
 /// pipeline-aware classifier in agent::tool_dispatch::helpers.
@@ -332,6 +339,14 @@ pub fn classify(call: &ToolCallRecord<'_>) -> Vec<ObservedEvent> {
             scope: Scope::WorkspaceCoverageUnknown,
             outcome,
             artifact: None,
+        }];
+    }
+
+    if OPAQUE_MUTATION_TOOLS.contains(&call.tool) {
+        return vec![ObservedEvent::OpaqueRun {
+            command: call.tool.to_string(),
+            outcome,
+            may_have_mutated: true,
         }];
     }
 

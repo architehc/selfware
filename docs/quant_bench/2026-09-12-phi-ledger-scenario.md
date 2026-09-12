@@ -86,13 +86,67 @@ that ignores that field will overstate how much is accounted for.
 `tool_call_started`, unlike Step 5. The ledger correctly recorded nothing. The
 deletion path therefore remains unexercised end to end.
 
-**`cargo_fmt` is still unobserved.** It rewrites files and is listed as a known
-uncovered mutation in the registry sweep test.
+**`cargo_fmt` is now observed** as an opaque mutation: it genuinely rewrites
+files and genuinely names none, so recording uncertainty beats both silence and
+an invented path. The registry sweep's uncovered list is empty.
+
+## Live run — Flash Next against llm.selfware.design
+
+Same fixture shape, real model, XML tool mode, `enable_thinking=false`.
+The model fixed the bug (`return a - b` -> `return a + b`) and the suite went
+green; the task reported failure only on max iterations, because it kept going
+after succeeding.
+
+| | |
+| --- | --- |
+| oracle | `1 added / 1 removed  calculator.py` |
+| citation | `unreviewed calculator.py (2 lines, turn 2)` |
+| unattributed | **0** |
+| unknown_size_obligations | **0** |
+| possible_unrecorded_mutations | 2 |
+| outstanding / untested | 2 / 2 |
+
+**Zero unattributed against real model traffic.** The schema keys hold outside
+the scripted fixture: an actual Qwen tool call in XML mode was attributed to the
+right file and turn, with a size.
+
+**Six passing test runs did not move the debt.**
+
+    rec2 .. rec18   untested=2  unreviewed=2  outstanding=2
+
+The model ran `python3 -m unittest test_calculator.py` six times, green every
+time, and the obligation stood throughout — because unittest reports no per-file
+coverage. This is the designed behaviour and the prediction held exactly. It is
+also the finding most worth sitting with before anything surfaces this to a
+user: a flat line through six green runs is correct, and it is not obviously
+*useful*. Whether "2 lines untested after six passing suites" reads as honest or
+as noise is a question for threshold evaluation, which is precisely why this is
+still shadow mode.
+
+`cargo_check` was recorded `opaque_run / Failed` — correctly not a test run, and
+correctly failed, since this is not a Rust project.
+
+### A known imprecision, found here
+
+`possible_unrecorded_mutations: 2` came from two read-only commands:
+
+    ls -la; echo '---'; find . -maxdepth 2 -name '*.rs'
+
+They are flagged because the compound-command check keys on `;`, `&&` and `||`
+without asking what the segments do. The error is in the conservative direction
+— overstating uncertainty rather than understating it — but it does inflate the
+figure, and a consumer treating it as a count of real unrecorded mutations would
+be misled. Narrowing it needs per-segment classification, not a different
+separator list.
 
 ## Not yet done
 
-- A live model run. The scenario surfaced one real attribution bug; that is
-  fixed, but the deletion path and `cargo_fmt` remain unexercised.
+- **`file_delete` end to end.** It is dropped before dispatch with no
+  `tool_call_started` and no logged refusal, in both the scripted and
+  read-before-delete variants. `mutating_tools_so_far` does not advance. The
+  ledger correctly records nothing for a tool that never ran, so this is a
+  product finding outside the ledger's scope — but it means the deletion path is
+  covered only by unit tests.
 - Incremental checkpoint/resume through a real Agent, rather than a constructed
   checkpoint.
 - Threshold evaluation. Nothing here justifies a number yet, and "more debt" is
