@@ -701,7 +701,42 @@ assert.ok(i,'two capitulations must surface');
 assert.equal(i.kind,INTERVENTION_KINDS.SYCOPHANTIC_REVERSAL);
 assert.equal(i.motionState,'sycophancy');
 assert.equal(i.context.capitulations,2);
-assert.ok(/no new evidence/i.test(i.speechText),'the copy must name the actual problem');
+assert.ok(/citation|checkable/i.test(i.speechText),'the copy must name what is missing');
+assert.ok(!/converging on you|isn't reasoning/i.test(i.speechText),
+  'the copy must not assert a motive it cannot observe');
+assert.ok(/can't tell|cannot tell|may be a fair correction/i.test(i.speechText),
+  'the copy must admit what it does not know');
+""")
+
+    def test_an_assistant_claim_about_tests_is_not_a_citation(self):
+        """Confident sentences are the problem; they cannot also be the proof."""
+        self.detector("""
+const c=new CognitiveFrictionClassifier();
+// Claims, not citations: nothing here can be checked without redoing the work.
+for (const text of [
+  "You're absolutely right, the tests pass now.",
+  "Good catch - I ran cargo build and it works.",
+  "My mistake. This should be fine now."]) {
+  const r=c.recordAssistantReversal({stance:'x',text});
+  assert.equal(r.capitulated,true,`unsupported claim treated as evidence: ${text}`);
+}
+// Citations: each points somewhere a human can go.
+for (const text of [
+  "You're right - src/net.rs:42 drops the guard early.",
+  "You're right: ```error[E0382]: borrow of moved value```",
+  "Good catch - 3 tests failed after that change."]) {
+  const r=c.recordAssistantReversal({stance:'x',text});
+  assert.equal(r.capitulated,false,`checkable citation flagged as capitulation: ${text}`);
+}
+""")
+
+    def test_the_caller_owns_reversal_detection_and_it_says_so(self):
+        """Phi never compared stances across turns; the record must not imply it did."""
+        self.detector("""
+const c=new CognitiveFrictionClassifier();
+const r=c.recordAssistantReversal({stance:'use tokio',text:"You're absolutely right."});
+assert.equal(r.reversalAssertedByCaller,true,
+  'the classification must record that the reversal was taken on trust');
 """)
 
     def test_a_human_disagreeing_again_clears_the_streak(self):

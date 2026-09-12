@@ -38,17 +38,39 @@ export const CAPITULATION_MARKERS = Object.freeze([
   /\bsorry\s+about\s+that\b/i
 ]);
 
-/* Evidence is something that can be checked by someone other than the model:
- * a file, a line, a command, a test, a measurement. "I think" and "it should"
- * are not evidence. */
-export const EVIDENCE_MARKERS = Object.freeze([
-  /\b[\w./-]+\.(?:rs|js|ts|py|go|toml|json|md):\d+/,
-  /\b(?:cargo|npm|pytest|git|node|go)\s+\w+/i,
-  /\b(?:test|tests)\s+(?:pass|passed|fail|failed)\b/i,
-  /\bexit\s+(?:code|status)\b/i,
-  /\bmeasured\b|\bbenchmark\b|\bprofil(?:e|ed|ing)\b/i,
-  /```/
+/* What can be CHECKED, not what sounds supported.
+ *
+ * These are citations, not evidence. A citation is something a human can go and
+ * verify in seconds; an assertion is not. The distinction matters because an
+ * assistant claiming "tests pass" is making exactly the kind of unsupported
+ * statement this detector exists to notice — an earlier version treated that
+ * phrase, a bare command mention, and any code fence as evidence, which meant a
+ * confident sentence could clear the bar that confident sentences are the
+ * problem.
+ *
+ * So: a file:line reference points somewhere. Quoted tool output can be
+ * re-run. A bare claim about a test result cannot be checked without doing the
+ * work yourself, and is therefore not counted here.
+ *
+ * This is still a heuristic over text. It cannot tell a real citation from a
+ * fabricated one — only that the answer offered something checkable rather than
+ * nothing. Phi's job is to make the disagreement inspectable, not to rule on it.
+ */
+export const CITATION_MARKERS = Object.freeze([
+  // A location someone can open.
+  /\b[\w./-]+\.(?:rs|js|ts|py|go|toml|json|md|yaml|yml):\d+/,
+  // Quoted output, which carries its own provenance.
+  /```[\s\S]*?```/,
+  // A concrete diagnostic rather than a summary of one.
+  /\berror\[E\d+\]|\bwarning:\s|\bpanicked at\b|\bassertion (?:failed|`)/i,
+  // An exit status or a named, counted failure.
+  /\bexit (?:code|status)\s*[:=]?\s*\d+/i,
+  /\b\d+\s+(?:test|tests)\s+failed\b/i
 ]);
+
+/* Kept as a deprecated alias so existing callers keep working; the name
+ * overclaimed what the patterns could establish. */
+export const EVIDENCE_MARKERS = CITATION_MARKERS;
 
 export class CognitiveFrictionClassifier {
   constructor(options = {}) {
@@ -148,19 +170,32 @@ export class CognitiveFrictionClassifier {
     return this;
   }
 
-  /* Record an assistant turn that reverses a previous position. Returns the
-   * classified reversal so callers can act on it directly.
+  /* Classify an assistant turn the CALLER has already determined to be a
+   * reversal. Returns the classification so callers can act on it.
    *
-   * A reversal is only counted as capitulation when it carries an agreement
-   * marker AND cites no checkable evidence. Changing your mind because a test
-   * failed is reasoning; changing it because you were pushed is not. */
+   * The hard part is not solved here: comparing positions across turns to
+   * decide that a reversal happened at all. This method trusts the caller on
+   * that and records `reversalAssertedByCaller` to keep the boundary visible.
+   *
+   * Given a reversal, it is counted as capitulation when it carries an
+   * agreement marker AND offers nothing checkable. Changing position because a
+   * test failed is reasoning. Changing it because you were pushed is not — but
+   * a human can also supply a valid correction, or change a requirement,
+   * without producing a file citation. So this flags a pattern worth looking
+   * at; it does not establish that the model was wrong to change its mind. */
   recordAssistantReversal({ stance, text = '', afterPushback = true, timestamp = Date.now() } = {}) {
     const body = String(text || '');
     const marker = CAPITULATION_MARKERS.find(pattern => pattern.test(body));
-    const citedEvidence = EVIDENCE_MARKERS.some(pattern => pattern.test(body));
-    const capitulated = Boolean(marker) && !citedEvidence && afterPushback;
+    const citedSomethingCheckable = CITATION_MARKERS.some(pattern => pattern.test(body));
+    const capitulated = Boolean(marker) && !citedSomethingCheckable && afterPushback;
     const reversal = { timestamp, stance: stance ? String(stance) : null,
-                       marker: marker ? marker.source : null, citedEvidence, capitulated };
+                       marker: marker ? marker.source : null,
+                       citedEvidence: citedSomethingCheckable,
+                       // The caller decided this was a reversal. Phi did not
+                       // compare stances across turns; record that it is taking
+                       // that on trust rather than implying it detected it.
+                       reversalAssertedByCaller: true,
+                       capitulated };
     if (capitulated) {
       this.history.reversals.push(reversal);
       if (this.history.reversals.length > 40) this.history.reversals.shift();
@@ -234,15 +269,15 @@ export class CognitiveFrictionClassifier {
       if (recent.length >= this.options.reversalThreshold) {
         return {
           kind: INTERVENTION_KINDS.SYCOPHANTIC_REVERSAL,
-          title: 'It Agreed With You Again',
+          title: 'Position Changed, Nothing Cited',
           context: { capitulations: recent.length, window_minutes: Math.round(this.options.reversalWindowMs / 60000),
                      last_stance: recent[recent.length - 1].stance || 'unnamed claim' },
           motionState: 'sycophancy',
           gesture: 'look',
-          speechText: `That's ${recent.length} reversals with no new evidence behind any of them. It isn't converging on the answer, it's converging on you. Ask it what would prove the previous version wrong — if it can't say, neither version was reasoning.`,
+          speechText: `${recent.length} reversals in this session, none with a citation attached. That may be a fair correction on your part — I can't tell from here. What I can say is that nothing checkable has been offered either way. Asking what would prove the previous answer wrong makes the disagreement inspectable.`,
           actions: [
             { id: 'demand_evidence', label: 'Ask what would disprove it', action: 'demand_evidence' },
-            { id: 'revert_claim', label: 'Revert to the first answer', action: 'revert_claim' },
+            { id: 'compare_claims', label: 'Show both positions side by side', action: 'compare_claims' },
             { id: 'dismiss', label: 'I\u2019ve got this (Esc)', action: 'dismiss' }
           ]
         };

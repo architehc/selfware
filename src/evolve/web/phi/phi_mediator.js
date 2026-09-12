@@ -98,8 +98,15 @@ export class PhiMediator {
       augmentations.push({
         kind: MEDIATION.NARROW_SCOPE,
         reason: `Unverified debt is ${(vector.debt).toFixed(2)}; broad changes here are hard to review.`,
-        text: 'Keep this change as small as it can be and still be correct. '
-            + 'Prefer one file. If it cannot be small, explain why before writing anything.'
+        // Deliberately NOT "prefer one file". A correct fix for a bug class has
+        // to cover every instance of it, and a one-file instruction argues
+        // against sweeping the class — which is the more expensive mistake.
+        // Scope follows the defect, and review burden is managed by naming the
+        // scope up front rather than by truncating it.
+        text: 'State the bug class before changing anything, and cover every instance of it — '
+            + 'a fix applied to one of several implementations leaves the others silently wrong. '
+            + 'Keep everything OUTSIDE that class out of this change, and list the files you '
+            + 'intend to touch first so the review has a shape.'
       });
     }
 
