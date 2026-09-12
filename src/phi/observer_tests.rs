@@ -23,26 +23,123 @@ fn call<'a>(
 
 #[test]
 fn every_mutating_tool_in_the_registry_is_classified() {
-    // Rule 5 sweep, enforced. A new file-writing tool that is not listed here
-    // would silently create no obligation, and the ledger would report a debt
-    // of zero for work nobody checked.
-    //
-    // The registry's critical-tool list is the source; anything in it that
-    // writes must be known to the observer.
-    let registry_writers = ["file_write", "file_edit", "file_multi_edit", "file_delete"];
-    for tool in registry_writers {
+    // Rule 5 sweep, read from the authoritative list rather than a handwritten
+    // copy of it. An earlier version of this test asserted against four names
+    // typed in by hand, which would have passed while a real new write tool
+    // went unclassified.
+    let known: Vec<&str> = crate::tools::CRITICAL_TOOLS
+        .iter()
+        .copied()
+        .filter(|t| {
+            // Anything that writes, by the registry's own naming.
+            matches!(
+                *t,
+                "file_write" | "file_edit" | "file_multi_edit" | "file_fim_edit" | "file_delete"
+            ) || *t == "patch_apply"
+        })
+        .collect();
+    assert!(
+        known.len() >= 4,
+        "sanity: the registry should list several write tools, found {known:?}"
+    );
+    for tool in known {
         assert!(
             MUTATING_TOOLS.contains(&tool),
-            "{tool} can change files but the observer does not classify it"
+            "{tool} is a registry write tool the observer does not classify; \
+             mutations through it would create no obligation at all"
         );
     }
-    // And the reverse: nothing is claimed that the tool layer does not have.
-    for tool in MUTATING_TOOLS {
+}
+
+#[test]
+fn shell_verification_is_recognised_across_languages() {
+    // shell_exec was invisible to the ledger: not a mutating tool, not in the
+    // verification list, so every pytest / npm test / go test run was
+    // unrecorded. Uses the codebase's own pipeline-aware classifier rather than
+    // a second heuristic that would drift from it.
+    for command in [
+        "pytest -q",
+        "python3 -m unittest discover",
+        "npm test",
+        "cargo test --lib",
+        "go test ./...",
+    ] {
+        let args = json!({"command": command});
+        let events = classify(&call("shell_exec", &args, 1));
         assert!(
-            tool.starts_with("file_") || *tool == "patch_apply",
-            "unexpected tool in MUTATING_TOOLS: {tool}"
+            matches!(events.as_slice(), [ObservedEvent::RunFinished { .. }]),
+            "{command} should record a test run, got {events:?}"
         );
     }
+}
+
+#[test]
+fn an_opaque_shell_command_is_recorded_as_possibly_mutating() {
+    // "Not verification" does not mean "changed nothing". A shell command can
+    // write files the observer cannot name, and silence would read as no
+    // mutation at all.
+    let args = json!({"command": "sed -i s/a/b/ src/a.rs"});
+    let events = classify(&call("shell_exec", &args, 1));
+    match events.as_slice() {
+        [ObservedEvent::OpaqueRun {
+            may_have_mutated, ..
+        }] => assert!(*may_have_mutated),
+        other => panic!("expected OpaqueRun, got {other:?}"),
+    }
+}
+
+#[test]
+fn cargo_check_is_not_a_test_run() {
+    // It compiles and executes nothing, so it cannot discharge UntestedLogic.
+    let check_args = json!({});
+    let events = classify(&call("cargo_check", &check_args, 1));
+    assert!(
+        matches!(events.as_slice(), [ObservedEvent::OpaqueRun { .. }]),
+        "cargo_check must not be recorded as test execution, got {events:?}"
+    );
+
+    let mut ledger = Ledger::new();
+    let snap = ledger.snapshot();
+    apply(
+        &mut ledger,
+        &classify(&call(
+            "file_write",
+            &json!({"path": "src/a.rs", "content": "a"}),
+            1,
+        )),
+        snap,
+        T,
+    );
+    let run_snap = ledger.snapshot();
+    apply(&mut ledger, &events, run_snap, T);
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UntestedLogic),
+        1,
+        "a successful compile discharges nothing"
+    );
+}
+
+#[test]
+fn a_failed_test_run_is_recorded_not_dropped() {
+    // Losing failed runs makes a red session look merely quiet.
+    let args = json!({});
+    let mut record = call("cargo_test", &args, 1);
+    record.succeeded = false;
+    match classify(&record).as_slice() {
+        [ObservedEvent::RunFinished { outcome, .. }] => assert_eq!(*outcome, Outcome::Failed),
+        other => panic!("expected a recorded failed run, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_failed_mutation_is_unknown_not_harmless() {
+    // A failed edit may have applied partially. "Nothing changed" is a claim
+    // the observer cannot support.
+    let args = json!({"path": "src/a.rs", "new_str": "x"});
+    let mut record = call("file_edit", &args, 1);
+    record.succeeded = false;
+    let events = classify(&record);
+    assert_eq!(unattributed_count(&events), 1, "got {events:?}");
 }
 
 #[test]
@@ -53,16 +150,30 @@ fn a_write_creates_a_change_sized_by_its_content() {
         events,
         vec![ObservedEvent::Changed {
             path: "src/a.rs".into(),
-            line_count: 3,
+            line_count: Some(3),
             turn_index: 3
         }]
     );
 }
 
 #[test]
-fn a_failed_tool_changes_nothing() {
+fn a_failed_mutation_is_not_treated_as_no_mutation() {
+    // This test previously asserted a failed tool produced NO events, which
+    // encoded the assumption that failure means the tree is untouched. A failed
+    // edit can apply partially; the honest record is "unknown".
     let args = json!({"path": "src/a.rs", "content": "x"});
     let mut record = call("file_write", &args, 1);
+    record.succeeded = false;
+    let events = classify(&record);
+    assert_eq!(unattributed_count(&events), 1, "got {events:?}");
+}
+
+#[test]
+fn a_failed_read_still_changes_nothing() {
+    // The asymmetry that makes the above safe: non-mutating tools that fail
+    // genuinely cannot have altered anything.
+    let args = json!({"path": "src/a.rs"});
+    let mut record = call("file_read", &args, 1);
     record.succeeded = false;
     assert!(classify(&record).is_empty());
 }
@@ -85,8 +196,8 @@ fn a_mutation_whose_target_is_unreadable_is_recorded_as_unknown() {
 #[test]
 fn a_multi_edit_owes_for_every_file_it_touched() {
     let args = json!({"edits": [
-        {"path": "src/a.rs", "new_string": "a\nb"},
-        {"path": "src/b.rs", "new_string": "c"}
+        {"path": "src/a.rs", "new_str": "a\nb"},
+        {"path": "src/b.rs", "new_str": "c"}
     ]});
     let events = classify(&call("file_multi_edit", &args, 4));
     assert_eq!(events.len(), 2);
@@ -108,8 +219,8 @@ fn a_multi_edit_owes_for_every_file_it_touched() {
 #[test]
 fn a_multi_edit_entry_with_no_path_is_unattributed_without_losing_the_others() {
     let args = json!({"edits": [
-        {"path": "src/a.rs", "new_string": "a"},
-        {"new_string": "orphan"}
+        {"path": "src/a.rs", "new_str": "a"},
+        {"new_str": "orphan"}
     ]});
     let events = classify(&call("file_multi_edit", &args, 1));
     assert_eq!(events.len(), 2);
@@ -130,7 +241,7 @@ fn a_patch_is_sized_by_touched_lines_not_context() {
     });
     let events = classify(&call("patch_apply", &args, 2));
     match &events[0] {
-        ObservedEvent::Changed { line_count, .. } => assert_eq!(*line_count, 2),
+        ObservedEvent::Changed { line_count, .. } => assert_eq!(*line_count, Some(2)),
         other => panic!("expected Changed, got {other:?}"),
     }
 }
@@ -242,5 +353,75 @@ fn observing_a_session_survives_a_restart() {
         restored.outstanding().len(),
         4,
         "a restart forgives nothing"
+    );
+}
+
+#[test]
+fn a_multi_file_patch_owes_for_every_file_it_touches() {
+    // patch_apply takes a `diff` that may span files. Attributing it to one
+    // path left the rest unrecorded entirely.
+    let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@\n+one\n+two\n--- a/src/b.rs\n+++ b/src/b.rs\n@@\n-gone\n";
+    let args = json!({"diff": diff});
+    let events = classify(&call("patch_apply", &args, 5));
+    assert_eq!(events.len(), 2, "got {events:?}");
+
+    let mut ledger = Ledger::new();
+    let snap = ledger.snapshot();
+    apply(&mut ledger, &events, snap, T);
+    let paths: Vec<_> = ledger
+        .outstanding()
+        .iter()
+        .map(|o| o.path.display().to_string())
+        .collect();
+    assert!(paths.iter().any(|p| p.ends_with("a.rs")));
+    assert!(paths.iter().any(|p| p.ends_with("b.rs")));
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UnreviewedChange),
+        3,
+        "two added plus one removed"
+    );
+}
+
+#[test]
+fn a_deletion_only_edit_is_not_sized_at_zero() {
+    // Sizing an edit by its replacement alone calls a pure deletion weightless.
+    let args = json!({"path": "src/a.rs", "old_str": "a\nb\nc", "new_str": ""});
+    match classify(&call("file_edit", &args, 1)).as_slice() {
+        [ObservedEvent::Changed { line_count, .. }] => {
+            assert_eq!(*line_count, Some(3), "removed lines must count")
+        }
+        other => panic!("expected Changed, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_edit_with_no_recognisable_size_reports_unknown_not_zero() {
+    // The failure this whole change is about: `new_string` matched nothing in
+    // the real schema, so every edit silently became a zero-line obligation
+    // without raising unattributed_count.
+    let args = json!({"path": "src/a.rs", "mystery_field": "?"});
+    match classify(&call("file_edit", &args, 1)).as_slice() {
+        [ObservedEvent::Changed { line_count, .. }] => {
+            assert_eq!(*line_count, None, "unknown size must not be reported as 0")
+        }
+        other => panic!("expected Changed, got {other:?}"),
+    }
+
+    let mut ledger = Ledger::new();
+    let snap = ledger.snapshot();
+    apply(
+        &mut ledger,
+        &classify(&call("file_edit", &args, 1)),
+        snap,
+        T,
+    );
+    assert_eq!(
+        ledger.outstanding_lines(ObligationKind::UnreviewedChange),
+        0
+    );
+    assert_eq!(
+        ledger.outstanding_unknown_size(ObligationKind::UnreviewedChange),
+        1,
+        "the line total is a floor, and the ledger must say so"
     );
 }

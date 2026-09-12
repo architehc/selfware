@@ -407,16 +407,7 @@ impl Agent {
         });
 
         let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let evidence = Some(super::turn_artifacts::EvidenceSnapshot {
-            outstanding: self.evidence_ledger.outstanding().len(),
-            unreviewed_lines: self
-                .evidence_ledger
-                .outstanding_lines(crate::phi::ledger::ObligationKind::UnreviewedChange),
-            untested_lines: self
-                .evidence_ledger
-                .outstanding_lines(crate::phi::ledger::ObligationKind::UntestedLogic),
-            citations: self.ledger_citations(),
-        });
+        let evidence = Some(self.evidence_snapshot());
         let artifact = super::turn_artifacts::TurnArtifact {
             step,
             timestamp: chrono::Utc::now(),
@@ -1386,6 +1377,12 @@ impl Agent {
         }
 
         self.execute_tool_batch(tool_calls).await?;
+
+        // The diagnostic artifact above is written BEFORE these tools run, so
+        // its evidence necessarily omits this turn's changes. Append a second,
+        // clearly-labelled record afterwards; without it the telemetry is
+        // permanently one turn behind and the first turn always reads empty.
+        self.write_post_execution_evidence().await;
 
         // After tool batch execution, check if all tool calls were suppressed.
         // When the model keeps emitting identical tool calls that are all

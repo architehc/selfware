@@ -77,6 +77,15 @@ pub struct EvidenceSnapshot {
     pub unreviewed_lines: usize,
     /// Lines changed that no executed test covered.
     pub untested_lines: usize,
+    /// Outstanding obligations whose size could not be determined. Non-zero
+    /// means the line totals above are a floor, not a total.
+    #[serde(default)]
+    pub unknown_size_obligations: usize,
+    /// Mutations that could not be attributed to a path, with their reasons.
+    /// Persisted rather than debug-logged: this is the record that says whether
+    /// the classifier's schema assumptions match real traffic.
+    #[serde(default)]
+    pub unattributed: Vec<crate::phi::observer::UnattributedRecord>,
     /// One line per outstanding obligation, naming file and turn.
     pub citations: Vec<String>,
 }

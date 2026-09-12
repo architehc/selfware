@@ -34,6 +34,7 @@ impl Agent {
         args_str: &str,
         success: bool,
         snapshot: RunSnapshot,
+        call_id: Option<&str>,
     ) {
         let parsed: serde_json::Value =
             serde_json::from_str(args_str).unwrap_or(serde_json::Value::Null);
@@ -57,13 +58,20 @@ impl Agent {
         apply(&mut self.evidence_ledger, &events, snapshot, now_ms);
 
         if unattributed > 0 {
-            // Not an error: an honest admission that the ledger's picture of the
-            // tree is incomplete, which makes any debt figure a floor.
-            tracing::debug!(
-                tool = name,
-                unattributed,
-                "phi ledger: mutation could not be attributed to a path"
-            );
+            // Persisted, not just logged. A debug line cannot be compared
+            // against a saved session, and the whole reason this count exists
+            // is to find out whether the classifier's schema assumptions hold.
+            for event in &events {
+                if let crate::phi::observer::ObservedEvent::Unattributed { tool, reason } = event {
+                    self.ledger_unattributed
+                        .push(crate::phi::observer::UnattributedRecord {
+                            turn: turn_index,
+                            tool: tool.clone(),
+                            reason: reason.clone(),
+                            call_id: call_id.map(str::to_string),
+                        });
+                }
+            }
         }
         tracing::debug!(
             tool = name,
@@ -78,9 +86,46 @@ impl Agent {
         );
     }
 
-    /// Outstanding obligations as citation lines, for turn artifacts.
-    pub(crate) fn ledger_citations(&self) -> Vec<String> {
-        self.evidence_ledger.citations()
+    /// Append a post-execution evidence record for this turn.
+    ///
+    /// The main turn artifact is written before the turn's tools run, so its
+    /// evidence cannot include them. This is written afterwards and named
+    /// separately so the two are never confused.
+    pub(super) async fn write_post_execution_evidence(&self) {
+        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let dir = super::turn_artifacts::artifact_dir(&workdir);
+        if tokio::fs::create_dir_all(&dir).await.is_err() {
+            return;
+        }
+        let step = self.loop_control.current_iteration();
+        let payload = serde_json::json!({
+            "step": step,
+            "phase": "post_execution",
+            "evidence": self.evidence_snapshot(),
+        });
+        let path = dir.join(format!("turn_{step:04}_evidence.json"));
+        if let Ok(text) = serde_json::to_string_pretty(&payload) {
+            let _ = tokio::fs::write(path, text).await;
+        }
+    }
+
+    /// The ledger summary written into turn artifacts.
+    pub(crate) fn evidence_snapshot(&self) -> super::turn_artifacts::EvidenceSnapshot {
+        use crate::phi::ledger::ObligationKind;
+        super::turn_artifacts::EvidenceSnapshot {
+            outstanding: self.evidence_ledger.outstanding().len(),
+            unreviewed_lines: self
+                .evidence_ledger
+                .outstanding_lines(ObligationKind::UnreviewedChange),
+            untested_lines: self
+                .evidence_ledger
+                .outstanding_lines(ObligationKind::UntestedLogic),
+            unknown_size_obligations: self
+                .evidence_ledger
+                .outstanding_unknown_size(ObligationKind::UnreviewedChange),
+            unattributed: self.ledger_unattributed.clone(),
+            citations: self.evidence_ledger.citations(),
+        }
     }
 }
 
@@ -112,29 +157,37 @@ mod phi_observation_tests {
     }
 
     #[test]
-    fn the_snapshot_is_taken_before_tools_run_not_after() {
-        // Order matters: a snapshot taken after execution would let a test
-        // result claim to cover edits that landed while it ran.
-        for (name, body) in [
-            ("execute_parallel_tools", "async fn execute_parallel_tools"),
+    fn the_snapshot_is_taken_before_execution_not_merely_before_observation() {
+        // The previous version compared the snapshot against observe_tool_call,
+        // so moving it AFTER execution but before observation would still have
+        // passed — while silently letting a run claim to cover edits that
+        // landed during it. Anchor on execution instead.
+        for (name, header, executes) in [
+            (
+                "execute_parallel_tools",
+                "async fn execute_parallel_tools",
+                "run_tool_bounded(",
+            ),
             (
                 "execute_single_tool_in_batch",
                 "async fn execute_single_tool_in_batch",
+                "let start_time = std::time::Instant::now();",
             ),
         ] {
-            let start = DISPATCH.find(body).unwrap_or_else(|| {
-                panic!("{name} not found; the sweep test needs updating");
-            });
+            let start = DISPATCH
+                .find(header)
+                .unwrap_or_else(|| panic!("{name} not found; this sweep needs updating"));
             let rest = &DISPATCH[start..];
             let snapshot = rest
                 .find("self.ledger_batch_snapshot()")
                 .unwrap_or_else(|| panic!("{name} never takes a ledger snapshot"));
-            let observe = rest
-                .find("self.observe_tool_call(")
-                .unwrap_or_else(|| panic!("{name} never observes"));
+            let execution = rest
+                .find(executes)
+                .unwrap_or_else(|| panic!("{name}: execution anchor {executes:?} not found"));
             assert!(
-                snapshot < observe,
-                "{name} must snapshot before it observes"
+                snapshot < execution,
+                "{name} must snapshot before it executes anything, not merely \
+                 before it observes"
             );
         }
     }

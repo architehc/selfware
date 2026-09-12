@@ -282,6 +282,10 @@ impl Agent {
         agent.checkpoint_manager = Some(checkpoint_manager);
         // Restore the cumulative budget so the wall-clock / token caps continue
         // accumulating across resume instead of restarting from zero.
+        // Outstanding obligations survive a restart. A resume that dropped them
+        // would forgive every unread change in the session, which is precisely
+        // the "waiting clears debt" failure in a different costume.
+        agent.evidence_ledger = checkpoint.evidence_ledger.clone();
         agent.prior_elapsed_secs = checkpoint.elapsed_wall_secs;
         // Only the TOTAL is persisted (the checkpoint format has no
         // input/output split), so `.input`/`.output` restart at 0 while
@@ -416,6 +420,10 @@ impl Agent {
         } else {
             TaskCheckpoint::new(task_id.to_string(), task_description.to_string())
         };
+        // Shadow-mode ledger rides with the task. Declaring the field without
+        // copying it here meant every resume silently forgave the session's
+        // outstanding obligations.
+        checkpoint.evidence_ledger = self.evidence_ledger.clone();
 
         checkpoint.set_step(self.loop_control.current_step());
         checkpoint.set_iteration(self.loop_control.current_iteration());

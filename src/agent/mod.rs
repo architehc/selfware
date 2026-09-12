@@ -119,7 +119,7 @@ mod streaming;
 mod task_policy;
 mod task_runner;
 mod tool_collect;
-mod tool_dispatch;
+pub(crate) mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
 pub mod turn_artifacts;
@@ -515,6 +515,10 @@ pub struct Agent {
     /// Observe-only: nothing reads this to make a decision. It exists so
     /// recorded sessions can be evaluated before anything acts on them.
     pub(crate) evidence_ledger: crate::phi::ledger::Ledger,
+    /// Observations the classifier could not attribute to a path, kept for the
+    /// life of the task. Without these persisted, a debt figure cannot be told
+    /// apart from a complete one — the count is what makes it a floor.
+    pub(crate) ledger_unattributed: Vec<crate::phi::observer::UnattributedRecord>,
     client: ApiClient,
     tools: ToolRegistry,
     memory: AgentMemory,
@@ -1324,6 +1328,7 @@ To call a tool, use this EXACT XML structure:
         let credential_origin_endpoint = config.endpoint.clone();
         let agent = Self {
             evidence_ledger: crate::phi::ledger::Ledger::new(),
+            ledger_unattributed: Vec::new(),
             client,
             tools,
             memory,

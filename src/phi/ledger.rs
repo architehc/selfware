@@ -156,8 +156,10 @@ pub struct Obligation {
     pub id: ObligationId,
     pub kind: ObligationKind,
     pub path: PathBuf,
-    /// Lines touched, used for weighting and for citing the hunk to a human.
-    pub line_count: usize,
+    /// Lines touched, when the mutation reported a size. `None` means the
+    /// observer could not determine it — which is NOT zero. Collapsing unknown
+    /// into zero is how an ordinary edit became a weightless obligation.
+    pub line_count: Option<usize>,
     /// Which agent turn produced the change.
     pub turn_index: usize,
     /// Sequence anchor: the ledger position at which this change was recorded.
@@ -266,7 +268,7 @@ impl Ledger {
     pub fn record_change(
         &mut self,
         path: impl Into<PathBuf>,
-        line_count: usize,
+        line_count: Option<usize>,
         turn_index: usize,
         recorded_at_ms: u64,
     ) -> [ObligationId; 2] {
@@ -348,7 +350,7 @@ impl Ledger {
             id,
             kind: ObligationKind::UnreviewedChange,
             path,
-            line_count: 0,
+            line_count: Some(0),
             turn_index,
             seq,
             recorded_at_ms,
@@ -455,7 +457,7 @@ impl Ledger {
             id,
             kind: ObligationKind::UnreviewedChange,
             path,
-            line_count: 0,
+            line_count: None,
             turn_index: usize::MAX,
             seq,
             recorded_at_ms,
@@ -556,8 +558,18 @@ impl Ledger {
         self.obligations
             .iter()
             .filter(|o| o.outstanding() && o.kind == kind)
-            .map(|o| o.line_count)
+            .filter_map(|o| o.line_count)
             .sum()
+    }
+
+    /// Outstanding obligations whose size could not be determined. A non-zero
+    /// count means `outstanding_lines` is a floor, not a total — reporting the
+    /// sum without this is reporting an estimate as a measurement.
+    pub fn outstanding_unknown_size(&self, kind: ObligationKind) -> usize {
+        self.obligations
+            .iter()
+            .filter(|o| o.outstanding() && o.kind == kind && o.line_count.is_none())
+            .count()
     }
 
     /// One line per outstanding obligation, citing where it came from.
@@ -569,11 +581,15 @@ impl Ledger {
                     ObligationKind::UnreviewedChange => "unreviewed",
                     ObligationKind::UntestedLogic => "untested",
                 };
+                let size = match o.line_count {
+                    Some(n) => format!("{n} lines"),
+                    None => "size unknown".to_string(),
+                };
                 format!(
-                    "{} {} ({} lines, turn {})",
+                    "{} {} ({}, turn {})",
                     kind,
                     o.path.display(),
-                    o.line_count,
+                    size,
                     o.turn_index
                 )
             })

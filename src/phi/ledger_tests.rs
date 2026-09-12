@@ -20,7 +20,7 @@ fn paths(p: &[&str]) -> Vec<PathBuf> {
 #[test]
 fn a_change_owes_both_a_read_and_a_test() {
     let mut l = ledger();
-    l.record_change("src/a.rs", 40, 1, T);
+    l.record_change("src/a.rs", Some(40), 1, T);
     assert_eq!(l.outstanding().len(), 2);
     assert_eq!(l.outstanding_lines(ObligationKind::UnreviewedChange), 40);
     assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 40);
@@ -30,7 +30,7 @@ fn a_change_owes_both_a_read_and_a_test() {
 fn passing_tests_never_discharge_the_review_obligation() {
     // A green suite is not a read. This is the separation the scalar lost.
     let mut l = ledger();
-    l.record_change("src/a.rs", 40, 1, T);
+    l.record_change("src/a.rs", Some(40), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -51,7 +51,7 @@ fn passing_tests_never_discharge_the_review_obligation() {
 #[test]
 fn a_human_review_never_discharges_the_test_obligation() {
     let mut l = ledger();
-    l.record_change("src/a.rs", 40, 1, T);
+    l.record_change("src/a.rs", Some(40), 1, T);
     let snap = l.snapshot();
     l.record_human_review(snap, paths(&["src/a.rs"]), Outcome::Passed, None, T);
 
@@ -68,7 +68,7 @@ fn an_unrelated_passing_suite_discharges_nothing() {
     // A green run in module A absolving unread code in module B was the
     // concrete bug this ledger exists to make impossible.
     let mut l = ledger();
-    l.record_change("src/b.rs", 30, 1, T);
+    l.record_change("src/b.rs", Some(30), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -87,7 +87,7 @@ fn a_run_that_started_before_the_change_proves_nothing_about_it() {
     // exist when it started, however green it is.
     let mut l = ledger();
     let snap = l.snapshot(); // run begins
-    l.record_change("src/a.rs", 20, 1, T); // edit lands mid-run
+    l.record_change("src/a.rs", Some(20), 1, T); // edit lands mid-run
     l.record_test_run(
         snap,
         Scope::WorkspaceWithCoverage(paths(&["src/a.rs", "src/b.rs"])),
@@ -108,9 +108,9 @@ fn a_run_that_raced_an_edit_is_stale_for_that_path() {
     // Edit -> run starts -> the same file is edited again -> run reports green.
     // It read some indeterminate mixture, so it settles nothing for that path.
     let mut l = ledger();
-    l.record_change("src/a.rs", 20, 1, T);
+    l.record_change("src/a.rs", Some(20), 1, T);
     let snap = l.snapshot();
-    l.record_change("src/a.rs", 5, 2, T); // lands while the run is in flight
+    l.record_change("src/a.rs", Some(5), 2, T); // lands while the run is in flight
     l.record_test_run(
         snap,
         Scope::WorkspaceWithCoverage(paths(&["src/a.rs", "src/b.rs"])),
@@ -131,10 +131,10 @@ fn a_run_that_raced_an_edit_still_covers_untouched_paths() {
     // Staleness is per-path. A racing edit to a.rs must not invalidate the
     // run's verdict on b.rs.
     let mut l = ledger();
-    l.record_change("src/a.rs", 20, 1, T);
-    l.record_change("src/b.rs", 10, 1, T);
+    l.record_change("src/a.rs", Some(20), 1, T);
+    l.record_change("src/b.rs", Some(10), 1, T);
     let snap = l.snapshot();
-    l.record_change("src/a.rs", 5, 2, T);
+    l.record_change("src/a.rs", Some(5), 2, T);
     l.record_test_run(
         snap,
         Scope::WorkspaceWithCoverage(paths(&["src/a.rs", "src/b.rs"])),
@@ -159,7 +159,7 @@ fn a_run_that_raced_an_edit_still_covers_untouched_paths() {
 #[test]
 fn a_failing_run_discharges_nothing() {
     let mut l = ledger();
-    l.record_change("src/a.rs", 20, 1, T);
+    l.record_change("src/a.rs", Some(20), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -174,9 +174,9 @@ fn a_failing_run_discharges_nothing() {
 #[test]
 fn a_partial_review_discharges_only_what_was_read() {
     let mut l = ledger();
-    l.record_change("src/a.rs", 20, 1, T);
-    l.record_change("src/b.rs", 30, 1, T);
-    l.record_change("src/c.rs", 10, 1, T);
+    l.record_change("src/a.rs", Some(20), 1, T);
+    l.record_change("src/b.rs", Some(30), 1, T);
+    l.record_change("src/c.rs", Some(10), 1, T);
     let snap = l.snapshot();
     l.record_human_review(
         snap,
@@ -197,7 +197,7 @@ fn a_partial_review_discharges_only_what_was_read() {
 fn one_turn_touching_many_files_owes_for_each() {
     let mut l = ledger();
     for (path, lines) in [("src/a.rs", 10), ("src/b.rs", 20), ("src/c.rs", 30)] {
-        l.record_change(path, lines, 7, T);
+        l.record_change(path, Some(lines), 7, T);
     }
     assert_eq!(l.outstanding().len(), 6);
     assert_eq!(l.outstanding_lines(ObligationKind::UnreviewedChange), 60);
@@ -211,7 +211,7 @@ fn one_turn_touching_many_files_owes_for_each() {
 #[test]
 fn deleting_a_file_retires_its_debt_but_the_deletion_is_itself_a_change() {
     let mut l = ledger();
-    l.record_change("src/gone.rs", 80, 1, T);
+    l.record_change("src/gone.rs", Some(80), 1, T);
     assert_eq!(l.outstanding().len(), 2);
 
     l.record_deletion("src/gone.rs", 2, T);
@@ -228,7 +228,7 @@ fn deleting_a_file_retires_its_debt_but_the_deletion_is_itself_a_change() {
 #[test]
 fn recording_the_same_evidence_twice_changes_nothing() {
     let mut l = ledger();
-    l.record_change("src/a.rs", 20, 1, T);
+    l.record_change("src/a.rs", Some(20), 1, T);
     let snap = l.snapshot();
     l.record_human_review(snap, paths(&["src/a.rs"]), Outcome::Passed, None, T);
     let after_first = l.outstanding().len();
@@ -254,8 +254,8 @@ fn a_replayed_session_reconstructs_the_same_ledger() {
     // Restart must not forgive debt, and must not double-count it.
     let build = || {
         let mut l = ledger();
-        l.record_change("src/a.rs", 20, 1, T);
-        l.record_change("src/b.rs", 30, 1, T);
+        l.record_change("src/a.rs", Some(20), 1, T);
+        l.record_change("src/b.rs", Some(30), 1, T);
         let snap = l.snapshot();
         l.record_test_run(
             snap,
@@ -287,7 +287,7 @@ fn the_reason_for_non_discharge_is_inspectable() {
     // An outstanding count nobody can explain is the failure mode of the
     // scalar. Every refusal names itself.
     let mut l = ledger();
-    l.record_change("src/a.rs", 20, 1, T);
+    l.record_change("src/a.rs", Some(20), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -316,7 +316,7 @@ fn the_reason_for_non_discharge_is_inspectable() {
 #[test]
 fn citations_name_the_file_and_the_turn() {
     let mut l = ledger();
-    l.record_change("src/agent/streaming.rs", 42, 3, T);
+    l.record_change("src/agent/streaming.rs", Some(42), 3, T);
     let lines = l.citations();
     assert!(lines
         .iter()
@@ -328,7 +328,7 @@ fn citations_name_the_file_and_the_turn() {
 #[test]
 fn a_revision_and_checkpoint_can_be_attached() {
     let mut l = ledger();
-    let ids = l.record_change("src/a.rs", 12, 1, T);
+    let ids = l.record_change("src/a.rs", Some(12), 1, T);
     l.annotate_revision(&ids, "sha256:abc123", Some(7));
     let o = &l.obligations()[0];
     assert_eq!(o.revision.as_deref(), Some("sha256:abc123"));
@@ -348,7 +348,7 @@ fn a_green_suite_with_no_coverage_data_discharges_nothing() {
     // with no test touching it passes the suite by being ignored; a green run
     // is evidence about the suite, not about that file.
     let mut l = ledger();
-    l.record_change("src/untested.rs", 60, 1, T);
+    l.record_change("src/untested.rs", Some(60), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -382,7 +382,7 @@ fn unknown_coverage_is_distinct_from_definitely_not_covered() {
     // "I did not test that" and "I cannot say whether I tested that" are
     // different claims and must not collapse into one.
     let mut l = ledger();
-    l.record_change("src/a.rs", 10, 1, T);
+    l.record_change("src/a.rs", Some(10), 1, T);
     let snap = l.snapshot();
 
     l.record_test_run(
@@ -419,8 +419,8 @@ fn unknown_coverage_is_distinct_from_definitely_not_covered() {
 fn a_reported_coverage_list_does_discharge_what_it_names() {
     // The flip side: a run that says what it exercised is usable evidence.
     let mut l = ledger();
-    l.record_change("src/a.rs", 10, 1, T);
-    l.record_change("src/b.rs", 20, 1, T);
+    l.record_change("src/a.rs", Some(10), 1, T);
+    l.record_change("src/b.rs", Some(20), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -443,7 +443,7 @@ fn an_external_edit_makes_the_revision_unknown() {
     // touched it. The ledger never saw that diff, so it does not know what is
     // in the file, and evidence taken over it settles nothing.
     let mut l = ledger();
-    l.record_change("src/a.rs", 30, 1, T);
+    l.record_change("src/a.rs", Some(30), 1, T);
     l.record_external_change("src/a.rs", T);
 
     let snap = l.snapshot();
@@ -458,7 +458,7 @@ fn an_external_edit_makes_the_revision_unknown() {
     let agent_change = l
         .obligations()
         .iter()
-        .find(|o| o.kind == ObligationKind::UntestedLogic && o.line_count == 30)
+        .find(|o| o.kind == ObligationKind::UntestedLogic && o.line_count == Some(30))
         .unwrap();
     assert_eq!(
         l.assess(&l.evidence()[0], agent_change),
@@ -474,7 +474,10 @@ fn an_external_edit_records_no_line_count_it_did_not_observe() {
     let mut l = ledger();
     let id = l.record_external_change("src/a.rs", T);
     let obligation = l.obligations().iter().find(|o| o.id == id).unwrap();
-    assert_eq!(obligation.line_count, 0);
+    assert_eq!(
+        obligation.line_count, None,
+        "no size is claimed for an unseen diff"
+    );
     assert_eq!(obligation.revision, None, "no revision is claimed");
     assert!(
         obligation.outstanding(),
@@ -488,7 +491,7 @@ fn a_human_review_that_found_problems_discharges_nothing() {
     // made "I looked and it is wrong" indistinguishable from "I looked and it
     // is fine".
     let mut l = ledger();
-    l.record_change("src/a.rs", 25, 1, T);
+    l.record_change("src/a.rs", Some(25), 1, T);
     let snap = l.snapshot();
     l.record_human_review(snap, paths(&["src/a.rs"]), Outcome::Failed, None, T);
 
@@ -511,7 +514,7 @@ fn a_change_to_a_dependency_does_not_invalidate_evidence_about_its_dependents() 
     // discovered later as a silent wrong answer. If dependency data is wired in,
     // this test should FAIL and be rewritten — that is the intended signal.
     let mut l = ledger();
-    l.record_change("src/b.rs", 10, 1, T);
+    l.record_change("src/b.rs", Some(10), 1, T);
     let snap = l.snapshot();
     l.record_test_run(
         snap,
@@ -522,7 +525,7 @@ fn a_change_to_a_dependency_does_not_invalidate_evidence_about_its_dependents() 
     );
     assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 0);
 
-    l.record_change("src/a.rs", 5, 2, T); // b's dependency moves underneath it
+    l.record_change("src/a.rs", Some(5), 2, T); // b's dependency moves underneath it
 
     assert_eq!(
         l.outstanding_lines(ObligationKind::UntestedLogic),
@@ -535,8 +538,8 @@ fn a_change_to_a_dependency_does_not_invalidate_evidence_about_its_dependents() 
 fn deleting_a_file_does_not_discharge_other_paths() {
     // Retirement is per-path. Deleting a.rs must not quietly absolve b.rs.
     let mut l = ledger();
-    l.record_change("src/a.rs", 10, 1, T);
-    l.record_change("src/b.rs", 20, 1, T);
+    l.record_change("src/a.rs", Some(10), 1, T);
+    l.record_change("src/b.rs", Some(20), 1, T);
     l.record_deletion("src/a.rs", 2, T);
 
     let owed: Vec<_> = l.outstanding().iter().map(|o| o.path.clone()).collect();
@@ -552,9 +555,9 @@ fn duplicate_change_delivery_records_the_work_twice_on_purpose() {
     // them would discard a real second edit. What matters is that verification
     // still has to cover the latest sequence, which the race check enforces.
     let mut l = ledger();
-    l.record_change("src/a.rs", 10, 1, T);
+    l.record_change("src/a.rs", Some(10), 1, T);
     let snap = l.snapshot();
-    l.record_change("src/a.rs", 10, 1, T); // duplicate delivery, mid-run
+    l.record_change("src/a.rs", Some(10), 1, T); // duplicate delivery, mid-run
     l.record_test_run(
         snap,
         Scope::Paths(paths(&["src/a.rs"])),
@@ -575,7 +578,7 @@ fn evidence_recorded_without_taking_a_snapshot_first_cannot_backdate_itself() {
     // Taking the snapshot AFTER the work is the mistake this guards: it would
     // let a result claim to cover changes that landed while it ran.
     let mut l = ledger();
-    l.record_change("src/a.rs", 10, 1, T);
+    l.record_change("src/a.rs", Some(10), 1, T);
     // Correct: snapshot before the run.
     let honest = l.snapshot();
     l.record_test_run(
@@ -588,6 +591,74 @@ fn evidence_recorded_without_taking_a_snapshot_first_cannot_backdate_itself() {
     assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 0);
 
     // A later change is not retroactively covered by that earlier run.
-    l.record_change("src/a.rs", 7, 2, T);
+    l.record_change("src/a.rs", Some(7), 2, T);
     assert_eq!(l.outstanding_lines(ObligationKind::UntestedLogic), 7);
+}
+
+#[test]
+fn a_checkpoint_round_trip_preserves_outstanding_obligations() {
+    // to_checkpoint() declared an evidence_ledger field and never copied the
+    // live one into it, and resume() never read it back — so every restart
+    // silently forgave the session's debt while the field made it look
+    // persisted.
+    use crate::session::checkpoint::TaskCheckpoint;
+
+    let mut ledger = Ledger::new();
+    ledger.record_change("src/a.rs", Some(40), 1, T);
+    let snap = ledger.snapshot();
+    ledger.record_human_review(snap, paths(&["src/a.rs"]), Outcome::Passed, None, T);
+    assert_eq!(ledger.outstanding().len(), 1, "the test obligation remains");
+
+    let mut checkpoint = TaskCheckpoint::new("task".into(), "desc".into());
+    checkpoint.evidence_ledger = ledger.clone();
+
+    let restored: TaskCheckpoint =
+        serde_json::from_str(&serde_json::to_string(&checkpoint).unwrap()).unwrap();
+    assert_eq!(restored.evidence_ledger, ledger);
+    assert_eq!(
+        restored.evidence_ledger.outstanding().len(),
+        1,
+        "a resume must not forgive outstanding work"
+    );
+}
+
+#[test]
+fn a_legacy_checkpoint_is_distinguishable_from_a_recorded_empty_one() {
+    // Both load as an empty ledger, and they mean different things: one never
+    // observed anything, the other observed and found nothing owed. The
+    // evidence log tells them apart.
+    use crate::session::checkpoint::TaskCheckpoint;
+
+    let legacy: TaskCheckpoint = serde_json::from_value(serde_json::json!({
+        "version": 1, "task_id": "t", "task_description": "d",
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+        "status": "in_progress", "current_step": 0,
+        "messages": [], "memory_entries": [], "estimated_tokens": 0,
+        "tool_calls": [], "errors": []
+    }))
+    .expect("a checkpoint written before the ledger existed must still load");
+    assert!(legacy.evidence_ledger.obligations().is_empty());
+    assert!(
+        legacy.evidence_ledger.evidence().is_empty(),
+        "nothing was ever observed"
+    );
+
+    let mut recorded = Ledger::new();
+    recorded.record_change("src/a.rs", Some(10), 1, T);
+    let snap = recorded.snapshot();
+    recorded.record_human_review(snap, paths(&["src/a.rs"]), Outcome::Passed, None, T);
+    let test_snap = recorded.snapshot();
+    recorded.record_test_run(
+        test_snap,
+        Scope::WorkspaceWithCoverage(paths(&["src/a.rs"])),
+        Outcome::Passed,
+        None,
+        T,
+    );
+    assert!(recorded.outstanding().is_empty(), "nothing owed");
+    assert_eq!(
+        recorded.evidence().len(),
+        2,
+        "but two verifications are on record, which is how you tell them apart"
+    );
 }

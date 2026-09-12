@@ -12,7 +12,7 @@ use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
 use crate::hooks::HookContext;
 
-mod helpers;
+pub(crate) mod helpers;
 mod spill;
 mod trust_gate;
 
@@ -1813,7 +1813,13 @@ impl Agent {
             self.hook_registry.fire(&post_ctx).await;
 
             // Shadow-mode evidence ledger. Observational only.
-            self.observe_tool_call(&vt.name, &vt.args_str, success, ledger_snapshot);
+            self.observe_tool_call(
+                &vt.name,
+                &vt.args_str,
+                success,
+                ledger_snapshot,
+                Some(vt.call_id.as_str()),
+            );
 
             // Audit log
             if let Some(ref logger) = self.audit_logger {
@@ -1848,6 +1854,8 @@ impl Agent {
 
         // Ledger position before this tool runs; see execute_parallel_tools.
         let ledger_snapshot = self.ledger_batch_snapshot();
+        // Captured before `tool_call_id` is consumed downstream.
+        let observed_call_id = tool_call_id.clone();
         let start_time = std::time::Instant::now();
         if let Some(warning) = self
             .self_improvement
@@ -2162,7 +2170,13 @@ impl Agent {
         self.hook_registry.fire(&post_ctx).await;
 
         // Shadow-mode evidence ledger. Observational only.
-        self.observe_tool_call(&name, &args_str, success, ledger_snapshot);
+        self.observe_tool_call(
+            &name,
+            &args_str,
+            success,
+            ledger_snapshot,
+            observed_call_id.as_deref(),
+        );
 
         // Audit: log tool execution
         if let Some(ref logger) = self.audit_logger {
