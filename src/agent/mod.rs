@@ -107,6 +107,7 @@ mod interactive;
 pub mod last_tool;
 mod learning;
 pub mod loop_control;
+mod phi_observation;
 pub mod plan_mode;
 mod plan_step;
 pub mod planning;
@@ -509,6 +510,11 @@ pub(crate) const ESCALATED_EDIT_ARGS_WINDOW_SIZE: usize = 64;
 /// checker, supports checkpointing for task resumption, and implements an
 /// observe-orient-decide-act cognitive loop.
 pub struct Agent {
+    /// Shadow-mode record of what has been changed and what has verified it.
+    ///
+    /// Observe-only: nothing reads this to make a decision. It exists so
+    /// recorded sessions can be evaluated before anything acts on them.
+    pub(crate) evidence_ledger: crate::phi::ledger::Ledger,
     client: ApiClient,
     tools: ToolRegistry,
     memory: AgentMemory,
@@ -1317,6 +1323,7 @@ To call a tool, use this EXACT XML structure:
         #[cfg(feature = "resilience")]
         let credential_origin_endpoint = config.endpoint.clone();
         let agent = Self {
+            evidence_ledger: crate::phi::ledger::Ledger::new(),
             client,
             tools,
             memory,

@@ -140,6 +140,9 @@ impl Agent {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
+        // A new task starts with no outstanding obligations. Debt is per-task:
+        // carrying it across would attribute one task's unread code to another.
+        self.evidence_ledger = crate::phi::ledger::Ledger::new();
         self.clear_failed_tool_attempts();
         self.edit_loop_recovery_used = false;
         self.clear_task_state_memory();

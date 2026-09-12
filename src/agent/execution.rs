@@ -407,6 +407,16 @@ impl Agent {
         });
 
         let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let evidence = Some(super::turn_artifacts::EvidenceSnapshot {
+            outstanding: self.evidence_ledger.outstanding().len(),
+            unreviewed_lines: self
+                .evidence_ledger
+                .outstanding_lines(crate::phi::ledger::ObligationKind::UnreviewedChange),
+            untested_lines: self
+                .evidence_ledger
+                .outstanding_lines(crate::phi::ledger::ObligationKind::UntestedLogic),
+            citations: self.ledger_citations(),
+        });
         let artifact = super::turn_artifacts::TurnArtifact {
             step,
             timestamp: chrono::Utc::now(),
@@ -419,6 +429,7 @@ impl Agent {
             parsed_tool_calls: parsed_tool_calls.to_vec(),
             agent_decision: decision,
             elapsed_ms: meta.elapsed_ms,
+            evidence,
         };
         super::turn_artifacts::write_artifact(&workdir, &artifact).await;
     }

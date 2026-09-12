@@ -57,6 +57,28 @@ pub struct TurnArtifact {
     /// What selfware did with it.
     pub agent_decision: AgentDecision,
     pub elapsed_ms: u64,
+    /// Shadow-mode evidence ledger state at the end of this turn.
+    ///
+    /// Written so recorded sessions can be inspected empirically: whether the
+    /// citations name the right files, and what the debt curve actually looks
+    /// like, before anything is tuned or displayed. Omitted from older
+    /// artifacts, hence `default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<EvidenceSnapshot>,
+}
+
+/// What the ledger held at the end of a turn. Deliberately a summary plus
+/// citations rather than the whole ledger: the artifact is for reading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceSnapshot {
+    /// Obligations still owed.
+    pub outstanding: usize,
+    /// Lines changed that nobody has read.
+    pub unreviewed_lines: usize,
+    /// Lines changed that no executed test covered.
+    pub untested_lines: usize,
+    /// One line per outstanding obligation, naming file and turn.
+    pub citations: Vec<String>,
 }
 
 /// Sentinel that replaces redacted secret values in artifact files.

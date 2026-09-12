@@ -1346,6 +1346,12 @@ impl Agent {
         use super::tui_events::AgentEvent;
         use crate::hooks::HookAction;
 
+        // Ledger position BEFORE anything in this batch runs. Tools in a
+        // parallel batch have no order relative to each other, so a test run
+        // sharing a batch with an edit must be treated as having started before
+        // that edit — the ledger will decline to discharge on it.
+        let ledger_snapshot = self.ledger_batch_snapshot();
+
         // Pre-validate all tools and collect validated ones for concurrent execution
         struct ValidatedTool {
             name: String,
@@ -1806,6 +1812,9 @@ impl Agent {
             let post_ctx = HookContext::post_tool(&vt.name, &vt.args_str, success, &result_str);
             self.hook_registry.fire(&post_ctx).await;
 
+            // Shadow-mode evidence ledger. Observational only.
+            self.observe_tool_call(&vt.name, &vt.args_str, success, ledger_snapshot);
+
             // Audit log
             if let Some(ref logger) = self.audit_logger {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1837,6 +1846,8 @@ impl Agent {
         use super::tui_events::AgentEvent;
         use crate::hooks::HookAction;
 
+        // Ledger position before this tool runs; see execute_parallel_tools.
+        let ledger_snapshot = self.ledger_batch_snapshot();
         let start_time = std::time::Instant::now();
         if let Some(warning) = self
             .self_improvement
@@ -2149,6 +2160,9 @@ impl Agent {
         // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
         let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
         self.hook_registry.fire(&post_ctx).await;
+
+        // Shadow-mode evidence ledger. Observational only.
+        self.observe_tool_call(&name, &args_str, success, ledger_snapshot);
 
         // Audit: log tool execution
         if let Some(ref logger) = self.audit_logger {

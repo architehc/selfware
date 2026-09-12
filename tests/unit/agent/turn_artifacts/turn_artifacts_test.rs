@@ -39,6 +39,9 @@ fn sample_artifact() -> TurnArtifact {
             "choices": [{"message": {"role": "assistant", "content": "ok"}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
         }),
+        // Pre-ledger artifacts had no evidence field; `None` is the shape
+        // those sessions produce, and must stay loadable.
+        evidence: None,
         finish_reason: Some("stop".to_string()),
         completion_tokens: Some(2),
         prompt_tokens: Some(5),

@@ -338,6 +338,12 @@ pub struct TaskCheckpoint {
     pub memory_entries: Vec<MemoryEntry>,
     pub estimated_tokens: usize,
 
+    /// Shadow-mode evidence ledger. `#[serde(default)]` so checkpoints written
+    /// before it existed still load — an absent ledger is an empty one, which
+    /// is honest: those sessions recorded nothing.
+    #[serde(default)]
+    pub evidence_ledger: crate::phi::ledger::Ledger,
+
     // Execution log
     pub tool_calls: Vec<ToolCallLog>,
     pub errors: Vec<ErrorLog>,
@@ -571,6 +577,7 @@ impl TaskCheckpoint {
     pub fn new(task_id: String, task_description: String) -> Self {
         let now = Utc::now();
         Self {
+            evidence_ledger: crate::phi::ledger::Ledger::new(),
             version: CURRENT_CHECKPOINT_VERSION,
             task_id,
             task_description,
