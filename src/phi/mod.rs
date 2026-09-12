@@ -5,7 +5,12 @@
 //! should until recorded sessions have been evaluated.
 
 pub mod ledger;
+pub mod observer;
 
 #[cfg(test)]
 #[path = "ledger_tests.rs"]
 mod ledger_tests;
+
+#[cfg(test)]
+#[path = "observer_tests.rs"]
+mod observer_tests;
