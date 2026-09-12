@@ -29,6 +29,17 @@
 //! 7. **Only a passing outcome discharges.** A failing run establishes that the
 //!    work is not done, not that it was checked.
 //!
+//! # What this deliberately does not model
+//!
+//! **Dependency effects.** Changing `a.rs` can invalidate a passing test about
+//! `b.rs` when `b` depends on `a`. The ledger has no dependency graph and makes
+//! no attempt to guess one, so evidence about `b` survives a change to `a`.
+//! This is a known gap, pinned by a test so it cannot be mistaken for a solved
+//! problem. Closing it needs real dependency data, not a heuristic.
+//!
+//! **What a test actually exercised.** Without coverage data, a passing suite
+//! says the suite is green and nothing more — see [`Scope`].
+//!
 //! # Status: observe-only
 //!
 //! This module records and reports. It is deliberately not wired to the
@@ -84,21 +95,51 @@ impl EvidenceKind {
 }
 
 /// What an evidence record covers.
+///
+/// There is no variant meaning "everything". A suite that runs across the whole
+/// workspace proves the suite is green; it does not prove that any particular
+/// file was exercised, because a file with no test touching it passes the suite
+/// by being ignored. Treating a whole-workspace run as universal coverage is
+/// the same mistake as treating a green run as a review — it clears an
+/// obligation nothing actually discharged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scope {
-    /// Named paths only.
+    /// Exactly these paths, and no others.
     Paths(Vec<PathBuf>),
-    /// A whole-workspace run, e.g. the full suite. Only ever produced by test
-    /// execution — a human cannot review a workspace.
-    Workspace,
+    /// A workspace-wide run that reported which paths it exercised.
+    WorkspaceWithCoverage(Vec<PathBuf>),
+    /// A workspace-wide run with no coverage data. It discharges nothing; what
+    /// it exercised is unknown, and unknown is not covered.
+    WorkspaceCoverageUnknown,
+}
+
+/// Whether this evidence covers a path, and if not, whether that is a definite
+/// "no" or an admission of ignorance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    Covered,
+    NotCovered,
+    /// The run may or may not have exercised this path. Nobody can say.
+    Unknown,
 }
 
 impl Scope {
-    pub fn covers(&self, path: &Path) -> bool {
+    pub fn coverage_of(&self, path: &Path) -> Coverage {
         match self {
-            Scope::Workspace => true,
-            Scope::Paths(paths) => paths.iter().any(|p| p == path),
+            Scope::Paths(paths) | Scope::WorkspaceWithCoverage(paths) => {
+                if paths.iter().any(|p| p == path) {
+                    Coverage::Covered
+                } else {
+                    Coverage::NotCovered
+                }
+            }
+            Scope::WorkspaceCoverageUnknown => Coverage::Unknown,
         }
+    }
+
+    /// Only a definite yes counts.
+    pub fn covers(&self, path: &Path) -> bool {
+        self.coverage_of(path) == Coverage::Covered
     }
 }
 
@@ -178,6 +219,13 @@ pub enum Unsatisfied {
     PredatesChange,
     /// The path changed while the run was in flight.
     RacedAnEdit,
+    /// The run executed but did not report what it exercised, so whether this
+    /// path was covered is unknown. Distinct from `OutOfScope`, which is a
+    /// definite no.
+    CoverageUnknown,
+    /// The path's current content was not produced by a recorded change, so the
+    /// ledger does not know what is in it.
+    RevisionUnknown,
 }
 
 /// Append-only ledger of obligations and evidence.
@@ -192,6 +240,8 @@ pub struct Ledger {
     /// edit, which the obligation list alone cannot answer once obligations are
     /// retired.
     changes_by_path: BTreeMap<PathBuf, Vec<Seq>>,
+    /// Changes the ledger did not make, and therefore cannot describe.
+    external_changes: BTreeMap<PathBuf, Vec<Seq>>,
 }
 
 impl Ledger {
@@ -336,6 +386,7 @@ impl Ledger {
         &mut self,
         snapshot: RunSnapshot,
         paths: Vec<PathBuf>,
+        outcome: Outcome,
         artifact: Option<String>,
         recorded_at_ms: u64,
     ) -> EvidenceId {
@@ -343,7 +394,7 @@ impl Ledger {
             EvidenceKind::HumanReviewed,
             snapshot,
             Scope::Paths(paths),
-            Outcome::Passed,
+            outcome,
             artifact,
             recorded_at_ms,
         )
@@ -376,6 +427,53 @@ impl Ledger {
         id
     }
 
+    /// Record a change the ledger did not make: a human editing in their
+    /// editor, a `git checkout`, a formatter, another process.
+    ///
+    /// Line count is deliberately not a parameter. The ledger did not see the
+    /// diff, so claiming a size would be inventing one. What it records is that
+    /// the path's content is no longer attributable to anything it knows, which
+    /// invalidates evidence taken over it.
+    pub fn record_external_change(
+        &mut self,
+        path: impl Into<PathBuf>,
+        recorded_at_ms: u64,
+    ) -> ObligationId {
+        let path = path.into();
+        let seq = self.tick();
+        self.changes_by_path
+            .entry(path.clone())
+            .or_default()
+            .push(seq);
+        self.external_changes
+            .entry(path.clone())
+            .or_default()
+            .push(seq);
+        let id = ObligationId(self.next_obligation);
+        self.next_obligation += 1;
+        self.obligations.push(Obligation {
+            id,
+            kind: ObligationKind::UnreviewedChange,
+            path,
+            line_count: 0,
+            turn_index: usize::MAX,
+            seq,
+            recorded_at_ms,
+            revision: None,
+            checkpoint: None,
+            satisfied_by: None,
+            retired: false,
+        });
+        id
+    }
+
+    /// Has an unattributed edit landed on `path` at or after `since`?
+    fn externally_changed_since(&self, path: &Path, since: Seq) -> bool {
+        self.external_changes
+            .get(path)
+            .is_some_and(|seqs| seqs.iter().any(|s| *s >= since))
+    }
+
     /// Did `path` change strictly inside `(after, up_to]`?
     fn changed_between(&self, path: &Path, after: Seq, up_to: Seq) -> bool {
         self.changes_by_path
@@ -391,8 +489,10 @@ impl Ledger {
         if evidence.kind.discharges() != obligation.kind {
             return Err(Unsatisfied::WrongKind);
         }
-        if !evidence.scope.covers(&obligation.path) {
-            return Err(Unsatisfied::OutOfScope);
+        match evidence.scope.coverage_of(&obligation.path) {
+            Coverage::Covered => {}
+            Coverage::NotCovered => return Err(Unsatisfied::OutOfScope),
+            Coverage::Unknown => return Err(Unsatisfied::CoverageUnknown),
         }
         if evidence.outcome != Outcome::Passed {
             return Err(Unsatisfied::Failed);
@@ -406,6 +506,12 @@ impl Ledger {
             evidence.recorded_seq,
         ) {
             return Err(Unsatisfied::RacedAnEdit);
+        }
+        // An edit the ledger did not see means it does not know what is in the
+        // file now. Evidence taken over an unknown revision proves nothing
+        // about the change this obligation records.
+        if self.externally_changed_since(&obligation.path, obligation.seq) {
+            return Err(Unsatisfied::RevisionUnknown);
         }
         Ok(())
     }
