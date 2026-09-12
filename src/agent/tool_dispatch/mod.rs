@@ -3434,8 +3434,13 @@ impl Agent {
             } else {
                 String::new()
             };
+            let hint = if tool == "call" {
+                " Note: 'call' is not a tool name; use an exact tool name like 'file_read', 'file_edit', or 'shell_exec'."
+            } else {
+                ""
+            };
             return format!(
-                "Safety check failed: tool '{tool}' does not exist. Available tools: {}{suffix}. \
+                "Safety check failed: tool '{tool}' does not exist.{hint} Available tools: {}{suffix}. \
                  Call one of those by exact name, or use tool_search with a keyword to discover more tools.",
                 preview.join(", ")
             );

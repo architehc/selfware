@@ -1368,8 +1368,8 @@ impl Agent {
             self.messages.push(crate::api::types::Message::user(
                 "Your edit was NOT applied and has been discarded — no FILES: checklist was \
                  provided yet. First output a line `FILES: <path>` naming the file(s) you will \
-                 change, then RE-ISSUE the file_edit/file_write (or file-writing shell) tool \
-                 call (send it again — the previous one did not run). Do not claim the edit is \
+                 change, then RE-ISSUE your edit using the `file_edit` or `file_write` tool \
+                 (send it again — the previous one did not run). Do not claim the edit is \
                  done until a tool result confirms it."
                     .to_string(),
             ));
