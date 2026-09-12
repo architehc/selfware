@@ -140,6 +140,7 @@ pub mod interview;
 pub mod llm_doctor;
 pub mod memory;
 pub mod output;
+pub mod phi;
 #[cfg(feature = "resilience")]
 pub mod self_healing;
 pub mod templates;
